@@ -52,7 +52,7 @@ DIRECTIONS = (
     "RoPE, KV write) with one, and fused_rms_fp8_group_quant with a fused silu_mul and fp8 group quant removed the "
     "separate quant kernels from every layer. A fused kernel that rejects the model's size (aiter's "
     "silu_and_mul_quant above d 8192) or sits inside an aiter op is copied into the framework tree and edited there. "
-    "Fusions each below the bar go together as one intent.",
+    "Fusions that each read below the bar are tested again only together, as one intent.",
     "Server arguments and environment variables: yours is the one branch that tests settings alone; test the settings "
     "the profile or server.log point at, not a blind sweep. Before testing a setting, grep where it is read: one with "
     "no reader on this model's path, this backend or this phase (decode or prefill) is dead, and its test measures "

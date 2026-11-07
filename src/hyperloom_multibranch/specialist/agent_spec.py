@@ -34,7 +34,8 @@ class AgentSpec:
     ``dossier``, the dossier the session's dossier pass wrote, for its checkout (``None`` without one), and
     ``review``, how its review gate is handed over (:data:`~hyperloom_multibranch.specialist.arbor_adapter.REVIEW_HOST`
     when MB reviews before its branches open, :data:`~hyperloom_multibranch.specialist.arbor_adapter.REVIEW_OFF` when
-    nobody does, ``""`` to leave the config without either); the onboarding model is told none of them."""
+    nobody does, ``""`` to leave the config without either), and ``source_unkept``, why no change to the framework's
+    source can be kept on this image (``""`` when one can); the onboarding model is told none of them."""
 
     model: str
     framework: str
@@ -63,6 +64,7 @@ class AgentSpec:
     root_shares_source: str = ROOT_PROFILE_SOURCE
     review: str = ""
     remove_args: tuple[str, ...] = ()
+    source_unkept: str = ""
 
     def to_document(self) -> dict[str, object]:
         return {

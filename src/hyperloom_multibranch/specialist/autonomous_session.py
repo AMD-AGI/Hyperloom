@@ -29,9 +29,11 @@ a snapshot of each keep (Arbor's component mode) runs to that time as its absolu
 workspace starts on, and has its newest snapshot read whole, chained back to that commit, its launch only as it
 differs from the one MB started it with (:func:`read_snapshot`); a variable the measurement sets itself is left out of
 every keep and noted once; why it ended, from its exit file, goes into the branch log; one that refuses its config
-(exit 2) ends the branch with why, from its refusal file, and is never started again. An agent
-that exits 0 finishes the run once what it kept last settled; one that exits otherwise is a crash the runtime restarts
-it from. A session never ends idle: what the agent keeps, or does not, is its own business, bounded by the session's
+(exit 2) ends the branch with why, from its refusal file, and is never started again. So does an agent told at the
+preflight that no change to its component's source can land (:func:`~.worktree.source_unkept`) once a keep of it is
+refused for adding the component without its upstream repository and commit: keeps are cumulative, so every later one
+would be refused too. An agent that exits 0 finishes the run once what it kept last settled; one that exits otherwise
+is a crash the runtime restarts it from. A session never ends idle: what the agent keeps, or does not, is its own business, bounded by the session's
 stops. A watch beside the run's poll makes the run a lost session when the running agent writes nothing (no output,
 transcript or file), or the poll does not come round, for :data:`STALL_SECONDS`: the runtime then kills the agent and resumes it, and gives the branch
 up after a few such losses in a row, so a hung agent does not hold its cards and its branch's slot.
@@ -52,7 +54,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import KernelArtifact, KernelKind, LaunchConfig, PatchRef, RecipeDelta, RecipeError
+from hyperloom.contracts.recipe import (
+    KernelArtifact,
+    KernelKind,
+    LaunchConfig,
+    PatchRef,
+    Recipe,
+    RecipeDelta,
+    RecipeError,
+)
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, kernel_load_env, locate_installed_package
 from hyperloom.sandbox import SandboxGone
 from hyperloom.sandbox.socket import SandboxUnavailable
@@ -114,7 +124,7 @@ from hyperloom_multibranch.specialist.start_tables import (
     save_start_tables,
 )
 from hyperloom_multibranch.specialist.tools import sync_to_head
-from hyperloom_multibranch.specialist.worktree import Upstream, WorktreeError, installed_upstream
+from hyperloom_multibranch.specialist.worktree import Upstream, WorktreeError, installed_upstream, source_unkept
 from hyperloom.measure.framework.base import image_configs
 
 if TYPE_CHECKING:
@@ -205,7 +215,8 @@ class KeepWatch:
     what of the agent's launch the toolbox refused, which every later keep that still runs with it is imported
     without: ``refused_envs``, each variable with the value refused (``None``: the variable left unset), and
     ``refused_args``, server arguments refused as a whole; ``learnt``, for each finding of the agent's ledger the branch
-    learnt, the learning it became and a digest of what it said."""
+    learnt, the learning it became and a digest of what it said; ``source_unkept``, why the preflight told the agent no
+    change to its component's source can land, ``""`` when it told it none."""
 
     root: str
     seq: int = 0
@@ -218,6 +229,7 @@ class KeepWatch:
     refused_envs: dict[str, str | None] = field(default_factory=dict)
     refused_args: str | None = None
     learnt: dict[str, list[str]] = field(default_factory=dict)
+    source_unkept: str = ""
 
     @classmethod
     def load(cls, path: Path) -> KeepWatch:
@@ -239,6 +251,7 @@ class KeepWatch:
             "refused_envs": self.refused_envs,
             "refused_args": self.refused_args,
             "learnt": self.learnt,
+            "source_unkept": self.source_unkept,
         }
         path.write_text(json.dumps(document), encoding=ENCODING)
 
@@ -279,6 +292,7 @@ class AutonomousSession:
         root = self._place.worktree.commit()
         recipe = await self._setup.repo.read_recipe(self._start.start_commit)
         tables = await self._lay_start_tables(recipe.kernels)
+        unkept = await asyncio.to_thread(source_unkept, self._setup.component, recipe)
         lease = await self._lease(self._setup.spec.tp)
         self._hold(lease)
         await self._notes.refresh()
@@ -297,6 +311,7 @@ class AutonomousSession:
             deadline=self._setup.clock() + (seconds or NO_DEADLINE_SECONDS),
             root=root,
             root_shares=None if baseline is None else snapshot.op_shares.get(baseline.root_commit),
+            source_unkept=unkept,
         )
         spec = replace(spec, cards=lease.gpu_ids)
         self._sandbox = self._setup.sandbox(lease)
@@ -308,8 +323,13 @@ class AutonomousSession:
         # Every snapshot of the agent's session is one of this branch's keeps, the first among them possibly written
         # while the preflight waited for the agent to start.
         mark = None if ready.manifest.snapshots is not None else self._mark(ready.manifest)
-        KeepWatch(root, mark=mark).save(self._place.workspace / WATCH_FILE)
+        KeepWatch(root, mark=mark, source_unkept=ready.source_unkept).save(self._place.workspace / WATCH_FILE)
         await self._note(f"the agent {ready.manifest.source} at {ready.manifest.commit} is running")
+        if unkept:
+            component = self._setup.component
+            await self._note(
+                f"no change to {component}'s source can be kept: {unkept}; only launch and env changes can"
+            )
         for note in ready.notes:
             await self._note(note)
 
@@ -704,19 +724,25 @@ class AutonomousSession:
         A keep whose launch the toolbox cannot compile (``delta_not_applicable``) goes again without the part of its
         launch that is refused (:meth:`_narrowed`): keeps are cumulative, so a launch entry the measurement refuses,
         such as a variable its launcher sets itself, would otherwise refuse every keep after it, and is left out of
-        them from then on."""
+        them from then on. A keep refused for adding the component without its upstream, after the preflight told the
+        agent so (``source_unkept``), ends the branch (:meth:`_end_unkept`)."""
 
         kept = watch.pending
         if kept is None or await self._busy():
             return
         head = await self._setup.repo.head(self._start.branch)
-        launch = (await self._setup.repo.read_recipe(head)).launch
+        recipe = await self._setup.repo.read_recipe(head)
+        launch = recipe.launch
         kept = _without_refused(kept, launch, watch)
+        delta: RecipeDelta | None = None
         try:
-            await self._submitted(kept, head, await self._delta(kept, head), watch)
+            delta = await self._delta(kept, head)
+            await self._submitted(kept, head, delta, watch)
         except Backpressure:
             return
         except RequestRejected as error:
+            if watch.source_unkept and error.code == LAUNCH_REFUSED and _adds_unlabelled(delta, recipe):
+                await self._end_unkept(kept, error)
             narrowed = await self._narrowed(kept, launch, head, watch) if error.code == LAUNCH_REFUSED else None
             if narrowed is None:
                 await self._note(f"keep {kept.seq} was refused: {error.reason}")
@@ -730,6 +756,14 @@ class AutonomousSession:
             await self._note(f"keep {kept.seq} cannot be read against the branch head and is skipped: {error}")
         watch.pending = watch.waiting.pop(0) if watch.waiting else None
         watch.save(self._place.workspace / WATCH_FILE)
+
+    async def _end_unkept(self, kept: KeptChange, error: RequestRejected) -> None:
+        ended = (
+            f"keep {kept.seq} was refused: {error.reason}; the agent kept a source change to {self._setup.component}"
+            " after being told it cannot land"
+        )
+        await self._note(ended)
+        raise SessionRefused(ended)
 
     async def _submit_narrowed(self, kept: KeptChange, head: str, watch: KeepWatch) -> None:
         try:
@@ -999,6 +1033,17 @@ def _without_refused(kept: KeptChange, launch: LaunchConfig, watch: KeepWatch) -
 
     names = tuple(name for name, value in watch.refused_envs.items() if kept.envs.get(name) == value)
     return _reverted(kept, launch, names, kept.server_args == watch.refused_args)
+
+
+def _adds_unlabelled(delta: RecipeDelta | None, recipe: Recipe) -> bool:
+    """Whether ``delta`` adds to ``recipe`` a component without its upstream repository and commit, which
+    :func:`~hyperloom.contracts.recipe.apply` refuses."""
+
+    present = {item.component for item in recipe.components}
+    return delta is not None and any(
+        change.component not in present and (change.upstream_repo is None or change.upstream_ref is None)
+        for change in delta.components
+    )
 
 
 def _reverted(kept: KeptChange, launch: LaunchConfig, names: tuple[str, ...], args: bool) -> KeptChange:

@@ -55,7 +55,7 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
 )
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
 from hyperloom_multibranch.specialist.tools import sync_to_commit
-from hyperloom_multibranch.specialist.worktree import BranchWorktree, WorktreeError
+from hyperloom_multibranch.specialist.worktree import BranchWorktree, WorktreeError, source_unkept
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
@@ -127,6 +127,7 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
     try:
         await sync_to_commit(setup.repo, start.start_commit, worktree)
         recipe = await setup.repo.read_recipe(start.start_commit)
+        unkept = await asyncio.to_thread(source_unkept, setup.spec.framework, recipe)
     except (WorktreeError, OSError) as error:
         return DossierOutcome(None, None, f"its worktree could not be laid out: {error}")
     seconds = start.deadline - setup.clock()
@@ -144,6 +145,7 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
         root_shares=start.shares,
         root_shares_source=start.shares_source,
         plan=None,
+        source_unkept=unkept,
     )
     try:
         lease = await setup.toolbox.lease_branch_sandbox(

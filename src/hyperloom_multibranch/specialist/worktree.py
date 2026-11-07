@@ -13,15 +13,20 @@ against its head, a patch the toolbox applies where it applies every other.
 
 from __future__ import annotations
 
+import http.client
+import importlib.metadata
+import logging
 import re
 import shutil
 import subprocess
 import tempfile
 import threading
+import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
     ComponentLayout,
@@ -29,8 +34,11 @@ from hyperloom.measure.compile import (
     UnsupportedComponentError,
     locate_installed_package,
 )
+from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
 from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
+
+logger = logging.getLogger(__name__)
 
 #: The file in a base's git directory that names the paths each worktree links rather than holds.
 LINKED_PATHS = "hyperloom-third-party"
@@ -95,21 +103,113 @@ class Upstream:
 
 def installed_upstream(package: PackageBase) -> Upstream | None:
     """Where ``package`` was built from: the commit its version names, resolved in the checkout it is installed from,
-    and that checkout's origin; ``None`` when the version names no commit or no checkout holds it.
-
-    A wheel has no checkout: its version names an abbreviated commit, which no full commit can be read from.
-    """
+    and that checkout's origin; for a wheel, which has no checkout and ships no full commit, see
+    :func:`_wheel_upstream`. ``None`` when the version names no commit or neither resolves it."""
     named = _BUILT_FROM.search(package.dist_version or "")
     if named is None:
         return None
+    abbreviated = named.group(1)
+    return _checkout_upstream(package.path, abbreviated) or _wheel_upstream(
+        package.path, package.dist_name, abbreviated
+    )
+
+
+def _checkout_upstream(path: Path, abbreviated: str) -> Upstream | None:
     # The image's checkout may belong to another user, and the system or global config that trusted it is not read.
     trusted = ("-c", "safe.directory=*")
     try:
-        commit = _git(package.path, *trusted, _REV_PARSE, "--verify", _QUIET, f"{named.group(1)}^{{commit}}").strip()
-        repo = _git(package.path, *trusted, "remote", "get-url", "origin").strip()
+        commit = _git(path, *trusted, _REV_PARSE, "--verify", _QUIET, f"{abbreviated}^{{commit}}").strip()
+        repo = _git(path, *trusted, "remote", "get-url", "origin").strip()
     except WorktreeError:
         return None
     return Upstream(repo, commit) if commit and repo else None
+
+
+#: A full commit standing alone in an image reference (``vllm-openai-rocm:nightly-rocm100-<commit>``), not inside a
+#: longer hex run such as a digest.
+_FULL_COMMIT = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
+_GITHUB_REPO = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+")
+#: The first line of a commit's ``.patch`` on GitHub, as ``git format-patch`` writes it.
+_PATCH_FROM = re.compile(r"From (?P<commit>[0-9a-f]{40}) ")
+PATCH_TIMEOUT_S = 10.0
+_PATCH_HEAD_BYTES = 128
+
+
+#: Each wheel's upstream once resolved, by :func:`_wheel_upstream`'s arguments.
+_RESOLVED: dict[tuple[Path, str | None, str], Upstream] = {}
+
+
+def _wheel_upstream(path: Path, dist_name: str | None, abbreviated: str) -> Upstream | None:
+    """The upstream of the wheel installed at ``path``: the GitHub repository its metadata declares, at the full commit
+    the active image's reference names when it starts with ``abbreviated``, else the one that repository resolves
+    ``abbreviated`` to. Kept once resolved, as the image and the wheel stay the same for the process and the lookup is
+    a network call; one that failed is made again at the next call, as GitHub may answer it then."""
+    key = (path, dist_name, abbreviated)
+    if key in _RESOLVED:
+        return _RESOLVED[key]
+    repo = _declared_repo(path, dist_name)
+    if repo is None:
+        return None
+    commit = _image_commit(abbreviated) or _github_commit(repo, abbreviated)
+    if commit is None:
+        return None
+    _RESOLVED[key] = Upstream(repo, commit)
+    return _RESOLVED[key]
+
+
+def _declared_repo(path: Path, dist_name: str | None) -> str | None:
+    """The GitHub repository the distribution ``dist_name`` beside ``path`` declares as a project URL."""
+    if dist_name is None:
+        return None
+    found = next(iter(importlib.metadata.distributions(name=dist_name, path=[str(path.parent)])), None)
+    if found is None:
+        return None
+    declared = [entry.split(",", 1)[-1].strip().rstrip("/") for entry in found.metadata.get_all("Project-URL") or []]
+    return next((url for url in declared if _GITHUB_REPO.fullmatch(url)), None)
+
+
+def _image_commit(abbreviated: str) -> str | None:
+    try:
+        reference = active_image().ref
+    except ImagePinError:
+        return None
+    return next((commit for commit in _FULL_COMMIT.findall(reference) if commit.startswith(abbreviated)), None)
+
+
+def _github_commit(repo: str, abbreviated: str) -> str | None:
+    named = _PATCH_FROM.match(_patch_head(f"{repo}/commit/{abbreviated}.patch") or "")
+    return named["commit"] if named and named["commit"].startswith(abbreviated) else None
+
+
+def _patch_head(url: str) -> str | None:
+    """The first line of the patch at ``url``, ``None`` when it cannot be read."""
+    try:
+        with urllib.request.urlopen(url, timeout=PATCH_TIMEOUT_S) as reply:
+            return reply.readline(_PATCH_HEAD_BYTES).decode("ascii", "replace")
+    except (OSError, http.client.HTTPException) as error:
+        logger.warning("cannot read %s, so its commit stays unresolved: %s", url, error)
+        return None
+
+
+def source_unkept(component: str, recipe: Recipe) -> str:
+    """Why no change to ``component``'s source can land on ``recipe``, ``""`` when one can: a component new on the
+    recipe lands with the upstream commit its installed package was built from, which the rule gate requires."""
+
+    if any(item.component == component for item in recipe.components):
+        return ""
+    try:
+        package = locate_installed_package(COMPONENT_LAYOUTS[component])
+    except UnsupportedComponentError as error:
+        return f"the recipe does not carry {component}, and its upstream commit cannot be read: {error}"
+    if installed_upstream(package) is not None:
+        return ""
+    version = package.dist_version or "(no version)"
+    return (
+        f"the recipe does not carry {component}, and the image's {component} {version} names no upstream commit a"
+        " checkout holds, and neither the image's reference nor its declared GitHub repository resolves the abbreviated"
+        " one a wheel's version names, so the rule gate refuses a source change for lacking its upstream repository and"
+        " commit"
+    )
 
 
 def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None = None) -> str:
@@ -277,13 +377,13 @@ def _ignore(root: Path, built: Sequence[str]) -> Callable[[str, list[str]], set[
 
 
 def _with_checkout(component: str, package: PackageBase, layout: ComponentLayout) -> Path:
-    """Where ``package`` is installed, refused for a component whose meta trees the base lays out when it is installed
-    without a checkout: a recipe pins a component to a full upstream commit, which only a checkout can resolve."""
+    """Where ``package`` is installed, refused for a component whose meta trees the base lays out when its upstream
+    commit cannot be resolved (:func:`installed_upstream`): a recipe pins a component to a full upstream commit."""
     if meta_sections(layout) and installed_upstream(package) is None:
         raise UnsupportedComponentError(
             f"{component} at {package.path} is installed with no git checkout that holds the commit its version "
-            f"{package.dist_version!r} names (a wheel names only an abbreviated commit), so no recipe can pin where its "
-            f"sources came from; the source base lays {component} out only from a develop install"
+            f"{package.dist_version!r} names, and neither the image's reference nor its declared GitHub repository "
+            "resolves it, so no recipe can pin where its sources came from"
         )
     return package.path
 
@@ -479,5 +579,6 @@ __all__ = [
     "Upstream",
     "WorktreeError",
     "installed_upstream",
+    "source_unkept",
     "linked_paths",
 ]

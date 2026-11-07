@@ -169,14 +169,16 @@ class OnboardingSetup:
 
 @dataclass(frozen=True)
 class ReadyAgent:
-    """An agent preflight made ready: its manifest, its checkout and the process it runs in, and what its branch should
+    """An agent preflight made ready: its manifest, its checkout and the process it runs in, what its branch should
     note of how it was started (an input its Arbor lacks, :func:`fit_keys`, or a dossier that is gone,
-    :func:`dossier_notes`)."""
+    :func:`dossier_notes`), and ``source_unkept``, the spec's reason no change to the framework's source can be kept
+    when the agent was told it (Arbor, in its host rules), ``""`` when it was told none."""
 
     manifest: AgentManifest
     source_dir: Path
     process: AgentProcess
     notes: tuple[str, ...] = ()
+    source_unkept: str = ""
 
 
 class AttemptFailed(RuntimeError):
@@ -268,7 +270,7 @@ async def _attempt(
     finally:
         if not started:
             await process.kill()
-    return ReadyAgent(manifest, checkout, process, notes)
+    return ReadyAgent(manifest, checkout, process, notes, spec.source_unkept if adapted else "")
 
 
 async def install(manifest: AgentManifest, setup: OnboardingSetup, checkout: Path, env: Mapping[str, str]) -> None:
