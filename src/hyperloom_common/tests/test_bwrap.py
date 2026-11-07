@@ -170,6 +170,7 @@ def test_argv_mounts_by_depth_with_the_masks_last(tmp_path: Path) -> None:
         *("--bind", "/dev/shm/hl-agent-b", "/dev/shm"),
         *("--ro-bind-try", str(models), str(models), "--bind", str(work), str(work)),
         *("--perms", "0000", "--tmpfs", stored, "--remount-ro", stored),
+        *("--remount-ro", "/"),
         *("--chdir", str(work), "--setenv", "HYPERLOOM_REAP_MARK", "m1", "--json-status-fd", "9"),
         *("--", "claude", "--print"),
     ]
