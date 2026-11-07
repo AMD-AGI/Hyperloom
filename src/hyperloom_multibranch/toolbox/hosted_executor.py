@@ -691,14 +691,20 @@ def _scores_of(rounds: tuple[RoundOutcome, ...]) -> tuple[AccuracyValue, ...]:
 def _accuracy_values(rounds: tuple[RoundOutcome, ...], *, wanted: bool) -> tuple[AccuracyValue, ...]:
     """The scores of the accuracy rounds, in round order.
 
-    A request that asked for accuracy and got no round, or a round with no score, is not a result: a test that
-    "succeeds" without the number it was run for would be read as a pass of the accuracy gate.
+    A request that asked for accuracy and got no round, a round that failed, or a round with no score, is not a result: a
+    test that "succeeds" without the number it was run for would be read as a pass of the accuracy gate.
     """
     evaluated = [r for r in rounds if r.phase == _ACCURACY]
     if not wanted:
         return ()
     if not evaluated:
         raise MeasurementRefused("the request asked for accuracy but the verified result has no accuracy round")
+    failed = next((r for r in evaluated if r.returncode != 0), None)
+    if failed is not None:
+        # Before the scores: a round that failed is no score, whatever it holds and whatever the outcome says.
+        raise MeasurementRefused(
+            f"the verified result's accuracy round of point {failed.point} failed with return code {failed.returncode}"
+        )
     if any(not r.accuracy for r in evaluated):
         raise MeasurementRefused("the verified result's accuracy round holds no accuracy score")
     return tuple(value for r in evaluated for value in r.accuracy)
