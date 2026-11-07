@@ -364,6 +364,19 @@ def test_the_manifest_digest_a_host_names_is_the_one_stage_printed_and_none_with
     assert inference_suite.manifest_sha256(tmp_path / "empty") is None
 
 
+def test_the_verified_digest_is_that_of_an_intact_cache_and_none_for_a_damaged_or_empty_one(staged, tmp_path) -> None:
+    cache, _, digest = staged
+
+    assert inference_suite.verified_manifest_sha256(cache) == digest
+    (inferencex_root(cache) / GSM8K_TASK).write_text("edited\n")
+    assert inference_suite.verified_manifest_sha256(cache) is None
+    assert inference_suite.verified_manifest_sha256(tmp_path / "empty") is None
+
+
+def test_the_package_names_the_inferencex_pin_a_host_keys_its_staging_by() -> None:
+    assert inference_suite.INFERENCEX_CLIENT_COMMIT == PINNED_TOOLS[INFERENCEX_TOOL]
+
+
 def test_pinned_tools_name_the_client_the_base_launch_records() -> None:
     assert dict(PINNED_TOOLS) == {INFERENCEX_TOOL: INFERENCEX_CLIENT_COMMIT}
 
