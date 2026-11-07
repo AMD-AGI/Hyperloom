@@ -32,7 +32,9 @@ A test's server runs a branch's patches, so where bubblewrap can sandbox it, eve
 (:mod:`hyperloom.sandbox.confined`): it writes its own tree and reads its toolchain, its own signing key and what
 :func:`runner_plan` names (the model, the Hugging Face hub cache and the trees its template's variables name), never the
 session's other files, another sandbox's key, the app's credentials or its processes. Where bubblewrap cannot, tests run
-as before, said once at WARNING; a hosted run refuses to build the toolbox.
+as before, said once at WARNING; a hosted run refuses to build the toolbox. A model whose entry links into a credential
+location (``~/.ssh``, ``~/.claude``, a login file) runs each test as before, said at WARNING, and a hosted run refuses
+its tests: no mask would hide what that bind shows.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import pwd
 import sys
 import tempfile
 import time
@@ -49,6 +52,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
+from hyperloom.common.confinement import credential_paths
 from hyperloom.common.outside_facts.rule_pack import PACK_ENV, rule_pack_identity
 from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.hosted import FILES_ROOT, HostedConfig, HostedMeasurementBackend
@@ -478,16 +482,90 @@ def _named_path(value: str) -> Path | None:
     return Path(path) if os.path.isabs(path) else None
 
 
-def _model_trees(model_dir: Path) -> tuple[Path, ...]:
-    """The model's directory and what its entries link to: each link's target itself, never the directory it is in
-    (a link to a file in the home would show the whole home), except a hub snapshot's links, whose repository's
-    ``blobs`` is bound whole, so that the snapshot's nested links resolve too."""
-    linked = []
+def _real(path: str | os.PathLike[str]) -> Path:
+    return Path(os.path.realpath(path))
+
+
+def _at_or_below(path: Path, tree: Path) -> bool:
+    return path == tree or tree in path.parents
+
+
+def _passwd_home() -> Path | None:
+    try:
+        return Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    except KeyError:
+        return None
+
+
+@dataclass(frozen=True)
+class _LinkRule:
+    """Where a model entry's link may lead (all paths resolved): never to or below one of the credential
+    ``locations``, except below one of the ``homes`` outside its hidden entries; and anywhere in a tree the plan reads
+    whole anyway (``bound``)."""
+
+    homes: tuple[Path, ...]
+    locations: tuple[Path, ...]
+    bound: tuple[Path, ...]
+
+    def refusal(self, entry: Path, tree: Path) -> str | None:
+        """Why ``entry``'s bind of ``tree`` would show credentials no mask hides (masks open a credential location up
+        around a bound path, so nothing in that path is masked); ``None`` when it would not: ``tree`` is in a tree the
+        plan reads whole, or is neither a credential location nor below one, except below a home outside its hidden
+        entries (``~/.ssh``, ``~/.config``, ``~/.netrc``), where tools keep their logins by name."""
+        if any(_at_or_below(tree, bound) for bound in self.bound):
+            return None
+        where = self._credentials(tree)
+        return None if where is None else f"{entry} links to {tree}, {where}, which its bind would show unmasked"
+
+    def _credentials(self, tree: Path) -> str | None:
+        for location in dict.fromkeys((*self.locations, *self.homes)):
+            if tree == location:
+                return "a credential location of the app's"
+            if location not in tree.parents:
+                continue
+            if location not in self.homes:
+                return f"below the credential location {location} of the app's"
+            hidden = location / tree.relative_to(location).parts[0]
+            if hidden.name.startswith("."):
+                return f"in {hidden}, a hidden entry of a home where tools keep their logins"
+        return None
+
+
+def _link_rule(
+    model_dir: Path, hub: Path | None, envs: Mapping[str, str], environ: Mapping[str, str] | None
+) -> _LinkRule:
+    """The rule for the links of the model at ``model_dir``: the homes of the app (``environ``, this process's by
+    default, and its passwd entry) and of the runner (``envs``), every credential location of either
+    (:func:`~hyperloom.common.confinement.credential_paths` with nothing allowed names each, whole), and the model's
+    directory and the hub cache ``hub``, which the plan reads whole."""
+    app = os.environ if environ is None else environ
+    homes = (app.get("HOME"), envs.get("HOME"), _passwd_home())
+    return _LinkRule(
+        homes=tuple(dict.fromkeys(_real(home) for home in homes if home and os.path.isabs(home))),
+        locations=credential_paths(envs, app_environ=app),
+        bound=tuple(_real(tree) for tree in (model_dir, hub) if tree is not None),
+    )
+
+
+def _model_trees(model_dir: Path, rule: _LinkRule) -> tuple[tuple[Path, ...], tuple[str, ...]]:
+    """The model's directory and what its entries link to, and why a link of it cannot be bound safely. Each link
+    binds its target itself, never the directory it is in (a link to a file in the home would show the whole home),
+    except a hub snapshot's links, whose repository's ``blobs`` is bound whole, so that the snapshot's nested links
+    resolve too. A link whose bind ``rule`` refuses (one into a credential location: ``~/.ssh``, ``~/.claude``, a
+    login file) binds nothing; the reason is kept instead, and a sandbox of the plan runs as before, said at WARNING,
+    or is refused in a hosted run."""
+    linked, refused = [], []
     with contextlib.suppress(OSError):
         for entry in model_dir.iterdir():
-            if entry.is_symlink():
-                linked.append(_linked_tree(Path(os.path.realpath(entry))))
-    return (model_dir, *dict.fromkeys(linked))
+            if not entry.is_symlink():
+                continue
+            tree = _linked_tree(_real(entry))
+            why = rule.refusal(entry, tree)
+            if why is None:
+                linked.append(tree)
+            else:
+                refused.append(why)
+    return (model_dir, *dict.fromkeys(linked)), tuple(refused)
 
 
 def _linked_tree(target: Path) -> Path:
@@ -507,14 +585,21 @@ def runner_plan(
     """What a confined runner of the session at ``session_dir`` reads besides its toolchain (its launcher's
     interpreter's, this process's), its own tree and its key: the interpreter ``python`` its template starts it with,
     the trees its template's variables ``envs`` name (:data:`RUNNER_READS`; a repository named by URL names none), the
-    session's model and what its entries link to (:func:`_model_trees`), and this host's Hugging Face hub cache (:func:`hub_cache` of
-    ``environ``, this process's by default). No bind may show the session's directory whole: it holds the blackboard,
-    every sandbox and key, and the leases."""
+    session's model and what its entries link to (:func:`_model_trees`), and this host's Hugging Face hub cache
+    (:func:`hub_cache` of ``environ``, this process's by default). No bind may show the session's directory whole: it
+    holds the blackboard, every sandbox and key, and the leases. A model link into a credential location is refused
+    (:attr:`~hyperloom.sandbox.local.RunnerPlan.refused`), so no test sandbox of the plan runs confined with it."""
     named = [_named_path(envs.get(name, "")) for name in RUNNER_READS]
-    model = _model_trees(model_dir) if model_dir is not None else ()
-    found = (_named_path(python), *named, *model, hub_cache(environ))
+    hub = hub_cache(environ)
+    model: tuple[Path, ...] = ()
+    refused: tuple[str, ...] = ()
+    if model_dir is not None:
+        model, refused = _model_trees(model_dir, _link_rule(model_dir, hub, envs, environ))
+    found = (_named_path(python), *named, *model, hub)
     return RunnerPlan(
-        readable=tuple(dict.fromkeys(path for path in found if path is not None)), app_only=(Path(session_dir),)
+        readable=tuple(dict.fromkeys(path for path in found if path is not None)),
+        app_only=(Path(session_dir),),
+        refused=refused,
     )
 
 

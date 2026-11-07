@@ -26,9 +26,10 @@ as it would on the host.
 
 A sandbox whose paths bubblewrap cannot bind safely runs as before, said at WARNING, and a hosted run refuses it: a
 plan's path that is itself one of the app's credential locations (a home, a login file) is one, since a mask hides
-what lies below a bind, never the bound path itself. A sealed sandbox, whose one launch finds its scratch as it was
-made, falls back to a fresh ``/tmp`` of its own where a bubblewrap older than
-:data:`~hyperloom_common.bwrap.NESTED_SAFE` refuses binds below a bound one.
+what lies below a bind, never the bound path itself, and so is a plan whose maker refused a tree it found
+(:attr:`RunnerPlan.refused`). A sealed sandbox, whose one launch finds its scratch as it was made, falls back to a
+fresh ``/tmp`` of its own where a bubblewrap older than :data:`~hyperloom_common.bwrap.NESTED_SAFE` refuses binds below
+a bound one.
 
 Tests unconfined only because bubblewrap's probe gave no answer in time are so for that launch alone: the next
 sandbox is chosen for again, until a choice is final.
@@ -107,11 +108,14 @@ class RunnerPlan:
     ``readable`` trees (the model, the Hugging Face cache, the runner cache, the compiled-code store, the framework
     snapshot); ``app_only`` paths no bind may show, nor anything above them (the app's state directory and the
     provider's directory of sandboxes, which holds every sandbox's key, are added); ``devices``, bound for a template
-    with cards."""
+    with cards. ``refused`` says why a tree its maker found it must read cannot be bound safely (one in a credential
+    location, whose credentials no mask would hide); a sandbox of a plan that says any runs as before, said at
+    WARNING, and a hosted run refuses it."""
 
     readable: tuple[Path, ...] = ()
     app_only: tuple[Path, ...] = ()
     devices: tuple[Path, ...] = GPU_DEVICES
+    refused: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -264,9 +268,10 @@ class SandboxConfiner:
     ) -> BwrapPolicy | tuple[str, ...]:
         """The policy of every launch of the sandbox, or why bubblewrap must not launch it: ``fs/`` writable, and a
         sealed sandbox's ``private/``; the toolchain and the plan's trees read-only, but none in a tree it writes,
-        which shows it already, and none of the plan's that is a credential location; the credential locations they
-        show masked; the devices; the app's state and the provider's directory never bound. No launch dies with the
-        thread that started it: the sandbox's kill and timeout end it, with their grace."""
+        which shows it already, none of the plan's that is a credential location, and none of a plan that refused a
+        tree (:attr:`RunnerPlan.refused`); the credential locations they show masked; the devices; the app's state and
+        the provider's directory never bound. No launch dies with the thread that started it: the sandbox's kill and
+        timeout end it, with their grace."""
         directory, env = sandbox.directory, sandbox.env
         writable = (directory / "fs", *((directory / "private",) if sandbox.sealed else ()))
         trees = (*writable, Path(scratch.tmp), Path(scratch.shm))
@@ -276,7 +281,7 @@ class SandboxConfiner:
             toolchain.extend(toolchain_paths(env, program, writable=trees))
         named = (*toolchain, *self.plan.readable)
         readable = tuple(path for path in dict.fromkeys(named) if not _within(path, writable))
-        exposed = _credential_locations(self.plan.readable, env, trees)
+        exposed = (*self.plan.refused, *_credential_locations(self.plan.readable, env, trees))
         if exposed:
             return exposed
         masked = credential_paths(env, allowed=(*readable, *writable), writable=trees)
