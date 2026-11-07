@@ -43,7 +43,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     _build_variant_yaml,
     _run_magpie,
     run_grid,
-    MagpieRound,
+    GridRound,
     GridRecipe,
     GridLaunch,
     GridStop,
@@ -915,9 +915,9 @@ def test_build_variant_yaml_refuses_to_unset_pinned_envs(tmp_path):
     assert "SGLANG_ENABLE_FOO" not in envs
 
 
-def _slot_round(tmp_path: Path, result_dir: str | None = None) -> MagpieRound:
+def _slot_round(tmp_path: Path, result_dir: str | None = None) -> GridRound:
     """The Magpie round the ``_run_magpie`` env tests launch into ``tmp_path / "slot"``."""
-    return MagpieRound(
+    return GridRound(
         magpie_python="/opt/venv/bin/python",
         config_path=tmp_path / "config.yaml",
         output_dir=tmp_path / "slot",

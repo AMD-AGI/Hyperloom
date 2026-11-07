@@ -16,7 +16,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     _run_magpie,
     run_grid,
-    MagpieRound,
+    GridRound,
     GridLaunch,
     GridRecipe,
 )
@@ -67,7 +67,7 @@ def _run(tmp_path: Path, launched: list[object]) -> tuple[int, str, str]:
         side_effect=lambda cmd, *a, **k: launched.append(cmd) or subprocess.CompletedProcess(cmd, 0, "ok", ""),
     ):
         return _run_magpie(
-            MagpieRound(
+            GridRound(
                 magpie_python="/opt/venv/bin/python",
                 config_path=_config(tmp_path / "config.yaml"),
                 output_dir=tmp_path / "slot",

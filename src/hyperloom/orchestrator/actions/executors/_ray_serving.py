@@ -53,7 +53,7 @@ CLOSE_STOP_TIMEOUT_SEC: float = 10.0
 # leaving their lane leases to expire unreclaimed.
 #
 # The slack covers only what the round spends OUTSIDE its own cap, which is less than it looks: server bringup is
-# inside it, because ``_grid_runner.sync_benchmark_timeout`` writes the same ``timeout_sec`` into the benchmark's
+# inside it, because ``_grid_base.sync_benchmark_timeout`` writes the same ``timeout_sec`` into the benchmark's
 # ``server_lifecycle.server_ready_timeout_s``, and both submitters run that before submitting. What is genuinely
 # outside is Ray dispatching the method onto an actor ``ensure()`` already created, the cooperative reap the actor
 # performs once the cap fires (``COOPERATIVE_REAP_BUDGET_SEC``), and shipping the round's captured stdout/stderr

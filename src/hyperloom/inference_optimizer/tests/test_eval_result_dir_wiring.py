@@ -19,7 +19,7 @@ import yaml
 from hyperloom.common.gain_math import accuracy_passed
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.actions.executors._accuracy_gate import parse_eval_results
-from hyperloom.orchestrator.actions.executors._grid_runner import _run_magpie, MagpieRound
+from hyperloom.orchestrator.actions.executors._grid_runner import _run_magpie, GridRound
 from hyperloom.orchestrator.actions.executors._inferencex_patcher import BENCH_SEED_ENV
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
@@ -81,7 +81,7 @@ def test_run_magpie_exports_eval_result_dir_under_result_dir(tmp_path, monkeypat
         side_effect=fake_run,
     ):
         _run_magpie(
-            MagpieRound(
+            GridRound(
                 magpie_python="/opt/venv/bin/python",
                 config_path=config_path,
                 output_dir=tmp_path / "slot",
@@ -109,7 +109,7 @@ def test_run_magpie_eval_result_dir_follows_result_dir_override(tmp_path, monkey
         side_effect=fake_run,
     ):
         _run_magpie(
-            MagpieRound(
+            GridRound(
                 magpie_python="/opt/venv/bin/python",
                 config_path=config_path,
                 output_dir=tmp_path / "slot",
@@ -145,7 +145,7 @@ def test_run_magpie_keeps_magpie_traces_when_eval_output_is_cleaned(tmp_path, mo
         side_effect=fake_run,
     ):
         _run_magpie(
-            MagpieRound(
+            GridRound(
                 magpie_python="/opt/venv/bin/python",
                 config_path=config_path,
                 output_dir=output_dir,

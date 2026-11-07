@@ -21,7 +21,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     _run_magpie,
     run_grid,
-    MagpieRound,
+    GridRound,
     GridLaunch,
     GridRecipe,
 )
@@ -148,7 +148,7 @@ def test_the_grid_arm_asserts_bounds_even_when_inferencex_path_is_unset(tmp_path
         ),
     ):
         rc, _out, _err = _run_magpie(
-            MagpieRound(
+            GridRound(
                 magpie_python="/opt/venv/bin/python",
                 config_path=_write_config(tmp_path / "config.yaml"),
                 output_dir=tmp_path / "slot",
@@ -175,7 +175,7 @@ def test_a_variant_fails_when_the_bounds_target_is_present_but_unpatchable(tmp_p
         ),
     ):
         rc, _out, err = _run_magpie(
-            MagpieRound(
+            GridRound(
                 magpie_python="/opt/venv/bin/python",
                 config_path=_write_config(tmp_path / "config.yaml"),
                 output_dir=tmp_path / "slot",
@@ -202,7 +202,7 @@ def test_a_variant_still_runs_when_no_bounds_target_exists(tmp_path, monkeypatch
         ),
     ):
         rc, _out, _err = _run_magpie(
-            MagpieRound(
+            GridRound(
                 magpie_python="/opt/venv/bin/python",
                 config_path=_write_config(tmp_path / "config.yaml"),
                 output_dir=tmp_path / "slot",
@@ -227,7 +227,7 @@ def test_a_variant_that_runs_no_eval_is_not_failed_by_the_bounds_check(tmp_path,
         ),
     ):
         rc, _out, _err = _run_magpie(
-            MagpieRound(
+            GridRound(
                 magpie_python="/opt/venv/bin/python",
                 config_path=_write_config(tmp_path / "config.yaml", RUN_EVAL="false"),
                 output_dir=tmp_path / "slot",

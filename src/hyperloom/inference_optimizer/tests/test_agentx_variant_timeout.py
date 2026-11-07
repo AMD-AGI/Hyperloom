@@ -16,9 +16,9 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridRecipe,
     GridVariant,
     _build_variant_yaml,
-    sync_benchmark_timeout,
     variant_conc,
 )
+from hyperloom.orchestrator.actions.executors._grid_base import sync_benchmark_timeout
 from hyperloom.orchestrator.actions.executors.benchmark_config import composed_benchmark_timeout_sec
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     resolve_benchmark_timeouts,
