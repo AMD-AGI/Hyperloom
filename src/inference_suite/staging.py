@@ -229,6 +229,15 @@ def manifest_sha256(tool_cache: Path) -> str | None:
         return None
 
 
+def verified_manifest_sha256(tool_cache: Path) -> str | None:
+    """The sha256 of the manifest ``tool_cache`` holds when the cache verifies against the pins in force; ``None``
+    when it does not, or holds no manifest."""
+    digest = manifest_sha256(tool_cache)
+    if digest is None or verify(tool_cache, digest).failed_step is not None:
+        return None
+    return digest
+
+
 def _parse_manifest(path: Path, data: bytes) -> StagingManifest | str:
     """The manifest in ``data``, or what to report when it does not parse."""
     try:
@@ -487,6 +496,7 @@ __all__ = [
     "manifest_sha256",
     "stage",
     "tool_root",
+    "verified_manifest_sha256",
     "verify",
 ]
 

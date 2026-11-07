@@ -12,7 +12,9 @@ The operator's own launch file enters both as the :class:`UserFile` :func:`parse
 :func:`fetch_response` reads one at a URL.
 
 A runner runs one round with :func:`run_round`, and reaps a server a round left running with :func:`stop`. The round
-names the staged tools it runs by :func:`manifest_sha256`, the digest of the tool cache's manifest. ``install.sh
+names the staged tools it runs by :func:`manifest_sha256`, the digest of the tool cache's manifest;
+:func:`verified_manifest_sha256` gives it only for a cache that verifies against the pins, and a host that keeps one
+staging per InferenceX pin keys it by :data:`INFERENCEX_CLIENT_COMMIT`. ``install.sh
 <tool-cache-dir>``, shipped in this package, is the published entry point that stages those tools for a runner or a
 local setup: it runs ``python -m inference_suite stage`` under ``$PYTHON``, the interpreter rounds run under, prints
 the manifest's sha256, stages nothing into a cache that already verifies, and exits 2 with ``staging_missing`` on a
@@ -34,12 +36,14 @@ from inference_suite.recipe.sources import SourceFetchError, fetch_response, fet
 from inference_suite.recipe.user_file import UserFile, UserFileError, parse_user_file
 from inference_suite.run import RoundResult, run_round
 from inference_suite.runtime.server import stop
-from inference_suite.staging import CLIENT_FILE, inferencex_root, manifest_sha256
+from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
+from inference_suite.staging import CLIENT_FILE, inferencex_root, manifest_sha256, verified_manifest_sha256
 
 __all__ = [
     "CLIENT_FILE",
     "EXIT_REFUSED",
     "GPU_MASK_ENV",
+    "INFERENCEX_CLIENT_COMMIT",
     "LaunchQuery",
     "Miss",
     "RoundResult",
@@ -56,4 +60,5 @@ __all__ = [
     "resolve_base",
     "run_round",
     "stop",
+    "verified_manifest_sha256",
 ]
