@@ -284,11 +284,11 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         + "to — the Coordinator gate stays authoritative, so this is guidance, "
         + "not a requirement.",
         "",
-        "Optional helper: a ``rebench`` convenience reuses the real Magpie "
-        + "serving + benchmark path on your leased cards, so you can get numbers "
+        "Optional helper: a ``rebench`` convenience runs the gate's own "
+        + "inference_suite round on your leased cards, so you can get numbers "
         + "directly comparable to the ``integrate_patch`` gate in one call:",
         "    python -m hyperloom.orchestrator.specialists.rebench \\",
-        "        --config <magpie.yaml> --output ./scratch/rebench " + "[--extra-args '<server args>']",
+        "        [--config <point.yaml>] --output ./scratch/rebench " + "[--extra-args '<server args>']",
         "  It prints a JSON result with ``output_throughput``. It is OPTIONAL "
         + "— you may instead write your own bench/autotune script. Throughput "
         + "does NOT have to come from rebench.",
