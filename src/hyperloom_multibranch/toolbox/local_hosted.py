@@ -148,6 +148,9 @@ RUNNER_READS: Final = (
 _FILE_URL = "file://"
 _HUB = "hub"
 _HUGGINGFACE = "huggingface"
+#: A Hugging Face hub repository's directory starts so; its snapshots' files, nested ones too, link into its ``blobs``.
+_HUB_REPOS = ("models--", "datasets--", "spaces--")
+_BLOBS = "blobs"
 _SANDBOXES = "sandboxes"
 _BRANCH_SANDBOXES = "branch-sandboxes"
 _RULE_PACK = "rule-pack"
@@ -460,14 +463,22 @@ def _named_path(value: str) -> Path | None:
 
 
 def _model_trees(model_dir: Path) -> tuple[Path, ...]:
-    """The model's directory and the directories its entries link into (a hub snapshot's files are links to its
-    blobs)."""
+    """The model's directory and what its entries link to: each link's target itself, never the directory it is in
+    (a link to a file in the home would show the whole home), except a hub snapshot's links, whose repository's
+    ``blobs`` is bound whole, so that the snapshot's nested links resolve too."""
     linked = []
     with contextlib.suppress(OSError):
         for entry in model_dir.iterdir():
             if entry.is_symlink():
-                linked.append(Path(os.path.realpath(entry)).parent)
+                linked.append(_linked_tree(Path(os.path.realpath(entry))))
     return (model_dir, *dict.fromkeys(linked))
+
+
+def _linked_tree(target: Path) -> Path:
+    """What a model entry linking to ``target`` (resolved) binds: the hub repository's ``blobs`` directory for a
+    blob, else ``target``."""
+    blobs = target.parent
+    return blobs if blobs.name == _BLOBS and blobs.parent.name.startswith(_HUB_REPOS) else target
 
 
 def runner_plan(
@@ -480,7 +491,7 @@ def runner_plan(
     """What a confined runner of the session at ``session_dir`` reads besides its toolchain (its launcher's
     interpreter's, this process's), its own tree and its key: the interpreter ``python`` its template starts it with,
     the trees its template's variables ``envs`` name (:data:`RUNNER_READS`; a repository named by URL names none), the
-    session's model and what its entries link into, and this host's Hugging Face hub cache (:func:`hub_cache` of
+    session's model and what its entries link to (:func:`_model_trees`), and this host's Hugging Face hub cache (:func:`hub_cache` of
     ``environ``, this process's by default). No bind may show the session's directory whole: it holds the blackboard,
     every sandbox and key, and the leases."""
     named = [_named_path(envs.get(name, "")) for name in RUNNER_READS]
