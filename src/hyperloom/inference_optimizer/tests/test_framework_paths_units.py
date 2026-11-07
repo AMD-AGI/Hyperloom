@@ -823,3 +823,19 @@ class TestFrameworkApplyTree:
     def test_nothing_named_is_nothing(self, tmp_path):
         assert fp.framework_apply_tree("") is None
         assert fp.framework_apply_tree(str(tmp_path / "absent")) is None
+
+
+def test_the_operator_script_is_the_framework_and_runner_named_one_then_the_only_one(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.framework_paths import OPERATOR_SCRIPTS_DIR_ENV, operator_benchmark_script
+
+    monkeypatch.delenv(OPERATOR_SCRIPTS_DIR_ENV, raising=False)
+    assert operator_benchmark_script("custom", "mi355x") is None
+    monkeypatch.setenv(OPERATOR_SCRIPTS_DIR_ENV, str(tmp_path))
+    assert operator_benchmark_script("custom", "mi355x") is None
+    only = tmp_path / "bench.sh"
+    only.write_text("exit 0\n")
+    assert operator_benchmark_script("xdit", "mi355x") == str(only)
+    named = tmp_path / "xdit_mi355x.sh"
+    named.write_text("exit 0\n")
+    assert operator_benchmark_script("xdit", "mi355x") == str(named)
+    assert operator_benchmark_script("custom", "mi355x") is None
