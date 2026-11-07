@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
 import json
 from dataclasses import dataclass
@@ -15,6 +16,9 @@ from typing import Any
 from hyperloom.measure import signing
 from hyperloom.measure.bundle import BundleExpectation
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
+from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
+from inference_suite.contracts import BaseLaunch, Workload
+from inference_suite.recipe.resolve import UnreadSource
 
 REQUEST_ID = "6c0e0000-0000-5000-8000-000000000001"
 SPEC_FINGERPRINT = "a1b2c3d4e5f60718"
@@ -130,7 +134,33 @@ def point_document(yaml_text: str) -> dict[str, Any]:
     return {"yaml": yaml_text, "sha256": hashlib.sha256(yaml_text.encode()).hexdigest()}
 
 
+STAGING = "c" * 64
+
+
+@functools.lru_cache(maxsize=None)
+def base_launch() -> BaseLaunch:
+    """A frozen base resolved offline from the default table, as a session without InferenceX access freezes one."""
+    snapshot = SourceSnapshot(None, 1_793_000_000, unread=UnreadSource("InferenceX", "offline"))
+    query = LaunchQuery(
+        "meta-llama/Llama-3.1-8B-Instruct", "sglang", "mi355x", Workload.FIXED, (64,), isl=1024, osl=1024, tp=1
+    )
+    base = resolve_base(query, snapshot, gpus=8)
+    assert isinstance(base, BaseLaunch), base
+    return base
+
+
 def spec_document() -> dict[str, Any]:
+    """A v2 sheet: the frozen base carried whole and the inference_suite staging named by its manifest's sha256."""
+    document = spec_document_v1()
+    document["schema"] = "hyperloom.measurement-spec/v2"
+    document["tools"] = {"inference_suite": {"staging": STAGING}, "inferencex": {"commit": "b" * 40}}
+    del document["procedure"]["benchmark_backend"]
+    document["procedure"]["base_launch"] = base_launch().to_document()
+    return document
+
+
+def spec_document_v1() -> dict[str, Any]:
+    """A sheet as the application wrote it while tests ran through Magpie."""
     yaml_text = (
         "model: m\nserver:\n  pid_dir: /shared/u1/sess-a/pids\n  port: 8000\ninferencex_path: /shared/u1/sess-a/ix\n"
     )

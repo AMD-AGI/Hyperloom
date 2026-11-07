@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import json
 from collections.abc import Callable
@@ -11,7 +12,16 @@ from importlib import resources
 from typing import Any
 
 import pytest
-from hyperloom.measure.tests.bundle_factory import REQUEST_ID, point_document, point_yaml, spec_document, spec_json
+from hyperloom.measure.tests.bundle_factory import (
+    REQUEST_ID,
+    STAGING,
+    base_launch,
+    point_document,
+    point_yaml,
+    spec_document,
+    spec_document_v1,
+    spec_json,
+)
 from jsonschema import Draft202012Validator
 
 from hyperloom.measure import spec as spec_module
@@ -27,8 +37,14 @@ from hyperloom.measure.spec import (
 )
 
 VERSION = "1.1.3+gtest"
-SCHEMA = json.loads(resources.files("hyperloom.contracts").joinpath("measurement_spec.v1.schema.json").read_text())
-VALIDATOR = Draft202012Validator(SCHEMA)
+
+
+def _validator(name: str) -> Draft202012Validator:
+    return Draft202012Validator(json.loads(resources.files("hyperloom.contracts").joinpath(name).read_text()))
+
+
+VALIDATOR = _validator("measurement_spec.v2.schema.json")
+VALIDATOR_V1 = _validator("measurement_spec.v1.schema.json")
 
 
 def _fp(document: dict[str, Any], **kwargs: Any) -> str:
@@ -66,14 +82,18 @@ def test_the_valid_sheet_passes_the_json_schema() -> None:
 NEGATIVES: dict[str, Callable[[dict[str, Any]], None]] = {
     "unknown top-level key": lambda d: d.update(surprise=1),
     "missing section": lambda d: d.pop("outputs"),
-    "other schema version": lambda d: d.update(schema="hyperloom.measurement-spec/v2"),
+    "other schema version": lambda d: d.update(schema="hyperloom.measurement-spec/v3"),
     "unknown kind": lambda d: d.update(kind="bench"),
     "bool as gpu_count": lambda d: d["hardware"].update(gpu_count=True),
     "zero gpus": lambda d: d["hardware"].update(gpu_count=0),
     "priority out of range": lambda d: d["meta"].update(priority=5),
     "confirm without retest_of": lambda d: d["meta"].update(purpose="confirm"),
     "bad image digest": lambda d: d["image"].update(digest="sha256:xyz"),
-    "short commit": lambda d: d["tools"]["magpie"].update(commit="abc"),
+    "short commit": lambda d: d["tools"]["inferencex"].update(commit="abc"),
+    "staging not a sha256": lambda d: d["tools"]["inference_suite"].update(staging="sha256:" + STAGING),
+    "magpie commit in a v2 sheet": lambda d: d["tools"].update(magpie={"commit": "a" * 40}),
+    "benchmark backend in a v2 sheet": lambda d: d["procedure"].update(benchmark_backend="magpie"),
+    "no base launch": lambda d: d["procedure"].pop("base_launch"),
     "absolute entry path": lambda d: d["environment"]["roots"][0]["entries"][0].update(path="/etc/x"),
     "dotdot entry path": lambda d: d["environment"]["roots"][0]["entries"][0].update(path="a/../b"),
     "upsert without blob": lambda d: d["environment"]["roots"][0]["entries"][0].pop("blob"),
@@ -207,7 +227,7 @@ def test_the_fingerprint_ignores_what_is_not_measurement_content(change) -> None
     [
         lambda d: d["hardware"].update(gpu_count=2),
         lambda d: d["image"].update(digest="sha256:" + "99" * 32),
-        lambda d: d["tools"]["magpie"].update(commit="c" * 40),
+        lambda d: d["tools"]["inference_suite"].update(staging="d" * 64),
         lambda d: d["process_env"].update(AITER_LOG_LEVEL="DEBUG"),
         lambda d: d["platform_env"].update(NCCL_IB_SL="4"),
         lambda d: d["unset_envs"].append("OTHER"),
@@ -221,7 +241,7 @@ def test_the_fingerprint_ignores_what_is_not_measurement_content(change) -> None
     ids=[
         "gpu_count",
         "image",
-        "tool commit",
+        "staging",
         "process_env",
         "platform_env",
         "unset_envs",
@@ -447,15 +467,98 @@ def test_the_request_id_in_the_sheet_is_the_one_given() -> None:
 
 
 def test_a_sheet_written_while_the_decode_pass_existed_still_parses_and_the_flag_is_dropped() -> None:
-    old = copy.deepcopy(spec_document())
+    old = spec_document_v1()
     old["procedure"]["decode_pass"] = True
-    assert list(VALIDATOR.iter_errors(old)) == []
+    assert list(VALIDATOR_V1.iter_errors(old)) == []
 
     spec = MeasurementSpec.from_document(old)
 
     assert "decode_pass" not in spec.to_document()["procedure"]
-    assert spec.to_document() == MeasurementSpec.from_document(spec_document()).to_document()
+    assert spec.to_document() == MeasurementSpec.from_document(spec_document_v1()).to_document()
     assert not hasattr(spec.procedure, "decode_pass")
+
+
+#: The fingerprint and bytes hash of :func:`spec_document_v1` before the sheet had a second version.
+_V1_FINGERPRINT = "7ea292d95ef4e78e"
+_V1_SHA256 = "733b2a6a9ad55cc717ce23b1f169928db7800b0c66987df61327c35b4b8d8db5"
+
+
+def test_a_v1_sheet_still_loads_with_the_bytes_and_fingerprint_it_was_recorded_with() -> None:
+    """The journal and the archive keep v1 sheets, and an archived bundle is verified again from its sheet."""
+    document = spec_document_v1()
+    assert list(VALIDATOR_V1.iter_errors(document)) == []
+
+    spec = MeasurementSpec.from_document(document)
+
+    assert spec.schema == "hyperloom.measurement-spec/v1"
+    assert (spec.tools.magpie, spec.tools.staging, spec.procedure.benchmark_backend) == ("a" * 40, None, "magpie")
+    assert spec.procedure.base_launch is None
+    assert spec.to_document() == document
+    assert (spec.sha256(), _fp(document)) == (_V1_SHA256, _V1_FINGERPRINT)
+
+
+def test_a_v1_sheet_cannot_carry_what_only_v2_says() -> None:
+    document = spec_document_v1()
+    document["procedure"]["base_launch"] = base_launch().to_document()
+
+    with pytest.raises(DocumentError, match="unknown key 'base_launch'"):
+        MeasurementSpec.from_document(document)
+
+
+def test_a_sheet_of_a_version_the_reader_does_not_know_is_refused_naming_it_and_the_known_ones() -> None:
+    with pytest.raises(DocumentError) as refused:
+        MeasurementSpec.from_document(_edit(lambda d: d.update(schema="hyperloom.measurement-spec/v3")))
+
+    assert "hyperloom.measurement-spec/v3" in str(refused.value)
+    assert "hyperloom.measurement-spec/v1, hyperloom.measurement-spec/v2" in str(refused.value)
+
+
+def test_a_v2_sheet_without_a_base_launch_is_refused_naming_both_versions() -> None:
+    with pytest.raises(DocumentError) as refused:
+        MeasurementSpec.from_document(_edit(lambda d: d["procedure"].pop("base_launch")))
+
+    assert "hyperloom.measurement-spec/v2" in str(refused.value) and "hyperloom-base-launch/1" in str(refused.value)
+
+
+def test_a_v2_sheet_carries_the_frozen_base_whole_and_names_the_staging() -> None:
+    spec = MeasurementSpec.from_document(spec_document())
+
+    assert spec.procedure.base_launch == base_launch()
+    assert spec.tools.staging == STAGING and spec.tools.magpie is None
+    assert spec.procedure.benchmark_backend is None
+    assert MeasurementSpec.from_bytes(spec.to_bytes()).to_bytes() == spec.to_bytes()
+
+
+def test_a_base_launch_whose_digest_does_not_match_its_content_is_refused() -> None:
+    document = _edit(lambda d: d["procedure"]["base_launch"].update(args=["--edited"]))
+
+    with pytest.raises(DocumentError, match="spec.procedure.base_launch"):
+        MeasurementSpec.from_document(document)
+
+
+def test_a_base_launch_over_64_kib_is_refused_when_the_sheet_is_written() -> None:
+    def oversized(d: dict[str, Any]) -> None:
+        d["procedure"]["base_launch"]["warnings"] = ["w" * spec_module.MAX_BASE_LAUNCH_BYTES]
+
+    document = _edit(oversized)
+    size = len(json.dumps(document["procedure"]["base_launch"], sort_keys=True, separators=(",", ":")).encode())
+
+    with pytest.raises(DocumentError, match=rf"base_launch too large \({size} bytes > 65536\)"):
+        MeasurementSpec.from_document(document)
+
+
+def test_the_fingerprint_takes_the_base_by_its_digest() -> None:
+    """When the base was resolved is not its identity; what its digest covers is."""
+    resolved_later = dataclasses.replace(base_launch(), resolved_unix=1_800_000_000)
+    other_args = dataclasses.replace(base_launch(), args=(*base_launch().args, "--disable-radix-cache"))
+
+    def carrying(base: Any) -> dict[str, Any]:
+        return _edit(lambda d: d["procedure"].update(base_launch=base.to_document()))
+
+    assert _fp(carrying(resolved_later)) == _fp(spec_document())
+    assert _fp(carrying(other_args)) != _fp(spec_document())
+    canonical = canonical_for_fingerprint(MeasurementSpec.from_document(spec_document()))
+    assert canonical["procedure"]["base_launch"] == base_launch().digest()
 
 
 def _short_prompts(**changes: Any) -> dict[str, Any]:

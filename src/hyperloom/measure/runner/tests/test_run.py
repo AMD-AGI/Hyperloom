@@ -33,16 +33,16 @@ from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import MeasurementSpec
 from hyperloom.measure.runner.tests import aiperf_source
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with
-from hyperloom.measure.tests.bundle_factory import REQUEST_ID, spec_document
+from hyperloom.measure.tests.bundle_factory import REQUEST_ID, spec_document_v1
 from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
 
-SHEET_IMAGE = spec_document()["image"]["digest"]
+SHEET_IMAGE = spec_document_v1()["image"]["digest"]
 POINT = {"benchmark": {"model": "/m", "framework": "sglang", "envs": {"TP": 1, "CONC": 4, "RUN_EVAL": "false"}}}
 
 
 def _sheet(**changes) -> dict:
-    document = spec_document()
+    document = spec_document_v1()
     text = yaml.safe_dump(POINT)
     document["config"] = [{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}]
     document["attachments"] = []
