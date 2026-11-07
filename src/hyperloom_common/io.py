@@ -163,18 +163,16 @@ def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions =
     """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``)."""
     path = Path(path)
     if options.shared:
-        private_mode = _private_mode(path, options)
-        mode = SHARED_FILE_MODE
+        # judged before the parents are made: a parent made under a umask that leaves group write in a setgid
+        # directory would look shared itself, and the file would be widened where the call alone would not be
+        widened = not options.make_parents or parent_is_shared(path)
         if options.make_parents:
-            # judged before the parents are made: a parent made under a umask that leaves group write in a setgid
-            # directory would look shared itself, and the file would be widened where the call alone would not be
-            if not parent_is_shared(path):
-                mode = private_mode
             make_shared_dirs(path.parent)
+        private_mode = _private_mode(path, options)  # once the parents are there: group_read asks the parent
         write_shared_bytes(
             path,
             data,
-            mode=mode,
+            mode=SHARED_FILE_MODE if widened else private_mode,
             private_mode=private_mode,
             flush=Flush(file=options.fsync, directory=options.fsync_dir),
         )

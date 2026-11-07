@@ -75,8 +75,12 @@ def open_directory(path: Path, *, make: int | None = None) -> int:
     itself, ``/tmp``) or that another account than this one and root owns (a member's home or project directory):
     any member of the group, or that owner, could have put one there, to any directory the account that follows it
     can write. Links above that point (``/var/run``, a mount reached through a link of the host's), and this account's
-    and root's own anywhere, are followed. In a single-id user namespace root and every other account own their
-    directories as one unmapped id, so there only the mode of such a directory decides (:func:`_unmapped`). With ``make``, each missing directory is made with that mode
+    and root's own anywhere, are followed. In a user namespace host root, and every account it does not map, own their
+    directories as the kernel's overflow id; whether one namespace maps a single id (a container's root) or several
+    ranges (rootless subuids, a Kubernetes pod without host users, where the overflow id is itself mapped), a directory
+    of that id is trusted as root's and only its mode decides (:func:`_overflow`). The tradeoff: a directory owned by a
+    real account that is the overflow id (a host ``nobody``) is trusted as root's too. A link of that id is still not
+    followed past a directory others can write or own. With ``make``, each missing directory is made with that mode
     (:func:`make_shared_dirs`).
 
     Raises:
@@ -155,31 +159,28 @@ def _trusted(uid: int) -> bool:
 
 def _owner_trusted(uid: int) -> bool:
     """Whether a directory ``uid`` owns leaves its links to be followed, as far as its owner goes: one of
-    :func:`_trusted`'s, or one this user namespace cannot tell from root (:func:`_unmapped`)."""
-    return _trusted(uid) or _unmapped(uid)
+    :func:`_trusted`'s, or the overflow id, which may be root (:func:`_overflow`)."""
+    return _trusted(uid) or _overflow(uid)
 
 
-def _unmapped(uid: int) -> bool:
-    """Whether ``uid`` is the overflow id this user namespace shows for an id it does not map: in the single-id
-    namespace of a container (its root mapped to the account) host root and every other account look alike, so which
-    one owns a directory cannot be told. ``False`` when the kernel does not say."""
+def _overflow(uid: int) -> bool:
+    """Whether ``uid`` is the kernel's overflow id, the one a user namespace shows for an id it does not map: there
+    host root, whose directories (``/``, ``/var``, a host bind mount) every path passes, cannot be told from it, in a
+    namespace of one id or of several ranges (where the overflow id may itself be mapped). ``False`` when the kernel
+    does not say."""
     try:
         with open("/proc/sys/kernel/overflowuid", encoding=_PROC_ENCODING) as overflow:
-            if uid != int(overflow.read()):
-                return False
-        with open("/proc/self/uid_map", encoding=_PROC_ENCODING) as uid_map:
-            ranges = [tuple(map(int, line.split()[::2])) for line in uid_map if line.strip()]
+            return uid == int(overflow.read())
     except (OSError, ValueError):
         return False
-    return not any(first <= uid < first + count for first, count in ranges)
 
 
 class _Walk:
     """Where :func:`open_directory` is on its way: the directory open as :attr:`descriptor` (``O_PATH``) is
     :attr:`here`, and :attr:`shared` once a directory passed can be written by accounts other than its owner, or is
-    owned by an account other than this one and root (which can put any link there). An owner this user namespace
-    does not map (:func:`_unmapped`) cannot be told from root, whose directories (``/``, ``/var``) every path passes,
-    so only the mode decides for its directories."""
+    owned by an account other than this one and root (which can put any link there). The overflow id may be root as a
+    user namespace shows it (:func:`_overflow`), whose directories (``/``, ``/var``) every path passes, so only the
+    mode decides for its directories."""
 
     def __init__(self, descriptor: int) -> None:
         self.descriptor = descriptor
@@ -228,7 +229,7 @@ class _Walk:
         an absolute one starts again from ``/``.
 
         Past a directory others can write or another account owns, only a link of this account's or root's is
-        followed, which no other account can make (one whose owner this user namespace does not map is not): it is
+        followed, which no other account can make (one of the overflow id is not): it is
         opened itself (``O_PATH``), so the link whose owner is checked is the one read.
 
         Raises:

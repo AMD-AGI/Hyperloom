@@ -74,6 +74,13 @@ class Accounts:
         """Run ``code`` as root of a new user namespace that maps only ``0`` to ``uid`` (``setgroups`` denied, so the
         account keeps :attr:`group` without seeing it); its stdout. The maps are written from here, as a container
         runtime writes them."""
+        return self.run_in_namespace(uid, code, more=(), umask=umask)
+
+    def run_in_namespace(
+        self, uid: int, code: str, *, more: tuple[tuple[int, int, int], ...] = (), umask: int = 0o022
+    ) -> str:
+        """Run ``code`` as root of a new user namespace that maps ``0`` to ``uid`` and each ``(inside, outside,
+        count)`` range of ``more`` for users and groups alike (``setgroups`` denied); its stdout."""
         wait_then_run = ["sh", "-c", 'read _ && exec "$@"', "sh", *self._interpreter(code, umask)]
         prefix = self._setpriv(uid)
         child = subprocess.Popen(
@@ -84,7 +91,9 @@ class Accounts:
             text=True,
         )
         try:
-            _map_single_id(child.pid, uid)
+            _map_ids(
+                child.pid, "".join(f"{inside} {outside} {count}\n" for inside, outside, count in ((0, uid, 1), *more))
+            )
         except OSError as exc:
             child.kill()
             child.communicate()
@@ -121,14 +130,14 @@ def _finish(done: subprocess.CompletedProcess[str]) -> str:
     return done.stdout
 
 
-def _map_single_id(pid: int, uid: int) -> None:
+def _map_ids(pid: int, ranges: str) -> None:
     ours = os.stat("/proc/self/ns/user").st_ino
     deadline = time.monotonic() + _TIMEOUT_SEC
     while os.stat(f"/proc/{pid}/ns/user").st_ino == ours:
         if time.monotonic() > deadline:
             raise TimeoutError(f"process {pid} never entered a new user namespace")
         time.sleep(0.01)
-    for name, text in (("setgroups", "deny"), ("uid_map", f"0 {uid} 1"), ("gid_map", f"0 {uid} 1")):
+    for name, text in (("setgroups", "deny"), ("uid_map", ranges), ("gid_map", ranges)):
         Path(f"/proc/{pid}/{name}").write_text(text)
 
 

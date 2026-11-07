@@ -299,25 +299,89 @@ def test_a_link_in_a_directory_another_account_owns_is_not_followed_though_only_
         assert sorted(path.name for path in private.iterdir()) == ["settings.json"]
 
 
-def test_where_this_namespace_maps_the_overflow_id_a_directory_it_owns_is_another_accounts(closed_to_others):
-    """Only an id the namespace does not map is let off the owner rule: where the overflow id is a real account (the
-    host's ``nobody``), its home is another account's like any other, and its link there is not followed."""
+@pytest.mark.parametrize(("home_mode", "followed"), [(0o755, True), (0o775, False)], ids=["0755", "0775"])
+def test_a_directory_of_the_overflow_id_is_trusted_as_roots_and_only_its_mode_decides(
+    closed_to_others, home_mode, followed
+):
+    """The overflow id is root as a user namespace shows it, mapped there or not, so its directories are trusted as
+    root's: a real account of that id (the host's ``nobody``) is trusted with them too, the tradeoff that lets a
+    container pass host directories. Its link is followed where only it writes the directory, and not where the group
+    can write it."""
     if os.geteuid() != 0:
         pytest.skip("only root can give a directory and a link to the overflow id")
     nobody = int(Path("/proc/sys/kernel/overflowuid").read_text())
     home = closed_to_others / "home-of-nobody"
-    home.mkdir(mode=0o755)
+    home.mkdir()
+    home.chmod(home_mode)
     target = closed_to_others / "target"
     target.mkdir()
     (home / "link").symlink_to(target)
     os.lchown(home / "link", nobody, nobody)
     os.chown(home, nobody, nobody)
 
+    if followed:
+        shared_storage.write_shared_bytes(home / "link" / "f.json", b"x")
+        assert (target / "f.json").read_bytes() == b"x"
+        return
     with pytest.raises(OSError, match="is not followed past a directory another account can write or owns") as raised:
         shared_storage.write_shared_bytes(home / "link" / "f.json", b"x")
-
     assert (raised.value.errno, raised.value.filename) == (errno.ELOOP, str(home / "link"))
     assert list(target.iterdir()) == []
+
+
+_PASS_THE_HOSTS = """
+import errno, json, os
+from pathlib import Path
+from hyperloom_common.shared_storage import open_directory, write_shared_bytes
+seen = []
+def attempt(action):
+    try:
+        action()
+    except OSError as exc:
+        seen.append([errno.errorcode[exc.errno], exc.filename])
+    else:
+        seen.append("ok")
+for path in {paths!r}:
+    attempt(lambda: write_shared_bytes(Path(path), b"from the container"))
+for path in ("/var/run", "/lib"):
+    attempt(lambda: os.close(open_directory(Path(path))))
+print(json.dumps(seen))
+"""
+
+#: The subuid range of a rootless container or a Kubernetes pod without host users: it maps the overflow id itself.
+_SUBUIDS = (1, 300000, 65536)
+
+
+def test_in_a_namespace_of_several_ranges_host_directories_are_passed_and_a_mapped_accounts_are_not(
+    closed_to_others,
+):
+    """Where the namespace maps a range of ids besides its root, host root still shows as the overflow id, now a
+    mapped one: a root link in a directory only root writes is followed, and ``/var/run`` and ``/lib`` open. A
+    directory of another account the namespace maps is that account's, and its link is not followed."""
+    with other_accounts() as accounts:
+        target = closed_to_others / "target"
+        target.mkdir()
+        os.chown(target, accounts.first, accounts.group)
+        target.chmod(0o2775)
+        rootdir = closed_to_others / "rootdir"
+        rootdir.mkdir(mode=0o755)
+        (rootdir / "ln").symlink_to(target)
+        mapped = _SUBUIDS[1] + 5
+        home = closed_to_others / "home-of-a-mapped-account"
+        home.mkdir(mode=0o755)
+        (home / "ln").symlink_to(target)
+        os.lchown(home / "ln", mapped, mapped)
+        os.chown(home, mapped, mapped)
+        followed, refused = rootdir / "ln" / "f.json", home / "ln" / "refused.json"
+
+        seen = json.loads(
+            accounts.run_in_namespace(
+                accounts.first, _PASS_THE_HOSTS.format(paths=[str(followed), str(refused)]), more=(_SUBUIDS,)
+            )
+        )
+
+        assert seen == ["ok", ["ELOOP", str(home / "ln")], "ok", "ok"]
+        assert sorted(path.name for path in target.iterdir()) == ["f.json"]
 
 
 _WRITE_THROUGH_EACH = """
