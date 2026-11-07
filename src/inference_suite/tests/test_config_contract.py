@@ -131,7 +131,7 @@ def test_round_trip_through_json(config):
 
 def test_round_trip_fixed_and_scriptable():
     fixed = _config(workload=WorkloadKind.FIXED, agentx=None, fixed=_FIXED, profile=ProfileConfig(False))
-    script = ScriptableWorkload(script="xdit_mi355x.sh", params={"XDIT_NUM_STEPS": 28, "XDIT_GUIDANCE_SCALE": 4.0})
+    script = ScriptableWorkload(params={"XDIT_NUM_STEPS": 28, "XDIT_GUIDANCE_SCALE": 4.0})
     scriptable = _config(workload=WorkloadKind.SCRIPTABLE, agentx=None, scriptable=script, profile=ProfileConfig(False))
     for config in (fixed, scriptable):
         assert SuiteConfig.from_document(json.loads(json.dumps(config.to_document()))) == config
@@ -173,7 +173,7 @@ def test_every_mlperf_knob_is_explicit(name):
 
 
 def test_an_mlperf_round_is_not_profiled():
-    with pytest.raises(ConfigError, match="a mlperf profile needs a fixed or AgentX workload"):
+    with pytest.raises(ConfigError, match="a mlperf profile needs a fixed, AgentX or scriptable workload"):
         _mlperf_config(profile=ProfileConfig(enabled=True, agentx_open_after_sec=0, agentx_duration_sec=30))
 
 
@@ -324,7 +324,7 @@ def test_agentx_client_env_is_aiperf_only_with_fast_mode_off(client_env, match):
 @pytest.mark.parametrize("name", ["XDIT_QUALITY_LPIPS_MAX", "XDIT_QUALITY_SSIM_MIN", "quality_threshold"])
 def test_scriptable_params_carry_no_threshold(name):
     with pytest.raises(ConfigError, match="threshold"):
-        ScriptableWorkload(script="xdit.sh", params={name: 0.1})
+        ScriptableWorkload(params={name: 0.1})
 
 
 @pytest.mark.parametrize(
@@ -332,7 +332,7 @@ def test_scriptable_params_carry_no_threshold(name):
 )
 def test_scriptable_params_are_env_names_the_round_does_not_set(name, match):
     with pytest.raises(ConfigError, match=match):
-        ScriptableWorkload(script="xdit.sh", params={name: 1})
+        ScriptableWorkload(params={name: 1})
 
 
 def test_layers_refuse_contradictions():

@@ -8,7 +8,8 @@ installed framework's version (D6) and its parser (D7) unless the server is exte
 It then acquires the server, runs the load and the eval on it, and releases it. The GPU sampler follows the round's
 phase marks, so its readings cover the measured window alone; the KV sampler scrapes the ready server and tags each
 reading with its phase. An AgentX profile round opens the server's capture window on the replay's phase clock, a fixed
-profile round around its measured pass. Every child is reaped and every artifact written before :func:`run_round`
+profile round around its measured pass. A scriptable round runs its base's script in place of a server and a load, and
+a scriptable profile round captures the script's whole run. Every child is reaped and every artifact written before :func:`run_round`
 returns, so the run_dir does not change after it; ``report.json`` is written last.
 """
 
@@ -310,7 +311,7 @@ class _Round:
             return base
         self.base_digest = base.digest()
         if self.config.workload is WorkloadKind.SCRIPTABLE:
-            self._run_scriptable()
+            self._run_scriptable(base)
             return None
         prepared = self._prepare(base, RoundFacts(config_sha256, UNVERSIONED, _provisional_check(base), staged.pins))
         if isinstance(prepared, Stop):
@@ -320,8 +321,15 @@ class _Round:
         self._serve(prepared)
         return None
 
-    def _run_scriptable(self) -> None:
-        outcome = run_scriptable(self.config, self.gate, self.clock)
+    def _run_scriptable(self, base: BaseLaunch) -> None:
+        profile = self.config.profile.enabled
+        if profile:
+            make_trace_dirs(self.layout)
+        opened = time.time()
+        outcome = run_scriptable(self.config, base, self.gate, self.clock)
+        if profile and outcome.invocation is not None:
+            capture = WindowCapture(None, opened, time.time(), None, None)
+            self.sections["profile"] = _profile_result(self.layout, capture)
         self.codes = replace(self.codes, client=outcome.returncode)
         if outcome.result is not None:
             self.sections[WorkloadKind.SCRIPTABLE.value] = outcome.result
@@ -556,7 +564,7 @@ def _load_refusal(config: SuiteConfig) -> Stop | None:
 
 
 def _profile_result(layout: RunLayout, capture: WindowCapture) -> ProfileResult:
-    """The report's profile section once the server has stopped writing its traces."""
+    """The report's profile section once the server or the script has stopped writing its traces."""
     trace_dirs = settle_traces(layout)
     return ProfileResult(
         trace_dirs=trace_dirs,

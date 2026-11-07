@@ -34,6 +34,8 @@ from inference_suite.contracts import (
     FailedStep,
     FixedWorkload,
     GpuTelemetry,
+    LaunchModel,
+    LaunchQuery,
     Lifecycle,
     LifecycleMode,
     ProfileConfig,
@@ -42,7 +44,9 @@ from inference_suite.contracts import (
     RunLayout,
     RunPaths,
     RunStatus,
+    ScriptableWorkload,
     SuiteConfig,
+    Topology,
     WorkloadKind,
 )
 from inference_suite.contracts.base_launch import Workload
@@ -50,6 +54,7 @@ from inference_suite.contracts.launch import Launch, LayerSource, VersionCheck
 from inference_suite.contracts.report import Report
 from inference_suite.eval.definition import EvalPlan
 from inference_suite.framework_probe import FrameworkInstall, FrameworkProbeError
+from inference_suite.load.scriptable import scriptable_base
 from inference_suite.parser_check import FlagRefusal, RefusedFlag
 from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
 from inference_suite.runtime import server as runtime_server
@@ -699,3 +704,40 @@ def test_an_external_round_measures_a_server_it_neither_starts_nor_holds_to_the_
     assert launch.framework.version_check is VersionCheck.NOT_HELD
     assert (pid_dir / "server.pid").exists()
     assert not runtime_server.stop(pid_dir).survivors
+
+
+def _scriptable_round(rig, run_id: str, body: str, *, profile: bool = False) -> SuiteConfig:
+    script = rig.tmp / f"{run_id}.sh"
+    script.write_text(body)
+    query = LaunchQuery("FLUX.1-dev", "custom", "mi355x", Workload.SCRIPTABLE, (1,))
+    base = scriptable_base(query, str(script), LaunchModel("FLUX.1-dev"), Topology(tp=1))
+    base_path = rig.tmp / f"{run_id}_base.json"
+    base_path.write_text(json.dumps(base.to_document()))
+    config = rig.config(run_id, workload=WorkloadKind.SCRIPTABLE, fixed=None, scriptable=ScriptableWorkload({"N": 2}))
+    server = replace(config.server, base=BaseRef(str(base_path), base.digest()))
+    return replace(config, server=server, profile=ProfileConfig(enabled=profile))
+
+
+_TRACING_SCRIPT = """
+mkdir -p "$VLLM_TORCH_PROFILER_DIR" && echo trace > "$VLLM_TORCH_PROFILER_DIR/rank0.json"
+echo "{\\"output_throughput\\": $N, \\"profile\\": \\"$PROFILE\\"}" > "$RESULT_DIR/$RESULT_FILENAME.json"
+"""
+
+
+def test_a_scriptable_profile_round_runs_its_base_script_and_keeps_the_trace_it_wrote(rig):
+    result = run.run_round(_scriptable_round(rig, "s1", _TRACING_SCRIPT, profile=True))
+
+    report = result.report
+    assert report.run_status is RunStatus.COMPLETED, report.failure_detail
+    assert report.scriptable is not None and report.scriptable.result == {"output_throughput": 2, "profile": "1"}
+    assert report.profile is not None and report.profile.has_step_traces
+    assert report.profile.window_open_unix <= report.profile.window_close_unix
+    assert report.server is None and report.launch_digest is None and not result.layout.launch.exists()
+
+
+def test_a_scriptable_round_on_a_serving_base_is_refused(rig):
+    config = rig.config("s2", workload=WorkloadKind.SCRIPTABLE, fixed=None, scriptable=ScriptableWorkload())
+
+    report = run.run_round(config).report
+
+    assert report.failed_step is FailedStep.CONFIG_INVALID and "needs a scriptable base" in report.failure_detail
