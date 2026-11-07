@@ -45,6 +45,7 @@ def test_the_commits_own_inference_suite_publishes_into_the_runner_caches_infere
     seen = json.loads((cache / "seen.json").read_text())
     assert seen["argv"] == ["publish", "--stagings", str(cache / "inference-suite")]
     assert Path(seen["module"]).is_relative_to(source / "src")
+    assert not list(source.rglob("__pycache__")), "the entry's source is checked file by file on reuse"
 
 
 def test_a_failed_publish_is_an_error_naming_its_staging_missing_line(tmp_path, monkeypatch):
