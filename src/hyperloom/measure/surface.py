@@ -30,9 +30,9 @@ from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_ISL,
-    ENV_MAGPIE_EVAL_LIMIT,
-    ENV_MAGPIE_EVAL_TASKS,
-    ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS,
+    ENV_EVAL_LIMIT,
+    ENV_EVAL_TASKS,
+    ENV_EVAL_TOKENIZED_REQUESTS,
     ENV_NUM_PROMPTS,
     ENV_NUM_WARMUPS,
     ENV_OSL,
@@ -48,9 +48,9 @@ SURFACE_ENV_KEYS: tuple[str, ...] = (
     ENV_ISL,
     ENV_OSL,
     ENV_RANDOM_RANGE_RATIO,
-    ENV_MAGPIE_EVAL_TASKS,
-    ENV_MAGPIE_EVAL_LIMIT,
-    ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS,
+    ENV_EVAL_TASKS,
+    ENV_EVAL_LIMIT,
+    ENV_EVAL_TOKENIZED_REQUESTS,
 )
 #: Request counts that follow from the concurrency level; compared per point, not hashed.
 POINT_ENV_KEYS: tuple[str, ...] = (ENV_NUM_PROMPTS, ENV_NUM_WARMUPS)
