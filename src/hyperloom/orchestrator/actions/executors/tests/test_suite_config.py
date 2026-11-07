@@ -219,6 +219,14 @@ def test_a_server_phase_point_boots_the_server_and_runs_no_load_or_eval() -> Non
     assert "MAGPIE_RUN_PHASE" not in config.server.user.env_set
 
 
+def test_an_eval_only_point_runs_the_eval_and_no_load_on_the_held_server() -> None:
+    point = _point("vllm", RUN_EVAL="true", EVAL_ONLY="true")
+    config = suite_config(point, _base("vllm"), _settings(LifecycleMode.REUSE))
+
+    assert (config.workload, config.fixed, config.eval.enabled) == (WorkloadKind.NONE, None, True)
+    assert "EVAL_ONLY" not in config.server.user.env_set
+
+
 def test_without_a_gpu_mask_the_round_takes_the_first_tp_gpus() -> None:
     point = _point("sglang")
     del point["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"]
