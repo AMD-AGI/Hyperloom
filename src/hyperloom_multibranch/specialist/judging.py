@@ -113,17 +113,9 @@ class BranchJudge:
         )
         records = [record for record in snapshot.records if record.request.branch_id == self._branch]
         logged = {record.entry for record in snapshot.branch_logs.get(self._branch, ())}
-        closed = {
-            request_id
-            for entry in logged
-            if entry.content.startswith(NOTICE) and left_unjudged(entry.content)
-            for request_id in entry.request_ids
-        }
+        closed = _closed_unjudged(logged)
         guarded = {case.fix_commit for case in snapshot.regressions}
-        retests: dict[str, list[TestRecord]] = {}
-        for record in records:
-            if record.request.retest_of is not None:
-                retests.setdefault(record.request.retest_of, []).append(record)
+        retests = _retests_by_candidate(records)
         for record in records:
             if _awaits_judgement(record) and record.request_id not in closed:
                 await self._judge(record, retests.get(record.request_id, []), logged)
@@ -250,6 +242,25 @@ def left_unjudged(notice: str) -> bool:
     """Whether the judge's ``notice`` closes its candidate without a judgement; a notice such as a fix judged on its
     performance alone or a diagnosis precedes the gate's judgement and commit."""
     return _NOTHING_JUDGED in notice or _CANNOT_BE_JUDGED in notice or _NOT_COMMITTED in notice
+
+
+def _closed_unjudged(logged: set[BranchLogEntry]) -> set[str]:
+    """The request ids of the candidates a notice of the judge in ``logged`` closed without a judgement."""
+    return {
+        request_id
+        for entry in logged
+        if entry.content.startswith(NOTICE) and left_unjudged(entry.content)
+        for request_id in entry.request_ids
+    }
+
+
+def _retests_by_candidate(records: Sequence[TestRecord]) -> dict[str, list[TestRecord]]:
+    """The retests among ``records``, keyed by the request id of the candidate each retests."""
+    retests: dict[str, list[TestRecord]] = {}
+    for record in records:
+        if record.request.retest_of is not None:
+            retests.setdefault(record.request.retest_of, []).append(record)
+    return retests
 
 
 def _awaits_judgement(record: TestRecord) -> bool:
