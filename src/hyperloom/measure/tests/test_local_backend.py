@@ -118,8 +118,8 @@ class _Server:
             lambda path: {"eligible": eligible, "port": 8123, "framework": "sglang", "reason": "not eligible"},
         )
 
-        def teardown(slot: Path, lifecycle: dict[str, Any]) -> list[int]:
-            self.teardowns.append({"pid_dir": slot, **lifecycle})
+        def teardown(slot: Path) -> list[int]:
+            self.teardowns.append({"pid_dir": slot})
             return list(survivors)
 
         monkeypatch.setattr(local, "teardown_variant_server", teardown)
@@ -1040,7 +1040,7 @@ def test_a_sweep_takes_its_server_down_through_its_pid_dir_and_names_what_outliv
 
     outcome = _run(call)
 
-    assert server.teardowns == [{"pid_dir": Path(call.output_dir) / "server_arm", "framework": "sglang", "port": 8123}]
+    assert server.teardowns == [{"pid_dir": Path(call.output_dir) / "server_arm"}]
     assert "server pids [4242] outlived SIGKILL" in outcome.stderr
 
 
@@ -1621,7 +1621,7 @@ class _Case:
         self.ran = tmp_path / "case-ran"
         self.events: list[str] = []
 
-        def teardown(slot: Path, lifecycle: dict[str, Any]) -> list[int]:
+        def teardown(slot: Path) -> list[int]:
             self.events.append("teardown after the case" if self.ran.exists() else "teardown before the case")
             return []
 
