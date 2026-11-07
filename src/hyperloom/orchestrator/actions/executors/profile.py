@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Real ``profile`` ActionRunner — Magpie run with torch profiler on."""
+"""Real ``profile`` ActionRunner — a benchmark round with the torch profiler on."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 import yaml
 
@@ -27,12 +27,6 @@ from hyperloom.common.profile_args import sanitize_profile_server_args as _sanit
 from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from hyperloom.inference_optimizer import framework_registry
-from ._inferencex_patcher import (
-    benchmark_serving_path_in,
-    ensure_benchmark_lib_patched,
-    ensure_benchmark_lib_eval_dest_patched,
-    ensure_benchmark_serving_patched,
-)
 from .benchmark_result import round_succeeded
 from ._round_folder import is_round_folder
 from inference_suite.contracts import RunLayout
@@ -121,32 +115,24 @@ def _check_row(
     return {"check_id": check_id, "status": status, "skip_reason": skip_reason, "detail": detail}
 
 
-def _instrumentation_preflight_row(
-    envs: Mapping[str, Any], patchers: Mapping[str, Any] | None = None
-) -> dict[str, Any]:
+def _instrumentation_preflight_row(envs: Mapping[str, Any]) -> dict[str, Any]:
     """State, before the run, whether the annotations the trace checks look for can land at all.
 
     When the TraceLens runtime patch is unavailable the env layer turns ``detailed_annotations`` and
     ``shape_discovery`` off, which makes checks 3 and 5 certain to fail. Recording that decision here gives the
     post-hoc failures their cause. This only reports it -- the run proceeds unchanged, because a trace without
     annotations is still a trace.
-
-    ``patchers`` carries each patcher's own outcome. The env block records what the patch results *caused*, which
-    is not the same as which patcher ran and what it returned: a successful patch records its outcome too, so
-    "instrumentation was fine" and "nobody looked" are different records.
     """
     degraded = str(envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") or "")
-    patchers = dict(patchers or {})
     try:
         extra_body = json.loads(str(envs.get("PROFILE_EXTRA_BODY") or "{}"))
     except (TypeError, ValueError):
         extra_body = {}
     if not isinstance(extra_body, dict):
         extra_body = {}
-    failed_patchers = sorted(name for name, ok in patchers.items() if ok is False)
     return _check_row(
         CHECK_INSTRUMENTATION_PREFLIGHT,
-        status="failed" if (degraded or failed_patchers) else "passed",
+        status="failed" if degraded else "passed",
         degraded_reason=degraded,
         tracelens_patch_status=str(envs.get("HYPERLOOM_TRACELENS_PATCH_STATUS") or ""),
         detailed_annotations=extra_body.get("detailed_annotations"),
@@ -155,8 +141,6 @@ def _instrumentation_preflight_row(
         shape_discovery_flag_present=(
             "shape-discovery-for-cuda-graph-profile" in str(envs.get("EXTRA_SGLANG_ARGS") or "")
         ),
-        patchers=patchers,
-        failed_patchers=failed_patchers,
         # Named so a reader knows which post-hoc checks this predicts rather than having to rediscover the link.
         predicts_failure_of=[CHECK_STEP_ANNOTATIONS, CHECK_SGLANG_SHAPE_PROFILER] if degraded else [],
     )
@@ -920,13 +904,11 @@ class ProfileExecutor(BenchmarkRunExecutor):
     def __init__(
         self,
         *,
-        magpie_python: str | None = None,
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
     ):
         """Initialize the profile executor with profile-specific defaults."""
         super().__init__(
-            magpie_python=magpie_python,
             default_config_path=default_config_path,
             session_dir=session_dir,
         )
@@ -934,8 +916,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         self._host_probe_dir: str = ""
         # Non-empty only when arming failed, and then says why (an empty probe dir cannot tell never-asked from failed).
         self._host_probe_status: str = ""
-        # Set by ``_prepare_point`` from the config the run will actually execute, and restated with the patchers'
-        # outcomes by ``_after_materialize_config`` on the benchmark backend, so the post-hoc trace checks ship
+        # Set by ``_prepare_point`` from the config the run will actually execute, so the post-hoc trace checks ship
         # alongside the pre-run statement of whether their subject could have been produced.
         self._instrumentation_preflight: dict[str, Any] | None = None
 
@@ -1028,103 +1009,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
             self._host_probe_status = f"probe_injection_failed: {exc}"
         with contextlib.suppress(OSError, ValueError, yaml.YAMLError):
             self._instrumentation_preflight = _instrumentation_preflight_row(read_benchmark_point(config_path).envs)
-
-    def _after_materialize_config(self, config_path: Path, output_dir: Path) -> dict[str, Any] | None:
-        """Patch the InferenceX checkout Magpie will execute."""
-        from .magpie_agentx import native_config
-
-        if native_config(config_path):
-            return None
-        try:
-            point = read_benchmark_point(config_path)
-        except (OSError, ValueError, yaml.YAMLError) as exc:
-            return {
-                "status": "failed",
-                "error_class": "profile_config_unreadable",
-                "error": f"cannot read materialized profile config {config_path}: {exc}",
-            }
-        patchers: dict[str, Any] = {}
-
-        def _note_instrumentation() -> None:
-            """Re-state the instrumentation report. Called before every exit below, so no path leaves it unset."""
-            self._instrumentation_preflight = _instrumentation_preflight_row(point.envs, patchers)
-            detail = self._instrumentation_preflight["detail"]
-            if self._instrumentation_preflight["status"] != "failed":
-                return
-            log.warning(
-                "profile_executor: instrumentation preflight — degraded_reason=%r failed_patchers=%s; "
-                "annotation-dependent trace checks (%s, %s) cannot pass for this run",
-                detail.get("degraded_reason"),
-                detail.get("failed_patchers"),
-                CHECK_STEP_ANNOTATIONS,
-                CHECK_SGLANG_SHAPE_PROFILER,
-            )
-
-        _note_instrumentation()
-        from hyperloom.inference_optimizer import framework_registry
-
-        if framework_registry.is_scriptable(point.framework.strip().lower()):
-            return None
-        inferencex_path = point.inferencex_path.strip() or os.environ.get("INFERENCEX_PATH", "").strip()
-        if not inferencex_path:
-            log.warning("profile_executor: no inferencex_path or INFERENCEX_PATH; skipping InferenceX profile patching")
-            patchers["inferencex"] = None
-            _note_instrumentation()
-            return None
-
-        ix_root = Path(inferencex_path)
-        lib_ok = ensure_benchmark_lib_patched(ix_root)
-        patchers["benchmark_lib"] = lib_ok
-        patchers["benchmark_lib_eval_dest"] = ensure_benchmark_lib_eval_dest_patched(ix_root)
-        serving_ok = ensure_benchmark_serving_patched(ix_root)
-        patchers["benchmark_serving"] = serving_ok
-        return self._verify_inferencex_patches(ix_root, patchers, _note_instrumentation)
-
-    def _verify_inferencex_patches(
-        self,
-        ix_root: Path,
-        patchers: dict[str, Any],
-        note_instrumentation: Callable[[], None],
-    ) -> dict[str, Any] | None:
-        """Read the patched InferenceX sentinels back; a failed result when the checkout is not patched."""
-        lib_ok = patchers["benchmark_lib"]
-        serving_ok = patchers["benchmark_serving"]
-        lib_path = ix_root / "benchmarks" / "benchmark_lib.sh"
-        # path as a forwarding shim, which never carries the sentinel however well the patch landed.
-        # Scoped to ``ix_root`` like ``lib_path`` above: this gate speaks for the tree Magpie runs.
-        serving_path = benchmark_serving_path_in(ix_root)
-
-        def _contains(path: Path, needle: str) -> bool:
-            """Check whether ``needle`` appears in ``path``'s text."""
-            try:
-                return needle in path.read_text(encoding="utf-8")
-            except OSError:
-                return False
-
-        lib_valid = _contains(lib_path, "${NUM_PROMPTS:-$max_concurrency}")
-        serving_valid = _contains(serving_path, "PROFILE_EXTRA_BODY")
-        # The sentinels are a separate fact from the patcher's return: a patcher can report success against a
-        # checkout whose anchors have since moved, and only reading the file back tells them apart.
-        patchers["benchmark_lib_sentinel"] = lib_valid
-        patchers["benchmark_serving_sentinel"] = serving_valid
-        patchers["inferencex_path"] = str(ix_root)
-        note_instrumentation()
-        if not (lib_ok and serving_ok and lib_valid and serving_valid):
-            return {
-                "status": "failed",
-                "error_class": "profile_inferencex_patch_failed",
-                "error": (
-                    "profile requires InferenceX to honour NUM_PROMPTS and "
-                    "PROFILE_EXTRA_BODY, but the checkout Magpie will use is "
-                    f"not patched: inferencex_path={ix_root}, "
-                    f"benchmark_lib_ok={lib_ok}/{lib_valid}, "
-                    f"benchmark_serving_ok={serving_ok}/{serving_valid}"
-                ),
-                "inferencex_path": str(ix_root),
-                "benchmark_lib": str(lib_path),
-                "benchmark_serving": str(serving_path),
-            }
-        return None
 
     def drain_instrumentation_report(self) -> dict[str, Any] | None:
         """Take the instrumentation report this executor produced, clearing it.

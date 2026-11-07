@@ -8,23 +8,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import subprocess
 import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom_common.env import is_truthy
-from hyperloom_common.jsonio import read_json
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import agentx_active
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineInvocation
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
-from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout
+from inference_suite.contracts import FailedStep, LifecycleMode
 from .._grid_runner import sanitize_result_dir, sanitize_script_name
 from .._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
-from .._subprocess_kill import DETOKENIZER_STALL_RETURNCODE
 from .._workload_envs import (
     BenchmarkTarget,
     FrameworkScriptMismatchError,
@@ -34,12 +31,9 @@ from .._workload_envs import (
 )
 from ..benchmark_result import (
     extract_benchmark_measurement,
-    harvest_leaked_artifacts,
-    select_run_workspace,
-    snapshot_workspaces,
 )
 from .._failed_step import failed_step_error_class
-from .._round_folder import MAGPIE_REPORT_FILE, RoundFolder, round_report_path
+from .._round_folder import RoundFolder, round_report_path
 from .._suite_config import (
     SuiteRound,
     SuiteRoundRefused,
@@ -49,7 +43,7 @@ from .._suite_config import (
     run_suite_round,
 )
 from ..magpie_agentx import ServerArgvInvalidError
-from .bringup import _boot_failure, open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
+from .bringup import open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
 from .records import (
     _BENCHMARK_MODE_ATTR,
     BenchmarkAttempt,
@@ -57,7 +51,6 @@ from .records import (
     _BenchProcess,
     _round_post_ready_sec,
     _should_establish_quality_ref,
-    _stopped_round_result,
 )
 
 if TYPE_CHECKING:
@@ -137,14 +130,9 @@ def _attach_baseline_launch_evidence(
     workspace = Path(str(result.get("workspace") or "")) if result.get("workspace") else None
     actual_log = _measurement_server_log_path(output_dir / "server.log", workspace, slot=output_dir)
     result["server_log_path"] = actual_log or ""
-    if result.get("benchmark_backend") == "magpie_agentx":
-        from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
-
-        evidence = native_launch_evidence(result, config_path, actual_server_log=actual_log)
-    else:
-        evidence = build_launch_evidence(
-            RequestedLaunch(config_path, framework), actual_server_log=actual_log, slot=output_dir
-        )
+    evidence = build_launch_evidence(
+        RequestedLaunch(config_path, framework), actual_server_log=actual_log, slot=output_dir
+    )
     result["launch_evidence"] = evidence
     result["launch_evidence_path"] = persist_measurement_evidence(
         evidence, actual_server_log=actual_log, slot=output_dir
@@ -361,72 +349,6 @@ class _BenchmarkLaunchMixin:
             }
         return None
 
-    async def _measured_round_result(self, round_: _BenchmarkRound, round_warnings: list[str]) -> dict[str, Any]:
-        from .._multi_node_env import is_multi_node
-
-        workspaces_before = snapshot_workspaces(round_.output_dir)
-        started_unix = time.time()
-        # Anchor the Magpie parent process cwd to the per-task output_dir.
-        round_.output_dir.mkdir(parents=True, exist_ok=True)
-        # A reused output_dir may still hold a previous attempt's server.log, whose terminal init markers would be
-        # read as this attempt's, and the ready stamp beside it would make this attempt's boot look like it never
-        # happened.
-        server_log = round_.output_dir / "server.log"
-        attempt_index = open_bringup_attempt(round_.output_dir)
-        RunLayout(round_.output_dir).clear_ready_stamp()
-        ready = bool(round_.server_already_ready or round_.ctx_extra.get("server_already_ready") or is_multi_node())
-        if self.benchmark_watchdog and not ready:
-            from .._aiter_jit import sweep_stale_aiter_locks_if_dead
-
-            if deleted := (await asyncio.to_thread(sweep_stale_aiter_locks_if_dead)).get("deleted"):
-                log.warning("baseline_executor: reaped %d orphaned aiter JIT lock(s) before server launch", deleted)
-        try:
-            finished = await self._launch_benchmark(round_, started_unix, server_ready=ready)
-        except subprocess.TimeoutExpired as exc:
-            # A reaped timeout carries no wrapper streams; the server log is the whole of the evidence.
-            await asyncio.to_thread(self._record_bringup, round_, attempt_index, workspaces_before)
-            reaped = {"error_class": "timeout", "error": f"baseline benchmark exceeded {round_.timeout_sec}s: {exc}"}
-            return self._reaped_round_failure(
-                round_.output_dir, workspaces_before, started_unix, {**reaped, **round_.capture_meta}
-            )
-        server_log_text = await asyncio.to_thread(
-            self._record_bringup, round_, attempt_index, workspaces_before, finished.stderr, finished.stdout
-        )
-        boot_ref = round_.capture_meta["boot_observation_path"]
-        finished = finished._replace(server_log_text=server_log_text, boot_observation_ref=boot_ref)
-        stopped = _stopped_round_result(
-            finished.returncode,
-            round_label="measured round",
-            runtime_sec=finished.runtime_sec,
-            output_dir=round_.output_dir,
-            capture_meta=round_.capture_meta,
-        )
-        if stopped is not None:
-            return stopped
-        # Detokenizer-stall watchdog reap: the server came up healthy but went silent for the stall grace window
-        # (hung engine / wedged detokenizer).
-        if finished.returncode == DETOKENIZER_STALL_RETURNCODE:
-            log.warning(
-                "baseline_executor: detokenizer-stall watchdog reaped run "
-                "(server ready but log went silent); error_class=detokenizer_stall."
-            )
-            reaped = {
-                "error_class": "detokenizer_stall",
-                "returncode": finished.returncode,
-                "error": _DETOKENIZER_STALL_ERROR,
-                "subprocess_runtime_sec": round(finished.runtime_sec, 2),
-            }
-            return self._reaped_round_failure(
-                round_.output_dir, workspaces_before, started_unix, {**reaped, **round_.capture_meta}
-            )
-        # Read the server log back before the harvest below: harvesting can copy a leaked ``server.log`` into
-        # ``output_dir`` and change what this classification sees.
-        boot = _boot_failure(finished, server_log)
-        workspace = select_run_workspace(round_.output_dir, known_before=workspaces_before)
-        return await self._round_result_from_workspace(
-            round_, finished._replace(workspace=workspace), boot, round_warnings
-        )
-
     async def _suite_round_result(
         self, round_: _BenchmarkRound, route: SuiteRoute, *, warmup: bool, warnings: Sequence[str] = ()
     ) -> dict[str, Any]:
@@ -493,19 +415,6 @@ class _BenchmarkLaunchMixin:
         )
         round_.capture_meta["boot_observation_degraded"] = ""
 
-    def _record_bringup(
-        self,
-        round_: _BenchmarkRound,
-        attempt_index: int,
-        workspaces_before: Any,
-        wrapper_stderr: str = "",
-        wrapper_stdout: str = "",
-    ) -> str:
-        # Magpie writes the server log into the workspace it creates, not to $SERVER_LOG.
-        workspace = select_run_workspace(round_.output_dir, known_before=workspaces_before)
-        log_path = workspace / "server.log" if workspace is not None else round_.output_dir / "server.log"
-        return self._observe_bringup(round_, attempt_index, log_path, wrapper_stderr, wrapper_stdout)
-
     def _observe_bringup(
         self,
         round_: _BenchmarkRound,
@@ -533,62 +442,6 @@ class _BenchmarkLaunchMixin:
         )
         round_.capture_meta["boot_observation_degraded"] = read.degraded
         return read.text
-
-    @staticmethod
-    def _reaped_round_failure(
-        output_dir: Path,
-        workspaces_before: Any,
-        started_unix: float,
-        fields: dict[str, Any],
-    ) -> dict[str, Any]:
-        destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
-        harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=started_unix)
-        return {
-            "status": "failed",
-            "output_dir": str(output_dir),
-            "harvested_artifacts": [str(dst) for _, dst in harvested],
-            "nonfatal_warnings": [f"harvested_leaked_artifact:{src}" for src, _ in harvested],
-            **fields,
-        }
-
-    async def _round_result_from_workspace(
-        self,
-        round_: _BenchmarkRound,
-        finished: _BenchProcess,
-        boot: tuple[str, str] | None,
-        round_warnings: list[str],
-    ) -> dict[str, Any]:
-        workspace = finished.workspace
-        # Always-on artifact harvest: copy wrapper-side leaks into the task workspace so failure-path diagnostics
-        # survive; mtime gating rejects stale prior-run leaks.
-        harvested = harvest_leaked_artifacts(
-            workspace if workspace is not None else round_.output_dir,
-            subprocess_started_unix=finished.started_unix,
-        )
-        if harvested:
-            log.info(
-                "baseline_executor: harvested %d leaked artifact(s) into workspace: %s",
-                len(harvested),
-                ", ".join(str(src.name) for src, _ in harvested),
-            )
-        if workspace is None:
-            return self._no_workspace_failure(round_, finished, boot, harvested)
-        report_path = workspace / MAGPIE_REPORT_FILE
-        report = read_json(report_path, None, require_dict=True)
-        measurement = extract_benchmark_measurement(
-            report,
-            config_path=round_.config_path,
-            workspace=workspace,
-            subprocess_started_unix=finished.started_unix,
-        )
-        warnings = round_warnings + list(measurement.pop("nonfatal_warnings", []) or [])
-        warnings.extend(f"harvested_leaked_artifact:{src}" for src, _ in harvested)
-        failure = self._failed_round_result(round_, finished, boot, measurement, warnings)
-        if failure is not None:
-            return failure
-        result = await self._succeeded_round_result(round_, finished, measurement, warnings)
-        self._stamp_round_quality(round_, result, report, warnings)
-        return result
 
     async def _succeeded_round_result(
         self,

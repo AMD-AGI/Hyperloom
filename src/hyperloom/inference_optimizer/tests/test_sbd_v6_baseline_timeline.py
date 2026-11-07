@@ -883,7 +883,7 @@ async def test_the_executor_reads_the_counters_off_the_session(tmp_path: Path) -
 async def test_a_profile_run_opens_no_baseline_event(tmp_path: Path) -> None:
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
-    executor = ProfileExecutor(magpie_python="python", session_dir=tmp_path)
+    executor = ProfileExecutor(session_dir=tmp_path)
     recorders: list[Any] = []
 
     async def _run_once(_ctx, *, recorder=None, run_index=0, **_kwargs):

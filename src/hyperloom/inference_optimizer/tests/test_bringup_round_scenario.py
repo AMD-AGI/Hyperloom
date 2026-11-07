@@ -5,43 +5,23 @@
 
 from __future__ import annotations
 
-import time
 import types
 from pathlib import Path
 
 import pytest
 
 from hyperloom.common.bringup import LadderStage
-from hyperloom.inference_optimizer.session.session_paths import reports_dir
-from hyperloom.orchestrator.actions.executors import baseline as bl
-from hyperloom.orchestrator.actions.executors.benchmark_run import launch as launch_mod
-from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
-from hyperloom.orchestrator.bringup import load_boot_observation
-from hyperloom.orchestrator.bringup import reconcile
-from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.enablement.build import EnablementBuild
 from hyperloom.orchestrator.enablement.lane import EnablementLane
 from hyperloom.orchestrator.enablement.params import EnablementParams
-from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
-from hyperloom.orchestrator.policy.gate import PolicyGate
-from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.rehearsal import (
-    COMPLETED,
-    CRASHED,
-    STAGE_FAILED,
-    LaunchScenario,
-    ScriptedLaunchBackend,
-    ScriptedSpecialist,
-    SpecialistStep,
     boot_log_for,
 )
-from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.round_store import (
     FAILED,
@@ -49,20 +29,11 @@ from hyperloom.orchestrator.state.round_store import (
     RoundRequest,
     RoundStore,
 )
-from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
 #: The round: two blockers peeled one per attempt, then a boot that serves.
 #: Written as a stack rather than three logs because what is under test is that
 #: the round keeps going, not the wording of any one failure.
-_SCENARIO = {
-    "name": "two-blockers-then-boot",
-    "blockers": [
-        {"stage": "argv_parse", "duration_sec": 45.0},
-        {"stage": "config_validate", "duration_sec": 180.0},
-    ],
-    "clean_after": True,
-}
 
 
 def _ctx(task_id: str) -> RunnerContext:
@@ -84,14 +55,11 @@ def _ctx(task_id: str) -> RunnerContext:
 
 @pytest.fixture
 def round_slot(tmp_path, monkeypatch):
-    """A session root, a round workspace, and a baseline with no salvage pass."""
+    """A session root and a round workspace."""
     session = tmp_path / "session"
     session.mkdir()
     slot = tmp_path / "round"
     slot.mkdir()
-    monkeypatch.setattr(launch_mod, "harvest_leaked_artifacts", lambda *a, **k: [])
-    monkeypatch.setattr(launch_mod, "snapshot_workspaces", lambda *a, **k: set())
-    monkeypatch.setattr(launch_mod, "select_run_workspace", lambda *a, **k: None)
     return session, slot
 
 
@@ -102,36 +70,6 @@ def registry(tmp_path):
     ensure_schema(db.raw)
     yield TaskRegistry(db), RoundStore(db), SqliteLeaseBackend(db)
     db.close()
-
-
-async def _bringup_attempt(session: Path, slot: Path, *, task_id: str) -> dict:
-    """Run one bring-up attempt through the real baseline executor.
-
-    Args:
-        session: The session root.
-        slot: The round workspace the attempt runs in.
-        task_id: Task id the attempt runs under.
-
-    Returns:
-        dict: The round result, carrying the boot observation's path.
-    """
-    executor = bl.BaselineExecutor(session_dir=session, magpie_python="/usr/bin/python3")
-    config = session / "bench.yaml"
-    config.write_text("benchmark:\n  framework: vllm\n  model: scripted/Model\n", encoding="utf-8")
-    return await executor._run_single_benchmark(
-        BenchmarkAttempt(
-            timeout_sec=1800,
-            override_result_dir=None,
-            resolved_model="scripted/Model",
-            materialized_config_path=config,
-            inferencex_path="",
-            effective_extra_server_args="",
-            params={"framework": "vllm"},
-            ctx=_ctx(task_id),
-        ),
-        config_path=config,
-        output_dir=slot,
-    )
 
 
 def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: str):
@@ -218,243 +156,13 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
     return shim
 
 
-def _advanced_by(seconds: float):
-    """A ``time.time`` reading ``seconds`` later than the one in force now.
-
-    Args:
-        seconds: How much later the next reading is.
-
-    Returns:
-        Callable[[], float]: The replacement reading.
-    """
-    later = time.time() + float(seconds)
-    return lambda: later
-
-
-@pytest.mark.asyncio
-async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_attempt(
-    round_slot,
-    registry,
-    launch_backend,
-    virtual_clock,
-    monkeypatch,
-):
-    """Three attempts, three artifacts, a ladder that only ever goes up."""
-    import hyperloom.agents.framework.sources as sources
-
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
-
-    monkeypatch.setattr(sources, "enumerate_candidates", lambda _request: [])
-    monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)
-
-    session, slot = round_slot
-    tasks, rounds, _locks = registry
-    clock = virtual_clock
-    launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_SCENARIO), clock=clock)
-    launch_backend(launches)
-    # The first dispatch dies without a done-file and the round retries it; the
-    # retry is a fresh row, so the specialist sees a task id no earlier dispatch
-    # used. That, not a counter, is what tells a retry from a resumption.
-    specialists = ScriptedSpecialist(
-        steps=(
-            SpecialistStep(name="crash", outcome=CRASHED, duration_sec=60.0),
-            SpecialistStep(name="repair", outcome=COMPLETED, done={"status": "patched"}, duration_sec=240.0),
-        ),
-        clock=clock,
-    )
-
-    gate = PolicyGate(
-        role_registry=default_role_registry(),
-        session_dir=session,
-        shared_state=None,
-    )
-
-    observations: list = []
-    dispatched: list[str] = []
-
-    for tick in range(len(launches.scenario.attempts)):
-        result = await _bringup_attempt(session, slot, task_id=f"baseline-{tick}")
-        loaded = load_boot_observation(result.get("boot_observation_path"))
-        assert loaded.observation is not None, loaded.degraded
-        observations.append(loaded.observation)
-        if loaded.observation.stage_failed is None and loaded.observation.stage_reached >= LadderStage.HTTP_READY:
-            break
-
-        # The excerpt is what the round recorded off the server's own log, and
-        # the only evidence a wrapper that printed nothing leaves behind.
-        excerpt = loaded.observation.excerpt
-        # What the Coordinator does first on every tick. The previous round's
-        # specialist crashed without settling anything, and the lane will not
-        # open a second round while the first is still held: the repair pass is
-        # what ends it, and it runs before anything is admitted.
-        monkeypatch.setattr(reconcile, "TERMINAL_HOLDER_CAP_SEC", 0.0)
-        await Reconciler(
-            ReconcileStores(rounds=rounds, tasks=tasks, locks=SqliteLeaseBackend(rounds.db)),
-            SharedState(),
-            links=ReconcileLinks(
-                resources=ResourceFacts(),
-                proposals=dict,
-                drop_proposal=lambda _pending, _reason: None,
-                session_dir=session,
-                result_pending=lambda _task_id: False,
-            ),
-        ).run(time.time())
-        # A confirmed kill keeps excluding until the reap grace passes: the
-        # kernel has not torn the address space down when the signal returns,
-        # and the cards outlive the process that held them by longer still. The
-        # next tick is therefore on the far side of that grace.
-        monkeypatch.setattr(time, "time", _advanced_by(1.0))
-        lane = _lane(session, tasks, rounds, excerpt.text if excerpt is not None else "")
-        task_id = await lane._maybe_enqueue_enablement_specialist()
-        assert task_id, "the lane opened no repair task for a boot that failed"
-        row = await tasks.get(task_id)
-        # The gate re-reads the persisted row before anything dispatches it,
-        # which is the check a forged database row has to get past.
-        gate.validate_dispatched_task(row.kind, row.params)
-        dispatched.append(task_id)
-
-        workspace = session / "runs" / "specialist" / task_id
-        spawn = SpecialistSpawn(
-            task_id=task_id,
-            workspace=workspace,
-            worktree=None,
-            worktree_base=None,
-            system_prompt="",
-            user_prompt="",
-        )
-        outcome = await specialists.run(spawn)
-        await tasks.transition(task_id, "running")
-        await tasks.transition(task_id, "succeeded" if outcome.done_payload else "failed")
-
-    # Every attempt left exactly one artifact, at the path the packaging reads.
-    artifacts = sorted((reports_dir(session) / "bringup").glob("*.json"))
-    assert len(artifacts) == len(launches.scenario.attempts)
-    assert launches.served == len(launches.scenario.attempts)
-
-    # And the round got further each time, ending on a server that answered.
-    stages = [o.stage_failed or LadderStage.ACCURACY_OK for o in observations]
-    assert stages == sorted(stages), stages
-    assert stages[0] == LadderStage.ARGV_PARSE
-    assert stages[1] == LadderStage.CONFIG_VALIDATE
-    assert observations[-1].stage_failed is None
-    assert observations[-1].stage_reached >= LadderStage.HTTP_READY
-
-    # Two repair dispatches under two different ids: the lane minted a fresh
-    # idempotency key for the retry rather than reopening the crashed task,
-    # which is the only difference between a retry and a resumption a consumer
-    # outside the lane can see.
-    assert len(dispatched) == 2
-    assert dispatched[0] != dispatched[1], dispatched
-
-    # Every declared step was charged to the one clock both doubles share, and
-    # none of it was spent waiting.
-    assert clock.elapsed == pytest.approx(45.0 + 180.0 + 30.0 + 60.0 + 240.0)
-
-
 #: A round that never gets anywhere: the same wall, attempt after attempt, and
 #: no clean boot at the end. Written as explicit attempts rather than a blocker
 #: stack because the point is that nothing is peeled.
-_UNCLEARED = {
-    "name": "a-wall-that-never-moves",
-    "attempts": [
-        {"name": f"attempt-{index}", "outcome": STAGE_FAILED, "stage": "engine_init", "duration_sec": 240.0}
-        for index in range(4)
-    ],
-}
 
 #: The same wall, alternating between one the launcher rejected on its own
 #: arguments and one the engine hit after doing real work. Each class has its
 #: own terminal, and neither sequence on its own reaches three of a kind.
-_ALTERNATING = {
-    "name": "argument-then-engine-then-argument",
-    "attempts": [
-        {"name": "bad-arg", "outcome": STAGE_FAILED, "stage": "argv_parse", "duration_sec": 5.0},
-        {"name": "engine", "outcome": STAGE_FAILED, "stage": "engine_init", "duration_sec": 240.0},
-        {"name": "bad-arg-again", "outcome": STAGE_FAILED, "stage": "argv_parse", "duration_sec": 5.0},
-    ],
-}
-
-
-def _baseline_task(task_id: str):
-    """Return the registry row a baseline attempt settles under."""
-    from hyperloom.orchestrator.state.task_registry import Task
-
-    return Task(
-        task_id=task_id,
-        kind="baseline",
-        state="running",
-        params={"config_path": "baseline.yaml"},
-        idempotency_key=task_id,
-    )
-
-
-@pytest.fixture
-def coordinator(session_dir):
-    """A real Coordinator over a temp session, with silent LLM backends."""
-    from hyperloom.orchestrator.roles.base import Backend
-    from hyperloom.orchestrator.roles.mock_backend import MockBackend, ScriptedPlan
-
-    backends: dict[str, Backend] = {
-        name: MockBackend(ScriptedPlan(turns=[]), name=name) for name in ("orchestration", "critic")
-    }
-    return Coordinator(session_dir, backends=backends)
-
-
-async def _settle_failures(coordinator, session, slot, scenario_len: int) -> list[dict]:
-    """Play every attempt and hand each failure to the writeback path.
-
-    Args:
-        coordinator: The Coordinator whose state the failures are charged to.
-        session: The session root the executor writes observations under.
-        slot: The round workspace each attempt runs in.
-        scenario_len: How many attempts the scenario declares.
-
-    Returns:
-        list[dict]: The round result of every attempt that was played, in
-        order; short of ``scenario_len`` when a stop reason was set first.
-    """
-    played: list[dict] = []
-    for index in range(scenario_len):
-        result = await _bringup_attempt(session, slot, task_id=f"baseline-{index}")
-        played.append(result)
-        await coordinator.writeback.handle_unpromotable_result(_baseline_task(f"baseline-{index}"), result)
-        if coordinator.shared_state.stop_reason:
-            break
-    return played
-
-
-@pytest.mark.asyncio
-async def test_a_baseline_that_keeps_failing_reaches_the_prelude_terminal(
-    coordinator,
-    round_slot,
-    launch_backend,
-    virtual_clock,
-):
-    """A round with an open bring-up does not buy the baseline extra retries."""
-    from hyperloom.orchestrator.phases import machine_state
-
-    session, slot = round_slot
-    launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_UNCLEARED), clock=virtual_clock)
-    launch_backend(launches)
-
-    state = coordinator.shared_state
-    # --enablement=off: the three-strike PRELUDE terminal is the documented fast-fail.
-    state.enablement_mode = "off"
-    state.enablement.kept_patches = ["srt/attention.py"]
-
-    played = await _settle_failures(coordinator, session, slot, len(launches.scenario.attempts))
-
-    assert state.baseline_failure_streak == 3
-    assert state.stop_reason == "baseline_failed"
-    out = machine_state.compute_next_phase(state)
-    assert out is not None
-    target, reason, evidence = out
-    assert (target, reason) == ("CLOSE", "baseline_failed")
-    assert evidence["terminal"] is True
-    assert evidence["predicate_inputs"]["baseline"]["failure_streak"] == 3
-    # The fourth attempt was never played: the session stopped on the third.
-    assert len(played) == 3
-    assert launches.served == 3
 
 
 async def _seed_failed_rounds(rounds: RoundStore, n: int) -> None:
@@ -570,28 +278,3 @@ async def test_a_round_settles_when_the_caller_has_no_reason_to_give(
     assert await rounds.held() is None
     row = await rounds.get(held.round_id)
     assert (row.state, row.outcome) == (SETTLED, FAILED)
-
-
-@pytest.mark.asyncio
-async def test_the_arg_error_terminal_survives_an_alternating_failure_sequence(
-    coordinator,
-    round_slot,
-    launch_backend,
-    virtual_clock,
-):
-    """Two rejected-argument launches end the run even when one boot separates them."""
-    session, slot = round_slot
-    launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_ALTERNATING), clock=virtual_clock)
-    launch_backend(launches)
-
-    played = await _settle_failures(coordinator, session, slot, len(launches.scenario.attempts))
-
-    assert [r.get("error_class") for r in played] == [
-        "fast_exit_arg_error",
-        "subprocess_nonzero",
-        "fast_exit_arg_error",
-    ]
-    state = coordinator.shared_state
-    assert state.baseline_arg_error_streak == 2
-    assert state.baseline_failure_streak == 1
-    assert state.stop_reason == "baseline_arg_error"

@@ -881,69 +881,6 @@ def test_a_client_without_the_hook_is_reported(tmp_path):
     assert not mp.client_tokenizer_hook_installed("vllm_mi300x.sh", inferencex_dir=scripts.parent)
 
 
-def _deepseek_v4_config_without_hook(tmp_path):
-    """A materialized config for a model that needs a named tokenizer, over a client script lacking the hook."""
-    import yaml
-
-    scripts = tmp_path / "ix" / "benchmarks"
-    scripts.mkdir(parents=True)
-    (scripts / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    (scripts / "vllm_mi300x.sh").write_text(
-        '#!/usr/bin/env bash\nrun_benchmark_serving --result-dir "$WORKSPACE_DIR/" --drifted\n',
-        encoding="utf-8",
-    )
-    model = tmp_path / "m"
-    model.mkdir()
-    (model / "config.json").write_text('{"model_type": "deepseek_v4"}', encoding="utf-8")
-    cfg = tmp_path / "bench.yaml"
-    cfg.write_text(
-        yaml.safe_dump({"benchmark": {"model": str(model), "inferencex_path": str(tmp_path / "ix")}}),
-        encoding="utf-8",
-    )
-    return cfg
-
-
-def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_path, monkeypatch):
-    """The runtime consequence: no hook, no round -- but only for such a model."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    cfg = _deepseek_v4_config_without_hook(tmp_path)
-
-    ex = bl.BaselineExecutor(session_dir=tmp_path)
-    monkeypatch.setattr(bl, "materialized_run_eval_disabled", lambda _p: False)
-    # The subject is the refusal, not the mode detection that precedes it.
-    # ``_client_tokenizer_mode`` answers "" when ``transformers`` cannot be
-    # imported -- true of the lint/test images this suite runs on -- and also
-    # when the installed transformers happens to know ``deepseek_v4``. Left to
-    # the environment, this test asserted a refusal on the machines that had
-    # transformers and silently asserted nothing on the ones that did not.
-    monkeypatch.setattr(bl, "_client_tokenizer_mode", lambda _model: "deepseek_v4")
-    res = ex._after_materialize_config(cfg, tmp_path / "out")
-    assert res is not None and res.get("error_class") == "client_tokenizer_unpatchable", res
-    assert "1eb3df69de" in res["error"], res
-
-
-def test_the_hook_is_required_even_with_evaluation_disabled(tmp_path, monkeypatch):
-    """The hook fixes the THROUGHPUT client, which runs whether or not lm-eval does.
-
-    Gating it on eval would leave an eval-disabled DeepSeek-V4 run dying exactly
-    as before, with correctness resting on a preflight side effect.
-    """
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    cfg = _deepseek_v4_config_without_hook(tmp_path)
-
-    # Evaluation OFF: the eval probe and eval-concurrency checks must not run,
-    # but the tokenizer hook still must.
-    monkeypatch.setattr(bl, "materialized_run_eval_disabled", lambda _p: True)
-    ex = bl.BaselineExecutor(session_dir=tmp_path)
-    # Same environment dependence as the refusal test above: "" when
-    # ``transformers`` is missing, which is the state of the test images.
-    monkeypatch.setattr(bl, "_client_tokenizer_mode", lambda _model: "deepseek_v4")
-    res = ex._after_materialize_config(cfg, tmp_path / "out")
-    assert res is not None and res.get("error_class") == "client_tokenizer_unpatchable", res
-
-
 def test_an_unrelated_client_shape_does_not_veto_the_round(tmp_path):
     """The multimodal variants carry the same marker with a different call.
 
@@ -976,38 +913,3 @@ def test_naming_an_unpatchable_script_still_refuses(tmp_path):
         encoding="utf-8",
     )
     assert not mp.client_tokenizer_hook_installed("vllm_mi300x.sh", inferencex_dir=scripts.parent)
-
-
-def test_baseline_names_the_script_from_the_config(tmp_path):
-    """framework + runner_type is how Magpie picks it; an override wins."""
-    import yaml
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    cfg = tmp_path / "b.yaml"
-    cfg.write_text(yaml.safe_dump({"benchmark": {"framework": "vllm", "runner_type": "mi300x"}}), encoding="utf-8")
-    assert bl.BaselineExecutor._client_script_from_config(cfg) == "vllm_mi300x.sh"
-
-    cfg.write_text(
-        yaml.safe_dump({"benchmark": {"framework": "vllm", "runner_type": "mi300x", "benchmark_script": "custom.sh"}}),
-        encoding="utf-8",
-    )
-    assert bl.BaselineExecutor._client_script_from_config(cfg) == "custom.sh"
-
-    cfg.write_text(yaml.safe_dump({"benchmark": {}}), encoding="utf-8")
-    assert bl.BaselineExecutor._client_script_from_config(cfg) is None
-
-
-def test_baseline_reads_model_and_checkout_from_the_point_and_nothing_from_a_non_point(tmp_path, monkeypatch):
-    import yaml
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    monkeypatch.setenv("INFERENCEX_PATH", "/ambient")
-    cfg = tmp_path / "b.yaml"
-    cfg.write_text(yaml.safe_dump({"benchmark": {"model": " /m ", "inferencex_path": "/ix"}}), encoding="utf-8")
-    assert bl.BaselineExecutor._model_from_config(cfg) == "/m"
-    assert bl.BaselineExecutor._inferencex_root_from_config(cfg) == "/ix"
-
-    cfg.write_text(yaml.safe_dump({"other": {}}), encoding="utf-8")
-    assert bl.BaselineExecutor._client_script_from_config(cfg) is None
-    assert bl.BaselineExecutor._model_from_config(cfg) == ""
-    assert bl.BaselineExecutor._inferencex_root_from_config(cfg) == "/ambient"

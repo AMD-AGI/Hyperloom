@@ -7,9 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,13 +17,8 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-from hyperloom.orchestrator.actions.executors.benchmark_run.records import MEASURE_ROUND_DROPPED_WARNING
-from hyperloom.orchestrator.actions.executors._grid_runner import (
-    SESSION_TIME_EXHAUSTED_CLASS,
-)
 from hyperloom.orchestrator.actions.executors._inferencex_patcher import BENCH_SEED_ENV
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
-    SESSION_TIME_EXHAUSTED_RETURNCODE,
     stamp_server_ready,
 )
 
@@ -150,95 +143,17 @@ def _executor(
     tmp_path: Path,
 ) -> BaselineExecutor:
     return BaselineExecutor(
-        magpie_python=sys.executable,
         default_config_path=base,
         session_dir=tmp_path,
         shared_state=_unbounded_shared_state(),
     )
 
 
-def _run_mi300x_baseline(tmp_path, fake_run, *, framework: str = "vllm", **params) -> dict:
-    """Run the baseline on mi300x into ``tmp_path/ws`` with Magpie replaced by ``fake_run``."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework=framework)
-    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x", **params})
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        return _run(_executor(base, tmp_path)(ctx))
-
-
-def _prelude_shared_state(*, usable_sec: float, phase: str = "PRELUDE") -> SimpleNamespace:
-    """A session state with an explicit clock, as the budget policy reads it."""
-    return SimpleNamespace(
-        baseline_double_run=True,
-        phase=phase,
-        max_minutes=180,
-        session_budget_usable_sec=lambda: usable_sec,
-    )
-
-
-def test_a_measured_round_that_fails_on_its_own_is_still_a_failure(tmp_path):
-    """Only the run's clock earns the fallback."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    calls = {"n": 0}
-
-    def fake_run(cmd, *args, **kwargs):
-        if "--output-dir" not in cmd:
-            return subprocess.CompletedProcess(cmd, 0, "ok", "")
-        slot = Path(cmd[cmd.index("--output-dir") + 1])
-        calls["n"] += 1
-        if calls["n"] == 1:
-            _fake_workspace(slot, tput=_COLD_TPUT)
-            return subprocess.CompletedProcess(cmd, 0, "ok", "")
-        return subprocess.CompletedProcess(cmd, 1, "", "CUDA error")
-
-    executor = BaselineExecutor(
-        magpie_python=sys.executable,
-        default_config_path=base,
-        session_dir=tmp_path,
-        shared_state=_prelude_shared_state(usable_sec=10_000.0),
-    )
-    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "failed"
-    assert result["error_class"] != SESSION_TIME_EXHAUSTED_CLASS
-    assert MEASURE_ROUND_DROPPED_WARNING not in (result.get("nonfatal_warnings") or [])
-
-
 # The workload every case in the gate class below is priced against, and the figures the pricing derives from it.
-_COLD_ROUND_SEC = 900.0
-_COLD_POST_READY_SEC = 550.0
-_HOT_ROUND_SEC = 400.0
 # 900 - 550: the part of the cold round that was not the benchmark.
 # One further measured variant: its own boot, then its own benchmark.
 # A round's first pass is the cold one, measured whole rather than rebuilt from its halves -- rebuilding it as
 # boot-plus-hot would drop the compile it paid and under-price the round by 150s.
-
-
-class TestARoundThatCannotFinishIsNotIgnited:
-    """The gate in front of a round, and the two things it must be asked with."""
-
-    def test_a_refused_round_carries_nothing_that_could_replace_the_anchor(self, tmp_path):
-        """The property the whole gate rests on, asserted rather than assumed."""
-        result, _calls = _run_baseline_under_budget(
-            tmp_path,
-            remaining_sec=1400.0,
-            cold_round_sec=_COLD_ROUND_SEC,
-            cold_post_ready_sec=_COLD_POST_READY_SEC,
-            hot_round_sec=_HOT_ROUND_SEC,
-        )
-
-        assert result.get("output_throughput") in (None, 0, 0.0)
-        assert not result.get("nonfatal_warnings"), "a refused round volunteered a warning to promote"
 
 
 @pytest.fixture
@@ -351,63 +266,6 @@ def test_a_native_agentx_warmup_keeps_its_seed(tmp_path, monkeypatch):
     assert env == {}
 
 
-_STALE_FULL_REPORT = {
-    "throughput": {"output_throughput": 9999.0, "completed_requests": 64, "duration_seconds": 25.0},
-    "latency": {"ttft": {"mean_ms": 100.0}, "e2el": {"mean_ms": 2000.0}},
-}
-
-
-def _seed_stale_workspace(stale: Path, report: dict) -> None:
-    """A successful vllm workspace from a prior attempt, dated well before the current run."""
-    stale.mkdir(parents=True)
-    (stale / "benchmark_report.json").write_text(
-        json.dumps({"success": True, "framework": "vllm", **report}),
-        encoding="utf-8",
-    )
-    old = 1735689600.0
-    os.utime(stale / "benchmark_report.json", (old, old))
-    os.utime(stale, (old, old))
-
-
-def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):
-    """A stale benchmark_* workspace from a prior attempt must not be adopted as a successful result when the current subprocess crashes (rc=1)."""
-    _seed_stale_workspace(tmp_path / "ws" / "benchmark_vllm_20260101_000000", _STALE_FULL_REPORT)
-
-    def fake_run(cmd, *args, **kwargs):
-        return subprocess.CompletedProcess(cmd, 1, "", "HIP out of memory")
-
-    result = _run_mi300x_baseline(tmp_path, fake_run, baseline_double_run=False)
-
-    assert result["status"] == "failed", result
-    assert result.get("output_throughput") is None
-
-
-def test_baseline_rejects_stale_workspace_on_silent_exit(tmp_path, monkeypatch):
-    """A stale benchmark_* workspace must not be adopted when the subprocess exits 0 without producing any new workspace (silent no-op)."""
-    _seed_stale_workspace(tmp_path / "ws" / "benchmark_vllm_20260101_000000", _STALE_FULL_REPORT)
-
-    def fake_run(cmd, *args, **kwargs):
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    result = _run_mi300x_baseline(tmp_path, fake_run, baseline_double_run=False)
-
-    assert result["status"] == "failed", result
-    assert result.get("output_throughput") is None
-
-
-def test_baseline_rejects_stale_workspace_when_the_run_produced_none(tmp_path, monkeypatch):
-    """A crashed run adopts no workspace, however high the stale one sorts."""
-    _seed_stale_workspace(tmp_path / "ws" / "benchmark_vllm_29991231_235959", _STALE_FULL_REPORT)
-
-    def fake_run(cmd, *args, **kwargs):
-        return subprocess.CompletedProcess(cmd, 1, "", "boom")
-
-    result = _run_mi300x_baseline(tmp_path, fake_run, baseline_double_run=False)
-
-    assert result["status"] == "failed", result
-    assert result.get("output_throughput") is None
-
-
 def test_teardown_lifecycle_server_removes_state_files(tmp_path):
     """The defensive teardown unlinks stale pid/meta files without raising."""
     from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
@@ -448,43 +306,9 @@ def test_teardown_lifecycle_server_skips_signal_on_pid_reuse(tmp_path, monkeypat
 
 
 # Every output slot a multi-node baseline round launches a benchmark process into, in launch order.
-_MEASURED_ROUND_SLOT = "measured_round"
 
 
 # ``--max-hours`` defaults to 2.0 (``cli/parser.py``), so this is the session shape almost every run has.
-
-
-class _BudgetedState:
-    """A session state whose budget accounting moves as the passes spend it."""
-
-    def __init__(
-        self,
-        *,
-        remaining_sec: float | None,
-        cold_round_sec: float = 0.0,
-        cold_post_ready_sec: float = 0.0,
-        hot_round_sec: float = 0.0,
-        phase: str = "PRELUDE",
-        double_run: bool = False,
-    ) -> None:
-        self.baseline_double_run = double_run
-        self.baseline_runtime_sec = cold_round_sec
-        self.baseline_post_ready_runtime_sec = cold_post_ready_sec
-        self.baseline_warm_runtime_sec = hot_round_sec
-        self.phase = phase
-        self.max_minutes = 0.0 if remaining_sec is None else remaining_sec / 60.0
-        self._deadline = None if remaining_sec is None else time.monotonic() + remaining_sec
-
-    def charge(self, seconds: float) -> None:
-        """Spend ``seconds`` of the session, as a pass that ran that long does."""
-        if self._deadline is not None:
-            self._deadline -= seconds
-
-    def grid_session_deadline_sec(self) -> float | None:
-        return self._deadline
-
-    def session_budget_usable_sec(self) -> float | None:
-        return None if self._deadline is None else self._deadline - time.monotonic()
 
 
 class _AClockOnlyThePassesMove:
@@ -500,110 +324,6 @@ class _AClockOnlyThePassesMove:
     def advance(self, seconds: float) -> None:
         """Spend ``seconds``, as a pass that ran that long does."""
         self._now += float(seconds)
-
-
-def _capturing_fake_run(
-    returncode: int = 0,
-    *,
-    produces_workspace: bool = True,
-    pass_duration_sec: float = 0.0,
-    state: _BudgetedState | None = None,
-    charge_sec: float | None = None,
-    clock: _AClockOnlyThePassesMove | None = None,
-    boot_sec: float = 0.0,
-    benchmark_sec: float = 0.0,
-):
-    """A ``run_with_session_kill`` stand-in that records how each round was launched."""
-    calls: list[dict] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        # The memoized interpreter probe is not a benchmark round.
-        if "--output-dir" not in cmd:
-            return subprocess.CompletedProcess(cmd, 0, "ok", "")
-        kwargs = _launch_kwargs(kwargs)
-        slot = Path(cmd[cmd.index("--output-dir") + 1])
-        calls.append({"round_slot": slot.name, **kwargs})
-        granted = float(kwargs.get("timeout") or 0.0)
-        deadline = kwargs.get("session_deadline_sec")
-        ran_sec = min(granted, pass_duration_sec) if pass_duration_sec else 0.0
-        reaped_by_the_session = False
-        if deadline is not None and pass_duration_sec:
-            until_deadline = max(0.0, deadline - time.monotonic())
-            reaped_by_the_session = until_deadline < ran_sec
-            ran_sec = min(ran_sec, until_deadline)
-        if clock is not None:
-            clock.advance(boot_sec)
-            server_log_path = kwargs.get("server_log_path")
-            if server_log_path:
-                Path(server_log_path).parent.mkdir(parents=True, exist_ok=True)
-                stamp_server_ready(server_log_path, boot_sec)
-            clock.advance(benchmark_sec)
-        if state is not None:
-            state.charge(charge_sec if charge_sec is not None else ran_sec)
-        if pass_duration_sec and ran_sec < pass_duration_sec:
-            if reaped_by_the_session:
-                return subprocess.CompletedProcess(cmd, SESSION_TIME_EXHAUSTED_RETURNCODE, "", "")
-            raise subprocess.TimeoutExpired(cmd, granted)
-        if produces_workspace:
-            _fake_workspace(slot, tput=_HOT_TPUT)
-        return subprocess.CompletedProcess(cmd, returncode, "ok", "")
-
-    return fake_run, calls
-
-
-def _run_baseline_under_budget(
-    tmp_path,
-    *,
-    remaining_sec: float | None,
-    timeout_sec: int = 7200,
-    returncode: int = 0,
-    produces_workspace: bool = True,
-    cold_round_sec: float = 0.0,
-    cold_post_ready_sec: float = 0.0,
-    hot_round_sec: float = 0.0,
-    pass_duration_sec: float = 0.0,
-    phase: str = "PRELUDE",
-    double_run: bool = False,
-    executor_cls=BaselineExecutor,
-) -> tuple[dict, list[dict]]:
-    """Run one baseline round against a session with ``remaining_sec`` left."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    state = _BudgetedState(
-        remaining_sec=remaining_sec,
-        cold_round_sec=cold_round_sec,
-        cold_post_ready_sec=cold_post_ready_sec,
-        hot_round_sec=hot_round_sec,
-        phase=phase,
-        double_run=double_run,
-    )
-    fake_run, calls = _capturing_fake_run(
-        returncode,
-        produces_workspace=produces_workspace,
-        pass_duration_sec=pass_duration_sec,
-        state=state,
-    )
-    executor = executor_cls(
-        magpie_python=sys.executable,
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx_params: dict = {
-        "output_dir": str(tmp_path / _MEASURED_ROUND_SLOT),
-        "timeout_sec": timeout_sec,
-        "gpu_type": "mi300x",
-    }
-    if not double_run:
-        ctx_params["baseline_double_run"] = False
-    ctx = _make_ctx(ctx_params)
-    # The live state arrives on the context, the way the coordinator passes it.
-    ctx.extra["shared_state"] = state
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-    return result, calls
 
 
 # _classify_subprocess_error unit tests

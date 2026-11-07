@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Iterator, Mapping, NamedTuple
 
 import yaml
 
-from hyperloom.common.env_safety import scrub_benchmark_process_env
 from ...stop_attribution import StoppedByTheRun
 from .._accuracy_gate import ACCURACY_DEFINITION_DIGEST_KEY, EVAL_DEFINITION_DIGEST_KEY
 from .._grid_runner import stopped_by_the_run
@@ -189,24 +188,6 @@ def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Pa
     return (output_dir / result_dir).resolve()
 
 
-def _benchmark_process_env(
-    config_path: Path, output_dir: Path, result_dir: Path, inferencex_path: str
-) -> dict[str, str]:
-    """Build the client environment without overriding Magpie's native checkout selection."""
-    from ..magpie_agentx import native_config
-
-    env = scrub_benchmark_process_env(os.environ.copy())
-    env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-    if inferencex_path and not native_config(config_path):
-        env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-    env["RESULT_DIR"] = str(result_dir)
-    # InferenceX removes EVAL_RESULT_DIR after processing lm-eval output.
-    env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
-    env["SERVER_LOG"] = str(output_dir / "server.log")
-    env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
-    return env
-
-
 def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] | None = None) -> bool:
     """Only a genuine ``baseline`` task may establish/overwrite the quality reference."""
     if str(task_kind or "") != "baseline":
@@ -296,7 +277,7 @@ class BenchmarkAttempt:
     serving_lease: Any = None
     recorder: Any = None
     run_index: int = 0
-    #: Where the attempt's rounds run on inference_suite; ``None`` while they stay on the benchmark backend.
+    #: Where the attempt's rounds run on inference_suite; set once the attempt resolved its session's route.
     suite: SuiteRoute | None = None
 
 
@@ -307,8 +288,6 @@ class _BenchmarkRound(NamedTuple):
     result_dir: Path
     ctx: RunnerContext
     ctx_extra: Mapping[str, Any]
-    cmd: list[str]
-    env: dict[str, Any]
     framework: str
     watchdog_server_log: str | None
     capture_meta: dict[str, Any]
