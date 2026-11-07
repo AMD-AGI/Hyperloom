@@ -13,10 +13,10 @@ import pytest
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     RoundWatch,
-    clear_server_ready_stamp,
-    post_ready_runtime_sec,
     run_with_session_kill,
 )
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import _round_post_ready_sec
+from inference_suite.contracts import RunLayout
 
 
 def test_from_ready_excludes_pre_ready_phase(tmp_path):
@@ -96,8 +96,8 @@ class TestARoundIsPricedByItsTwoParts:
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
 
-        post_ready = post_ready_runtime_sec(
-            str(log_path),
+        post_ready = _round_post_ready_sec(
+            log_path.parent,
             started_unix=started_unix,
             runtime_sec=runtime_sec,
         )
@@ -131,8 +131,8 @@ class TestARoundIsPricedByItsTwoParts:
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
 
-        post_ready = post_ready_runtime_sec(
-            str(log_path),
+        post_ready = _round_post_ready_sec(
+            log_path.parent,
             started_unix=started_unix,
             runtime_sec=runtime_sec,
         )
@@ -159,7 +159,7 @@ class TestARoundIsPricedByItsTwoParts:
             watch=RoundWatch(timeout=30, server_log_path=str(log_path), session_deadline_sec=time.monotonic() + 30.0),
         )
         assert cp.returncode == 0
-        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is not None, (
+        assert _round_post_ready_sec(log_path.parent, started_unix=0.0, runtime_sec=1.0) is not None, (
             "the boot/benchmark split was withdrawn along with the stall watchdog"
         )
 
@@ -183,14 +183,14 @@ class TestARoundIsPricedByItsTwoParts:
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
 
-        agreed = post_ready_runtime_sec(
-            str(log_path),
+        agreed = _round_post_ready_sec(
+            log_path.parent,
             started_unix=started_unix,
             runtime_sec=runtime_sec,
         )
         # A caller whose clock runs five seconds behind the writer's.
-        skewed = post_ready_runtime_sec(
-            str(log_path),
+        skewed = _round_post_ready_sec(
+            log_path.parent,
             started_unix=started_unix - 5.0,
             runtime_sec=runtime_sec,
         )
@@ -212,10 +212,10 @@ class TestARoundIsPricedByItsTwoParts:
             [sys.executable, "-c", script, str(log_path)],
             watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
-        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is None
+        assert _round_post_ready_sec(log_path.parent, started_unix=0.0, runtime_sec=1.0) is None
         assert (
-            post_ready_runtime_sec(
-                str(log_path),
+            _round_post_ready_sec(
+                log_path.parent,
                 started_unix=started_unix,
                 runtime_sec=time.time() - started_unix,
             )
@@ -230,8 +230,8 @@ class TestARoundIsPricedByItsTwoParts:
         (tmp_path / "server_ready_at").write_text(f"{time.time() - 600.0:.3f} 30.000\n", encoding="utf-8")
 
         assert (
-            post_ready_runtime_sec(
-                str(log_path),
+            _round_post_ready_sec(
+                log_path.parent,
                 started_unix=time.time(),
                 runtime_sec=90.0,
             )
@@ -243,14 +243,14 @@ class TestARoundIsPricedByItsTwoParts:
         log_path = tmp_path / "server.log"
         stamp = tmp_path / "server_ready_at"
         stamp.write_text(f"{time.time():.3f} 30.000\n", encoding="utf-8")
-        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is not None
+        assert _round_post_ready_sec(log_path.parent, started_unix=0.0, runtime_sec=1.0) is not None
 
-        clear_server_ready_stamp(str(log_path))
+        RunLayout(log_path.parent).clear_ready_stamp()
 
         assert not stamp.exists()
-        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is None
+        assert _round_post_ready_sec(log_path.parent, started_unix=0.0, runtime_sec=1.0) is None
         # Idempotent: a round whose dir never had one must not fail to start.
-        clear_server_ready_stamp(str(log_path))
+        RunLayout(log_path.parent).clear_ready_stamp()
 
     def test_a_boot_longer_than_the_round_cannot_produce_a_negative_price(self, tmp_path):
         """A corrupt stamp must cost a measurement, never produce a nonsense one."""
@@ -258,8 +258,8 @@ class TestARoundIsPricedByItsTwoParts:
         started_unix = time.time()
         (tmp_path / "server_ready_at").write_text(f"{started_unix + 10.0:.3f} 500.000\n", encoding="utf-8")
 
-        priced = post_ready_runtime_sec(
-            str(log_path),
+        priced = _round_post_ready_sec(
+            log_path.parent,
             started_unix=started_unix,
             runtime_sec=100.0,
         )
@@ -273,8 +273,8 @@ class TestARoundIsPricedByItsTwoParts:
         (tmp_path / "server_ready_at").write_text(f"{started_unix + 10.0:.3f}\n", encoding="utf-8")
 
         assert (
-            post_ready_runtime_sec(
-                str(log_path),
+            _round_post_ready_sec(
+                log_path.parent,
                 started_unix=started_unix,
                 runtime_sec=100.0,
             )
