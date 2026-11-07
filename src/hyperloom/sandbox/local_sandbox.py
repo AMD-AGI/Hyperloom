@@ -10,10 +10,12 @@ inside; the reap, the tag sweep and the card guard find its processes as before.
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import posixpath
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -28,6 +30,7 @@ from hyperloom.common.agent_isolation import IsolationRefused
 from hyperloom.sandbox.confined import SandboxConfinement, SandboxConfiner, SandboxShape
 from hyperloom.sandbox.launcher import StatusPipe, launcher_argv
 from hyperloom.sandbox.reaper import Leftovers, kill_launchers, reap_sandbox_processes, wait_exited
+from hyperloom.sandbox.rooted import open_rooted
 from hyperloom.sandbox.socket import (
     CommandResult,
     OutputSinks,
@@ -230,7 +233,8 @@ class LocalSandbox:
             raise SandboxDenied(f"path {virt!r} resolves outside the sandbox")
         return real
 
-    def _gate(self, path: str, *, write: bool) -> Path:
+    def _gate(self, path: str, *, write: bool) -> str:
+        """The virtual path ``path`` names, once the sealed policy allows it; opened by :meth:`_open` alone."""
         self._require_alive()
         virt = self._virtual(path)
         if self.template.sealed:
@@ -238,41 +242,67 @@ class LocalSandbox:
             if not allowed:
                 verb = "write" if write else "read"
                 raise SandboxDenied(f"sealed sandbox: cannot {verb} {virt!r} (write /in/, read /out/ only)")
-        return self._real(virt)
+        return virt
+
+    def _open(self, virt: str, flags: int, *, make_parents: bool = False) -> int:
+        """``virt`` opened below the root by one walk no link leads out of (:func:`~hyperloom.sandbox.rooted.open_rooted`):
+        the sandbox's processes write the tree, so a path is never checked and then opened again by name."""
+        return open_rooted(self.fs, virt, flags, make_parents=make_parents)
+
+    def _file(self, path: str, *, write: bool) -> IO[bytes]:
+        """The regular file ``path`` names, open to read, or to write from its start (made if missing, with its
+        parents); never a pipe or device a sandbox's process put there, which could block the app.
+
+        Raises:
+            SandboxDenied: By the sealed policy, for a path that escapes the root, or for what is not a regular file.
+            IsADirectoryError: For a directory.
+        """
+        virt = self._gate(path, write=write)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC if write else os.O_RDONLY
+        fd = self._open(virt, flags | os.O_NONBLOCK, make_parents=write)
+        try:
+            mode = os.fstat(fd).st_mode
+            if stat.S_ISDIR(mode):
+                raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), virt)
+            if not stat.S_ISREG(mode):
+                raise SandboxDenied(f"path {virt!r} is not a regular file")
+            os.set_blocking(fd, True)
+            return os.fdopen(fd, "wb" if write else "rb")
+        except BaseException:
+            os.close(fd)
+            raise
 
     def write_file(self, path: str, data: bytes) -> None:
         """Write a file; a sealed sandbox only accepts paths under ``/in/``.
 
         Raises:
-            SandboxDenied: By the sealed policy, or for a path that escapes the root.
+            SandboxDenied: By the sealed policy, for a path that escapes the root, or for what is not a regular file.
             SandboxGone: When the sandbox has ended.
         """
-        target = self._gate(path, write=True)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target = self._gate(path, write=True)  # re-check after the parents exist
-        target.write_bytes(data)
+        with self._file(path, write=True) as target:
+            target.write(data)
 
     def read_file(self, path: str) -> bytes:
         """Read a file; a sealed sandbox only serves ``/out/``.
 
         Raises:
-            SandboxDenied: By the sealed policy, or for a path that escapes the root.
+            SandboxDenied: By the sealed policy, for a path that escapes the root, or for what is not a regular file.
             SandboxGone: When the sandbox has ended.
             FileNotFoundError: When there is no such file.
         """
-        return self._gate(path, write=False).read_bytes()
+        with self._file(path, write=False) as source:
+            return source.read()
 
     def copy_out(self, path: str, dest: Path) -> int:
         """Stream a file to ``dest`` in chunks and return the byte count.
 
         Raises:
-            SandboxDenied: By the sealed policy, or for a path that escapes the root.
+            SandboxDenied: By the sealed policy, for a path that escapes the root, or for what is not a regular file.
             SandboxGone: When the sandbox has ended.
             FileNotFoundError: When there is no such file.
         """
-        source = self._gate(path, write=False)
         total = 0
-        with source.open("rb") as src, dest.open("wb") as out:
+        with self._file(path, write=False) as src, dest.open("wb") as out:
             while chunk := src.read(_CHUNK):
                 out.write(chunk)
                 total += len(chunk)
@@ -286,7 +316,11 @@ class LocalSandbox:
             SandboxGone: When the sandbox has ended.
             FileNotFoundError: When there is no such directory.
         """
-        return sorted(entry.name for entry in self._gate(path, write=False).iterdir())
+        fd = self._open(self._gate(path, write=False), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            return sorted(os.listdir(fd))
+        finally:
+            os.close(fd)
 
     # -- processes ---------------------------------------------------------
 
