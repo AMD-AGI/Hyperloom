@@ -498,7 +498,9 @@ async def test_an_agentx_session_replays_the_trace_window_it_names_and_its_tests
     workload = replace(AGENTX, model=str(model), agentx_duration_sec=600)
     given = _options_given(monkeypatch, local_hosted, "build_local_toolbox")
 
-    async with _peers(tmp_path / "workspace", monkeypatch, workload, replace(HOST, inferencex=AGENTX_CHECKOUT)) as built:
+    async with _peers(
+        tmp_path / "workspace", monkeypatch, workload, replace(HOST, inferencex=AGENTX_CHECKOUT)
+    ) as built:
         canonical = yaml.safe_load((built.layout.toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
         assert str(canonical["envs"]["DURATION"]) == "600"
 
