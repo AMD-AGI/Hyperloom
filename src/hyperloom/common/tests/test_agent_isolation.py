@@ -34,6 +34,8 @@ from hyperloom.common.agent_isolation import (
     choose_sandbox_isolation,
     isolation_required,
     require_agent_isolation,
+    session_isolation_lines,
+    unconfined_launch,
 )
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV, RunAs, RunAsError
 
@@ -345,6 +347,41 @@ def test_start_up_of_a_hosted_run_that_cannot_isolate_warns_that_every_agent_wou
     assert [r.getMessage().split(" (")[0] for r in caplog.records] == [
         "specialists and agent sandboxes will be refused: they must be isolated here, and no tier can"
     ]
+
+
+def test_a_launch_that_runs_unconfined_after_start_up_found_bubblewrap_warns_once_and_the_report_counts_it(caplog):
+    """A probe that passed at start-up and gave no answer in time at a launch: nothing said agents run unconfined."""
+    with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
+        report = announce_agent_isolation(probe=Probes(ON_PATH))
+        later = choose_agent_isolation(probe=Probes(NO_ANSWER))
+        assert isinstance(later, NoIsolation)
+        unconfined_launch(later)
+        unconfined_launch(later)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [
+        f"agents run unconfined on this host, as before: they can read this account's files and credentials "
+        f"({later.why})"
+    ]
+    assert session_isolation_lines() == (
+        report.line(),
+        f"agent isolation: 2 agent launches ran unconfined: {later.why}",
+    )
+
+
+def test_a_launch_after_start_up_warned_that_agents_run_unconfined_adds_no_second_warning(caplog):
+    with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
+        report = announce_agent_isolation(probe=Probes(MISSING))
+        unconfined_launch(choose_agent_isolation(probe=Probes(MISSING)))
+    assert [r.levelno for r in caplog.records].count(logging.WARNING) == 1
+    assert session_isolation_lines() == (
+        report.line(),
+        f"agent isolation: 1 agent launch ran unconfined: {NOT_SET}; bubblewrap: not found on PATH",
+    )
+
+
+def test_a_process_that_announced_nothing_and_launched_nothing_unconfined_reports_nothing():
+    choose_agent_isolation(probe=Probes(ON_PATH))
+    assert session_isolation_lines() == ()
 
 
 # ---- the launch command line ----
