@@ -42,7 +42,6 @@ import yaml
 
 from hyperloom_common.env import is_truthy
 from hyperloom.common.agentx_workload import (
-    CANON_TRACE,
     CANON_WARMUP_PER_LANE,
     agentx_profiling_requests,
     is_agentx_client_script,
@@ -470,6 +469,8 @@ _TRACE_ENV = "WEKA_LOADER_OVERRIDE"
 _DURATION_ENV = "DURATION"
 _EP_SIZE_ENV = "EP_SIZE"
 _WARMUP_PER_LANE_ENV = "AIPERF_WARMUP_REQUESTS_PER_LANE"
+#: The AgentX point's environment the config carries as fields, beside a fixed point's and the client's ``AIPERF_*``.
+_AGENTX_CONSUMED_ENV = _CONSUMED_ENV | {_MODEL_PATH_ENV, _EP_SIZE_ENV, _TRACE_ENV}
 #: The client knobs of Magpie's replay and the MLPerf client, which the agentx-harness replay does not read.
 _MAGPIE_CLIENT_PREFIXES = ("AGENTX_", "AGENTIC_")
 #: The keys an AgentX ``profiler.torch_profiler`` may set, and Magpie's defaults (``TorchProfilerConfig``) for two.
@@ -536,13 +537,20 @@ def _lane_warmup(client_env: Mapping[str, str]) -> int:
         raise ConfigError(f"the AgentX client's {_WARMUP_PER_LANE_ENV} is not an integer: {value!r}") from None
 
 
+def _agentx_trace(point: _Point, base: BaseLaunch) -> str:
+    trace = point.text(_TRACE_ENV) or base.client.env.get(_TRACE_ENV)
+    if trace is None:
+        raise ConfigError(f"neither the AgentX point nor its base's client env names the trace corpus ({_TRACE_ENV})")
+    return trace
+
+
 def _agentx_workload(point: _Point, base: BaseLaunch) -> AgentxWorkload:
     """The replay: the base's client environment under the point's, every knob the harness takes explicit."""
     client_env = {AGENTX_FAST_MODE_ENV: "0", **_aiperf_env(base.client.env), **_aiperf_env(point.envs)}
     concurrency = point.integer(ENV_CONC)
     return AgentxWorkload(
         concurrency=concurrency,
-        dataset=point.text(_TRACE_ENV) or base.client.env.get(_TRACE_ENV) or CANON_TRACE,
+        dataset=_agentx_trace(point, base),
         num_prompts=point.integer(ENV_NUM_PROMPTS, agentx_profiling_requests(concurrency)),
         warmup_requests_per_lane=_lane_warmup(client_env),
         seed=MEASURED_SEED,
@@ -582,12 +590,21 @@ def _agentx_profiler_args(bench: Mapping[str, Any], framework: Framework) -> tup
     return tuple(token for name, value in fields.items() for token in (f"--profiler-config.{name}", value))
 
 
+def _agentx_server_env(point: _Point) -> dict[str, str]:
+    """The point's environment as Magpie layered it under the launch's: less what the config carries as fields."""
+    return {
+        name: value
+        for name, value in point.envs.items()
+        if name not in _AGENTX_CONSUMED_ENV and not name.startswith(AGENTX_CLIENT_ENV_PREFIX)
+    }
+
+
 def _agentx_server(
     point: _Point, bench: Mapping[str, Any], base: BaseLaunch, settings: RoundSettings, args: tuple[str, ...] = ()
 ) -> ServerConfig:
     """The AgentX point's server: its launch over the base, on the interpreter and source files the launch names."""
     launch = BenchmarkPoint.from_block(bench).agentx_launch
-    layer = _layer_over_base(launch, base)
+    layer = _layer_over_base(launch, base, _agentx_server_env(point))
     server = _server(point, base, settings, None, replace(layer, args_add=(*layer.args_add, *args)))
     overrides = _agentx_block(bench).get("launch_overrides") or {}
     return replace(
@@ -676,12 +693,12 @@ def _flag_groups(argv: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
     return groups
 
 
-def _layer_over_base(launch: AgentxLaunch, base: BaseLaunch) -> LaunchDelta:
+def _layer_over_base(launch: AgentxLaunch, base: BaseLaunch, point_env: Mapping[str, str]) -> LaunchDelta:
     """The layer the AgentX ``launch`` runs above ``base`` and its golden layer.
 
     A launch composed on the session base replaces the recipe's argv with the base's, golden's and its own layers'
-    flags, and sets their environment; what differs from base plus golden is its own layer. A flag the base sets and
-    the launch dropped is removed.
+    flags, and sets their environment over ``point_env``, the point's own; what differs from base plus golden is its
+    own layer. A flag the base sets and the launch dropped is removed, and so is a variable the launch unsets.
     """
     if not launch.replace_args:
         raise ConfigError("the AgentX point does not run the session base; its launch extends the recipe's argv")
@@ -690,16 +707,14 @@ def _layer_over_base(launch: AgentxLaunch, base: BaseLaunch) -> LaunchDelta:
     below = _flag_groups(normalize_argv((*base.args, *golden_args)))
     ran = _flag_groups(normalize_argv(launch.append_args))
     below_env = {**base.env, **golden_env}
-    unset = tuple(sorted(set(launch.unset_env) & set(base.env)))
+    env = {**point_env, **{name: str(value) for name, value in launch.env.items()}}
     return LaunchDelta(
         args_add=tuple(token for name, group in ran.items() if below.get(name) != group for token in group),
         args_remove=tuple(f"--{name}" for name in _flag_groups(base.args) if name not in ran),
         env_set={
-            name: str(value)
-            for name, value in launch.env.items()
-            if name not in unset and below_env.get(name) != str(value)
+            name: value for name, value in env.items() if name not in launch.unset_env and below_env.get(name) != value
         },
-        env_unset=unset,
+        env_unset=tuple(sorted(set(launch.unset_env) & set(base.env))),
     )
 
 
