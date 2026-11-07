@@ -20,6 +20,7 @@ from hyperloom.measure.socket import SessionFacts, TestCall
 from hyperloom.measure.tests.bundle_factory import STAGING, STAGING_MANIFEST, base_launch
 from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate
+from inference_suite import StagingError
 from inference_suite.contracts import NormalisedManifest
 
 FAKE_RUNNER = (sys.executable, "-m", "hyperloom.measure.tests.fake_runner")
@@ -84,7 +85,13 @@ def staged_tool_cache(tmp: Path, monkeypatch: Any) -> NormalisedManifest:
     tools.mkdir(parents=True, exist_ok=True)
     (tools / "staging_manifest.json").write_bytes(STAGING_MANIFEST)
     monkeypatch.setenv("INFERENCE_SUITE_TOOL_CACHE", str(tools))
-    monkeypatch.setattr(consistency, "normalised_manifest", {tools: STAGING}.__getitem__)
+
+    def identify(tool_cache: Path) -> NormalisedManifest:
+        if tool_cache != tools:
+            raise StagingError(f"the AgentX client staged in {tool_cache} cannot be read")
+        return STAGING
+
+    monkeypatch.setattr(consistency, "normalised_manifest", identify)
     return STAGING
 
 
