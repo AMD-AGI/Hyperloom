@@ -118,6 +118,45 @@ async def test_restoring_a_disabled_fast_path_keeps_a_small_drop(tmp_path):
     assert (out["status"], out["keep_reason"], out["resolves_finding"]) == ("kept", "correctness_fix", finding)
 
 
+BRIDGE_FINDING = "feature_disabled:fuse_rope_kvcache"
+
+
+@pytest.mark.asyncio
+async def test_undeclared_patch_that_clears_a_bridge_finding_keeps_as_its_fix(tmp_path):
+    out = await _gate(
+        tmp_path,
+        after_log=CLEAN_LOG,
+        tput=992.0,
+        accuracy_pass=True,
+        finding="",
+        state_fields={"static_recon_bridge_findings": [BRIDGE_FINDING]},
+    )
+
+    assert (out["status"], out["keep_reason"], out["resolves_finding"]) == ("kept", "correctness_fix", BRIDGE_FINDING)
+
+
+@pytest.mark.asyncio
+async def test_undeclared_patch_that_leaves_the_bridge_finding_reverts(tmp_path):
+    out = await _gate(
+        tmp_path,
+        after_log=DISABLED_LOG,
+        tput=992.0,
+        accuracy_pass=True,
+        finding="",
+        state_fields={"static_recon_bridge_findings": [BRIDGE_FINDING]},
+    )
+
+    assert out["status"] == "reverted"
+    assert out["reason"] == "throughput delta -0.80% < keep_threshold 1.00%"
+
+
+@pytest.mark.asyncio
+async def test_undeclared_patch_clearing_a_finding_no_bridge_named_reverts(tmp_path):
+    out = await _gate(tmp_path, after_log=CLEAN_LOG, tput=992.0, accuracy_pass=True, finding="")
+
+    assert out["status"] == "reverted"
+
+
 @pytest.mark.asyncio
 async def test_traceback_finding_cannot_claim_the_allowance(tmp_path):
     out = await _gate(

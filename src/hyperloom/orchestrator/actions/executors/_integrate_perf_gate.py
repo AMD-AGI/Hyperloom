@@ -14,7 +14,11 @@ from typing import Any
 from hyperloom_common.coerce import first_text
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero, graded_gate_row
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, GradingAnchor
-from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
+from hyperloom.orchestrator.measurement.runtime_findings import (
+    KEEP_REASON_CORRECTNESS_FIX,
+    load_runtime_findings,
+    resolved_finding,
+)
 
 from ...knowledge.kb_writeback import (
     OUTCOME_INTEGRATED,
@@ -532,10 +536,10 @@ def _weigh_gate(
 
     perf_kept = graded.comparable and graded.verdict == VERDICT_KEEP
     gate_pass = perf_kept and not acc_block
-    fix_finding = first_text(_done_field(attempt.done_payload, "resolves_finding"))
+    fix_finding = "" if gate_pass else _claimed_fix_finding(attempt.done_payload, shared_state, bench_result)
     fix_refusals: list[str] = []
     correctness_fix = False
-    if not gate_pass and fix_finding:
+    if fix_finding:
         fix_refusals = _correctness_fix_refusals(
             fix_finding,
             shared_state=shared_state,
@@ -682,6 +686,24 @@ def _graded_delta_pct(graded: GradedComparison) -> float | None:
             graded.tput_candidate,
         )
     return gain_pct(graded.candidate, graded.reference)
+
+
+def _claimed_fix_finding(
+    done_payload: dict[str, Any] | None, shared_state: SharedState | None, bench_result: dict[str, Any]
+) -> str:
+    """The finding the patch claims to fix: its declared one, else a static-recon bridge finding its run cleared."""
+    declared = first_text(_done_field(done_payload, "resolves_finding"))
+    bridge_findings = getattr(shared_state, "static_recon_bridge_findings", None)
+    if declared or not bridge_findings:
+        return declared
+    cleared = resolved_finding(
+        load_runtime_findings(getattr(shared_state, "current_best_measurement", None) or {}),
+        load_runtime_findings(bench_result),
+        bridge_findings,
+    )
+    if cleared:
+        log.info("integrate_patch: the run cleared static-recon bridge finding %s; claiming it as the fix", cleared)
+    return cleared
 
 
 def _live_base_tput(params: dict[str, Any], shared_state: SharedState | None) -> float:

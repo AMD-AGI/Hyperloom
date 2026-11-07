@@ -50,7 +50,7 @@ async def test_warm_specialist_params_injects_current_best_findings(tmp_path):
 
     assert params["runtime_findings"].splitlines()[:2] == [
         f"runtime findings for {log} [vllm]",
-        "- detected [correctness] vllm.unknown_env VLLM_FOO x1: Unknown vLLM environment variable detected: VLLM_FOO",
+        "- detected [correctness] vllm.unknown_env:VLLM_FOO x1: Unknown vLLM environment variable detected: VLLM_FOO",
     ]
 
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Pattern
@@ -71,6 +71,21 @@ def _named(subject: str) -> Callable[[re.Match[str]], str]:
     return lambda _match: subject
 
 
+#: A capitalised feature name of at most nine words that stays inside one sentence.
+_FEATURE = r"(?<!\w)([A-Z][\w()/+-]*(?: [\w()/+-]+){0,8}?)"
+#: Most specific first: a line names its gate before the generic "is disabled" that follows it, and the gate is the
+#: subject a fix clears even when another path still logs the same feature as disabled.
+_FEATURE_DISABLED_PATTERNS: tuple[Pattern[str], ...] = (
+    re.compile(r"\bDisabling ([^.:;,(\n]{1,80})"),
+    re.compile(
+        _FEATURE + r" is (?:only (?:validated|supported|enabled|tested)|(?:validated|supported|enabled|tested) only)"
+        r" (?:for|on|with|when)\b"
+    ),
+    re.compile(_FEATURE + r" (?:is )?(?:unsupported|not supported) (?:for|on) (?:this|the current)\b"),
+    re.compile(_FEATURE + r" (?:optimi[sz]ation )?(?:is|has been) disabled\b"),
+)
+
+
 _LINE_RULES: tuple[_LineRule, ...] = (
     _LineRule(
         rule_id="vllm.unknown_env",
@@ -83,7 +98,7 @@ _LINE_RULES: tuple[_LineRule, ...] = (
     _LineRule(
         rule_id="feature_disabled",
         category=PERF_PATH,
-        patterns=(re.compile(r"\bDisabling ([^.:;,(\n]{1,80})"),),
+        patterns=_FEATURE_DISABLED_PATTERNS,
         subject=_first_group_or_match,
     ),
     _LineRule(
@@ -272,13 +287,32 @@ def load_runtime_findings(measurement: Mapping[str, Any]) -> dict[str, Any] | No
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def correctness_fix_refusal(before: dict[str, Any] | None, after: dict[str, Any] | None, finding_id: str) -> str:
-    """Why ``finding_id`` is not a listed finding the candidate resolved; empty when it is."""
-    rule_id, separator, subject = finding_id.partition(":")
+def finding_id(finding: Mapping[str, Any]) -> str:
+    """The ``rule_id:subject`` a patch names in ``resolves_finding``."""
+    return f"{finding['rule_id']}:{finding['subject']}" if finding["subject"] else str(finding["rule_id"])
+
+
+def fix_finding_id_refusal(finding_id: str) -> str:
+    """Why ``finding_id`` cannot name a correctness fix at all; empty when its form and rule can."""
+    rule_id, separator, _ = finding_id.partition(":")
     if not separator:
         return f"resolves_finding {finding_id!r} is not rule_id:subject"
     if rule_id not in CORRECTNESS_FIX_RULES:
         return f"{rule_id} cannot justify a correctness fix"
+    return ""
+
+
+def resolved_finding(before: dict[str, Any] | None, after: dict[str, Any] | None, finding_ids: Iterable[str]) -> str:
+    """The first of ``finding_ids`` the candidate run resolved; empty when it resolved none."""
+    return next((fid for fid in finding_ids if not correctness_fix_refusal(before, after, fid)), "")
+
+
+def correctness_fix_refusal(before: dict[str, Any] | None, after: dict[str, Any] | None, finding_id: str) -> str:
+    """Why ``finding_id`` is not a listed finding the candidate resolved; empty when it is."""
+    malformed = fix_finding_id_refusal(finding_id)
+    if malformed:
+        return malformed
+    rule_id, _, subject = finding_id.partition(":")
     if before is None:
         return "no runtime findings for the current best"
     if not any((f["rule_id"], f["subject"], f["status"]) == (rule_id, subject, DETECTED) for f in before["findings"]):
@@ -304,7 +338,7 @@ def render_runtime_findings(measurement: Mapping[str, Any]) -> str:
     findings = report["findings"]
     lines = [f"runtime findings for {report['log_path'] or '(no server log)'} [{report['framework']}]"]
     lines.extend(
-        f"- detected [{f['category']}] {f['rule_id']} {f['subject']} x{f['count']}: {f['evidence']}"
+        f"- detected [{f['category']}] {finding_id(f)} x{f['count']}: {f['evidence']}"
         for f in findings
         if f["status"] == DETECTED
     )
