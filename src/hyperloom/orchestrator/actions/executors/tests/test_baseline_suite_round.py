@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.session.base_launch import write_base_launch
+from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from hyperloom.orchestrator.actions.executors import _suite_config, baseline
 from hyperloom.orchestrator.actions.executors._suite_config import MEASURED_SEED, WARMUP_SEED
 from hyperloom.orchestrator.actions.executors._suite_config import RUN_DIR_PREFIX, TOOL_CACHE_ENV
@@ -57,7 +57,7 @@ def _point(path: Path) -> Path:
 def suite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     session = tmp_path / "session"
     session.mkdir()
-    write_base_launch(session, _base("sglang"))
+    freeze_base(session, _base("sglang"))
     cache = tmp_path / "tools"
     cache.mkdir()
     (cache / "staging_manifest.json").write_text("{}", encoding="utf-8")

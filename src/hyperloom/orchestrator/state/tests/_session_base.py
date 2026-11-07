@@ -64,7 +64,11 @@ def freeze_session_base(
     golden: GoldenAcceptance | None = None,
 ) -> BaseLaunch:
     """Write ``base_launch.json`` into ``session_dir`` and record its digest in the session's state."""
-    base = session_base(args, env, golden)
+    return freeze_base(session_dir, session_base(args, env, golden))
+
+
+def freeze_base(session_dir: Path, base: BaseLaunch) -> BaseLaunch:
+    """Write ``base`` as ``session_dir``'s ``base_launch.json`` and record its digest in the session's state."""
     write_base_launch(session_dir, base)
     state = SharedState.load_or_init(session_dir)
     state.base_launch_digest = base.digest()
