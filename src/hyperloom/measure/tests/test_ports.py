@@ -79,7 +79,7 @@ def _lifecycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, picked: int) -> 
     info = {"eligible": True, "port": picked, "framework": "sglang"}
     monkeypatch.setattr(local, "resolve_lifecycle_params", lambda _point: info)
     call = SimpleNamespace(output_dir=str(tmp_path), points=[_point(tmp_path)])
-    return local._Lifecycle(SimpleNamespace(call=call, phases=None))
+    return local._Lifecycle(SimpleNamespace(call=call, phases=None, notes=[]))
 
 
 def test_a_lifecycle_whose_port_fell_in_the_reserved_block_serves_on_another(
