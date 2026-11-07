@@ -556,7 +556,8 @@ class SuiteRound:
     """One round of an attempt: the point it runs, the directory it writes below, and how it holds the server.
 
     ``warmup`` marks a discarded round, which draws its prompts with the warmup seed so it cannot prime the measured
-    round's prefix cache. ``env_drop`` names host variables the round's server and client do not inherit.
+    round's prefix cache. ``boot_only`` marks a round that only brings the server up, running the point as a
+    ``MAGPIE_RUN_PHASE=server`` point: no load and no eval. ``env_drop`` names host variables the round's server and client do not inherit.
     ``serving_lease`` is the Ray lease whose actor runs the round on the GPUs it holds, ``None`` to run it here.
     """
 
@@ -567,6 +568,7 @@ class SuiteRound:
     deadline_unix: int | None = None
     env_drop: frozenset[str] = frozenset()
     serving_lease: ServingLease | None = None
+    boot_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -579,6 +581,11 @@ class PointServer:
 
 def _read_point(config_path: Path) -> Mapping[str, object]:
     return yaml.safe_load(config_path.read_text(encoding=_UTF8)) or {}
+
+
+def _server_phase_point(document: Mapping[str, object]) -> Mapping[str, object]:
+    bench = _bench(document)
+    return {**document, "benchmark": {**bench, "envs": {**_envs(bench), _RUN_PHASE_ENV: _SERVER_ONLY_PHASE}}}
 
 
 def _declined(config_path: Path) -> bool:
@@ -684,7 +691,10 @@ def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable
     run_dir = _next_run_dir(request.round_dir)
     settings = _settings(route, run_dir, request.lifecycle, request.deadline_unix, request.env_drop)
     try:
-        config = suite_config(_read_point(request.config_path), route.base, settings)
+        point = _read_point(request.config_path)
+        if request.boot_only:
+            point = _server_phase_point(point)
+        config = suite_config(point, route.base, settings)
     except ConfigError as exc:
         raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc
     if request.warmup and config.fixed is not None:

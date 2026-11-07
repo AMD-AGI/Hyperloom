@@ -26,7 +26,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_serving_patched,
 )
 from ._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabled
-from ._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid
+from ._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid, teardown_variant_server
 from ._ray_backend import strip_visible_devices_from_config
 from ._server_lifecycle import REUSE_PORT_DEFAULT, resolve_lifecycle_params, teardown_lifecycle_server
 from ._server_lifecycle import _assign_free_port as assign_free_port
@@ -99,4 +99,5 @@ __all__ = [
     "session_breakdown_executor",
     "strip_visible_devices_from_config",
     "teardown_lifecycle_server",
+    "teardown_variant_server",
 ]

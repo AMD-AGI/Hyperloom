@@ -126,7 +126,9 @@ def test_a_lone_round_owns_its_server_and_its_run_dir_is_the_variant_workspace(m
     assert suite.stopped == [slot]
 
 
-def test_a_callers_boot_round_boots_its_server_and_leaves_it_up(monkeypatch, suite, tmp_path):
+@pytest.mark.parametrize("extra_envs", [{}, {"RUN_EVAL": "true", "NUM_PROMPTS": "1"}])
+def test_a_callers_boot_round_boots_its_server_and_leaves_it_up(monkeypatch, suite, tmp_path, extra_envs):
+    """A boot-only launch runs no load and no eval, whatever the point's client knobs say and without a phase env."""
     pid_dir = tmp_path / "arm"
     lifecycle = {"cleanup": False, "pid_dir": str(pid_dir), "port": 30001}
     row, calls, slot = _play(
@@ -134,7 +136,7 @@ def test_a_callers_boot_round_boots_its_server_and_leaves_it_up(monkeypatch, sui
         suite,
         LaunchAttempt(outcome=READY),
         launch=GridLaunch(server_lifecycle=lifecycle, lifecycle_boot_only=True, warmup_before_measure=False),
-        extra_envs={"MAGPIE_RUN_PHASE": "server"},
+        extra_envs=extra_envs,
     )
 
     assert row.status == "succeeded", row
@@ -142,6 +144,8 @@ def test_a_callers_boot_round_boots_its_server_and_leaves_it_up(monkeypatch, sui
     (config,) = (call.config for call in calls)
     assert (config.lifecycle.mode, config.lifecycle.pid_dir) == (LifecycleMode.BOOT, str(pid_dir))
     assert config.workload is WorkloadKind.NONE
+    assert config.fixed is None
+    assert not config.eval.enabled
     assert config.server.port == 30001
     assert pid_dir not in suite.stopped
 

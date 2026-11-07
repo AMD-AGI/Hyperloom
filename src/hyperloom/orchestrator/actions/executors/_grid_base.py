@@ -82,8 +82,9 @@ def sync_benchmark_timeout(config_path: Path, timeout_sec: float) -> None:
 class GridRound:
     """One benchmark round of a grid: the config and directories it runs with, and its stop gates.
 
-    ``server_already_ready`` is whether an earlier round left the round's server up. ``magpie_python`` is the
-    interpreter of a round on the Magpie backend; a round inference_suite runs takes its own.
+    ``server_already_ready`` is whether an earlier round left the round's server up. ``boot_only`` is whether the
+    round only brings its server up for the rounds after it, which an inference_suite round does without a load.
+    ``magpie_python`` is the interpreter of a round on the Magpie backend; a round inference_suite runs takes its own.
     """
 
     magpie_python: str
@@ -96,6 +97,7 @@ class GridRound:
     server_already_ready: bool = False
     session_deadline_sec: float | None = None
     warmup: bool = False
+    boot_only: bool = False
 
 
 _FAILED_RETURNCODE = 1
@@ -135,6 +137,7 @@ def run_grid_suite_round(
         round_dir=round_.output_dir,
         lifecycle=server.lifecycle,
         warmup=round_.warmup,
+        boot_only=round_.boot_only,
         deadline_unix=deadline_unix(round_.session_deadline_sec),
         env_drop=env_drop,
         serving_lease=serving_lease,
