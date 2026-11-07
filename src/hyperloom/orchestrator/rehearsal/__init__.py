@@ -8,8 +8,10 @@ from __future__ import annotations
 from hyperloom.orchestrator.rehearsal.clock import VirtualClock, installed_clock
 from hyperloom.orchestrator.rehearsal.launch import (
     RecordedLaunch,
+    RecordedRound,
     ScenarioExhausted,
     ScriptedLaunchBackend,
+    ScriptedRounds,
 )
 from hyperloom.orchestrator.rehearsal.scenario import (
     DIED_SILENTLY,
@@ -42,9 +44,11 @@ __all__ = [
     "LaunchAttempt",
     "LaunchScenario",
     "RecordedLaunch",
+    "RecordedRound",
     "ScenarioError",
     "ScenarioExhausted",
     "ScriptedLaunchBackend",
+    "ScriptedRounds",
     "ScriptedSpecialist",
     "SpecialistStep",
     "VirtualClock",
