@@ -194,8 +194,10 @@ class BwrapPolicy:
     ``read_only`` and ``writable`` are bound (a missing read-only path is skipped); ``masked`` hides a directory
     inside a bound tree: it becomes an empty mode-0000 tmpfs, which holds while the app adds, replaces or removes
     entries in it (a mount over a file would go with the file's first rename, and an absent one has no mount to
-    cover it later, so below a bound tree only a directory may be masked; one the app itself removes or renames
-    away is unmasked with it). ``devices`` are bound with device access (``/dev/kfd``, ``/dev/dri``). ``tmp`` and
+    cover it later, so below a bound tree only a directory may be masked). The mount stays on the directory it
+    was made on: one the host removes or renames away, or whose parent it renames or replaces (with a link, say),
+    is unmasked, and what is put in its place is readable; a credential whose tool swaps directories so is kept out
+    by binding only what is needed beside it, not by a mask. ``devices`` are bound with device access (``/dev/kfd``, ``/dev/dri``). ``tmp`` and
     ``shm`` are bound at ``/tmp`` and ``/dev/shm`` (a :class:`Scratch`; a sandbox whose commands share files there
     passes the same pair to each, so before :data:`NESTED_SAFE` nothing may be mounted below them), else each is a
     fresh tmpfs. ``sys_paths`` are bound read-only (a compile narrows ``/sys`` to the CPU tree).
@@ -376,16 +378,78 @@ class BwrapPolicy:
         return _Mount(path, (_RO_BIND_TRY, path, path))
 
 
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _unlock_directory(name: str, parent: int) -> int:
+    """Give the directory ``name`` in ``parent`` mode 0700 (the agent may have left it 0000) and open it."""
+    os.chmod(name, stat.S_IRWXU, dir_fd=parent)
+    return os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
+
+
+def _empty_directory(directory: int) -> list[str]:
+    """Unlink every entry of ``directory`` that is not a directory; the names of those that are."""
+    below = []
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                below.append(entry.name)
+            else:
+                os.unlink(entry.name, dir_fd=directory)
+    return below
+
+
 def _remove_tree(path: str) -> None:
-    """Remove ``path`` even where the agent left it, or a directory in it, with a mode that forbids listing (0000)."""
-    if _is_directory(path):
-        os.chmod(path, stat.S_IRWXU)
-    for parent, names, _files in os.walk(path):
-        for name in names:
-            child = os.path.join(parent, name)
-            if not os.path.islink(child):
-                os.chmod(child, stat.S_IRWXU)
-    shutil.rmtree(path)
+    """Remove the directory ``path`` and everything below it, however the agent left it: a directory of mode 0000
+    (``path`` itself too), a tree deeper than the interpreter's recursion limit, a path longer than ``PATH_MAX``.
+
+    The walk holds one descriptor and no recursion: every call names one entry relative to an open directory, and the
+    way back up is ``..`` (no process moves directories in a scratch whose sandbox is gone).
+
+    Raises:
+        OSError: ``path`` is not a directory, or an entry could not be removed.
+    """
+    parent_path, name = os.path.split(os.path.abspath(path))
+    if not stat.S_ISDIR(os.lstat(path).st_mode):
+        raise NotADirectoryError(errno.ENOTDIR, "Not a directory", path)
+    parent = os.open(parent_path, _DIRECTORY_FLAGS)
+    try:
+        _remove_below(parent, name)
+    except OSError as exc:  # the entry is named relative to a directory: name the tree too
+        raise OSError(exc.errno, f"{exc.strerror} at {exc.filename!r} below", path) from exc
+    finally:
+        os.close(parent)
+
+
+def _remove_below(parent: int, name: str) -> None:
+    """:func:`_remove_tree` of the directory ``name`` in the open directory ``parent``."""
+    current = -1
+    try:
+        current = _unlock_directory(name, parent)
+        # One frame per level open on the way down: its name in the level above, and its subdirectories left.
+        stack = [(name, _empty_directory(current))]
+        while True:
+            left = stack[-1][1]
+            if left:
+                child = left.pop()
+                below = _unlock_directory(child, current)
+                os.close(current)
+                current = below
+                stack.append((child, _empty_directory(current)))
+            elif len(stack) > 1:
+                done = stack.pop()[0]
+                up = os.open("..", _DIRECTORY_FLAGS, dir_fd=current)
+                os.close(current)
+                current = up
+                os.rmdir(done, dir_fd=current)
+            else:
+                break
+        os.close(current)
+        current = -1
+        os.rmdir(name, dir_fd=parent)
+    finally:
+        if current >= 0:
+            os.close(current)
 
 
 @dataclass(frozen=True)
@@ -414,12 +478,18 @@ class Scratch:
         Raises:
             OSError: one could not be deleted (naming both when neither could).
         """
-        failed = []
-        for path in (self.tmp, self.shm):
+        failed: list[OSError] = []
+
+        def attempt(path: str) -> None:
             try:
                 _remove_tree(path)
             except OSError as exc:
                 failed.append(exc)
+
+        try:
+            attempt(self.tmp)
+        finally:  # whatever else stops the first, the second is still attempted
+            attempt(self.shm)
         if len(failed) == 1:
             raise failed[0]
         if failed:
