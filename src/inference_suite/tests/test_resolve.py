@@ -293,6 +293,31 @@ def test_inferencex_at_the_unmerged_entry_wins_over_the_cookbook():
     assert base.golden_al.value == 3.48
 
 
+@pytest.mark.parametrize(
+    ("query", "snapshot", "corpus"),
+    [
+        (_agentx("amd/Qwen3.8-Flash-Next-Quark-MXFP4-AttnFP8-PLEFP8", concurrencies=(1,)), None, "_256k"),
+        (_agentx(_GLM53_MXFP4), _snapshot("a1e8f975"), ""),
+        (_agentx("deepseek-ai/DeepSeek-V4.1-Flash", framework="vllm", board="mi300x", concurrencies=(1,)), None, ""),
+    ],
+)
+def test_an_agentx_base_names_the_corpus_inferencex_replays_for_its_model_family(query, snapshot, corpus):
+    base = _base(query, snapshot)
+
+    assert base.client.env["WEKA_LOADER_OVERRIDE"] == f"semianalysis_cc_traces_weka_062126{corpus}"
+
+
+def test_a_cookbook_agentx_base_names_the_corpus_of_its_base_models_family():
+    base = _base(_agentx(_GLM53_MXFP4), _glm53_snapshot(GoldenLength(3.48, curve=_GLM53_FLASH_CURVE)))
+
+    assert base.source.kind is SourceKind.SGLANG_COOKBOOK
+    assert base.client.env["WEKA_LOADER_OVERRIDE"] == "semianalysis_cc_traces_weka_062126"
+
+
+def test_a_fixed_base_names_no_corpus():
+    assert "WEKA_LOADER_OVERRIDE" not in _base(_fixed()).client.env
+
+
 def test_a_recipe_image_without_a_version_assumes_the_latest_release():
     kimi = _base(_agentx("moonshotai/Kimi-K3.1-Pro", concurrencies=(32,)))
     assert (kimi.image.version_basis, kimi.image.framework_version) == (VersionBasis.ASSUMED_LATEST, "0.5.23")
