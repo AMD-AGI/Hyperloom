@@ -33,6 +33,7 @@ from inference_suite.contracts import (
     ScriptableWorkload,
     ServerConfig,
     SuiteConfig,
+    Telemetry,
     WorkloadKind,
 )
 from inference_suite.tests.test_base_launch_contract import _base
@@ -102,7 +103,7 @@ def _config(base_digest: str | None = None, **changes) -> SuiteConfig:
         workload=WorkloadKind.AGENTX,
         agentx=_AGENTX,
         eval=_eval(enabled=False),
-        telemetry=GpuTelemetry(enabled=True, interval_sec=0.5),
+        telemetry=Telemetry(GpuTelemetry(enabled=True, interval_sec=0.5), kv=True),
         lifecycle=Lifecycle(mode=LifecycleMode.OWN),
         deadlines=Deadlines(boot_sec=1800, round_sec=3600, eval_sec=1200, silence_sec=600),
         paths=RunPaths(run_dir="/s/runs/r1", tool_cache="/s/tools", tool_manifest_sha256=_SHA),
@@ -192,6 +193,7 @@ def test_an_mlperf_round_is_not_profiled():
         ("eval", "probe"),
         ("telemetry",),
         ("telemetry", "gpu"),
+        ("telemetry", "kv"),
         ("lifecycle",),
         ("deadlines",),
         ("paths",),
@@ -255,6 +257,7 @@ def test_eval_probe_fields_are_required(missing):
         ("deadlines", "boot_sec", "the boot_sec deadline"),
         ("deadlines", "silence_sec", "the silence_sec deadline"),
         ("profile", "enabled", "the profile's enabled"),
+        ("telemetry", "kv", "the KV telemetry"),
     ],
 )
 def test_required_deadline_and_profile_keys_are_config_errors(section, missing, match):
@@ -262,6 +265,15 @@ def test_required_deadline_and_profile_keys_are_config_errors(section, missing, 
     del document[section][missing]
     with pytest.raises(ConfigError, match=match):
         SuiteConfig.from_document(document)
+
+
+def test_the_kv_telemetry_switch_round_trips():
+    config = _config(telemetry=replace(_config().telemetry, kv=False))
+
+    assert config.to_document()["telemetry"]["kv"] == {"enabled": False}
+    assert SuiteConfig.from_document(config.to_document()).telemetry.kv is False
+    with pytest.raises(ConfigError, match="the KV telemetry's enabled"):
+        replace(config.telemetry, kv="yes")
 
 
 def test_defaulted_deadline_keys_may_be_omitted():
