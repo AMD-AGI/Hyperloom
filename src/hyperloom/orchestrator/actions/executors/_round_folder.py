@@ -23,8 +23,8 @@ from inference_suite.contracts.layout import REPORT_FILE
 from ._gpu_metrics import write_gpu_metrics_from_report
 
 
-#: The file Magpie writes its own measurement to, inside the workspace it creates.
-MAGPIE_REPORT_FILE = "benchmark_report.json"
+#: The session-breakdown report a GEAK sweep point or a multi-node round writes into its workspace.
+BENCHMARK_REPORT_FILE = "benchmark_report.json"
 
 
 def is_round_folder(path: Path) -> bool:
@@ -33,8 +33,8 @@ def is_round_folder(path: Path) -> bool:
 
 
 def round_report_path(workspace: Path) -> Path:
-    """The report a round left in ``workspace``: an inference_suite run_dir's, else Magpie's."""
-    return RunLayout(workspace).report if is_round_folder(workspace) else workspace / MAGPIE_REPORT_FILE
+    """The report a round left in ``workspace``: an inference_suite run_dir's, else its benchmark report."""
+    return RunLayout(workspace).report if is_round_folder(workspace) else workspace / BENCHMARK_REPORT_FILE
 
 
 def read_round_launch(run_dir: Path) -> Launch | None:
@@ -72,4 +72,4 @@ class RoundFolder:
         return write_gpu_metrics_from_report(round_dir, self.report.to_document(), source=REPORT_FILE)
 
 
-__all__ = ["MAGPIE_REPORT_FILE", "RoundFolder", "is_round_folder", "read_round_launch", "round_report_path"]
+__all__ = ["BENCHMARK_REPORT_FILE", "RoundFolder", "is_round_folder", "read_round_launch", "round_report_path"]

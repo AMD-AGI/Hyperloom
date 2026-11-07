@@ -36,7 +36,7 @@ from inference_suite.contracts import ProbeOutcome, ReportError, RunLayout
 from inference_suite.contracts.launch import Launch
 from inference_suite.contracts.layout import REPORT_FILE
 
-from ._round_folder import MAGPIE_REPORT_FILE, RoundFolder, is_round_folder
+from ._round_folder import BENCHMARK_REPORT_FILE, RoundFolder, is_round_folder
 
 log = logging.getLogger(__name__)
 
@@ -238,7 +238,7 @@ def accuracy_keep_block(
 
 
 def _round_quality_gate(report: Path) -> object:
-    """The quality gate the report at ``report`` carries: an inference_suite round's, or Magpie's bench report's.
+    """The quality gate the report at ``report`` carries: an inference_suite round's, or a benchmark report's.
 
     Raises:
         OSError, ValueError: When the report cannot be read; a round report off its contract raises too.
@@ -251,7 +251,7 @@ def _round_quality_gate(report: Path) -> object:
 def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
     """Read a scriptable (server-less) quality gate from the newest round report under ``workspace``."""
     workspace = Path(workspace)
-    reports = [Path(f) for f in glob.glob(str(workspace / "**" / MAGPIE_REPORT_FILE), recursive=True)]
+    reports = [Path(f) for f in glob.glob(str(workspace / "**" / BENCHMARK_REPORT_FILE), recursive=True)]
     reports += [path for path in workspace.glob(f"**/{REPORT_FILE}") if is_round_folder(path.parent)]
     if not reports:
         return {"quality_gate": None, "error": f"no round report in {workspace}"}
