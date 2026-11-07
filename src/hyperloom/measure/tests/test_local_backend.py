@@ -164,7 +164,6 @@ def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, unheld,
         123.0,
         "lease",
     )
-    assert kwargs["launch"].magpie_python is None
     assert kwargs["launch"].server_lifecycle is None
     (config,) = grid.configs
     _own_port(config)

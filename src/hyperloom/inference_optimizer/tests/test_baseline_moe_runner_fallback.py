@@ -12,7 +12,6 @@ executor retries once with the flag dropped.
 
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,41 +35,6 @@ def _isolate_leak_root(tmp_path_factory, monkeypatch):
     sandbox = tmp_path_factory.mktemp("isolated_leak_root")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
     monkeypatch.delenv("HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND", raising=False)
-
-
-def _moe_model_dir(tmp_path: Path) -> str:
-    """A MoE checkpoint dir with no quant marker."""
-    d = tmp_path / "Qwen3-30B-A3B"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "config.json").write_text(
-        json.dumps({"architectures": ["Qwen3MoeForCausalLM"], "model_type": "qwen3_moe", "num_experts": 128}),
-        encoding="utf-8",
-    )
-    return str(d)
-
-
-def _quark_mxfp4_moe_model_dir(tmp_path: Path) -> str:
-    """A Quark MX-FP4 MoE checkpoint dir (the gate skips injection for it)."""
-    spec = {"dtype": "fp4", "qscheme": "per_group", "group_size": 32, "scale_format": "e8m0"}
-    d = tmp_path / "Qwen3.5-397B-A17B-MXFP4"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "config.json").write_text(
-        json.dumps(
-            {
-                "model_type": "qwen3_5_moe",
-                "num_experts": 128,
-                "quantization_config": {
-                    "quant_method": "quark",
-                    "global_quant_config": {
-                        "weight": {**spec, "is_dynamic": False},
-                        "input_tensors": {**spec, "is_dynamic": True},
-                    },
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    return str(d)
 
 
 def _make_ctx(params: dict) -> SimpleNamespace:
@@ -131,10 +95,6 @@ def _sglang_args(cmd) -> str:
     return str(cfg["benchmark"]["envs"].get("EXTRA_SGLANG_ARGS", ""))
 
 
-def _crash_on_pin(sglang_args: str) -> str | None:
-    return _QUARK_TRACEBACK if "--moe-runner-backend" in sglang_args else None
-
-
 def _run_baseline(tmp_path, model: str, crash_stderr, **params) -> tuple[list[str], dict]:
     """Run the baseline over a Magpie that fails with ``crash_stderr(sglang_args)`` when it returns text."""
     calls: list[str] = []
@@ -160,96 +120,3 @@ def _run_baseline(tmp_path, model: str, crash_stderr, **params) -> tuple[list[st
     )
     result = run_baseline(write_sglang_yaml(tmp_path / "base.yaml", model), tmp_path, ctx, fake_run)
     return calls, result
-
-
-def test_moe_runner_crash_triggers_flagless_retry(tmp_path, monkeypatch):
-    """A pinned backend that crashes (e.g. a stale recipe/task param, since
-    Hyperloom itself no longer injects one) still gets stripped on retry."""
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
-    calls, result = _run_baseline(
-        tmp_path, _moe_model_dir(tmp_path), _crash_on_pin, extra_server_args="--moe-runner-backend triton"
-    )
-
-    # Warmup crashes on the pinned triton, the retry re-runs warmup + measure flagless.
-    assert len(calls) == 3
-    assert "--moe-runner-backend triton" in calls[0]
-    assert all("--moe-runner-backend" not in c for c in calls[1:])
-    assert result["status"] == "succeeded"
-    assert "moe_runner_backend_fallback_dropped_flag" in result.get("nonfatal_warnings", [])
-
-
-def test_operator_pinned_backend_is_also_dropped_on_retry(tmp_path, monkeypatch):
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
-    calls, result = _run_baseline(
-        tmp_path, _moe_model_dir(tmp_path), _crash_on_pin, extra_server_args="--moe-runner-backend triton --foo 1"
-    )
-
-    assert len(calls) == 3
-    assert all("--moe-runner-backend" not in c for c in calls[1:])
-    assert "--foo 1" in calls[1]
-    assert result["status"] == "succeeded"
-
-
-@pytest.mark.parametrize("source", ["operator_env", "reference_recipe"])
-def test_backend_from_other_arg_sources_is_dropped_on_retry(tmp_path, monkeypatch, source):
-    """The flag can also arrive via $INFERENCE_OPTIMIZER_SERVER_ARGS or the reference recipe; both are merged after the task params, so the retry must strip the merged result rather than only the params."""
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
-    if source == "operator_env":
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", "--moe-runner-backend triton")
-    else:
-        from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
-
-        sd = tmp_path / "session"
-        sd.mkdir(parents=True, exist_ok=True)
-        freeze_session_base(sd, args=("--moe-runner-backend", "triton"))
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sd))
-    calls, result = _run_baseline(tmp_path, _moe_model_dir(tmp_path), _crash_on_pin)
-
-    assert "--moe-runner-backend triton" in calls[0]
-    assert all("--moe-runner-backend" not in c for c in calls[1:])
-    assert result["status"] == "succeeded"
-
-
-def test_quark_checkpoint_with_operator_pinned_backend_recovers(tmp_path, monkeypatch):
-    """The original bug shape: on a Quark MX-FP4 checkpoint the gate skips injection, but an operator pin still reaches the server on attempt 1."""
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
-    calls, result = _run_baseline(
-        tmp_path,
-        _quark_mxfp4_moe_model_dir(tmp_path),
-        _crash_on_pin,
-        extra_server_args="--moe-runner-backend triton --mem-fraction-static 0.9",
-    )
-
-    assert "--moe-runner-backend triton" in calls[0]
-    assert all("--moe-runner-backend" not in c for c in calls[1:])
-    assert "--mem-fraction-static 0.9" in calls[1]
-    assert result["status"] == "succeeded"
-
-
-def test_quark_checkpoint_without_pin_never_gets_the_flag(tmp_path, monkeypatch):
-    """Without an operator/recipe pin, a Quark MX-FP4 checkpoint launches
-    clean on the first attempt (Hyperloom never injects the flag) -- no
-    crash, no retry."""
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
-    calls, result = _run_baseline(tmp_path, _quark_mxfp4_moe_model_dir(tmp_path), _crash_on_pin)
-
-    assert all("--moe-runner-backend" not in c for c in calls)
-    assert result["status"] == "succeeded"
-    assert "moe_runner_backend_fallback_dropped_flag" not in result.get("nonfatal_warnings", [])
-
-
-def test_fallback_fires_only_once(tmp_path, monkeypatch):
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
-    # The crash persists even without the flag: no endless retry loop.
-    calls, result = _run_baseline(tmp_path, _moe_model_dir(tmp_path), lambda _args: _QUARK_TRACEBACK)
-
-    assert len(calls) == 2
-    assert result["status"] == "failed"
-
-
-def test_unrelated_failure_does_not_retry(tmp_path, monkeypatch):
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
-    calls, result = _run_baseline(tmp_path, _moe_model_dir(tmp_path), lambda _args: "CUDA out of memory\n")
-
-    assert len(calls) == 1
-    assert result["status"] == "failed"

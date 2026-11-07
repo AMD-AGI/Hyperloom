@@ -10,9 +10,6 @@ import tempfile
 from pathlib import Path
 
 from hyperloom.common.env_safety import is_python_package_root
-from hyperloom.orchestrator.actions.executors._grid_runner import (
-    _prepend_magpie_pythonpath,
-)
 
 from ._kernel_tools_harness import sourceable_kernel_tools
 
@@ -33,24 +30,6 @@ class TestIsPythonPackageRoot:
     def test_empty_is_not_package_root(self) -> None:
         assert not is_python_package_root("")
         assert not is_python_package_root(None)
-
-
-class TestGridRunnerPrepend:
-    def test_site_packages_not_prepended(self) -> None:
-        result = _prepend_magpie_pythonpath("/opt/venv/lib/python3.12/site-packages", "/primus/shuoshuo")
-        assert result == "/primus/shuoshuo"
-        assert "site-packages" not in result
-
-    def test_source_checkout_prepended(self) -> None:
-        result = _prepend_magpie_pythonpath("/data/.cache/Magpie@abc1234", "/existing")
-        assert result == "/data/.cache/Magpie@abc1234:/existing"
-
-    def test_source_checkout_prepended_empty_current(self) -> None:
-        result = _prepend_magpie_pythonpath("/data/.cache/Magpie@abc1234", "")
-        assert result == "/data/.cache/Magpie@abc1234"
-
-    def test_empty_magpie_dir_no_change(self) -> None:
-        assert _prepend_magpie_pythonpath("", "/existing") == "/existing"
 
 
 INSTALL_SCRIPT = Path(__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"

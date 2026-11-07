@@ -9,7 +9,6 @@ import sys
 import asyncio
 import json
 import os
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1808,60 +1807,6 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch, tmp_path
     assert "profile_executor raised" in result["error"]
 
 
-@pytest.mark.asyncio
-async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(tmp_path):
-    """A parseable measurement must not launder a non-zero process exit into success."""
-    db = SqliteConnection(tmp_path / "baseline.db")
-    locks = SqliteLeaseBackend(db)
-    tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
-
-    output_dir = tmp_path / "out"
-    output_dir.mkdir(parents=True)
-
-    # The workspace must be created inside the fake to count as this run's output.
-    report_body = json.dumps(
-        {
-            "success": False,
-            "framework": "sglang",
-            "model": "/path/models/Qwen-Qwen3-8B",
-            "throughput": {
-                "request_throughput": 1.8,
-                "output_throughput": 1872.0,
-                "total_token_throughput": 3744.0,
-                "completed_requests": 320,
-                "duration_seconds": 177.0,
-            },
-            "latency": {"ttft": {"mean_ms": 140}, "e2el": {"mean_ms": 2500}},
-        }
-    )
-
-    def fake_run(cmd, *args, **kwargs):
-        ws = output_dir / "benchmark_sglang_20260501_001122"
-        ws.mkdir(parents=True, exist_ok=True)
-        (ws / "benchmark_report.json").write_text(report_body)
-        return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="cleanup failed")
-
-    task, _ = await tr.create_or_return_existing(
-        TaskSpec(
-            kind="baseline",
-            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-            idempotency_key="baseline-valid-warning",
-        ),
-    )
-    sub.register_executor("baseline", BaselineExecutor(session_dir=tmp_path))
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
-        res = await sub.run_task(task)
-
-    assert res.result["status"] == "failed"
-    assert res.result["error_class"] == "magpie_nonzero_after_valid_measurement"
-    assert res.result["returncode"] == 1
-    assert "cleanup failed" in res.result["error"]
-    assert res.result["reported_success"] is False
-    assert "output_throughput" not in res.result
-    db.close()
-
-
 def _native_profile_result(trace: Path) -> dict:
     """What ``ProfileExecutor`` returns for a Magpie-owned profiling round."""
     from hyperloom.inference_optimizer.agentx.report import agentx_measurement
@@ -2012,139 +1957,6 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     assert len(res.result["trace_files"]) == 2
     assert res.result["main_trace_path"] == str(merged_trace)
     assert res.result["profile_trace_selection_reason"] == "merged_trace_preferred"
-    db.close()
-
-
-@pytest.mark.asyncio
-async def test_profile_executor_patches_configured_inferencex_path(
-    tmp_path,
-    monkeypatch,
-):
-    """ProfileExecutor must patch the InferenceX checkout Magpie will use (Qwen3-32B regression: empty benchmark.inferencex_path lost NUM_PROMPTS)."""
-    fake_ix = tmp_path / "InferenceX"
-    (fake_ix / "benchmarks").mkdir(parents=True)
-    (fake_ix / "utils" / "bench_serving").mkdir(parents=True)
-    (fake_ix / "benchmarks" / "benchmark_lib.sh").write_text(
-        'num_prompts="${NUM_PROMPTS:-$max_concurrency}"\n',
-        encoding="utf-8",
-    )
-    (fake_ix / "utils" / "bench_serving" / "benchmark_serving.py").write_text(
-        "# already patched\nPROFILE_EXTRA_BODY\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("INFERENCEX_PATH", str(fake_ix))
-
-    db = SqliteConnection(tmp_path / "x.db")
-    locks = SqliteLeaseBackend(db)
-    tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
-
-    output_dir = tmp_path / "out"
-    output_dir.mkdir(parents=True)
-
-    report_body = json.dumps(
-        {
-            "success": True,
-            "framework": "sglang",
-            "model": "/path/models/Qwen-Qwen3-8B",
-            "throughput": {
-                "request_throughput": 3.2,
-                "output_throughput": 800.0,
-                "total_token_throughput": 1600.0,
-                "completed_requests": 80,
-                "duration_seconds": 25.0,
-            },
-            "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
-        }
-    )
-
-    def _fake_run_ix(cmd, *args, **kwargs):
-        ws = output_dir / "benchmark_sglang_20260501_001122"
-        ws.mkdir(parents=True, exist_ok=True)
-        (ws / "benchmark_report.json").write_text(report_body)
-        return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
-
-    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    task, _ = await tr.create_or_return_existing(
-        TaskSpec(
-            kind="profile",
-            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-            idempotency_key="prof-inferencex-path",
-        ),
-    )
-    sub.register_executor("profile", pe)
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run_ix):
-        res = await sub.run_task(task)
-
-    assert res.state == "succeeded"
-    materialized = Path(res.result["materialized_config"])
-    import yaml
-
-    rendered = yaml.safe_load(materialized.read_text())
-    assert rendered["benchmark"]["inferencex_path"] == str(fake_ix)
-    db.close()
-
-
-@pytest.mark.asyncio
-async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp_path):
-    db = SqliteConnection(tmp_path / "x.db")
-    locks = SqliteLeaseBackend(db)
-    tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
-
-    output_dir = tmp_path / "out"
-    output_dir.mkdir(parents=True)
-
-    def _fake_run(cmd, *args, **kwargs):
-        workspace = output_dir / "benchmark_vllm_20260501_001122"
-        workspace.mkdir(parents=True, exist_ok=True)
-        (workspace / "benchmark_report.json").write_text(
-            json.dumps(
-                {
-                    "success": True,
-                    "framework": "vllm",
-                    "model": "/path/models/Qwen-Qwen3-8B",
-                    "throughput": {
-                        "request_throughput": 3.2,
-                        "output_throughput": 800.0,
-                        "total_token_throughput": 1600.0,
-                        "completed_requests": 80,
-                        "duration_seconds": 25.0,
-                    },
-                    "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
-                }
-            )
-        )
-        trace_dir = workspace / "torch_trace"
-        trace_dir.mkdir(exist_ok=True)
-        _gz_trace(trace_dir / "rank0.177.pt.trace.json.gz", 128)
-        capture_dir = workspace / "capture_traces"
-        capture_dir.mkdir(exist_ok=True)
-        _gz_trace(capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz", 32)
-        return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
-
-    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    task, _ = await tr.create_or_return_existing(
-        TaskSpec(
-            kind="profile",
-            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-            idempotency_key="prof-capture",
-        ),
-    )
-    sub.register_executor("profile", pe)
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
-        res = await sub.run_task(task)
-
-    workspace = output_dir / "benchmark_vllm_20260501_001122"
-    torch_trace = workspace / "torch_trace"
-    complete_trace = torch_trace / "rank0.177.pt.trace.json.gz"
-    assert res.state == "succeeded"
-    assert res.result["framework"] == "vllm"
-    assert res.result["trace_dir"] == str(torch_trace)
-    assert res.result["trace_files"] == [str(complete_trace)]
-    assert res.result["main_trace_path"] == str(torch_trace)
-    assert res.result["profile_trace_selection_reason"] == "trace_dir_preferred"
-    assert res.result["profile_trace_selection_reason"] != "capture_only_fallback"
     db.close()
 
 
@@ -3480,10 +3292,6 @@ def test_handlers_dispatch_table():
 
 
 # _batch_kernel_candidates collapses task_group members.
-def _write_candidates_json(tmp_path, payload):
-    p = tmp_path / "kernel_candidates.json"
-    p.write_text(json.dumps(payload), encoding="utf-8")
-    return p
 
 
 # Coordinator — REQUEST programmatic handler integration

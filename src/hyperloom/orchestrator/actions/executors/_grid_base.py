@@ -88,11 +88,9 @@ class GridRound:
 
     ``server_already_ready`` is whether an earlier round left the round's server up. ``boot_only`` is whether the
     round only brings its server up for the rounds after it, which an inference_suite round does without a load.
-    ``magpie_python`` is the interpreter of a round on the Magpie backend; a round inference_suite runs takes its own.
     ``checkpoint`` stops an AgentX round that trails its reference at the checkpoint.
     """
 
-    magpie_python: str
     config_path: Path
     output_dir: Path
     timeout_sec: int

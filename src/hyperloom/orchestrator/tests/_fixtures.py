@@ -97,7 +97,7 @@ def launch_backend(monkeypatch):
     the definition and the names the eager importers bound are patched, so a
     launch made on a worker thread the test never sees is covered too.
     """
-    from hyperloom.orchestrator.actions.executors import _grid_runner, _subprocess_kill, baseline
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill, baseline
 
     installed: list = []
 
@@ -106,7 +106,7 @@ def launch_backend(monkeypatch):
             raise NoLaunchBackendInstalled(f"no launch backend is installed for this test; cmd={list(cmd)[:3]}")
         return installed[-1].run(cmd, **kwargs)
 
-    for module in (_subprocess_kill, _grid_runner, baseline):
+    for module in (_subprocess_kill, baseline):
         monkeypatch.setattr(module, "run_with_session_kill", _run)
 
     def _install(backend):

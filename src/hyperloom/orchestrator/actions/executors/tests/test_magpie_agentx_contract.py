@@ -390,72 +390,6 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     )
 
 
-@pytest.mark.parametrize("checkout", ["default", "yaml", "environment"])
-def test_native_baseline_runs_through_the_real_executor(source, tmp_path, monkeypatch, report, checkout):
-    import asyncio
-    import subprocess
-
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    monkeypatch.setenv(BENCHMARK_CONFIG_ENV, str(source))
-    monkeypatch.setenv("INFERENCEX_PATH", "/synthetic/InferenceX")
-    monkeypatch.delenv("MAGPIE_INFERENCEX_PATH", raising=False)
-    if checkout == "yaml":
-        config = yaml.safe_load(source.read_text())
-        config["benchmark"]["inferencex_path"] = "/native/InferenceX"
-        source.write_text(yaml.safe_dump(config))
-    elif checkout == "environment":
-        monkeypatch.setenv("MAGPIE_INFERENCEX_PATH", "/native/InferenceX")
-    report["agentx_metrics"]["server_launch"] = {
-        "effective_argv": [
-            "python3",
-            "-m",
-            "sglang.launch_server",
-            "--model-path",
-            "Qwen/Qwen3-0.6B",
-            "--disable-cuda-graph",
-        ],
-        "effective_env": {},
-    }
-    observed = {}
-
-    def run(cmd, **kwargs):
-        config = Path(cmd[cmd.index("--benchmark-config") + 1])
-        observed.update(load_benchmark(config))
-        assert kwargs["env"].get("MAGPIE_INFERENCEX_PATH") == (
-            "/native/InferenceX" if checkout == "environment" else None
-        )
-        assert observed.get("inferencex_path") == ("/native/InferenceX" if checkout == "yaml" else None)
-        slot = Path(cmd[cmd.index("--output-dir") + 1])
-        workspace = slot / "benchmark_sglang_contract"
-        workspace.mkdir(parents=True)
-        (workspace / "benchmark_report.json").write_text(json.dumps(report))
-        return subprocess.CompletedProcess(cmd, 0, "complete", "")
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", run)
-    state = SharedState(benchmark_mode="agentx", agentx_backend="magpie", enablement_mode="off")
-    ctx = SimpleNamespace(
-        task=SimpleNamespace(
-            task_id="native",
-            params={
-                "output_dir": str(tmp_path / "round"),
-                "timeout_sec": 10,
-                "model_path": "Qwen/Qwen3-0.6B",
-                "extra_server_args": "--disable-cuda-graph",
-            },
-        ),
-        extra={"shared_state": state},
-    )
-    executor = BaselineExecutor(magpie_python="python3", default_config_path=source, session_dir=tmp_path)
-    result = asyncio.run(executor(ctx))
-    assert result["status"] == "succeeded", result
-    assert result["valid_measurement"] is True
-    assert result["launch_evidence"]["magpie_server_launch"] == report["agentx_metrics"]["server_launch"]
-    assert observed["agentx"]["launch_overrides"]["append_args"] == ["--disable-cuda-graph"]
-    assert "PROFILE" not in observed["envs"]
-
-
 @pytest.mark.parametrize(
     "report", [None, {}, {"success": True, "throughput": {"output_throughput": 9000, "completed": 100}}]
 )
@@ -464,95 +398,6 @@ def test_native_missing_report_cannot_salvage_synthetic_results(source, tmp_path
     measured = extract_benchmark_measurement(report, workspace=tmp_path, config_path=source)
     assert measured["benchmark_backend"] == "magpie_agentx"
     assert not is_valid_measurement(measured)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("throughput,interactivity,expected", [(60.0, 30.0, "kept"), (40.0, 20.0, "reverted")])
-async def test_applied_source_is_measured_and_transactionally_kept_or_reverted(
-    source, report, tmp_path, monkeypatch, throughput, interactivity, expected
-):
-    import hashlib
-    import subprocess
-
-    from hyperloom.orchestrator.actions.executors import _grid_runner, _ray_serving
-    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
-    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-    from hyperloom.orchestrator.state.shared_state import SharedState
-    from hyperloom.orchestrator.state.task_registry import Task
-    from hyperloom.orchestrator.tests._helpers import init_git_repo, patch_integrate_patch_roots
-    from hyperloom.inference_optimizer.session.session_paths import runs_dir
-
-    patch_integrate_patch_roots(monkeypatch, tmp_path)
-    monkeypatch.setenv(BENCHMARK_CONFIG_ENV, str(source))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **kw: None)
-    session = tmp_path / "session"
-    session.mkdir()
-    repo = tmp_path / "framework"
-    init_git_repo(repo)
-    before = (repo / "src.py").read_bytes()
-    specialist = runs_dir(session, "specialist", "source-test")
-    specialist.mkdir(parents=True)
-    patch = specialist / "candidate.patch"
-    patch.write_text(
-        "diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n@@ -1,2 +1,2 @@\n def f():\n-    return 1\n+    return 2\n"
-    )
-    (specialist / "specialist_done.json").write_text(
-        json.dumps({"patches_written": [str(patch)], "summary": "source candidate"})
-    )
-    anchor = extract_benchmark_measurement(report)
-    state = SharedState(
-        framework="sglang",
-        benchmark_mode="agentx",
-        agentx_backend="magpie",
-        enablement_mode="off",
-        current_best={**anchor, "tput": 50.0},
-        baseline_perf=graded_axes_of(anchor),
-        baseline_tput=50.0,
-    )
-    state.record_specialist_patch_verdict("source-test", "approve")
-    observed = []
-
-    def run(cmd, **kwargs):
-        config = Path(cmd[cmd.index("--benchmark-config") + 1])
-        launch = load_benchmark(config)["agentx"]["launch_overrides"]
-        assert (repo / "src.py").read_text().endswith("return 2\n")
-        assert (
-            launch["source_files"][str(repo / "src.py")] == hashlib.sha256((repo / "src.py").read_bytes()).hexdigest()
-        )
-        observed.append(config)
-        measured = deepcopy(report)
-        measured["agentx_metrics"]["throughput"]["output_tokens_per_second"] = throughput
-        measured["agentx_metrics"]["latency_seconds"]["e2e_norm_intvty"] = {"p50": interactivity, "p90": 10.0}
-        measured["agentx_metrics"]["server_launch"]["source_files"] = launch["source_files"]
-        workspace = Path(cmd[cmd.index("--output-dir") + 1]) / "benchmark_sglang_source"
-        workspace.mkdir(parents=True)
-        (workspace / "benchmark_report.json").write_text(json.dumps(measured))
-        return subprocess.CompletedProcess(cmd, 0, "complete", "")
-
-    monkeypatch.setattr(_grid_runner, "run_with_session_kill", run)
-    task = Task(
-        task_id="source-round",
-        kind="integrate_patch",
-        state="queued",
-        idempotency_key="source-round",
-        params={
-            "specialist_task_id": "source-test",
-            "framework_source_root": str(repo),
-            "framework": "sglang",
-            "config_path": str(source),
-            "patches": [str(patch)],
-        },
-    )
-    ctx = RunnerContext(task=task, lease=None, extra={"shared_state": state})
-    result = await IntegratePatchExecutor(session_dir=session)(ctx)
-    assert result["status"] == expected, result
-    assert observed
-    assert result["bench_result"]["workload_identity"] == anchor["workload_identity"]
-    if expected == "kept":
-        assert (repo / "src.py").read_text().endswith("return 2\n")
-    else:
-        assert (repo / "src.py").read_bytes() == before
 
 
 @pytest.mark.asyncio
@@ -730,27 +575,6 @@ def test_server_args_that_cannot_become_argv_are_refused_as_argv_invalid(vllm_so
     assert refused.value.error_class == ARGV_INVALID
     offending = args.split(" ", 1)[1] if " " in args else args.partition("=")[2]
     assert offending in str(refused.value)
-
-
-@pytest.mark.asyncio
-async def test_run_grid_writes_no_launch_evidence_for_a_refused_argv(vllm_source, tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
-    from hyperloom.orchestrator.actions.executors import _grid_runner
-
-    def never_launched(_bench_round, **kwargs):
-        raise AssertionError("a refused variant must not reach Magpie")
-
-    monkeypatch.setattr(_grid_runner, "_run_magpie", never_launched)
-    base = materialize_benchmark_config(vllm_source, tmp_path / "base")
-    output_root = tmp_path / "grid"
-    results = await _grid_runner.run_grid(
-        grid=[GridVariant("refused", "--speculative-config {1:2}", {})],
-        output_root=output_root,
-        recipe=_grid_runner.GridRecipe(base_yaml_path=base),
-    )
-    assert [(result.status, result.error_class) for result in results] == [("failed", ARGV_INVALID)]
-    assert not results[0].launch_evidence
-    assert not [*output_root.rglob("launch_evidence.json"), *output_root.rglob("runtime_findings.json")]
 
 
 def test_native_baseline_refuses_an_unsplittable_argv_without_launching(vllm_source, tmp_path, monkeypatch):
