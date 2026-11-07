@@ -16,6 +16,7 @@ from hyperloom.measure.socket import SessionFacts
 from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
 from hyperloom.measure.tests.hosted_fixtures import make_call, point_yaml, spec_context
 from inference_suite.contracts import Redacted
+from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
 
 OTHER_STAGING = "d" * 64
 
@@ -26,10 +27,17 @@ def _tools(tmp_path, **overrides):
     return ctx, build_spec(call, request_id="req-1", ctx=ctx, deadline_unix=time.time() + 60).tools
 
 
-def test_the_sheet_names_the_staging_of_the_session_facts_and_the_contexts_inferencex_commit(tmp_path):
-    ctx, tools = _tools(tmp_path, session_facts=SessionFacts(staging=OTHER_STAGING, base_launch=base_launch()))
+def test_the_sheet_names_the_staging_and_the_inferencex_commit_its_carried_base_is_measured_with(tmp_path):
+    base = replace(base_launch(), client=replace(base_launch().client, commit="e" * 40))
+    _, tools = _tools(tmp_path, session_facts=SessionFacts(staging=OTHER_STAGING, base_launch=base))
 
-    assert (tools.staging, tools.inferencex, tools.magpie) == (OTHER_STAGING, ctx.inferencex_commit, None)
+    assert (tools.staging, tools.inferencex, tools.magpie) == (OTHER_STAGING, "e" * 40, None)
+
+
+def test_a_frozen_base_names_the_inferencex_commit_the_inference_suite_staging_requires(tmp_path):
+    _, tools = _tools(tmp_path)
+
+    assert tools.inferencex == PINNED_TOOLS[INFERENCEX_TOOL]
 
 
 @pytest.mark.parametrize("facts", [None, SessionFacts(), SessionFacts(staging="sha256:" + "d" * 64)])

@@ -67,7 +67,6 @@ MAX_ATTACHMENT_BYTES = 64 * _MIB
 _HASH_CHUNK_BYTES = _MIB
 _POINT_UNREADABLE = "point_unreadable"
 _PLACEHOLDER = re.compile(r"\$\{HL_ATTACH:([A-Za-z0-9][A-Za-z0-9._-]{0,63})\}")
-_HEX_COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -92,7 +91,6 @@ class SpecContext:
     image_ref: str
     image_digest: str
     gpu_type: str
-    inferencex_commit: str
     blobs: Any
     power_cap_w: float | None = None
     partition_mode: str | None = None
@@ -157,12 +155,6 @@ def _platform_env(ctx: SpecContext) -> dict[str, str]:
 def _unset_envs(call: TestCall) -> tuple[str, ...]:
     facts = call.session_facts
     return tuple(dict.fromkeys([*(facts.reference_unset_envs if facts else ()), *call.unset_envs]))
-
-
-def _commit(value: str | None, what: str) -> str:
-    if not value or not _HEX_COMMIT.fullmatch(value):
-        raise SpecRefused("tools_unknown", f"{what} commit is not a full commit hash: {value!r}")
-    return value
 
 
 def _warmup_rounds(call: TestCall) -> int:
@@ -369,13 +361,15 @@ def _hardware_section(ctx: SpecContext, gpus: int) -> dict[str, Any]:
     }
 
 
-def _tools_section(call: TestCall, ctx: SpecContext) -> dict[str, Any]:
+def _tools_section(call: TestCall) -> dict[str, Any]:
+    """The staging, and the InferenceX commit the carried base's client is pinned at: the runner stages from a
+    checkout of it, and staging refuses any commit but the one its pins name."""
     staging = call.session_facts.staging if call.session_facts else None
     if not staging or not _SHA256.fullmatch(staging):
         raise SpecRefused("tools_unknown", f"the inference_suite staging is not a manifest sha256: {staging!r}")
     return {
         "inference_suite": {"staging": staging},
-        "inferencex": {"commit": _commit(ctx.inferencex_commit, "InferenceX")},
+        "inferencex": {"commit": _frozen_base(call).client.commit},
     }
 
 
@@ -400,10 +394,15 @@ def _unredacted_credentials(base: BaseLaunch) -> list[str]:
     return found
 
 
-def _base_launch_document(call: TestCall) -> dict[str, Any]:
+def _frozen_base(call: TestCall) -> BaseLaunch:
     base = call.session_facts.base_launch if call.session_facts else None
     if base is None:
         raise SpecRefused("base_launch_missing", f"a {SPEC_SCHEMA} sheet carries the session's frozen base launch")
+    return base
+
+
+def _base_launch_document(call: TestCall) -> dict[str, Any]:
+    base = _frozen_base(call)
     found = _unredacted_credentials(base)
     if found:
         raise SpecRefused("base_launch_secret", f"the frozen base holds an unredacted credential in {', '.join(found)}")
@@ -432,7 +431,7 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
 
     Raises:
         SpecRefused: No point, an unreadable point, an environment override that
-            is not allowed, a missing tool commit or staging, no frozen base launch, a placeholder with no
+            is not allowed, a missing staging, no frozen base launch, a placeholder with no
             attachment, or a document the sheet schema refuses (a base launch over its size cap among them).
     """
     if not call.points:
@@ -453,7 +452,7 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
         "process_env": _process_env(call, ctx),
         "platform_env": _platform_env(ctx),
         "unset_envs": list(_unset_envs(call)),
-        "tools": _tools_section(call, ctx),
+        "tools": _tools_section(call),
         "environment": _environment_document(call.environment, ctx),
         "model_hashes": dict(ctx.model_hashes),
         "procedure": _procedure_section(call, deadline_unix),
