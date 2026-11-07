@@ -27,6 +27,7 @@ from inference_suite.load.agentx import (
     refusal,
     run_agentx,
 )
+from inference_suite.staging import AGENTX_PYTHON
 from inference_suite.runtime.phases import Phase, PhaseClock
 from inference_suite.runtime.server import Server
 from inference_suite.runtime.watch import RoundGate
@@ -105,7 +106,7 @@ def _config(tmp_path: Path) -> SuiteConfig:
 @pytest.fixture
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AgentxTool:
     root = tmp_path / "ix"
-    python = root / "agentx-venv" / "bin" / "python"
+    python = root / AGENTX_PYTHON
     python.parent.mkdir(parents=True)
     script = tmp_path / "fake_harness.py"
     script.write_text(_FAKE_HARNESS)
@@ -130,7 +131,7 @@ def _round(tmp_path: Path, tool: AgentxTool, config: SuiteConfig | None = None) 
 def test_client_argv_passes_every_replay_knob_explicitly(tmp_path: Path):
     config = _config(tmp_path)
     argv = client_argv(AgentxTool.staged(Path("/ix")), config)
-    assert argv[:5] == ("/ix/agentx-venv/bin/python", "-I", "-m", "agentx_cli", "profile")
+    assert argv[:5] == (f"/ix/{AGENTX_PYTHON}", "-I", "-m", "agentx_cli", "profile")
     expected = {
         "--scenario": "agentx",
         "--url": "http://127.0.0.1:30000",

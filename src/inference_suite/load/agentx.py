@@ -3,8 +3,8 @@
 
 """The AgentX load: the agentx-harness trace replay (``agentx profile``) InferenceX pins, against the round's server.
 
-The harness runs from the venv staging built (:mod:`inference_suite.staging`), not through ``infx.bench agentic``,
-which bootstraps a venv online. Every knob that shapes the replay is passed: the trace corpus, the concurrency, the
+The harness runs under the client environment staging built (:mod:`inference_suite.client_env`), as a subprocess of its
+own pinned interpreter, not through ``infx.bench agentic``, which bootstraps a venv online. Every knob that shapes the replay is passed: the trace corpus, the concurrency, the
 request count, the seed, the warmup requests per lane and the failed-request threshold, which is the caller's single
 value. The harness draws its warmup from the same seed, so a workload whose warmup seed differs is refused rather than
 recorded as a seed nothing used; a lane warmup of zero is refused because the harness would then apply its own.
@@ -79,7 +79,7 @@ ReplayListener = Callable[[float], None]
 
 @dataclass(frozen=True)
 class AgentxTool:
-    """The staged harness: the venv interpreter it runs under and the InferenceX root its aggregator runs from."""
+    """The staged harness: the client interpreter it runs under and the InferenceX root its aggregator runs from."""
 
     python: str
     inferencex_root: str
