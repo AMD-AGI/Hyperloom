@@ -18,25 +18,27 @@ name to any path. Git is allowed no transport (:data:`~hyperloom_common.git_safe
 lazily (:data:`NO_LAZY_FETCH`): a config can turn a repository into a partial clone whose promisor remote's transport is
 a program. A repository nested in a tree is another config these do not reach; the callers keep git out of one. Nothing
 here trusts a repository by its owner or its mode.
+
+A branch's worktree, a linked worktree the agent writes gitfile and all, is not run from here: its git is
+:func:`~hyperloom_common.git_safety.app_git`'s, against an admin directory proven the source base's. What runs from
+here is git in a tree that is no linked worktree: the source base, the session's repositories, an image's checkout,
+an agent's checkout and an agent's workspace.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from hyperloom_common import git_safety
 from hyperloom_common.git_safety import NO_PROGRAMS, NO_TRANSPORT
 
-# Command-line scope outranks every config file. The excludes file defaults to $XDG_CONFIG_HOME/git/ignore even when
-# no global config is read.
-_NO_OPERATOR_FILES = (
-    "-c",
-    f"core.excludesFile={os.devnull}",
-    "-c",
-    f"core.attributesFile={os.devnull}",
-)
+#: The operator's excludes file kept out: command-line scope outranks every config file, and the excludes file
+#: defaults to ``$XDG_CONFIG_HOME/git/ignore`` even when no global config is read. The attributes file and the hooks
+#: are pinned by :data:`~hyperloom_common.git_safety.NO_PROGRAMS`.
+NO_EXCLUDES_FILE = ("-c", f"core.excludesFile={os.devnull}")
 #: No object is fetched behind a command's back: a config can make a repository a partial clone whose promisor
 #: remote's transport (an ssh command, a local ``uploadpack`` program) runs when an object is missing.
 NO_LAZY_FETCH = {"GIT_NO_LAZY_FETCH": "1"}
@@ -47,7 +49,7 @@ _CONFIG_TIMEOUT_S = 60.0
 
 def git_argv(*args: str) -> list[str]:
     """The command line of ``git <args>``."""
-    return ["git", *_NO_OPERATOR_FILES, *NO_PROGRAMS, *args]
+    return ["git", *NO_EXCLUDES_FILE, *NO_PROGRAMS, *args]
 
 
 def git_env(**pinned: str) -> dict[str, str]:
@@ -91,16 +93,41 @@ def blank_driver_programs(cwd: Path, env: Mapping[str, str], *prefix: str) -> li
     Raises:
         OSError: The config could not be read, or names a driver ``-c`` cannot address (its name holds ``=``).
     """
-    git = ["git", *_NO_OPERATOR_FILES, *NO_PROGRAMS, *prefix]
+    git = ["git", *NO_EXCLUDES_FILE, *NO_PROGRAMS, *prefix]
     return git_safety.blank_driver_programs(git, cwd, dict(env), _CONFIG_TIMEOUT_S)
+
+
+def pinned_git(cwd: Path, *args: str, timeout: float = _CONFIG_TIMEOUT_S) -> subprocess.CompletedProcess[str]:
+    """``git <args>`` in the repository at ``cwd``, which an agent writes and which is no linked worktree (an agent's
+    checkout or workspace), whoever owns it: the pins, no transport, and every driver program its config defines
+    blanked.
+
+    Raises:
+        OSError: The config could not be read to blank its driver programs (nothing was run).
+        subprocess.SubprocessError: As ``subprocess.run``.
+    """
+    env = git_env()
+    trusted = trusting(cwd)
+    blanked = blank_driver_programs(cwd, env, *trusted)
+    return subprocess.run(
+        git_argv(*trusted, *blanked, *args),
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
 
 
 __all__ = [
     "INIT",
+    "NO_EXCLUDES_FILE",
     "NO_LAZY_FETCH",
     "blank_driver_programs",
     "git_argv",
     "git_env",
     "leading_options",
+    "pinned_git",
     "trusting",
 ]

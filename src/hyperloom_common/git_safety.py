@@ -31,7 +31,7 @@ import errno
 import os
 import stat
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from hyperloom_common.fs_utils import read_text_nofollow
@@ -108,13 +108,18 @@ def _app_owned_dir(path: Path) -> None:
         raise OSError(errno.EPERM, "not a directory owned by the app", str(path))
 
 
-def trusted_admin_dir(worktree: Path) -> Path:
+def trusted_admin_dir(worktree: Path, common: Path | None = None) -> Path:
     """The admin directory of the linked worktree ``worktree``, proven to be the app's.
+
+    Ownership alone does not prove it when whoever writes the worktree writes files the app's uid owns (a sandbox
+    whose user namespace maps its user to the app's): it can lay out an admin directory of its own beside a gitfile
+    naming it. A caller that knows the repository it made the worktree from passes its git directory as ``common``,
+    and the admin directory must then be one of that repository's.
 
     Raises:
         OSError: ``.git`` is not a gitfile, or the directory it names is not an
             app-owned admin directory of a repository whose ``worktrees`` entry
-            points back at this gitfile.
+            points back at this gitfile, or of ``common`` when given.
     """
     gitfile = worktree / _GITFILE
     first = read_text_nofollow(gitfile).strip()
@@ -131,6 +136,8 @@ def trusted_admin_dir(worktree: Path) -> Path:
         raise OSError(errno.EPERM, "not an admin dir of a linked worktree", str(admin))
     if os.path.realpath(read_text_nofollow(back).strip()) != os.path.realpath(gitfile):
         raise OSError(errno.EPERM, "the admin dir does not belong to this worktree", str(admin))
+    if common is not None and os.path.realpath(admin.parent.parent) != os.path.realpath(common):
+        raise OSError(errno.EPERM, f"the admin dir is not one of the repository {common}", str(admin))
     return admin
 
 
@@ -172,17 +179,25 @@ def _blanked(key: str) -> str:
     return f"{key.rpartition('.')[0]}.enabled=false" if key.startswith("hook.") else f"{key}="
 
 
-def app_git(worktree: Path, *args: str, timeout: float = _DEFAULT_TIMEOUT_SEC) -> subprocess.CompletedProcess[str]:
+def app_git(
+    worktree: Path,
+    *args: str,
+    timeout: float = _DEFAULT_TIMEOUT_SEC,
+    env: Mapping[str, str] | None = None,
+    common: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run ``git <args>`` in ``worktree`` against its trusted admin dir, never against what the worktree holds.
 
     No program the repository's config names runs: the ``NO_PROGRAMS`` pins, every configured driver program blanked,
     and no transport. A repository nested in the tree is the caller's to keep out (see the module docstring).
+    ``env`` adds variables of the caller's (an index file, an identity) under the ones that keep this so; ``common``
+    is as :func:`trusted_admin_dir`'s.
 
     Raises:
         OSError: The worktree's git metadata is not the app's, or its config cannot be neutralized (nothing was run).
     """
-    admin = trusted_admin_dir(worktree)
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    admin = trusted_admin_dir(worktree, common)
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, **(env or {})}
     env.update(
         GIT_CONFIG_NOSYSTEM="1",
         GIT_CONFIG_GLOBAL="/dev/null",
