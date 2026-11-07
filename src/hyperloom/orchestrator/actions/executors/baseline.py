@@ -3,8 +3,8 @@
 
 """Real ``baseline`` ActionRunner — runs the benchmark rounds of a baseline measurement.
 
-A round runs on inference_suite when :func:`._suite_config.suite_route` routes its point there, and on the Magpie
-backend otherwise. ``BenchmarkRunExecutor`` is the benchmark round shared by every action that runs one;
+A round runs on inference_suite when its session froze a base launch (:func:`._suite_config.suite_route`), and on
+the Magpie backend otherwise. ``BenchmarkRunExecutor`` is the benchmark round shared by every action that runs one;
 ``BaselineExecutor`` adds the baseline timeline event, the benchmark watchdog and the
 InferenceX eval patching.
 """
@@ -299,7 +299,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         extra = getattr(attempt.ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or self.shared_state
         await asyncio.to_thread(self._prepare_point, config_path, output_dir)
-        attempt = replace(attempt, suite=suite_route(self.session_dir, config_path))
+        attempt = replace(attempt, suite=suite_route(self.session_dir))
         if (refusal := await self._attempt_refusal(attempt, output_dir, shared_state)) is not None:
             return refusal
         # Cold-start "warmup artifact" guard: the freshly-booted server's first benchmark window pays one-time cold
