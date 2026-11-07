@@ -152,6 +152,15 @@ def _no_credentials() -> dict[str, str]:
     return {"ANTHROPIC_BASE_URL": ""}
 
 
+def _openai_side_only() -> dict[str, str]:
+    """A shell that exports the OpenAI side alone, which a .env another account can write no longer lends either."""
+    return {
+        **_no_credentials(),
+        "OPENAI_BASE_URL": "https://gateway.invalid/v1",
+        "OPENAI_API_KEY": "ak-test-openai-side",
+    }
+
+
 def _launch_env(checkout: Path, workspace: Path, **exported: str) -> dict[str, str]:
     """This process's environment without any credential, workspace or provider variable, plus a launch shell's."""
     dropped = ("ANTHROPIC_", "OPENAI_", "CLAUDE_", "DEEPSEEK_", "GEAK_", "HYPERLOOM_", "KERNEL_AGENT_", "LLM_")
@@ -298,13 +307,13 @@ def test_a_shared_checkouts_dotenv_keeps_no_credentials_and_every_reader_still_g
 
 @pytest.mark.parametrize("kind", ["group-writable-checkout", "dotenv-of-another-account"])
 def test_credentials_left_in_a_shared_dotenv_are_neither_used_nor_copied(tmp_path, container, kind):
-    """Credentials only in a .env another account can write may be that account's: the install, with nothing
-    exported, takes none of them (it runs on the operator's OpenAI side, which this rule leaves alone), copies none into
-    the container-local file and removes them from .env; preflight takes none either."""
+    """Credentials only in a .env another account can write may be that account's: the install, with only the OpenAI
+    side exported, takes none of them, copies none into the container-local file and removes them from .env;
+    preflight takes none either."""
     checkout, workspace = container
     said = _make_shared(checkout, kind)
 
-    proc = _install(_write_installer(tmp_path / "assets"), checkout, workspace, _no_credentials())
+    proc = _install(_write_installer(tmp_path / "assets"), checkout, workspace, _openai_side_only())
 
     assert f"ignored 5 credential line(s) in {checkout}/.env, which keeps none, as another account can write it" in (
         proc.stderr
@@ -474,7 +483,7 @@ def test_no_later_write_copies_a_credential_line_of_a_shared_dotenv(tmp_path, co
         _write_installer(tmp_path / "assets", _RECORD_EVERY_DOTENV_WRITE),
         checkout,
         workspace,
-        {**_no_credentials(), "RECORD_FILE": str(record)},
+        {**_openai_side_only(), "RECORD_FILE": str(record)},
     )
 
     assert record.read_bytes().count(b"HF_HOME=/models/hf") > 5
