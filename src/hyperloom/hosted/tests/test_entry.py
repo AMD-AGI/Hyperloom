@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import stat
 import subprocess
 import sys
@@ -27,6 +28,12 @@ _SECRETS = {name: f"sentinel-secret-{index}" for index, name in enumerate(host_i
 _IMAGE = "registry.example/sglang:v0.5.4-rocm"
 
 
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
 @pytest.fixture
 def run(tmp_path, monkeypatch):
     """A complete host environment in ``os.environ`` and the paths it names."""
@@ -43,7 +50,7 @@ def run(tmp_path, monkeypatch):
         Var.GRANT_LIMITS: json.dumps({"max_gpus": 8, "gpu_hours": 12}),
         Var.SANDBOX_TEMPLATES: json.dumps({"runner": {"1": "r1"}}),
         Var.E2B_API_URL: "https://api.sandbox.example.test",
-        Var.MCP_PORT: "8765",
+        Var.MCP_PORT: str(_free_port()),  # a fixed port collides with whatever else listens on this host
         "USER_DATA_PATH": str(work),
         "ANTHROPIC_API_KEY": "gateway-key",
         "ANTHROPIC_BASE_URL": "https://gateway.example.test",
@@ -550,14 +557,6 @@ def test_multibranch_is_still_refused_when_the_shared_part_of_the_spec_is_wrong(
 
 
 # -- the MCP service ---------------------------------------------------------------------------------------------
-def _free_port() -> int:
-    import socket
-
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
-
-
 def _status_call(port: int, token: str) -> dict:
     import http.client
 
@@ -598,8 +597,6 @@ def test_no_port_means_no_server(run, monkeypatch):
 
 
 def test_a_port_that_cannot_be_bound_refuses_the_run(run, monkeypatch):
-    import socket
-
     with socket.socket() as taken:
         taken.bind(("127.0.0.1", 0))
         taken.listen()
