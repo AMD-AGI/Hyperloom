@@ -7,8 +7,10 @@
 profiled, with the largest Amdahl ceilings, leaving out the ops a running branch works on (its focus, an op a direction
 of Arbor's map it holds names, or an op of the family of a claim it holds or of its last explore test, which is all a
 branch opened without a focus shows) and the spent ones: those the playbook's ``failed_op_limit`` branches opened on
-the integration head as it stands were focused on and stopped without a commit. A spent op opens again once the
-integration head moves, and an op of a direction of the map once its Arbor branch stops. With too little of EXPLORE
+the integration head as it stands were focused on and stopped without a commit, and those a stopped branch focused on
+them exhausted on that head, its latest EXHAUSTED record finding no ceiling above the bar or every idea tested or
+claimed there. The other reasons of a record wait on a tool or a capability, not on the op, and spend none. A spent op
+opens again once the integration head moves, and an op of a direction of the map once its Arbor branch stops. With too little of EXPLORE
 left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a new branch took to
 it, it says that no branch should open. Shares taken from a commit the head builds on are named as that commit's, beside
 the head's. The direction families' odds are the specialists' menu (:mod:`rsi.menu`), not the judge's: a family has
@@ -21,6 +23,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.exhausted import Exhausted, ExhaustedWhy, latest_exhausted
 from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
     BranchNode,
@@ -35,6 +38,8 @@ from hyperloom_multibranch.blackboard.rsi.playbook import H0, Playbook
 #: How many ops the open areas list at most.
 OPEN_OPS = 5
 _MINUTE = 60.0
+#: The reasons of an EXHAUSTED record that say the op itself is done on the record's head.
+_DONE = frozenset({ExhaustedWhy.NO_CEILING_ABOVE_BAR, ExhaustedWhy.ALL_TESTED_OR_CLAIMED})
 
 
 @dataclass(frozen=True)
@@ -53,12 +58,14 @@ class OpenOp:
 @dataclass(frozen=True)
 class FocusHistory:
     """The branches this session opened on one op as their focus: how many, how many of them stopped without a
-    commit, the commits they made and the best gain among those."""
+    commit, the commits they made and the best gain among those; ``exhausted`` is the record that spent the op when
+    one of them exhausted it on the integration head."""
 
     opened: int
     ended_without_commit: int
     commits: int = 0
     best_gain_pct: float | None = None
+    exhausted: Exhausted | None = None
 
     def render(self) -> str:
         made = "no commit" if self.best_gain_pct is None else f"commits {self.commits}, best {self.best_gain_pct:+.1f}%"
@@ -113,12 +120,20 @@ class OpenAreas:
         if self.covered:
             worked = "; ".join(f"{op}, worked on by {', '.join(branches)}" for op, branches in self.covered.items())
             lines.append(f"Left out: {worked}.")
-        if self.spent:
+        ended = {op: history for op, history in self.spent.items() if history.exhausted is None}
+        if ended:
             lines.append(
                 "Spent focus, left out until the integration head moves: the branches focused on it here ended "
                 "without a commit. Open one again only on an angle they did not take:"
             )
-            lines += [f"- {op}: {history.render()}" for op, history in self.spent.items()]
+            lines += [f"- {op}: {history.render()}" for op, history in ended.items()]
+        exhausted = [(op, history, history.exhausted) for op, history in self.spent.items() if history.exhausted]
+        if exhausted:
+            lines.append(
+                "Spent focus, exhausted here and left out until the integration head moves: a branch focused on it "
+                "gave up on this head for the reason shown. Open one again only when its 'worth again if' holds:"
+            )
+            lines += [f"- {op}: {record.summary()} ({history.render()})" for op, history, record in exhausted]
         if self.too_late:
             lines.append(
                 f"Time left: {self.minutes_left:.0f} min, short of the {self.first_commit_minutes:.0f} min a new "
@@ -179,17 +194,46 @@ def _focused(snapshot: BlackboardSnapshot) -> dict[str, list[BranchNode]]:
     return focused
 
 
-def _spent(snapshot: BlackboardSnapshot, focused: Sequence[BranchNode], head: str, limit: int) -> FocusHistory | None:
-    """The history of the ``focused`` branches of an op when ``limit`` of those opened on ``head`` stopped without a
-    commit, else ``None``."""
+@dataclass(frozen=True)
+class StoppedOnFocus:
+    """A stopped branch opened on a focus, with its latest EXHAUSTED record that is not refused."""
 
+    node: BranchNode
+    exhausted: Exhausted | None
+
+
+def stopped_on_focus(snapshot: BlackboardSnapshot, focus: str) -> tuple[StoppedOnFocus, ...]:
+    """The stopped branches whose ``OPEN`` named ``focus``, newest first, each with its latest EXHAUSTED record."""
+
+    stopped = [node for node in snapshot.lineage.branches if node.stop_reason is not None and node.focus == focus]
+    stopped.sort(key=lambda node: node.stopped_at or 0.0, reverse=True)
+    return tuple(
+        StoppedOnFocus(node, latest_exhausted(record.entry for record in snapshot.branch_logs.get(node.branch, ())))
+        for node in stopped
+    )
+
+
+def _spent(
+    snapshot: BlackboardSnapshot, op: str, focused: Sequence[BranchNode], head: str, limit: int
+) -> FocusHistory | None:
+    """The history of the ``focused`` branches of ``op`` when a stopped one exhausted it on ``head``, or ``limit`` of
+    those opened on ``head`` stopped without a commit, else ``None``."""
+
+    record = next(
+        (
+            item.exhausted
+            for item in stopped_on_focus(snapshot, op)
+            if item.exhausted is not None and item.exhausted.why in _DONE and item.exhausted.head == head
+        ),
+        None,
+    )
     committed = {commit.branch for commit in snapshot.committed}
     bare = [node for node in focused if node.stopped_at is not None and node.branch not in committed]
-    if sum(1 for node in bare if node.start_commit == head) < limit:
+    if record is None and sum(1 for node in bare if node.start_commit == head) < limit:
         return None
     branches = {node.branch for node in focused}
     gains = [commit.gain_pct for commit in snapshot.committed if commit.branch in branches]
-    return FocusHistory(len(focused), len(bare), len(gains), max(gains, default=None))
+    return FocusHistory(len(focused), len(bare), len(gains), max(gains, default=None), record)
 
 
 def open_areas(
@@ -219,7 +263,7 @@ def open_areas(
         running = {node.branch for node in nodes if node.stopped_at is None} | working.get(item.family or "", set())
         if covering := _covering(item.op, running, held):
             covered[item.op] = covering
-        elif (history := _spent(snapshot, nodes, head, numbers.failed_op_limit)) is not None:
+        elif (history := _spent(snapshot, item.op, nodes, head, numbers.failed_op_limit)) is not None:
             spent[item.op] = history
     left = max(0.0, seconds_left) / _MINUTE
     needed = numbers.last_open_minutes if numbers.last_open_minutes is not None else first_commit_minutes
@@ -227,4 +271,4 @@ def open_areas(
     return OpenAreas(profiled, open_ops, covered, spent, left, needed, head)
 
 
-__all__ = ["OPEN_OPS", "FocusHistory", "OpenAreas", "OpenOp", "open_areas"]
+__all__ = ["OPEN_OPS", "FocusHistory", "OpenAreas", "OpenOp", "StoppedOnFocus", "open_areas", "stopped_on_focus"]
