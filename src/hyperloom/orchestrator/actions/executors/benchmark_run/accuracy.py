@@ -23,7 +23,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import RUN_
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 from inference_suite.contracts import FailedStep
 from inference_suite.server_log import death_excerpt
-from .._accuracy_gate import parse_eval_results
+from .._accuracy_gate import ACCURACY_DEFINITION_DIGEST_KEY, EVAL_DEFINITION_DIGEST_KEY, parse_eval_results
 from .._failed_step import failed_step_error_class
 from .._grid_runner import _num_gpus_for_config, session_grid_bounds
 from .._ray_serving import ServingLease, maybe_serving_lease
@@ -577,6 +577,8 @@ class _BaselineAccuracyMixin:
         result["accuracy_task"] = salvaged.get("task", "gsm8k")
         result["accuracy_metric"] = salvaged.get("metric", "")
         result["accuracy_source"] = salvaged.get("source_file", "")
+        definition_digest = salvaged.get(EVAL_DEFINITION_DIGEST_KEY, "")
+        result[ACCURACY_DEFINITION_DIGEST_KEY] = definition_digest
         if expected_handoff:
             log.info(
                 "baseline_executor: cold-start guard — reading accuracy=%.4f from "
@@ -595,6 +597,7 @@ class _BaselineAccuracyMixin:
             result.setdefault("nonfatal_warnings", []).append("baseline_accuracy_salvaged_from_sibling_attempt")
         if shared_state is not None and accuracy_meets_floor(acc_val, 0.0):
             shared_state.baseline_accuracy = acc_val
+            shared_state.baseline_accuracy_definition_digest = definition_digest
         return acc_val
 
     def _salvage_sibling_baseline_accuracy(

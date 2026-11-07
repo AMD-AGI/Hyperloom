@@ -28,13 +28,19 @@ from hyperloom.common.gain_math import (
 from hyperloom_common.coerce import optional_positive_float
 from hyperloom_common.env import env_flag, is_truthy
 from hyperloom_common.io import safe_mtime
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom.common.perf_metric import is_agentx_mode
 from inference_suite.contracts import ProbeOutcome, ReportError, RunLayout
+from inference_suite.contracts.launch import Launch
 
 log = logging.getLogger(__name__)
 
 #: Where in its slot an AgentX accuracy round writes its run_dir, which the gate reads the slot's score from.
 ACCURACY_DIR = "accuracy"
+#: The eval-results key naming the definition digest the score was taken under, "" outside an inference_suite round.
+EVAL_DEFINITION_DIGEST_KEY = "definition_digest"
+#: The result key a round records the definition digest of its ``accuracy`` under.
+ACCURACY_DEFINITION_DIGEST_KEY = "accuracy_definition_digest"
 
 # Enablement admission, selected by the ``--enablement`` CLI flag.
 ENABLEMENT_MODE_OFF = "off"
@@ -497,11 +503,22 @@ def _lm_eval_accuracy_result(workspace: Path) -> dict[str, Any]:
                         "task": task_name,
                         "metric": key,
                         "source_file": str(latest),
+                        EVAL_DEFINITION_DIGEST_KEY: _eval_definition_digest(latest),
                         # lm-eval's own wall-clock for the run; it ran inside the round's post-ready interval.
                         "eval_runtime_sec": optional_positive_float(data.get("total_evaluation_time_seconds")),
                     }
 
     return {"accuracy": None, "error": f"no recognized metric in {latest}"}
+
+
+def _eval_definition_digest(results_file: Path) -> str:
+    """The definition digest of the inference_suite round whose eval wrote ``results_file``, "" outside one."""
+    for run_dir in results_file.parents:
+        layout = RunLayout(run_dir)
+        if layout.eval_dir in results_file.parents and layout.launch.is_file():
+            invocation = Launch.from_document(read_json_strict(layout.launch)).eval
+            return "" if invocation is None else invocation.definition_digest
+    return ""
 
 
 def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
@@ -672,6 +689,7 @@ def enablement_correctness(
 
 
 __all__ = [
+    "ACCURACY_DEFINITION_DIGEST_KEY",
     "ACCURACY_DIR",
     "BASELINE_ACCURACY_STOP_REASON",
     "BASELINE_EVAL_ACCURACY_FLOOR_KEY",
@@ -690,6 +708,7 @@ __all__ = [
     "EVAL_KIND_ACCURACY_UNAVAILABLE",
     "EVAL_KIND_GENERATION_PATHOLOGY",
     "EVAL_KIND_CONTEXT_TOO_SMALL",
+    "EVAL_DEFINITION_DIGEST_KEY",
     "EVAL_KIND_RUNTIME_FAILURE",
     "EVAL_PROBE_FILENAME",
     "_extract_eval_contract_fields",

@@ -15,6 +15,7 @@ import yaml
 
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from ...stop_attribution import StoppedByTheRun
+from .._accuracy_gate import ACCURACY_DEFINITION_DIGEST_KEY, EVAL_DEFINITION_DIGEST_KEY
 from .._grid_runner import stopped_by_the_run
 from .._server_argv import ConfigUnreadable, config_point
 from .._suite_config import SuiteRoute
@@ -222,6 +223,7 @@ def record_eval_score(result: dict[str, Any], eval_data: Mapping[str, Any]) -> b
     result["accuracy_task"] = eval_data.get("task", "gsm8k")
     result["accuracy_metric"] = eval_data.get("metric", "")
     result["accuracy_source"] = eval_data.get("source_file", "")
+    result[ACCURACY_DEFINITION_DIGEST_KEY] = eval_data.get(EVAL_DEFINITION_DIGEST_KEY, "")
     result["eval_runtime_sec"] = eval_data.get("eval_runtime_sec")
     return True
 
