@@ -17,10 +17,11 @@ from hyperloom_common.io import WriteOptions
         ({"tput": 12.5, "server_args": ["--tp", "8"]}, True),
         ({"server_args": ["--tp", "8", "--api-key", "x"]}, False),
         ({"server_args": ["--tp", "8", "--api-key=x"]}, False),
-        ({"env": {"HF_TOKEN": "x"}}, False),
+        ({"extra_envs": {"HF_TOKEN": "x"}}, False),
+        ({"authored": ["a"], "last_failure_signature": "x"}, True),
         ({"log": "ServerArgs(api_key='sk-abcdefgh')"}, False),
     ],
-    ids=["knobs", "flag", "flag-equals", "env-name", "value"],
+    ids=["knobs", "flag", "flag-equals", "env-name", "field-names-are-not-credentials", "value"],
 )
 def test_the_options_are_shared_unless_the_document_holds_a_credential(document, shared):
-    assert shared_options(document) == WriteOptions(make_parents=True, shared=shared)
+    assert shared_options(document) == WriteOptions(make_parents=True, shared=shared, share_parents=True)

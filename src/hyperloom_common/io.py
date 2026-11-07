@@ -88,8 +88,9 @@ class WriteOptions:
     one group write in turn, and the rename replaces the file whoever owned it; the three
     options above are then ignored, and the parents ``make_parents`` creates are ``2775``
     (:func:`~hyperloom_common.shared_storage.make_shared_dirs`). Never use it for a file that holds a credential or
-    that anything executes or sources. ``fsync`` and ``fsync_dir`` raise the
-    ``OSError`` of a flush that fails: a caller that asks for durability learns
+    that anything executes or sources. ``share_parents`` makes the parents ``make_parents`` creates ``2775`` while the
+    file keeps its own mode: a file only its owner may read still lives in a directory the group can write.
+    ``fsync`` and ``fsync_dir`` raise the ``OSError`` of a flush that fails: a caller that asks for durability learns
     when it did not get it.
     """
 
@@ -100,6 +101,7 @@ class WriteOptions:
     preserve_mode: bool = False
     group_read: bool = False
     shared: bool = False
+    share_parents: bool = False
 
 
 #: A crash-safe replace: parents created, the data and the rename flushed to disk, an existing file's mode kept.
@@ -151,7 +153,7 @@ def _owner_mode(tmp: Path, path: Path, options: WriteOptions) -> None:
 def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions = WriteOptions()) -> None:
     """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``)."""
     path = Path(path)
-    if options.make_parents and options.shared:
+    if options.make_parents and (options.shared or options.share_parents):
         make_shared_dirs(path.parent)
     elif options.make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -61,12 +61,10 @@ _FIRST_LEG = textwrap.dedent(
 def _as_this_account(code: str, *, umask: int, workspace: Path, **env: str) -> str:
     """Run ``code`` in a process of its own, as this account, under ``umask`` (this process's is never changed)."""
     preamble = f"import os, sys\nos.umask({umask:#o})\nsys.path.insert(0, {_SRC!r})\n"
+    # Nothing of the test process's environment: what an earlier test left there decides what a leg writes.
+    clean = {"PATH": os.environ["PATH"], "HOME": str(workspace.parent), "USER_DATA_PATH": str(workspace), **env}
     done = subprocess.run(
-        [sys.executable, "-I", "-c", preamble + code],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env={**os.environ, "USER_DATA_PATH": str(workspace), **env},
+        [sys.executable, "-I", "-c", preamble + code], capture_output=True, text=True, timeout=120, env=clean
     )
     assert done.returncode == 0, done.stderr
     return done.stdout
@@ -97,7 +95,7 @@ def test_a_first_leg_makes_every_directory_2775_and_every_file_664_whatever_the_
     workspace = _setgid_workspace(tmp_path / "claw")
     session = Path(_as_this_account(_FIRST_LEG, umask=umask, workspace=workspace).splitlines()[-1])
     directories, files = _entries(session)
-    assert set(directories.values()) == {0o2775}, directories
+    assert {name: oct(mode) for name, mode in directories.items() if mode != 0o2775} == {}
     assert files == {
         "manifest.json": 0o664,
         "state.json": 0o664,
@@ -153,11 +151,12 @@ def test_state_json_is_664_unless_the_operators_pins_hold_a_credential(tmp_path,
         state = SharedState()
         for name, value in {pins!r}.items():
             setattr(state, name, value)
-        state.save(Path({str(workspace)!r}))
+        state.save(Path({str(workspace / "a" / "b")!r}))
         """
     )
     _as_this_account(code, umask=0o077, workspace=workspace)
-    assert _mode(workspace / "state.json") == mode
+    assert _mode(workspace / "a" / "b" / "state.json") == mode
+    assert (_mode(workspace / "a"), _mode(workspace / "a" / "b")) == (0o2775, 0o2775), "a private file, shared parents"
 
 
 @pytest.mark.parametrize(

@@ -425,9 +425,16 @@ def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, obje
     }
 
 
-def holds_credentials(value: object) -> bool:
-    """Whether a JSON-shaped ``value`` carries a credential: a string :func:`redact_secret_values` would change or with a
-    ``--flag`` named like one, or a mapping entry with a value under a credential-shaped name."""
+def _is_env_field(key: object) -> bool:
+    """Whether a document field named ``key`` holds environment variables (``env``, ``extra_envs``, ``launch_env``)."""
+    name = str(key).lower()
+    return name in ("environment", "environ") or name.rstrip("s").endswith("env")
+
+
+def holds_credentials(value: object, *, in_env: bool = False) -> bool:
+    """Whether a JSON-shaped ``value`` carries a credential: a string :func:`redact_secret_values` would change or with
+    a ``--flag`` named like one, or a value under a credential-shaped name in an environment mapping (a field named
+    ``env``, ``extra_envs``, ...: any other key is a field of the document, and ``authored`` is not a secret)."""
     if isinstance(value, str):
         flags = (
             token.lstrip("-").partition("=")[0].replace("-", "_") for token in value.split() if token.startswith("-")
@@ -435,10 +442,12 @@ def holds_credentials(value: object) -> bool:
         return redact_secret_values(value) != value or any(_is_credential_env_name(flag) for flag in flags)
     if isinstance(value, Mapping):
         return any(
-            (_is_credential_env_name(key) and bool(item)) or holds_credentials(item) for key, item in value.items()
+            (in_env and _is_credential_env_name(key) and bool(item))
+            or holds_credentials(item, in_env=_is_env_field(key))
+            for key, item in value.items()
         )
     if isinstance(value, (list, tuple)):
-        return any(holds_credentials(item) for item in value)
+        return any(holds_credentials(item, in_env=in_env) for item in value)
     return False
 
 

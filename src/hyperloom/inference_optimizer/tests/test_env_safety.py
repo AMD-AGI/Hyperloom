@@ -463,9 +463,20 @@ def test_launch_provided_names_cover_the_rank_topology_and_the_schedulers():
         },
         {"operator_server_args": "--tp 8 --max-total-tokens=120000 --tokenizer-path /models/m --max-prefill-tokens 5"},
         {"rows": [{"tput": 1.5, "note": "-1", "key": ""}], "ok": True},
-        {"HF_TOKEN": ""},
+        {"env": {"HF_TOKEN": ""}},
+        {"authored_framework_levers": ["a"], "baseline_last_failure_signature": "x", "reauthor_attempts": 3},
+        {"HF_TOKEN": "a field of the document, not an environment"},
     ],
-    ids=["empty", "none", "env-knobs", "server-arg-knobs", "numbers", "credential-name-without-a-value"],
+    ids=[
+        "empty",
+        "none",
+        "env-knobs",
+        "server-arg-knobs",
+        "numbers",
+        "credential-name-without-a-value",
+        "field-names-that-contain-auth-or-signature",
+        "credential-name-outside-an-env-mapping",
+    ],
 )
 def test_holds_credentials_is_false_for_knobs_and_numbers(document):
     assert common_env_safety.holds_credentials(document) is False
@@ -474,8 +485,9 @@ def test_holds_credentials_is_false_for_knobs_and_numbers(document):
 @pytest.mark.parametrize(
     "document",
     [
-        {"HF_TOKEN": "hf_live_value_123"},
-        {"nested": [{"env": {"MY_SERVICE_API_KEY": "plaintext"}}]},
+        {"env": {"HF_TOKEN": "hf_live_value_123"}},
+        {"nested": [{"extra_envs": {"MY_SERVICE_API_KEY": "plaintext"}}]},
+        {"operator_extra_env": {"HF_TOKEN": "hf_live_value_123"}},
         {"operator_server_args": "--tp 8 --api-key not-a-pattern"},
         {"operator_server_args": "--tp 8 --admin-api-key=not-a-pattern"},
         {"operator_server_args": "--hf-token abc"},
@@ -483,7 +495,7 @@ def test_holds_credentials_is_false_for_knobs_and_numbers(document):
         ["--header", "sk-abcdefghijkl"],
         ("ghp_abcdef",),
     ],
-    ids=["name", "nested-name", "flag", "flag-equals", "flag-token", "bearer", "list-of-strings", "tuple"],
+    ids=["name", "nested-name", "pins", "flag", "flag-equals", "flag-token", "bearer", "list-of-strings", "tuple"],
 )
 def test_holds_credentials_is_true_for_a_credential_by_name_flag_or_value(document):
     assert common_env_safety.holds_credentials(document) is True

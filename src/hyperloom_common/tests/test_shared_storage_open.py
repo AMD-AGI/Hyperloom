@@ -140,3 +140,16 @@ def test_shared_atomic_write_replaces_a_file_another_account_made_unwritable(tmp
     atomic_write_json(path, {"leg": 2}, options=SHARED)
     assert (_mode(path), json.loads(path.read_text())) == (0o664, {"leg": 2})
     assert (tmp_path / "old-inode").read_text() == "{}", "replaced by rename, never written in place"
+
+
+def test_share_parents_makes_the_parents_2775_and_leaves_the_file_owner_only(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o2775)
+    path = shared / "a" / "b" / "secret.json"
+    _here(
+        "from pathlib import Path\nfrom hyperloom_common.io import WriteOptions, atomic_write_json\n"
+        f"atomic_write_json(Path({str(path)!r}), {{'k': 1}}, options=WriteOptions(make_parents=True, share_parents=True))\n",
+        umask=0o077,
+    )
+    assert (_mode(path.parent.parent), _mode(path.parent), _mode(path)) == (0o2775, 0o2775, 0o600)
