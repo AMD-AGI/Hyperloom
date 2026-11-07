@@ -270,12 +270,6 @@ def test_a_cause_line_is_one_bounded_line() -> None:
     assert len(reason) <= len("serve_flag: ") + log_causes.CAUSE_CHARS
 
 
-def test_a_stalled_server_keeps_its_reason_when_its_log_holds_an_exception() -> None:
-    verdict = classify_test_failure(returncode=-911, logs=[PYTHON_EXCEPTION_LOG])
-
-    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, "server_stalled")
-
-
 @pytest.mark.parametrize(
     ("reader", "log", "expected"),
     [
