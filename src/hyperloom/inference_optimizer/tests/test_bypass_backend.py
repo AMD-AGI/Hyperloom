@@ -16,7 +16,6 @@ import yaml
 
 from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.orchestrator.actions.executors import _server_lifecycle
-from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 from hyperloom.orchestrator.actions.executors import bypass_engine
 from hyperloom.orchestrator.actions.executors import bypass_report
 from hyperloom.orchestrator.actions.executors import bypass_runner
@@ -46,29 +45,6 @@ def test_bypass_client_partial_output_reaches_outer_watchdog(tmp_path, monkeypat
     assert cp.returncode == 0
     assert cp.stdout == "." * 30
     assert (tmp_path / "client_stdout.log").read_text(encoding="utf-8") == "." * 30
-
-
-def test_bypass_backend_selected(monkeypatch):
-    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "bypass")
-    backend = bb.resolve_backend()
-    assert backend.name == "bypass"
-    cmd = backend.build_command(
-        python_exe="PY",
-        config_path=Path("/cfg.yaml"),
-        output_dir=Path("/out"),
-    )
-    assert cmd == [
-        "PY",
-        "-m",
-        "hyperloom.orchestrator.actions.executors.bypass_runner",
-        "benchmark",
-        "--benchmark-config",
-        "/cfg.yaml",
-        "--output-dir",
-        "/out",
-        "--run-mode",
-        "local",
-    ]
 
 
 def test_run_eval_enabled_env_and_yaml(monkeypatch):
@@ -843,7 +819,7 @@ class _BootRound:
         monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
         monkeypatch.setattr(bypass_runner, "_ensure_eval_deps", lambda python_exe: None)
         monkeypatch.setattr(bypass_runner, "_run_subprocess", self._run_subprocess)
-        # The argv BypassBackend.build_command hands the runner.
+        # The argv a round hands the runner.
         self.argv = [
             "benchmark",
             "--benchmark-config",

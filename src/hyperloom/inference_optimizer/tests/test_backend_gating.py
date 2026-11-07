@@ -1,46 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Stage 3-gate tests: Magpie install in preflight is gated by benchmark backend."""
+"""Preflight's kernel tool install: the Ray CLI it validates and the serving slot its Ray head carries."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 from hyperloom.inference_optimizer.cli import preflight as preflight_mod
-
-
-def test_backend_resolution_controls_magpie_need(monkeypatch):
-    # Default + magpie -> Magpie needed; bypass -> not needed.
-    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
-    assert bb.resolve_backend_name() == "magpie"
-    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "bypass")
-    assert bb.resolve_backend_name() == "bypass"
-    # Unknown typos normalize to magpie so preflight still installs Magpie.
-    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "magpiee")
-    assert bb.resolve_backend_name() == "magpie"
-
-
-def test_preflight_skips_magpie_install_under_bypass(monkeypatch):
-    """A bypass-only host has no Magpie; preflight must neither import nor install it."""
-
-    def _no_subprocess(*_args, **_kwargs):
-        raise AssertionError("Magpie must not be probed or installed under bypass")
-
-    recorded = []
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
-    monkeypatch.setattr(preflight_mod.subprocess, "run", _no_subprocess)
-    monkeypatch.setattr(preflight_mod, "_record_install_step", lambda _event, step, **_kw: recorded.append(step))
-
-    preflight_mod._ensure_magpie(
-        None, magpie_python="python3", benchmark_backend="bypass", magpie_active=False, pip_extra=[]
-    )
-
-    assert [(step.step_id, step.status, step.skip_reason) for step in recorded] == [
-        ("ensure_magpie", "skipped", "benchmark_backend_not_magpie"),
-    ]
-    assert "MAGPIE_PATH" not in preflight_mod.os.environ
 
 
 def test_kernel_install_validates_ray_cli_and_serving_slot():

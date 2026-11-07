@@ -170,7 +170,6 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         shared_state: Any | None = None,
     ):
         """Initialize the executor with launch defaults."""
-        # Backend-aware interpreter: bypass uses a plain python3, magpie uses the Magpie-importable venv.
         from .benchmark_backend import resolve_benchmark_interpreter
 
         self.magpie_python = magpie_python or resolve_benchmark_interpreter()
