@@ -58,15 +58,13 @@ from hyperloom.contracts.recipe import REMOVED, LaunchConfig
 from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
 
 #: The launch flags that set the served weights' precision, by the name a change is reported under, each with its
-#: spellings: vLLM's and SGLang's quantization method, its config and its parameter file, ATOM's online quantization,
-#: the weights' dtype (``--dtype`` in both frameworks), the checkpoint (vLLM's ``--model``, SGLang's ``--model-path``)
-#: and its revision, since another checkpoint may hold another precision, the files that can set any of them (none is
-#: read here: vLLM's and SGLang's ``--config`` of flags, and the model config vLLM's ``--hf-config-path`` and SGLang's
-#: ``--decrypted-config-file`` read instead of the checkpoint's), ModelOpt's and torchao's quantization, and SGLang's
-#: quantize-and-serve, ModelOpt's checkpoint paths (a restore takes the quantizer state from its file, and any of them
-#: sends SGLang's online ``modelopt_fp4`` to ModelOpt's calibrating loader), and the load format and its loader's extra
-#: config (:data:`SPEED_ONLY_LOAD_FORMATS`). A launch word counts as one of these spellings when the frameworks'
-#: parsers read it as that spelling: see :func:`_flag` and :func:`_names`.
+#: spellings: the quantization method, its config and parameter file, ATOM's online quantization, the weights' dtype,
+#: the checkpoint (vLLM's ``--model``, SGLang's ``--model-path``) and its revision, the files that can set any of them
+#: (none is read here: ``--config`` of flags, vLLM's ``--hf-config-path``, SGLang's ``--decrypted-config-file``),
+#: ModelOpt's and torchao's quantization, SGLang's quantize-and-serve, ModelOpt's checkpoint paths (a restore takes the
+#: quantizer state from its file; any of them sends SGLang's ``modelopt_fp4`` to ModelOpt's calibrating loader), and
+#: the load format and its loader's extra config (:data:`SPEED_ONLY_LOAD_FORMATS`). A launch word counts as one of these
+#: spellings when the frameworks' parsers read it as that spelling: see :func:`_flag` and :func:`_names`.
 WEIGHT_PRECISION_FLAGS: Mapping[str, tuple[str, ...]] = {
     "--quantization": ("--quantization", "-q"),
     "--quantization-config": ("--quantization-config",),
@@ -93,15 +91,15 @@ WEIGHT_PRECISION_FLAGS: Mapping[str, tuple[str, ...]] = {
 #: tensors as stored and differs only in the files it picks (``*.safetensors`` else ``*.bin``, ``*.safetensors``,
 #: ``*.pt``, ``*.bin`` through numpy). Any other value may quantize what it loads (SGLang's ``flash_rl`` serves a BF16
 #: checkpoint in FP8) or load no checkpoint (``dummy``), so a change to, from or between them is a change;
-#: ``runai_streamer`` among them, since SGLang does not route it to ModelOpt's loader, which quantizes the weights. The
-#: default loaders refuse an extra config with keys other than their threading ones, so where both launches load in one
-#: of these formats a change of ``--model-loader-extra-config`` is none; under any other format a key can set what is
-#: quantized (SGLang's ``bitsandbytes`` reads ``qlora_adapter_name_or_path``), and a change of it is a change.
+#: ``runai_streamer`` among them, since SGLang does not route it to ModelOpt's loader, which quantizes the weights.
 SPEED_ONLY_LOAD_FORMATS = frozenset({"auto", "pt", "safetensors", "npcache", "fastsafetensors"})
 
 _LOAD_FORMAT = "--load-format"
 
-#: The settings whose change is none when both launches load in :data:`SPEED_ONLY_LOAD_FORMATS`.
+#: The settings whose change is none when both launches load in :data:`SPEED_ONLY_LOAD_FORMATS`. Their default loaders
+#: refuse an extra config with keys other than their threading ones, so there a change of the extra config is none;
+#: under any other format a key can set what is quantized (SGLang's ``bitsandbytes`` reads
+#: ``qlora_adapter_name_or_path``), and a change of it is a change.
 _SPEED_ONLY_WHERE_LOADED_SO = frozenset({_LOAD_FORMAT, "--model-loader-extra-config"})
 
 #: The keys of a model's config that set its weights' dtype or quantization: vLLM and SGLang read
