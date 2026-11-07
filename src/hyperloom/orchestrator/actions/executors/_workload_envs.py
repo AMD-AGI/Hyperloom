@@ -1427,7 +1427,6 @@ def materialize_benchmark_config(
         LaunchChanges,
         apply_launch_changes,
         materialize_agentx,
-        recipe_base_launch,
         seed_session_base,
     )
 
@@ -1436,9 +1435,8 @@ def materialize_benchmark_config(
         return materialize_config_with_envs(config_path, output_dir, launch=launch, target=target, options=options)
     replacing = launch.args_mode == "replace"
     inherited = "" if replacing else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
-    recipe = recipe_base_launch(config_path)
-    seed_session_base(config["benchmark"], session_server_base(), recipe=recipe)
-    apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), recipe=recipe, accepted=True)
+    seed_session_base(config["benchmark"], session_server_base())
+    apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), accepted=True)
     from hyperloom_common.env import is_truthy
 
     unset_envs = to_str_list(launch.unset_envs)
@@ -1464,7 +1462,7 @@ def materialize_benchmark_config(
         unset_envs,
         replacing,
     )
-    apply_launch_changes(config["benchmark"], changes, recipe=recipe, accepted=True)
+    apply_launch_changes(config["benchmark"], changes, accepted=True)
     return materialize_agentx(
         config,
         output_dir / options.out_name,

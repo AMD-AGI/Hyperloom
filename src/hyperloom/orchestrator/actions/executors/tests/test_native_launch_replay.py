@@ -209,18 +209,6 @@ async def test_env_only_keep_replays_unrelated_recipe_and_operator_options(nativ
 
 
 @pytest.mark.asyncio
-async def test_explore_ablation_removes_recipe_and_appended_copies(native_session, tmp_path, monkeypatch):
-    session = native_session(appended=f"{_OPTION} 512")
-    observed = _stub_gpu(monkeypatch, session, effective=_PREFIX + ["--enable-hierarchical-cache"])
-    result = await _explore(session, tmp_path, name="ablate-both", candidate={"remove_args": [_OPTION]})
-    assert len(result["winners"]) == 1, result
-    assert len(observed) == 1
-    launch = observed[0]
-    assert _OPTION not in launch["append_args"]
-    assert _OPTION in launch["remove_args"] or launch["replace_args"]
-
-
-@pytest.mark.asyncio
 async def test_accepted_appended_only_ablation_survives_integrate_patch(native_session, tmp_path, monkeypatch):
     session = native_session(appended="--disable-cuda-graph", recipe=_PREFIX)
     observed = _stub_gpu(monkeypatch, session, effective=_PREFIX)

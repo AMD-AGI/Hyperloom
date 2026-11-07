@@ -87,7 +87,7 @@ def _agentx_point(base: BaseLaunch, layer: LaunchChanges = _SLOT_LAYER) -> dict:
         "agentx": {"enabled": True},
         "envs": {"TP": "1", "CONC": "8", "MODEL_PATH": _MODEL_PATH, "RUN_EVAL": "false"},
     }
-    seed_session_base(bench, server_base, recipe=SimpleNamespace(argv=(), env={}))
+    seed_session_base(bench, server_base)
     apply_launch_changes(bench, layer, accepted=True)
     return {"benchmark": bench}
 

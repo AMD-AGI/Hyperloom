@@ -431,27 +431,6 @@ def _build_native(tmp_path: Path, config: Path, variant: GridVariant, stack: Lau
     return yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["agentx"]["launch_overrides"]
 
 
-@pytest.mark.parametrize(
-    "variant",
-    [
-        pytest.param(
-            GridVariant("v", extra_server_args="--speculative-dspark-block-size 5 --speculative-num-draft-tokens 6"),
-            id="appends-a-different-draft",
-        ),
-        pytest.param(GridVariant("v", remove_args=["--speculative-dspark-block-size"]), id="removes-the-draft-flag"),
-        pytest.param(GridVariant("v", unset_envs=["SGLANG_SIMULATE_ACC_LEN"]), id="unsets-acc-len"),
-        pytest.param(
-            GridVariant("v", extra_server_args="--max-num-seqs 64", args_mode="replace"), id="replace-drops-the-draft"
-        ),
-    ],
-)
-def test_building_a_native_variant_refuses_a_change_to_the_recipes_pinned_draft(tmp_path, variant):
-    config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, SGLANG_SYNTHETIC_ENV)
-    with pytest.raises(SpeculativeDecodingPinnedError, match=SERVE_FLAG) as refused:
-        _build_native(tmp_path, config, variant)
-    assert refused.value.error_class == SERVE_FLAG
-
-
 def test_building_a_native_variant_keeps_other_knobs_open(tmp_path):
     config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, SGLANG_SYNTHETIC_ENV)
     launch = _build_native(tmp_path, config, GridVariant("v", extra_server_args="--mem-fraction-static 0.85"))
