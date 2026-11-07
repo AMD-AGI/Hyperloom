@@ -17,7 +17,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
 from hyperloom.common.agent_runtime_requirements import agent_runtime_requirements
 from hyperloom.common.agent_cli import resolve_claude_executable, resolve_codex_executable
@@ -30,7 +30,6 @@ from hyperloom_common.llm.llm_config import (
     with_synthesized_anthropic_keys,
 )
 from hyperloom_common.env import forge_explicitly_enabled
-from hyperloom_common.fs_utils import is_network_fs
 from hyperloom_common.llm.llm_headers import expand_env_refs
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.platform_probe import probe_cpu_platform
@@ -44,7 +43,7 @@ from hyperloom_common.timeutil import now_iso
 from hyperloom.common.visible_devices import hip_mask_within_rocr
 from hyperloom.common.model_paths import resolve_serving_model_path
 
-from .. import framework_registry, inferencex_checkout
+from .. import framework_registry
 from .bootstrap import parse_operator_extra_env
 from .device_init import _rocm_smi_visible_gpus
 from .framework_probe import (
@@ -79,16 +78,12 @@ from .credentials import (
 from ..session.paths import (
     DEFAULT_SESSION_DIR,
     ENV_USER_DATA_PATH,
-    MAGPIE_DEFAULT_REF,
     session_dir as _session_dir_resolve,
     workspace_root as _workspace_root_resolve,
 )
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 _ASSETS = Path(__file__).resolve().parent.parent / "assets"
-
-_CLONE_INFERENCEX_STEP = "clone_inferencex"
-_ENSURE_MAGPIE_STEP = "ensure_magpie"
 
 
 #: What a custom header may reference. Every child inherits the expanded header, so expanding any other name would
@@ -709,7 +704,7 @@ def _check_agent_cli() -> None:
 
 def _emit_preflight_diagnostics(
     *,
-    magpie_python: str,
+    benchmark_python: str,
     anthropic_base_url: str,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
@@ -734,8 +729,7 @@ def _emit_preflight_diagnostics(
         f"{os.environ.get(ENV_USER_DATA_PATH, '<unset>')}, "
         f"default={DEFAULT_SESSION_DIR})"
     )
-    print(f"  magpie_python       = {magpie_python}")
-    print(f"  INFERENCEX_PATH     = {os.environ.get('INFERENCEX_PATH', '<unset>')}")
+    print(f"  benchmark_python    = {benchmark_python}")
     print(f"  aiter jit cache     = {cache_line}")
     print(f"  benchmark_timeout   = {hard_timeout}s")
     print(f"  benchmark_silence   = {silence_timeout}s")
@@ -757,40 +751,13 @@ def _emit_preflight_diagnostics(
         "detail": {
             "asset_root": str(asset_root()),
             "session_dir": str(_session_dir_resolve()),
-            "magpie_python": magpie_python,
-            "inferencex_path": os.environ.get("INFERENCEX_PATH") or None,
+            "benchmark_python": benchmark_python,
             "aiter_jit_cache": dict(probe),
             "benchmark_timeout_sec": hard_timeout,
             "benchmark_silence_timeout_sec": silence_timeout,
             "anthropic_base_url": anthropic_base_url,
         },
     }
-
-
-def _report_inferencex_patch_anchors(inferencex_path: str) -> bool:
-    """Report whether Hyperloom's InferenceX patches can still find their place."""
-    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
-        verify_patch_anchors,
-    )
-
-    statuses = verify_patch_anchors(inferencex_path or None)
-    broken = [status for status in statuses if not status.ok]
-    if not broken:
-        return True
-    print(
-        f"Preflight: WARNING — {len(broken)} of {len(statuses)} InferenceX patch "
-        "anchors no longer match; those patches will not be applied:"
-    )
-    for status in broken:
-        print(f"  {status.describe()}")
-    print(
-        "  Hyperloom patches InferenceX by matching exact upstream text, so this "
-        "means the checkout drifted from the pinned revision. Re-anchor the "
-        "patches in _inferencex_patcher.py or pin INFERENCEX_REF back to a "
-        "revision they match. An accuracy-gate run aborts at launch on the ones "
-        "that would void its score."
-    )
-    return False
 
 
 def _begin_install_event(args: argparse.Namespace | None) -> dict[str, Any]:
@@ -914,11 +881,9 @@ def _resolved_provider_mode(resolved_urls: tuple[str, str]) -> str:
 
 @dataclass(frozen=True)
 class PreflightRuntime:
-    """The benchmark runtime preflight settled on: interpreters, InferenceX checkout and LLM endpoints."""
+    """The benchmark runtime preflight settled on: the serving interpreter and the LLM endpoints."""
 
     benchmark_python: str
-    magpie_python: str
-    inferencex_path: str
     resolved_urls: tuple[str, str]
 
 
@@ -928,9 +893,6 @@ def _finish_install_event(event: dict[str, Any], *, args: argparse.Namespace, ru
     tracelens_required = _tracelens_required_at_preflight(no_kernel, enable_roofline)
     event["ext"]["runtime_snapshot"] = {
         "benchmark_interpreter": runtime.benchmark_python,
-        "magpie_python": runtime.magpie_python,
-        "inferencex_path": runtime.inferencex_path,
-        "magpie_path": os.environ.get("MAGPIE_PATH") or None,
         "tracelens_required": tracelens_required,
         "provider_mode": _resolved_provider_mode(runtime.resolved_urls),
     }
@@ -1020,166 +982,6 @@ def _export_gateway_alias(gateway_url: str) -> None:
             prev = os.environ.get(alias, "")
             os.environ[alias] = gateway_url
             print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} (direct to gateway)")
-
-
-def _ensure_magpie(
-    install_event: Any,
-    *,
-    magpie_python: str,
-    framework: str,
-    pip_extra: list[str],
-) -> None:
-    """Install Magpie and resolve MAGPIE_PATH, unless ``framework`` is scriptable: its rounds never run on Magpie."""
-    if framework_registry.is_scriptable(framework):
-        _record_install_step(
-            install_event,
-            InstallStep(_ENSURE_MAGPIE_STEP, "install", "skipped", skip_reason="scriptable_framework"),
-            target="magpie-eval",
-            interpreter=magpie_python,
-        )
-        return
-    magpie_installed = False
-    magpie_spec: str | None = None
-    try:
-        magpie_ref = os.environ.get("MAGPIE_REF") or MAGPIE_DEFAULT_REF
-        checker = _ASSETS / "check_magpie.py"
-        check = subprocess.run([magpie_python, str(checker), magpie_ref], capture_output=True)
-        if check.returncode != 0 and not os.environ.get("MAGPIE_PATH"):
-            magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
-            magpie_spec = os.environ.get("MAGPIE_PACKAGE_SPEC", f"magpie-eval @ git+{magpie_repo}@{magpie_ref}")
-            print(f"Preflight: Magpie revision is missing; installing {magpie_spec} ...")
-            subprocess.run(
-                [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
-                check=True,
-            )
-            magpie_installed = True
-        if not os.environ.get("MAGPIE_PATH", "").strip():
-            magpie_root = subprocess.run(
-                [
-                    magpie_python,
-                    "-c",
-                    "from pathlib import Path; import Magpie; print(Path(Magpie.__file__).resolve().parent.parent)",
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
-            if magpie_root:
-                os.environ["MAGPIE_PATH"] = magpie_root
-                print(f"Preflight: MAGPIE_PATH resolved from installed package: {magpie_root}")
-    except BaseException as exc:
-        _fail_install_step(install_event, step_id=_ENSURE_MAGPIE_STEP, category="install", exc=exc)
-        raise
-    _record_install_step(
-        install_event,
-        InstallStep(
-            _ENSURE_MAGPIE_STEP,
-            "install",
-            "applied" if magpie_installed else "already_present",
-            message=f"installed {magpie_spec}" if magpie_installed else None,
-        ),
-        target="magpie-eval",
-        interpreter=magpie_python,
-    )
-
-
-def _fail_inferencex(install_event: Any, message: str) -> NoReturn:
-    """Record a fatal InferenceX problem and stop: baseline cannot run without a usable checkout."""
-    print(message, file=sys.stderr)
-    exc = SystemExit(2)
-    _fail_install_step(install_event, step_id=_CLONE_INFERENCEX_STEP, category="install", exc=exc)
-    raise exc
-
-
-def _ensure_inferencex(install_event: Any) -> str:
-    """The InferenceX checkout this run uses, cloning one when no writable checkout at the pin exists.
-
-    Required for the GSM8K accuracy eval; lm-eval deps auto-install at runtime
-    via ``benchmark_lib.sh``.
-    """
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip() or inferencex_checkout.detect()
-    inferencex_cloned = False
-    if not (inferencex_path and inferencex_checkout.checkout_ok(inferencex_path)):
-        from ..session.paths import deps_cache_root as _open_source_default
-
-        ref = os.environ.get("INFERENCEX_REF") or inferencex_checkout.DEFAULT_REF
-        # Per-revision dir: a shared name is what allowed a pre-bump clone to be reused forever.
-        dest = _open_source_default() / inferencex_checkout.destination_name(ref)
-        print(f"Preflight: no InferenceX checkout at {ref[:12]}; cloning into {dest} ...")
-        inferencex_path = inferencex_checkout.clone(dest)
-        inferencex_cloned = bool(inferencex_path)
-        if not (inferencex_path and inferencex_checkout.checkout_ok(inferencex_path)):
-            _fail_inferencex(
-                install_event,
-                "Preflight: ERROR — InferenceX checkout missing and clone "
-                "failed. baseline cannot run without it. Set INFERENCEX_PATH "
-                "to a writable checkout.",
-            )
-    # Magpie stages benchmark scripts into this tree, so a non-writable one fails the run before server boot.
-    if not os.access(inferencex_path, os.W_OK):
-        _fail_inferencex(
-            install_event,
-            f"Preflight: ERROR — INFERENCEX_PATH={inferencex_path} is not "
-            f"writable. Magpie stages benchmark scripts into it and will "
-            f"fail with [Errno 30] Read-only file system. Point "
-            f"INFERENCEX_PATH at a writable checkout (unset it to let "
-            f"Hyperloom clone a fresh one).",
-        )
-    # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH must not survive into the child env.
-    os.environ["INFERENCEX_PATH"] = inferencex_path
-    # A round cd's into this checkout and bash reads the benchmark script off it for the whole run, so a revocable
-    # mount that flaps fails the round on an exit code the measurement had nothing to do with. Recording it here is
-    # what tells that apart from a variant that genuinely cannot serve.
-    inferencex_network_fs = is_network_fs(inferencex_path)
-    if inferencex_network_fs:
-        print(
-            f"Preflight: WARNING — INFERENCEX_PATH={inferencex_path} is on a network filesystem. A mount flap "
-            f"mid-round exits the benchmark non-zero after it has already run. A round that served its whole "
-            f"protocol is kept, but one the flap cut short is recorded as "
-            f"magpie_nonzero_after_valid_measurement. Point INFERENCEX_PATH at local disk, or unset it and put "
-            f"HYPERLOOM_CACHE_DIR on local disk.",
-            file=sys.stderr,
-        )
-    _record_install_step(
-        install_event,
-        InstallStep(_CLONE_INFERENCEX_STEP, "install", "applied" if inferencex_cloned else "already_present"),
-        target="InferenceX",
-        version_after=inferencex_checkout.head_sha(inferencex_path) or None,
-        detail={
-            "ref": os.environ.get("INFERENCEX_REF") or inferencex_checkout.DEFAULT_REF,
-            "dest": inferencex_path,
-            "writable": os.access(inferencex_path, os.W_OK),
-            "network_fs": inferencex_network_fs,
-            "exit_code": 0,
-        },
-    )
-    return inferencex_path
-
-
-def _check_inferencex_patch_anchors(install_event: Any, inferencex_path: str) -> None:
-    """Record whether Hyperloom's InferenceX patches still find their anchors in the checkout."""
-    _run_install_step(
-        install_event,
-        step_id="check_inferencex_patch_anchors",
-        category="check",
-        action=lambda: {"status": "applied" if _report_inferencex_patch_anchors(inferencex_path) else "warned"},
-    )
-
-
-def _prepare_inferencex(install_event: Any) -> str:
-    """Prepare the synthetic runtime; native AgentX's checkout belongs to Magpie."""
-    from hyperloom.common.agentx_workload import is_mlperf_backend
-    from hyperloom.common.perf_metric import agentx_enabled
-
-    if agentx_enabled() and not is_mlperf_backend():
-        _record_install_step(
-            install_event,
-            InstallStep(_CLONE_INFERENCEX_STEP, "install", "skipped", skip_reason="magpie_manages_native_agentx"),
-        )
-        return ""
-    inferencex_path = _ensure_inferencex(install_event)
-    _check_inferencex_patch_anchors(install_event, inferencex_path)
-    return inferencex_path
 
 
 def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespace) -> None:
@@ -1330,7 +1132,7 @@ def _check_host_runtime(install_event: dict[str, Any]) -> None:
 
 
 def _run_closing_preflight_steps(
-    install_event: dict[str, Any], args: argparse.Namespace, *, magpie_python: str, resolved_urls: tuple[str, str]
+    install_event: dict[str, Any], args: argparse.Namespace, *, benchmark_python: str, resolved_urls: tuple[str, str]
 ) -> None:
     """Run the IR-3 PR Monitor probe and emit the preflight diagnostics snapshot."""
     # --- IR-3: PR Monitor reachability probe (soft degrade) ---
@@ -1347,7 +1149,7 @@ def _run_closing_preflight_steps(
         step_id="diagnostics_snapshot",
         category="diagnostic",
         action=lambda: _emit_preflight_diagnostics(
-            magpie_python=magpie_python,
+            benchmark_python=benchmark_python,
             anthropic_base_url=resolved_urls[0],
             args=args,
         ),
@@ -1406,27 +1208,13 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
         action=lambda: _check_serving_framework(args, benchmark_python),
     )
 
-    magpie_python = benchmark_python
-    _ensure_magpie(
-        install_event,
-        magpie_python=magpie_python,
-        framework=_selected_framework(args),
-        pip_extra=pip_extra,
-    )
-
-    inferencex_path = _prepare_inferencex(install_event)
-
     _check_agent_cli()
 
     _check_kernel_and_tracelens_clis(install_event, args)
 
-    _run_closing_preflight_steps(install_event, args, magpie_python=magpie_python, resolved_urls=resolved_urls)
+    _run_closing_preflight_steps(install_event, args, benchmark_python=benchmark_python, resolved_urls=resolved_urls)
 
-    _finish_install_event(
-        install_event,
-        args=args,
-        runtime=PreflightRuntime(benchmark_python, magpie_python, inferencex_path, resolved_urls),
-    )
+    _finish_install_event(install_event, args=args, runtime=PreflightRuntime(benchmark_python, resolved_urls))
 
     return resolved_urls
 
