@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
+from hyperloom.common.launch_credentials import credentials_in_the_clear
 from hyperloom.contracts.measurement import Purpose
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
@@ -463,7 +464,7 @@ def _long_context(value: Any, path: str) -> LongContextPlan | None:
 
 
 def _base_launch(value: Any, path: str) -> BaseLaunch:
-    """The frozen base a v2 sheet carries, its digest recomputed from its content."""
+    """The frozen base a v2 sheet carries, its digest recomputed from its content and no credential in the clear."""
     if value is None:
         raise DocumentError(
             f"{path}: a {SPEC_SCHEMA} sheet carries the session's frozen {BASE_LAUNCH_SCHEMA} base, and this one has none"
@@ -472,9 +473,13 @@ def _base_launch(value: Any, path: str) -> BaseLaunch:
     if size > MAX_BASE_LAUNCH_BYTES:
         raise DocumentError(f"{path}: base_launch too large ({size} bytes > {MAX_BASE_LAUNCH_BYTES})")
     try:
-        return BaseLaunch.from_document(value)
+        base = BaseLaunch.from_document(value)
     except ValueError as exc:
         raise DocumentError(f"{path}: {exc}") from None
+    found = credentials_in_the_clear(base)
+    if found:
+        raise DocumentError(f"{path}: the base holds an unredacted credential in {', '.join(found)}")
+    return base
 
 
 @dataclass(frozen=True)

@@ -117,6 +117,7 @@ def verify_args(bundle: Bundle) -> BundleExpectation:
         spec_fingerprint=SPEC_FINGERPRINT,
         spec_sha256=SPEC_SHA256,
         sandbox_id=SANDBOX_ID,
+        result_schema=RESULT_SCHEMA,
     )
 
 

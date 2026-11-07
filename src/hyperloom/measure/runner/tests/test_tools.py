@@ -166,3 +166,14 @@ def test_a_staging_this_interpreter_cannot_identify_is_a_tool_error(tmp_path, mo
 
     with pytest.raises(ToolError, match="cannot be identified: lm_eval None"):
         _ensure(tmp_path)
+
+
+def test_a_published_staging_is_refused_when_this_interpreters_lm_eval_is_not_at_its_pin(tmp_path, monkeypatch):
+    stage_into(tmp_path / "runner-cache")
+    info = tmp_path / "site" / "lm_eval-0.4.1.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text("Metadata-Version: 2.1\nName: lm_eval\nVersion: 0.4.1\n")
+    monkeypatch.syspath_prepend(str(tmp_path / "site"))
+
+    with pytest.raises(ToolError, match=r"cannot be identified: .* lm_eval 0\.4\.1, not lm_eval\[api\]==0\.4\.13"):
+        _ensure(tmp_path)

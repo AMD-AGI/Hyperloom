@@ -352,3 +352,13 @@ def test_nonpositive_topology_is_rejected_before_startup(flag, value, error):
     with pytest.raises(error):
         args = _build_parser().parse_args(["optimize", flag, value])
         configure_benchmark(args)
+
+
+def test_a_gpu_type_from_a_multibranch_dev_caller_is_accepted_and_writes_the_same_yaml(tmp_path):
+    workload = dict(framework="sglang", model="Qwen/Qwen3-8B", precision="fp8", tp=2, ep=1, conc=8)
+    with_board, without = tmp_path / "board.yaml", tmp_path / "plain.yaml"
+
+    write_agentx_benchmark(with_board, AgentXWorkload(**workload, gpu_type="mi355x"))
+    write_agentx_benchmark(without, AgentXWorkload(**workload))
+
+    assert with_board.read_bytes() == without.read_bytes()

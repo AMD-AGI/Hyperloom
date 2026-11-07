@@ -239,6 +239,7 @@ def test_a_rejected_sheet_is_not_a_candidate_failure(rig, tmp_path) -> None:
     assert outcome.returncode == HOSTED_SPEC_REJECTED_RC
     assert outcome.failure_class is None
     assert outcome.stderr.startswith("spec_rejected")
+    assert outcome.stderr.endswith("(the sheet is hyperloom.measurement-spec/v2)"), "an older runner names only its own"
     assert (call.output_dir / "hosted-server.log").read_bytes() == b"partial log\n", "the runner's log is kept"
 
 
@@ -666,9 +667,10 @@ def test_the_sheet_carries_the_pods_rccl_channel_count_but_not_its_interface_nam
     assert dict(_spec_of(r, "req-1").platform_env) == {"NCCL_MIN_NCHANNELS": "112"}
 
 
-def test_an_env_override_the_old_flow_refuses_refuses_the_sheet(rig, tmp_path) -> None:
+@pytest.mark.parametrize("name", ["HF_TOKEN", "GITHUBTOKEN", "HF_AUTH"])
+def test_an_env_override_the_old_flow_refuses_refuses_the_sheet(rig, tmp_path, name) -> None:
     r = rig()
-    outcome = r.backend.run_test(make_call(tmp_path, env_overrides={"HF_TOKEN": "x"}))
+    outcome = r.backend.run_test(make_call(tmp_path, env_overrides={name: "x"}))
     assert outcome.returncode == HOSTED_SPEC_REJECTED_RC and outcome.failure_reason == "env_override_refused"
     assert r.backend.journal.records() == []
 

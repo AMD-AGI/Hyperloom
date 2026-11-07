@@ -30,8 +30,7 @@ from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_variant_env_key,
-    is_secret_shaped_env_name,
-    redact_secret_values,
+    is_credential_name,
 )
 from hyperloom.measure.compile import BlobError
 from hyperloom.measure.docs import DocumentError, canonical_json
@@ -100,6 +99,10 @@ class SpecContext:
     platform_env: Mapping[str, str] | None = None
     process_environ: Mapping[str, str] | None = None
     blob_root: str = ""
+    # Ignored: multibranch-dev's scheduling.local_peers still passes the tool commits a sheet named before the staging
+    # replaced them; removed once that caller moves.
+    magpie_commit: str | None = None
+    inferencex_commit: str | None = None
 
 
 # -- reading the call ------------------------------------------------------------------------------------------------
@@ -139,7 +142,7 @@ def _process_env(call: TestCall, ctx: SpecContext) -> dict[str, str]:
     source = os.environ if ctx.process_environ is None else ctx.process_environ
     env = {name: source[name] for name in PROCESS_ENV_WHITELIST if name in source}
     allowed, dropped = filter_untrusted_env_mapping(call.env_overrides, allow_predicate=is_allowed_variant_env_key)
-    secret = sorted(name for name in allowed if is_secret_shaped_env_name(name))
+    secret = sorted(name for name in allowed if is_credential_name(name))
     if dropped or secret:
         raise SpecRefused("env_override_refused", f"env_overrides may not set {sorted(dropped) + secret}")
     env.update(allowed)
@@ -372,27 +375,6 @@ def _tools_section(call: TestCall) -> dict[str, Any]:
     }
 
 
-def _unredacted_credentials(base: BaseLaunch) -> list[str]:
-    """Where ``base`` holds a credential in the clear: an env value under a secret-shaped name, or any env value or
-    arg that looks like one. A sheet leaves the application, so only a :class:`Redacted` value may stand for one."""
-    layers = [("env", base.env, base.args), ("client env", base.client.env, base.client.args)]
-    if base.golden_al is not None:
-        layers.append(("golden env", base.golden_al.env, base.golden_al.args))
-    found = []
-    for what, env, args in layers:
-        found += [
-            f"{what} {name}"
-            for name, value in env.items()
-            if isinstance(value, str) and (is_secret_shaped_env_name(name) or redact_secret_values(value) != value)
-        ]
-        found += [
-            f"{what.replace('env', 'arg')} {index}"
-            for index, arg in enumerate(args)
-            if redact_secret_values(arg) != arg
-        ]
-    return found
-
-
 def _frozen_base(call: TestCall) -> BaseLaunch:
     base = call.session_facts.base_launch if call.session_facts else None
     if base is None:
@@ -404,18 +386,10 @@ def _frozen_base(call: TestCall) -> BaseLaunch:
     return base
 
 
-def _base_launch_document(call: TestCall) -> dict[str, Any]:
-    base = _frozen_base(call)
-    found = _unredacted_credentials(base)
-    if found:
-        raise SpecRefused("base_launch_secret", f"the frozen base holds an unredacted credential in {', '.join(found)}")
-    return base.to_document()
-
-
 def _procedure_section(call: TestCall, deadline_unix: float) -> dict[str, Any]:
     section: dict[str, Any] = {
         "prep": call.prep,
-        "base_launch": _base_launch_document(call),
+        "base_launch": _frozen_base(call).to_document(),
         "rounds": {"warmup": _warmup_rounds(call), "measure": int(call.rounds.measure_rounds)},
         "accuracy": bool(call.accuracy),
         "timeout_sec": float(call.timeout_sec),
@@ -435,7 +409,8 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
     Raises:
         SpecRefused: No point, an unreadable point, an environment override that
             is not allowed, a missing staging, no frozen base launch, a placeholder with no
-            attachment, or a document the sheet schema refuses (a base launch over its size cap among them).
+            attachment, or a document the sheet schema refuses (a base launch over its size cap or holding a credential in
+            the clear among them).
     """
     if not call.points:
         raise SpecRefused("no_points", "a test needs at least one measurement point")
