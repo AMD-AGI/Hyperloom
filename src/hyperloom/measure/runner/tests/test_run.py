@@ -216,22 +216,15 @@ def _point_config(benchmark: dict) -> list[dict]:
     return [{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}]
 
 
-@pytest.mark.parametrize(
-    ("benchmark", "reason"),
-    [
-        ({"agentx": {"enabled": True}}, "an AgentX point is not translated"),
-        ({"profiler": {"torch_profiler": {"enabled": True}}}, "a profile point is not translated"),
-    ],
-    ids=["agentx", "profile"],
-)
 def test_a_v2_sheet_whose_point_inference_suite_does_not_run_is_refused_and_never_falls_back_to_magpie(
-    tmp_path, env, monkeypatch, benchmark, reason
+    tmp_path, env, monkeypatch
 ):
     backend = _Backend(_ok)
     monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
     monkeypatch.setattr(runner, "ensure_magpie", lambda *args: pytest.fail("a v2 sheet staged Magpie"))
+    reason = "the point runs xdit, which serves nothing"
 
-    assert _go(tmp_path, env, _sheet_v2(config=_point_config(benchmark))) == 3
+    assert _go(tmp_path, env, _sheet_v2(config=_point_config({"framework": "xdit"}))) == 3
 
     status = _status(tmp_path)
     assert status["error_class"] == "spec_rejected" and reason in status["message"], status
