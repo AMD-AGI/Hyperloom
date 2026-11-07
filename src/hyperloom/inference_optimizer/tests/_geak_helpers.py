@@ -1,13 +1,28 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared GEAK test helpers: gating the delegation phase launch and driving the resume-pending fields."""
+"""Shared GEAK test helpers: the measured round, gating the delegation phase launch, the resume-pending fields."""
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import pytest
 
 from hyperloom.orchestrator.phases.kernel import KernelPhase
+from inference_suite.contracts import RunLayout
+from inference_suite.contracts.launch import Launch
+from inference_suite.tests.test_compose import _launch
+
+
+def measured_in_suite_round(state, run_dir: Path, launch: Launch | None = None) -> Launch:
+    """Record ``current_best`` as measured in ``run_dir``, whose ``launch.json`` records ``launch``."""
+    launch = launch or _launch()
+    RunLayout(run_dir).root.mkdir(parents=True, exist_ok=True)
+    RunLayout(run_dir).launch.write_text(json.dumps(launch.to_document()), encoding="utf-8")
+    state.current_best_measurement = {**(state.current_best_measurement or {}), "benchmark_workspace": str(run_dir)}
+    return launch
 
 
 def stop_geak_before_launch(monkeypatch: pytest.MonkeyPatch) -> None:
