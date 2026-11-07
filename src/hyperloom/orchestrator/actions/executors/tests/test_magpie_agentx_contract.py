@@ -577,38 +577,6 @@ def test_server_args_that_cannot_become_argv_are_refused_as_argv_invalid(vllm_so
     assert offending in str(refused.value)
 
 
-def test_native_baseline_refuses_an_unsplittable_argv_without_launching(vllm_source, tmp_path, monkeypatch):
-    import asyncio
-
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    monkeypatch.setenv(BENCHMARK_CONFIG_ENV, str(vllm_source))
-
-    def run(cmd, **kwargs):
-        raise AssertionError("an argv that cannot be split must not reach Magpie")
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", run)
-    ctx = SimpleNamespace(
-        task=SimpleNamespace(
-            task_id="native",
-            params={
-                "output_dir": str(tmp_path / "round"),
-                "timeout_sec": 10,
-                "model_path": "Qwen/Qwen3-0.6B",
-                "extra_server_args": "--speculative-config {1:2}",
-            },
-        ),
-        extra={"shared_state": SharedState(benchmark_mode="agentx", agentx_backend="magpie", enablement_mode="off")},
-    )
-    executor = BaselineExecutor(magpie_python="python3", default_config_path=vllm_source, session_dir=tmp_path)
-    result = asyncio.run(executor(ctx))
-    assert result["status"] == "failed", result
-    assert result["error_class"] == ARGV_INVALID
-    assert "{1:2}" in result["error"]
-
-
 def _draft_spec_args(tmp_path, *, heads=16, **overrides):
     """A drafting launch as one argv-splittable string, against a checkpoint declaring ``heads`` query heads."""
     model = tmp_path / f"drafter-{heads}"

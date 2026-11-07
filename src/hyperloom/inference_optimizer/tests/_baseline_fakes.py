@@ -82,7 +82,6 @@ def capture_launch(captured: dict):
 
 def run_baseline(base: Path, session_dir: Path, ctx, fake_run, **executor_kwargs) -> dict:
     executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
         default_config_path=base,
         session_dir=session_dir,
         **executor_kwargs,

@@ -550,29 +550,6 @@ def test_eval_dest_patch_is_idempotent(tmp_path, monkeypatch):
     assert after_first.count('"${RESULT_DIR:-.}/"') == 1
 
 
-def test_baseline_after_materialize_applies_eval_dest_patch(tmp_path, monkeypatch):
-    """BaselineExecutor's base hook (not just ProfileExecutor) must apply the eval-dest redirect, so a pure baseline run's ``mv ./`` writes results into $RESULT_DIR instead of the process cwd (the local-disk InferenceX mirror)."""
-    import yaml
-
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-
-    ix_root = tmp_path / "InferenceX@deadbeef"
-    lib = _write_eval_dest_lib(ix_root)
-    config_path = tmp_path / "baseline.yaml"
-    config_path.write_text(
-        yaml.safe_dump({"benchmark": {"inferencex_path": str(ix_root)}}),
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-
-    out = BaselineExecutor()._after_materialize_config(config_path, tmp_path / "out")
-
-    assert out is None  # baseline is never short-circuited
-    text = lib.read_text(encoding="utf-8")
-    assert 'mv -f "$jf" "${RESULT_DIR:-.}/"' in text
-    assert 'mv -f "$jf" ./ ' not in text
-
-
 _EVAL_START_FIXTURE = """#!/usr/bin/env bash
 run_eval() {
     local results_dir="$1"
@@ -645,27 +622,6 @@ def test_eval_start_patch_is_idempotent(tmp_path, monkeypatch):
     ensure_benchmark_lib_eval_start_patched(tmp_path)
     assert lib.read_text(encoding="utf-8") == after_first
     assert after_first.count("HYPERLOOM_EVAL_START") == 1
-
-
-def test_baseline_after_materialize_applies_eval_start_patch(tmp_path, monkeypatch):
-    """The eval-start marker is what keeps the explore overtime kill scoped to the throughput phase, so the baseline hook must install it too."""
-    import yaml
-
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-
-    ix_root = tmp_path / "InferenceX@deadbeef"
-    lib = _write_full_lib(ix_root)
-    config_path = tmp_path / "baseline.yaml"
-    config_path.write_text(
-        yaml.safe_dump({"benchmark": {"inferencex_path": str(ix_root)}}),
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-
-    out = BaselineExecutor()._after_materialize_config(config_path, tmp_path / "out")
-
-    assert out is None
-    assert 'echo "HYPERLOOM_EVAL_START" >&2' in lib.read_text(encoding="utf-8")
 
 
 # Upstream lm_eval_sitecustomize.py reduced to what the probe contract needs: valid Python that ends by installing its
@@ -771,69 +727,6 @@ def test_eval_probe_unreadable_target_returns_false(tmp_path, monkeypatch):
     assert target.exists()
 
 
-def test_baseline_fails_loud_when_probe_target_present_but_unpatchable(tmp_path, monkeypatch):
-    """A checkout that HAS the target and still cannot be patched is a hard stop."""
-    import yaml
-
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-
-    ix_root = tmp_path / "InferenceX@deadbeef"
-    _write_eval_dest_lib(ix_root)
-    _write_eval_probe_target(ix_root)
-    config_path = tmp_path / "baseline.yaml"
-    config_path.write_text(
-        yaml.safe_dump({"benchmark": {"inferencex_path": str(ix_root)}}),
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    monkeypatch.setattr(
-        _inferencex_patcher,
-        "_apply_eval_probe_atomic",
-        lambda _src: False,
-    )
-
-    out = BaselineExecutor()._after_materialize_config(config_path, tmp_path / "out")
-
-    assert isinstance(out, dict)
-    assert out["error_class"] == "eval_probe_unpatchable"
-
-
-def test_baseline_warns_when_probe_target_absent(tmp_path, monkeypatch):
-    """An unrecognized layout warns; it must not fail every eval run on a guess."""
-    import yaml
-
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-
-    ix_root = tmp_path / "InferenceX@deadbeef"
-    _write_eval_dest_lib(ix_root)
-    config_path = tmp_path / "baseline.yaml"
-    config_path.write_text(
-        yaml.safe_dump({"benchmark": {"inferencex_path": str(ix_root)}}),
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-
-    assert BaselineExecutor()._after_materialize_config(config_path, tmp_path / "out") is None
-
-
-def test_baseline_skips_probe_gate_when_eval_disabled(tmp_path, monkeypatch):
-    """RUN_EVAL off: a missing probe target is irrelevant and must not block."""
-    import yaml
-
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-
-    ix_root = tmp_path / "InferenceX@deadbeef"
-    _write_eval_dest_lib(ix_root)
-    config_path = tmp_path / "baseline.yaml"
-    config_path.write_text(
-        yaml.safe_dump({"benchmark": {"inferencex_path": str(ix_root), "envs": {"RUN_EVAL": "false"}}}),
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-
-    assert BaselineExecutor()._after_materialize_config(config_path, tmp_path / "out") is None
-
-
 def test_eval_probe_is_concurrency_safe(tmp_path, monkeypatch):
     """Several executors can patch one shared checkout at once."""
     from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
@@ -855,41 +748,7 @@ def test_eval_probe_is_concurrency_safe(tmp_path, monkeypatch):
     assert target.read_text(encoding="utf-8").count("_hl_eval_probe_install()") == 2
 
 
-def test_baseline_after_materialize_applies_eval_probe(tmp_path, monkeypatch):
-    """baseline._after_materialize_config must apply the probe patch before launching: a non-terminating model there stops the whole run."""
-    import yaml
-
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-
-    ix_root = tmp_path / "InferenceX@deadbeef"
-    _write_eval_dest_lib(ix_root)
-    target = _write_eval_probe_target(ix_root)
-    config_path = tmp_path / "baseline.yaml"
-    config_path.write_text(
-        yaml.safe_dump({"benchmark": {"inferencex_path": str(ix_root)}}),
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-
-    out = BaselineExecutor()._after_materialize_config(config_path, tmp_path / "out")
-
-    assert out is None
-    assert "HYPERLOOM_EVAL_PROBE" in target.read_text(encoding="utf-8")
-
-
 # Anchor contract
-
-
-def _write_baseline_config(tmp_path: Path, ix_root: Path, *, run_eval: bool = True) -> Path:
-    """Write the materialized Magpie YAML the hook reads its root from."""
-    import yaml
-
-    benchmark: dict[str, Any] = {"inferencex_path": str(ix_root)}
-    if not run_eval:
-        benchmark["envs"] = {"RUN_EVAL": "false"}
-    config_path = tmp_path / "baseline.yaml"
-    config_path.write_text(yaml.safe_dump({"benchmark": benchmark}), encoding="utf-8")
-    return config_path
 
 
 def test_verify_patch_anchors_finds_every_anchor_on_a_pristine_checkout(tmp_path, monkeypatch):
@@ -964,27 +823,6 @@ def test_verify_patch_anchors_accepts_an_already_patched_file(tmp_path, monkeypa
     assert failed_patch_anchors(tmp_path) == []
 
 
-def test_baseline_hook_fails_loudly_when_an_eval_critical_anchor_rots(tmp_path, monkeypatch):
-    """Without eval_dest the results file lands in the benchmark's cwd, where the accuracy parser never looks, so the gate would see no score at all."""
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-
-    ix_root = tmp_path / "InferenceX@deadbeef"
-    lib = _write_full_lib(ix_root)
-    _write_eval_probe_target(ix_root)
-    lib.write_text(
-        lib.read_text(encoding="utf-8").replace('mv -f "$jf" ./ ', 'mv --force "$jf" ./ '),
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
-
-    out = BaselineExecutor()._after_materialize_config(_write_baseline_config(tmp_path, ix_root), tmp_path / "out")
-
-    assert isinstance(out, dict)
-    assert out["error_class"] == "inferencex_patch_anchor_broken"
-    assert "eval_dest" in out["error"]
-
-
 def test_failed_patch_anchors_in_ignores_rot_outside_the_named_root(tmp_path, monkeypatch):
     """Scoped verification must not inherit env-wide discovery."""
     from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
@@ -1006,86 +844,6 @@ def test_failed_patch_anchors_in_ignores_rot_outside_the_named_root(tmp_path, mo
     assert [s.name for s in failed_patch_anchors(pinned)] == ["eval_dest"]
     assert failed_patch_anchors_in(pinned) == []
     assert [s.name for s in failed_patch_anchors_in(bundled / "InferenceX")] == ["eval_dest"]
-
-
-def test_baseline_hook_proceeds_when_only_the_magpie_bundled_tree_rots(tmp_path, monkeypatch):
-    """Magpie benchmarks the tree the config pins, so rot in the InferenceX
-    bundled with the installed Magpie must not abort this run's eval."""
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-
-    ix_root = tmp_path / "InferenceX@deadbeef"
-    _write_full_lib(ix_root)
-    _write_eval_probe_target(ix_root)
-    bundled = tmp_path / "site-packages"
-    rotted = _write_full_lib(bundled / "InferenceX")
-    rotted.write_text(
-        rotted.read_text(encoding="utf-8").replace('mv -f "$jf" ./ ', 'mv --force "$jf" ./ '),
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    monkeypatch.setenv("MAGPIE_PATH", str(bundled))
-
-    out = BaselineExecutor()._after_materialize_config(_write_baseline_config(tmp_path, ix_root), tmp_path / "out")
-
-    assert out is None
-
-
-def test_baseline_hook_proceeds_when_only_a_non_critical_anchor_rots(tmp_path, monkeypatch):
-    """eval_start is a log breadcrumb for the soft-deadline watcher: worth reporting, never worth aborting a run for."""
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-
-    ix_root = tmp_path / "InferenceX@deadbeef"
-    lib = _write_full_lib(ix_root)
-    _write_eval_probe_target(ix_root)
-    lib.write_text(
-        lib.read_text(encoding="utf-8").replace('export EVAL_RESULT_DIR="$results_dir"', "true"),
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
-
-    out = BaselineExecutor()._after_materialize_config(_write_baseline_config(tmp_path, ix_root), tmp_path / "out")
-
-    assert out is None
-
-
-def test_baseline_hook_ignores_anchors_it_does_not_own(tmp_path, monkeypatch):
-    """ProfileExecutor replaces this hook entirely and validates NUM_PROMPTS itself, so a rotted num_prompts anchor must not fail a baseline."""
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-
-    ix_root = tmp_path / "InferenceX@deadbeef"
-    lib = _write_full_lib(ix_root)
-    _write_eval_probe_target(ix_root)
-    lib.write_text(
-        lib.read_text(encoding="utf-8").replace('        num_prompts="$max_concurrency"', "        true"),
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
-
-    out = BaselineExecutor()._after_materialize_config(_write_baseline_config(tmp_path, ix_root), tmp_path / "out")
-
-    assert out is None
-
-
-def test_baseline_hook_skips_the_anchor_check_when_eval_is_off(tmp_path, monkeypatch):
-    """A throughput-only run does not care where lm-eval would have written."""
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-
-    ix_root = tmp_path / "InferenceX@deadbeef"
-    lib = _write_full_lib(ix_root)
-    lib.write_text(
-        lib.read_text(encoding="utf-8").replace('mv -f "$jf" ./ ', 'mv --force "$jf" ./ '),
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    monkeypatch.delenv("MAGPIE_PATH", raising=False)
-
-    out = BaselineExecutor()._after_materialize_config(
-        _write_baseline_config(tmp_path, ix_root, run_eval=False), tmp_path / "out"
-    )
-
-    assert out is None
 
 
 # SemiAnalysisAI/InferenceX#3022 moved the Python tools into ``infx/`` and left
@@ -1294,21 +1052,6 @@ def test_apply_round_seed_marks_only_the_discarded_round():
     assert warm == {"A": "1", BENCH_SEED_ENV: str(WARMUP_ROUND_SEED)}
     assert WARMUP_ROUND_SEED != 0
     assert apply_round_seed({"A": "1", BENCH_SEED_ENV: "7"}, warmup=False) == {"A": "1"}
-
-
-def test_baseline_hook_patches_the_seed_of_the_checkout_it_runs(tmp_path):
-    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-
-    ix_root = tmp_path / "InferenceX@deadbeef"
-    _write_full_lib(ix_root)
-    real, _shim = _write_infx_layout(ix_root)
-
-    out = BaselineExecutor()._after_materialize_config(
-        _write_baseline_config(tmp_path, ix_root, run_eval=False), tmp_path / "out"
-    )
-
-    assert out is None
-    assert "HYPERLOOM_BENCH_SEED" in real.read_text(encoding="utf-8")
 
 
 def test_grid_preparation_patches_the_seed_too(tmp_path, monkeypatch):

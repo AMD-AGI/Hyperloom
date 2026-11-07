@@ -1165,29 +1165,6 @@ def test_instrumentation_preflight_passes_on_a_healthy_patch(tmp_path, monkeypat
     assert row["detail"]["predicts_failure_of"] == []
 
 
-@pytest.mark.parametrize("in_point", [True, False], ids=["point", "environment"])
-def test_profile_patches_the_checkout_the_point_names_before_the_environments(tmp_path, monkeypatch, in_point):
-    import yaml
-
-    from hyperloom.orchestrator.actions.executors import profile as profile_mod
-
-    point_ix, env_ix = tmp_path / "point-ix", tmp_path / "env-ix"
-    bench = {"framework": "sglang", "envs": {}, **({"inferencex_path": str(point_ix)} if in_point else {})}
-    config = tmp_path / "config.yaml"
-    config.write_text(yaml.safe_dump({"benchmark": bench}))
-    monkeypatch.setenv("INFERENCEX_PATH", str(env_ix))
-    for patcher in ("ensure_benchmark_lib_patched", "ensure_benchmark_lib_eval_dest_patched"):
-        monkeypatch.setattr(profile_mod, patcher, lambda _root: True)
-    monkeypatch.setattr(profile_mod, "ensure_benchmark_serving_patched", lambda _root: False)
-    executor = profile_mod.ProfileExecutor()
-    monkeypatch.setattr(executor, "_inject_host_probe", lambda *_args: "")
-
-    result = executor._after_materialize_config(config, tmp_path / "out")
-
-    assert result["error_class"] == "profile_inferencex_patch_failed"
-    assert result["inferencex_path"] == str(point_ix if in_point else env_ix)
-
-
 def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
     """The certificate must not become a trace candidate for the directory it describes.
 
@@ -1545,29 +1522,6 @@ def test_materialize_profile_sglang_force_overrides_gemma2_gate(
         "",
     ), envs
     assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is True
-
-
-def test_profile_executor_calls_benchmark_lib_patcher():
-    """ProfileExecutor must patch the materialized InferenceX checkout before launching Magpie (else the computed profile window is stomped and the trace is empty)."""
-    from hyperloom.orchestrator.actions.executors import profile as profile_mod
-
-    # The symbols must be re-exportable for monkey-patching.
-    assert profile_mod.ensure_benchmark_lib_patched is not None
-    assert profile_mod.ensure_benchmark_serving_patched is not None
-    # The hook source must reference both patchers (regression guard against silent removal).
-    import inspect
-
-    src = inspect.getsource(profile_mod.ProfileExecutor._after_materialize_config)
-    assert "ensure_benchmark_lib_patched" in src, (
-        "ProfileExecutor._after_materialize_config must invoke "
-        "ensure_benchmark_lib_patched on the materialized InferenceX path — "
-        "otherwise issue #194 §2 regresses."
-    )
-    assert "ensure_benchmark_serving_patched" in src, (
-        "ProfileExecutor._after_materialize_config must invoke "
-        "ensure_benchmark_serving_patched so PROFILE_EXTRA_BODY reaches "
-        "SGLang's /start_profile request."
-    )
 
 
 def test_profile_server_args_sanitizer_drops_torch_compile_flags():

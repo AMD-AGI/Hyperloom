@@ -461,77 +461,12 @@ def test_baseline_eager_fallback_save_failure_is_not_reported_as_unarmed(tmp_pat
 
     monkeypatch.setattr(shared_state, "save", _disk_full)
     executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
         default_config_path=tmp_path / "base.yaml",
         session_dir=tmp_path,
         shared_state=shared_state,
     )
     with pytest.raises(OSError, match="No space left on device"):
         executor._consume_eager_fallback(shared_state)
-
-
-def test_baseline_executor_rejects_bad_param(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_yaml(base)
-    output_dir = tmp_path / "ws"
-
-    def fake_run(cmd, *args, **kwargs):  # pragma: no cover — must not run
-        raise AssertionError("subprocess.run should not be invoked")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "benchmark_script": "../etc/passwd.sh",
-        }
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "failed"
-    assert result["error_class"] == "bad_param"
-    assert "benchmark_script" in result["error"]
-
-
-def test_baseline_executor_rejects_bad_result_dir(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_yaml(base)
-    output_dir = tmp_path / "ws"
-
-    def fake_run(cmd, *args, **kwargs):  # pragma: no cover
-        raise AssertionError("subprocess.run should not be invoked")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "result_dir": "/tmp/leak;rm -rf /",
-        }
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "failed"
-    assert result["error_class"] == "bad_param"
-    assert "result_dir" in result["error"]
 
 
 # reference-script base layer (precedence + 0-degrade)

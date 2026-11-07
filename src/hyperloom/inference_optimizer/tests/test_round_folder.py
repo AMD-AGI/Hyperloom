@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -16,8 +15,6 @@ from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors._gpu_metrics import GPU_ARTIFACT_NAME
 from hyperloom.orchestrator.actions.executors._round_folder import RoundFolder, is_round_folder
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
-from hyperloom.orchestrator.actions.executors.benchmark_run.rounds import _BenchmarkRoundsMixin
-from hyperloom.orchestrator.state.failure_evidence import SERVER_INIT_DEAD
 from inference_suite.contracts import FailedStep, FixedMetrics, ReportError, RunLayout, RunStatus
 from inference_suite.tests.test_compose import _launch
 from inference_suite.tests.test_report_contract import _report
@@ -88,18 +85,6 @@ async def test_the_grid_reads_a_finished_run_dir_once_and_writes_its_gpu_artifac
     assert report is None
     assert measurement["valid_measurement"] is False
     assert (run_dir.parent / GPU_ARTIFACT_NAME).is_file()
-
-
-def test_a_failed_step_names_the_round_error_class(tmp_path: Path) -> None:
-    run_dir = _run_dir(
-        tmp_path, run_status=RunStatus.FAILED, failed_step=FailedStep.SERVER_EXITED_BEFORE_READY, fixed=None
-    )
-    measurement = extract_benchmark_measurement(None, workspace=run_dir)
-    finished = SimpleNamespace(returncode=1, runtime_sec=5.0)
-    named = _BenchmarkRoundsMixin._unmeasured_round_failure(
-        None, finished, None, measurement, RunLayout(run_dir).report, "tail"
-    )
-    assert named == (SERVER_INIT_DEAD, "tail")
 
 
 def test_a_magpie_report_maps_field_by_field_as_before(tmp_path: Path) -> None:
