@@ -69,6 +69,7 @@ from .bootstrap import (
     _seed_shared_state,
     resolve_session_base,
     _snapshot_system_prompts,
+    fresh_measurement_fields,
     measurement_state_is_stale,
     resume_gpu_power_settings,
     latency_budget_scope_error,
@@ -424,11 +425,11 @@ def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
     return lock
 
 
-def _reset_state_file(session_dir: Path, *, framework: str) -> None:
+def _reset_state_file(session_dir: Path, state: SharedState) -> None:
     """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched).
 
-    The fresh state keeps ``framework``: the session is single-framework, and
-    nothing after this point re-derives it.
+    The fresh state keeps ``framework`` and the measurement identity of *state*: the session is single-framework and
+    keeps its measurement path, nothing after this point re-derives either, and a later resume checks the latter.
     """
     state_path = session_dir / "state.json"
     if not state_path.exists():
@@ -439,11 +440,11 @@ def _reset_state_file(session_dir: Path, *, framework: str) -> None:
     except OSError as exc:
         log.warning("--reset-state: could not move %s → %s: %s", state_path, backup_path, exc)
         return
-    SharedState(framework=framework).save(session_dir)
+    SharedState(framework=state.framework, **fresh_measurement_fields(state)).save(session_dir)
     log.info(
         "--reset-state: backed up state.json to %s; session starts blank except for framework=%s.",
         backup_path.name,
-        framework,
+        state.framework,
     )
 
 
@@ -1647,7 +1648,7 @@ def _build_coordinator(
     os.environ["INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR"] = str(session_dir)
     # --reset-state backs up state.json and starts blank, before Coordinator is constructed.
     if getattr(args, "reset_state", False):
-        _reset_state_file(session_dir, framework=state.framework)
+        _reset_state_file(session_dir, state)
 
     return Coordinator(
         session_dir,
