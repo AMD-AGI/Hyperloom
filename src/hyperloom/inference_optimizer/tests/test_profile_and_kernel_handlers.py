@@ -37,14 +37,14 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
-    _map_native_capture,
     _record_workspace_traces,
     _sanitize_profile_server_args,
-    _trace_rank,
     _trace_files_for_dir,
     _trace_size_bytes,
 )
 from hyperloom.orchestrator.trace_analysis._trace_rank import select_primary_trace
+from hyperloom.orchestrator.trace_analysis._trace_rank import trace_rank as _trace_rank
+from inference_suite.contracts import RunLayout
 from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
@@ -1844,7 +1844,7 @@ async def test_coordinator_promotes_valid_baseline_even_with_failed_status(sessi
 
 @pytest.mark.asyncio
 async def test_profile_executor_extracts_trace_dir(tmp_path):
-    """When the workspace has torch_trace/*.trace.json.gz, the runner surfaces them in the result."""
+    """When the run_dir has profile/torch_trace/*.trace.json.gz, the runner surfaces them in the result."""
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
@@ -1854,7 +1854,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     output_dir.mkdir(parents=True)
 
     # The workspace must be created inside the fake to count as this run's output.
-    ws_name = "benchmark_sglang_20260501_001122"
+    ws_name = "run-1"
 
     async def _fake_baseline(_self, _ctx):
         workspace = output_dir / ws_name
@@ -1877,8 +1877,8 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
                 }
             )
         )
-        trace_dir = workspace / "torch_trace"
-        trace_dir.mkdir()
+        trace_dir = RunLayout(workspace).profile_trace_dirs()[0]
+        trace_dir.mkdir(parents=True)
         (trace_dir / "177-TP-0-DECODE.trace.json.gz").write_bytes(b"fake-trace")
         (trace_dir / "merged-177.trace.json.gz").write_bytes(b"fake-trace")
         return {
@@ -1903,7 +1903,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
         res = await sub.run_task(task)
 
     workspace = output_dir / ws_name
-    trace_dir = workspace / "torch_trace"
+    trace_dir = RunLayout(workspace).profile_trace_dirs()[0]
     merged_trace = trace_dir / "merged-177.trace.json.gz"
     assert res.state == "succeeded"
     assert res.result["framework"] == "sglang"
@@ -3553,21 +3553,12 @@ def test_trace_files_for_dir_excludes_split_chunks_and_leads_with_the_capture(tm
     assert found[0] == capture
 
 
-@pytest.mark.parametrize("entry", ["workspace", "native"])
-def test_certificate_selects_the_trace_profile_hands_the_analysis(tmp_path, entry):
-    trace_dir = tmp_path / "torch_trace"
-    if entry == "workspace":
-        _gz_trace(trace_dir / "merged-a.trace.json.gz", 32)
-        _gz_trace(trace_dir / "merged-b.trace.json.gz", 40_000)
-        result: dict = {}
-        _record_workspace_traces(result, str(tmp_path), "sglang", None)
-    else:
-        files = [
-            _gz_trace(trace_dir / "rank_0.trace.json.gz", 32),
-            _gz_trace(trace_dir / "merged-all.trace.json.gz", 40_000),
-        ]
-        capture = {"capture_id": "c0", "trace_files": [str(p) for p in files]}
-        result = _map_native_capture(capture, {"framework": "sglang", "tp": 2})
+def test_certificate_selects_the_trace_profile_hands_the_analysis(tmp_path):
+    trace_dir = RunLayout(tmp_path).profile_trace_dirs()[0]
+    _gz_trace(trace_dir / "merged-a.trace.json.gz", 32)
+    _gz_trace(trace_dir / "merged-b.trace.json.gz", 40_000)
+    result: dict = {}
+    _record_workspace_traces(result, str(tmp_path), "sglang", None)
 
     assert result["trace_validate"]["trace_dir_level"]["selected_path"] == result["main_trace_path"]
 

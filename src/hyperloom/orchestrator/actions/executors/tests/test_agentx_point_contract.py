@@ -395,53 +395,6 @@ def test_native_missing_report_cannot_salvage_synthetic_results(source, tmp_path
     assert not is_valid_measurement(measured)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("capture_status", ["complete", "failed", "missing"])
-async def test_profile_executor_keeps_capture_windows_separate(source, report, tmp_path, monkeypatch, capture_status):
-    import gzip
-
-    from hyperloom.orchestrator.actions.executors.baseline import BenchmarkRunExecutor
-    from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
-
-    monkeypatch.setenv(BENCHMARK_CONFIG_ENV, str(source))
-    windows = []
-    for index in range(2):
-        directory = tmp_path / f"profile_{index}"
-        directory.mkdir()
-        files = []
-        for rank in range(2):
-            path = directory / f"177-TP-{rank}-DECODE.trace.json.gz"
-            with gzip.open(path, "wt") as stream:
-                json.dump({"traceEvents": []}, stream)
-            files.append(str(path))
-        windows.append({"capture_id": f"window-{index}", "status": "complete", "trace_files": files})
-    report["agentx_metrics"].update(
-        diagnostic_only=True, profile_capture={"status": capture_status, "profiles": windows}
-    )
-    report["agentx_metrics"]["recipe"]["tp"] = 2
-    if capture_status == "missing":
-        del report["agentx_metrics"]["profile_capture"]
-
-    async def benchmark(self, ctx):
-        return {**extract_benchmark_measurement(report), "status": "succeeded", "workspace": str(tmp_path)}
-
-    monkeypatch.setattr(BenchmarkRunExecutor, "__call__", benchmark)
-    ctx = SimpleNamespace(task=SimpleNamespace(params={"config_path": str(source)}, task_id="profile"), extra={})
-    result = await ProfileExecutor(session_dir=tmp_path)(ctx)
-    assert result["valid_measurement"] is False
-    if capture_status != "complete":
-        assert result["status"] == "failed"
-        assert result["error_class"] == "profile_capture_failed"
-        assert result["trace_input_ready"] is False
-        return
-    assert result["status"] == "succeeded", result
-    assert result["primary_rank"] == 0
-    assert len(result["profile_captures"]) == 2
-    assert result["profile_captures"][0]["main_trace_path"] == windows[0]["trace_files"][0]
-    assert result["profile_captures"][1]["main_trace_path"] == windows[1]["trace_files"][0]
-    assert set(result["profile_captures"][0]["trace_files"]).isdisjoint(result["profile_captures"][1]["trace_files"])
-
-
 # vLLM server args of CI workloads (capture-size lists shortened): Hyperloom writes a JSON value as one unquoted token.
 _CI_JSON_ARGS = {
     "DeepSeek-V4.1-Flash": (

@@ -4,8 +4,8 @@
 """Turn a materialized point YAML into the inference_suite round it runs as, and run that round.
 
 The point YAML stays Hyperloom's internal format; this module is the one place it becomes a suite config, and
-inference_suite never reads it. The translation reproduces what Magpie's generic launcher would serve for the same
-point: its knobs (``TP``, ``CONC`` ...) become config fields instead of server environment, ``EXTRA_<FW>_ARGS`` and
+inference_suite never reads it. The translation reproduces what the generic launcher would serve for the same point
+(the defaults ``inference_suite/recipe/defaults/table.yaml`` records): its knobs (``TP``, ``CONC`` ...) become config fields instead of server environment, ``EXTRA_<FW>_ARGS`` and
 every other variable become the user layer on the frozen base, and the launcher's own server rules (vLLM's and
 ATOM's ``--max-model-len`` default, sglang's radix-cache conflict) are applied to that layer. What the YAML does
 not hold -- where the round writes, its interpreter, lifecycle and telemetry -- comes in :class:`RoundSettings`.
@@ -195,7 +195,7 @@ _CONSUMED_ENV = frozenset(
     }
 )
 
-# Magpie's launcher defaults (scripts/benchmark/*_mi3*.sh at 06b7cf6), and the eval probe's in _inferencex_patcher.
+# The generic launcher's defaults (``inference_suite/recipe/defaults/table.yaml``) and the eval probe's.
 _LAUNCHER_PORT = 8888
 _HTTP_PORT = 80
 _UTF8 = "utf-8"
@@ -206,7 +206,7 @@ _PROBE_LENGTH_RATIO = 0.75
 #: The few-shot count of InferenceX's ``infx/evals/gsm8k.yaml``.
 _GSM8K_FEWSHOT = 5
 
-#: The frameworks whose Magpie launcher always passes ``--max-model-len`` (sglang's leaves the context to the host).
+#: The frameworks whose generic launcher always passes ``--max-model-len`` (sglang's leaves the context to the host).
 _LAUNCHER_CONTEXT_LENGTH = frozenset({Framework.VLLM, Framework.ATOM})
 #: A flag the launcher drops from its defaults when the point's args carry the flag it cannot run beside:
 #: sglang's HiCache is built on the radix cache.
@@ -462,9 +462,9 @@ def _fixed_profile(bench: Mapping[str, Any], point: _Point) -> ProfileConfig:
     )
 
 
-#: The ``agentx`` keys a point may set: Magpie's recipe selection (``recipe``, ``selector`` ...) gives way to the base.
+#: The ``agentx`` keys a point may set; a recipe selection (``recipe``, ``selector`` ...) gives way to the base.
 _AGENTX_BLOCK_KEYS = frozenset({"enabled", "mode", "concurrency", "failed_request_threshold", "launch_overrides"})
-#: Every ``launch_overrides`` key Magpie read; ``remove_args`` edits the recipe argv a base-seeded launch replaces.
+#: Every ``launch_overrides`` key a point may set; ``remove_args`` edits the recipe argv a base-seeded launch replaces.
 _AGENTX_LAUNCH_KEYS = frozenset(
     {"version", "append_args", "remove_args", "replace_args", "env", "unset_env", "executable"}
     | {"source_files", "absent_source_files"}
@@ -477,8 +477,8 @@ _EP_SIZE_ENV = "EP_SIZE"
 _WARMUP_PER_LANE_ENV = "AIPERF_WARMUP_REQUESTS_PER_LANE"
 #: The AgentX point's environment the config carries as fields, beside a fixed point's and the client's ``AIPERF_*``.
 _AGENTX_CONSUMED_ENV = _CONSUMED_ENV | {_MODEL_PATH_ENV, _EP_SIZE_ENV, _TRACE_ENV, _DURATION_ENV}
-#: The client knobs of Magpie's replay and the MLPerf client, which the agentx-harness replay does not read.
-_MAGPIE_CLIENT_PREFIXES = ("AGENTX_", "AGENTIC_")
+#: The client knobs of the retired AgentX replay and the MLPerf client, which the agentx-harness replay does not read.
+_FOREIGN_CLIENT_PREFIXES = ("AGENTX_", "AGENTIC_")
 
 
 def _agentx_block(bench: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -502,7 +502,7 @@ def _check_agentx_block(block: Mapping[str, Any], point: _Point) -> None:
 
 
 def _check_agentx_envs(point: _Point, base: BaseLaunch) -> None:
-    refused = sorted(name for name in point.envs if name.startswith(_MAGPIE_CLIENT_PREFIXES))
+    refused = sorted(name for name in point.envs if name.startswith(_FOREIGN_CLIENT_PREFIXES))
     if refused:
         raise ConfigError(f"the AgentX point sets {', '.join(refused)}; the agentx-harness replay has its own knobs")
     if point.flag(ENV_RUN_EVAL, default=False):
@@ -548,7 +548,7 @@ def _agentx_workload(point: _Point, base: BaseLaunch) -> AgentxWorkload:
 
 
 def _agentx_server_env(point: _Point) -> dict[str, str]:
-    """The point's environment as Magpie layered it under the launch's: less what the config carries as fields."""
+    """The point's environment, layered under the launch's: less what the config carries as fields."""
     return {
         name: value
         for name, value in point.envs.items()
@@ -1006,7 +1006,7 @@ def deadline_unix(session_deadline_sec: float | None) -> int | None:
 
 
 def inherited_env_names(environ: Mapping[str, str]) -> tuple[str, ...]:
-    """The host environment a round's server and client see: what a Magpie round saw, less the GPU masks."""
+    """The host environment a round's server and client see: the scrubbed process environment, less the GPU masks."""
     scrubbed = scrub_benchmark_process_env(dict(environ))
     return tuple(sorted(name for name in scrubbed if _ENV_NAME.fullmatch(name) and name not in _GPU_MASK_ENVS))
 

@@ -18,19 +18,14 @@ import yaml
 
 from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.orchestrator.trace_analysis._capture_shapes import is_capture_fragment
-from hyperloom.orchestrator.trace_analysis._trace_rank import (
-    select_primary_trace,
-    trace_rank as _trace_rank,
-)
 from hyperloom_common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from hyperloom.inference_optimizer import framework_registry
 from .benchmark_result import round_succeeded
-from ._round_folder import is_round_folder
 from inference_suite.contracts import RunLayout
-from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS, CAPTURE_TRACES_DIR, TORCH_TRACE_DIR
+from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS
 from .baseline import BenchmarkRunExecutor
 
 
@@ -50,8 +45,6 @@ _INPUT_DIMS_FRACTION_FLOOR = 0.90
 # Kineto puts the annotation category in ``cat`` and the label the framework wrote in ``name``, so a marker keyed on
 # ``"name": "user_annotation"`` looks for a label no producer emits.
 _USER_ANNOTATION_MARKER = '"user_annotation"'
-# The bare capture dir an unpatched Magpie round leaves; goes with Magpie in 5.03.
-_MAGPIE_GRAPH_CAPTURE_DIR = "graph_capture"
 
 
 def _trace_contains(path: Path, substring: str) -> bool:
@@ -287,10 +280,9 @@ def _certify_trace_dir(trace_dir: Path, trace_input: Path, framework: str) -> di
     )
 
 
-# A Magpie round nests the capture sidecars in ``trace_dir``; a run_dir keeps them beside its ``torch_trace``.
+# A run_dir keeps the capture sidecars beside its ``torch_trace``.
 def _capture_trace_files(trace_dir: Path) -> tuple[Path | None, list[Path]]:
-    names = (*CAPTURE_TRACE_DIRS, _MAGPIE_GRAPH_CAPTURE_DIR)
-    capture_dirs = [base / name for base in (trace_dir, trace_dir.parent) for name in names]
+    capture_dirs = [base / name for base in (trace_dir, trace_dir.parent) for name in CAPTURE_TRACE_DIRS]
     capture = next((path for path in capture_dirs if path.is_dir()), None)
     if capture is None:
         return None, []
@@ -483,9 +475,8 @@ def _check_steady_state_naming(split_files: list[Path]) -> tuple[dict, str]:
         "[6] trace_split/ has _extend_* / _decode_* files but NO "
         "_steady_state_* — profile_by_stage=True leaked through, "
         "PROFILE_EXTRA_BODY env was not consumed by the framework. "
-        "Confirm _inferencex_patcher patched Magpie's bundled "
-        "InferenceX (#210; check $MAGPIE_PATH/InferenceX/utils/"
-        "bench_serving/benchmark_serving.py)."
+        "Check that the round's profile start request carried "
+        "PROFILE_EXTRA_BODY with profile_by_stage disabled."
     )
 
 
@@ -727,7 +718,7 @@ def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_
         result["trace_dir"] = None
         result["trace_files"] = []
         log.warning(
-            "profile_executor: round trace dir %s does not exist after magpie completed; check sglang server logs for torch profiler errors",
+            "profile_executor: round trace dir %s does not exist after the round completed; check sglang server logs for torch profiler errors",
             round_trace_root,
         )
         return
@@ -884,9 +875,8 @@ def _preferred_main_trace_path(trace_dir: Path, trace_files: list[Path]) -> Path
 
 
 def _candidate_trace_dirs(workspace: Path) -> list[Path]:
-    """Trace directories to probe: a run_dir's, then a Magpie workspace's (which go with Magpie in 5.03)."""
-    magpie = [workspace / TORCH_TRACE_DIR, workspace / CAPTURE_TRACES_DIR, workspace.parent / CAPTURE_TRACES_DIR]
-    return [*RunLayout(workspace).profile_trace_dirs(), *magpie]
+    """Trace directories to probe in a run_dir."""
+    return list(RunLayout(workspace).profile_trace_dirs())
 
 
 def _default_profile_config() -> Path:
@@ -1105,38 +1095,14 @@ class ProfileExecutor(BenchmarkRunExecutor):
     _measurement_succeeded = staticmethod(round_succeeded)
 
     async def _run_native_profile(self, ctx) -> dict[str, Any]:
-        """Certify an AgentX profile round's traces: a run_dir's as a fixed round's, Magpie's per capture window."""
-        import asyncio
+        """Certify an AgentX profile round's traces as a fixed round's."""
 
         result = await super().__call__(ctx)
         if result.get("status") != "succeeded":
             return result
-        if is_round_folder(Path(str(result.get("workspace") or ""))):
-            framework = str(result.get("framework") or "")
-            _record_workspace_traces(result, result["workspace"], framework, self._instrumentation_preflight)
-            result["trace_input_ready"] = bool(result.get("main_trace_path"))
-            return result
-        capture = result.get("agentx_metrics", {}).get("profile_capture", {})
-        if capture.get("status") != "complete":
-            return {
-                **result,
-                "status": "failed",
-                "error_class": "profile_capture_failed",
-                "trace_capture": capture,
-                "trace_input_ready": False,
-            }
-        result["trace_capture"] = capture
-        result["trace_capture_status"] = capture["status"]
-        result["trace_input_ready"] = False
-        result["profile_captures"] = []
-        for window in capture.get("profiles", [capture]):
-            mapped = await asyncio.to_thread(_map_native_capture, window, result)
-            result["profile_captures"].append(mapped)
-        primary = next((window for window in result["profile_captures"] if window.get("trace_input_ready")), None)
-        if primary is None:
-            result.update(status="failed", error_class="primary_rank_trace_missing")
-        else:
-            result.update(primary)
+        framework = str(result.get("framework") or "")
+        _record_workspace_traces(result, result["workspace"], framework, self._instrumentation_preflight)
+        result["trace_input_ready"] = bool(result.get("main_trace_path"))
         return result
 
 
@@ -1148,24 +1114,3 @@ __all__ = [
     "ProfileExecutor",
     "profile_executor",
 ]
-
-
-def _map_native_capture(capture: dict[str, Any], measurement: dict[str, Any]) -> dict[str, Any]:
-    """Select and check one capture, without combining ranks from different windows."""
-    files = [Path(name) for name in capture.get("trace_files", [])]
-    result: dict[str, Any] = {"capture_id": capture["capture_id"], "trace_input_ready": False}
-    if not files or not all(path.is_file() for path in files):
-        return result
-    trace_dir = files[0].parent
-    main = select_primary_trace(files, file_size=_trace_size_bytes, tensor_parallel_size=measurement.get("tp"))
-    result.update(trace_dir=str(trace_dir), trace_files=[str(path) for path in files])
-    if main is None:
-        return result
-    result.update(main_trace_path=str(main), primary_rank=_trace_rank(main), trace_input_ready=True)
-    framework = measurement["framework"]
-    health = _validate_trace_structure(trace_dir, framework)
-    certificate = _certify_trace_dir(trace_dir, main, framework)
-    result["trace_health"] = health
-    result["trace_validate"] = _build_trace_validate(health, _TraceProbe(trace_dir, framework, certificate=certificate))
-    result["trace_validate_path"] = _write_trace_certificate(trace_dir, result["trace_validate"])
-    return result
