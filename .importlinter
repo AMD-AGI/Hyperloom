@@ -353,6 +353,7 @@ source_modules =
 forbidden_modules =
     inference_suite.__main__
     inference_suite.cli
+    inference_suite.client_env
     inference_suite.compose
     inference_suite.eval
     inference_suite.framework_probe
@@ -394,6 +395,7 @@ layers =
     (inference_suite.compose)
     (inference_suite.recipe) | (inference_suite.parser_check) | (inference_suite.framework_version)
     (inference_suite.framework_probe) | (inference_suite.staging)
+    (inference_suite.client_env)
     (inference_suite.contracts)
     (inference_suite.golden) | (inference_suite.frameworks) | (inference_suite.pins) | (inference_suite.server_log)
     (inference_suite.argv)
