@@ -144,7 +144,7 @@ def _resolve_quant_config_weight_bytes(quant_cfg: Any) -> float:
     return _bits_to_bytes(quant_cfg.get("bits") or quant_cfg.get("w_bit"))
 
 
-#: Magpie ``benchmark.envs`` keys that carry the runtime server args for the
+#: Point ``benchmark.envs`` keys that carry the runtime server args for the
 #: text-serving frameworks. The baseline yaml only ever sets the one matching
 #: its framework, so reading these and concatenating is safe.
 _RUNTIME_SERVER_ARG_ENV_KEYS = (
