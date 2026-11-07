@@ -123,7 +123,8 @@ def _walk_to(path: Path, *, make: int | None, stop_at_missing: bool = False) -> 
                 parts[:0] = walk.follow(name, len(parts))
             else:
                 walk.enter(name, info, make)
-        walk.arrive(len(parts))
+        else:
+            walk.arrive(0)
     except BaseException:
         os.close(walk.descriptor)
         raise

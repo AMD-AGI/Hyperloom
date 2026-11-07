@@ -575,6 +575,9 @@ s.create_shared_file(parent / "old.log")
 s.write_shared_bytes(parent / "bytes", b"x")
 s.write_shared_bytes(parent / "credential", b"secret", mode=0o600)
 s.write_shared_text(parent / "text", "x")
+os.close(s.open_shared_replacement(parent / "replacement.log"))
+os.close(s.create_new_shared_file(parent / "segment.jsonl"))
+s.copy_shared_file(parent / "text", parent / "copy")
 atomic_write_text(parent / "io" / "a" / "state.json", "x", options=WriteOptions(make_parents=True, shared=True))
 modes = {{}}
 for path in sorted(parent.rglob("*")):
@@ -605,6 +608,7 @@ def test_below_a_setgid_group_writable_directory_every_helper_widens_whatever_th
         "chain": 0o2775,
         "chain/a": 0o2775,
         "chain/a/b": 0o2775,
+        "copy": 0o664,
         "credential": 0o600,
         "existing": 0o700,
         "existing/below": 0o775 & ~umask,  # judged at the nearest existing directory: not setgid, so not shared
@@ -614,6 +618,8 @@ def test_below_a_setgid_group_writable_directory_every_helper_widens_whatever_th
         "made": 0o2775,
         "new.log": 0o664,
         "old.log": 0o664,
+        "replacement.log": 0o664,
+        "segment.jsonl": 0o664,
         "text": 0o664,
         "the-old-inode": 0o640,
     }
@@ -638,6 +644,7 @@ def test_anywhere_else_every_helper_leaves_what_it_makes_to_the_umask(tmp_path, 
         "chain": directory,
         "chain/a": directory,
         "chain/a/b": directory,
+        "copy": file,
         "credential": 0o600,
         "existing": 0o700,
         "existing/below": 0o775 & ~umask,
@@ -647,6 +654,8 @@ def test_anywhere_else_every_helper_leaves_what_it_makes_to_the_umask(tmp_path, 
         "made": 0o700 | inherited,
         "new.log": file,
         "old.log": file,
+        "replacement.log": file,
+        "segment.jsonl": file,
         "text": file,
         "the-old-inode": 0o640,
     }
@@ -686,3 +695,20 @@ def test_a_link_to_shared_storage_is_not_taken_for_it(tmp_path):
         umask=0o022,
     )
     assert (_mode(shared / "a") & 0o777, _mode(shared / "f")) == (0o755, 0o644), "judged by lstat: a link is not shared"
+
+
+def test_parent_is_shared_judges_the_nearest_existing_directory_as_the_walk_reaches_it(tmp_path, monkeypatch):
+    shared = _setgid_parent(tmp_path / "shared")
+    (shared / "dangling").symlink_to(tmp_path / "nowhere")
+    (tmp_path / "link").symlink_to(shared)
+    (shared / "planted").symlink_to(shared)
+    theirs(shared / "planted", monkeypatch)
+    assert shared_storage.parent_is_shared(shared / "new")
+    assert shared_storage.parent_is_shared(shared / "missing" / "deeper" / "new"), "judged at the nearest that exists"
+    assert not shared_storage.parent_is_shared(tmp_path / "new")
+    assert not shared_storage.parent_is_shared(tmp_path / "link" / "new"), "a link stands at that directory's name"
+    assert not shared_storage.parent_is_shared(tmp_path / "link" / "below" / "new"), "nearest existing: the link"
+    make_shared_dirs(shared / "below")
+    assert shared_storage.parent_is_shared(tmp_path / "link" / "below" / "new"), "past the link its target decides"
+    assert not shared_storage.parent_is_shared(shared / "dangling" / "new"), "a link to nothing is no shared storage"
+    assert not shared_storage.parent_is_shared(shared / "planted" / "new"), "a link the walk refuses: not shared"
