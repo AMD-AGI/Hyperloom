@@ -424,6 +424,9 @@ class SourceBase:
         return layout
 
 
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
 def _link(worktree: Path, prefix: PurePosixPath, target: str) -> None:
     """Link ``target`` at ``prefix`` in ``worktree`` unless something is there, making the directories on the way.
 
@@ -434,24 +437,39 @@ def _link(worktree: Path, prefix: PurePosixPath, target: str) -> None:
     Raises:
         WorktreeError: A directory on the way is a symlink or no directory.
     """
-    fds = [os.open(worktree, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
+    fd = os.open(worktree, _DIRECTORY_FLAGS)
     try:
-        for part in prefix.parts[:-1]:
-            made = False
-            with contextlib.suppress(FileExistsError):
-                os.mkdir(part, SHARED_DIR_MODE, dir_fd=fds[-1])
-                made = True
-            try:
-                fds.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
-            except OSError as error:
-                raise WorktreeError(f"{worktree / prefix} cannot be linked: {part} is no directory: {error}") from error
-            if made:
-                os.fchmod(fds[-1], SHARED_DIR_MODE)
-        with contextlib.suppress(FileExistsError):
-            os.symlink(target, prefix.name, dir_fd=fds[-1])
+        _link_below(fd, worktree / prefix, prefix.parts[:-1], target)
     finally:
-        for fd in fds:
-            os.close(fd)
+        os.close(fd)
+
+
+def _link_below(dir_fd: int, link: Path, parts: tuple[str, ...], target: str) -> None:
+    """Link ``target`` at ``link``, whose directories still to make and open below ``dir_fd`` are ``parts``; a
+    directory made here is the group's (``2775``, set on its descriptor).
+
+    Raises:
+        WorktreeError: A directory on the way is a symlink or no directory.
+    """
+    if not parts:
+        with contextlib.suppress(FileExistsError):
+            os.symlink(target, link.name, dir_fd=dir_fd)
+        return
+    part = parts[0]
+    made = False
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(part, SHARED_DIR_MODE, dir_fd=dir_fd)
+        made = True
+    try:
+        fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=dir_fd)
+    except OSError as error:
+        raise WorktreeError(f"{link} cannot be linked: {part} is no directory: {error}") from error
+    try:
+        if made:
+            os.fchmod(fd, SHARED_DIR_MODE)
+        _link_below(fd, link, parts[1:], target)
+    finally:
+        os.close(fd)
 
 
 def _file_sections(patch: str) -> list[tuple[tuple[str, ...], str]]:
