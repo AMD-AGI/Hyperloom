@@ -38,6 +38,8 @@ _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 #: How each directory of a path is opened on the way (:func:`open_directory`): only to name what is below it, which
 #: needs no read permission (a home directory may be ``0711``), and never through a link.
 _WAY = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+#: How a link on the way is opened to check whose it is and read it (:meth:`_Walk.follow`).
+_LINK = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
 _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _PROBE_PREFIX = ".hl-writable-"
 #: What a new file is made with, before ``fchmod`` gives it its mode: the umask never decides it.
@@ -58,11 +60,12 @@ def open_directory(path: Path, *, make: int | None = None) -> int:
     """``path`` opened as a directory: an ``O_PATH`` descriptor (the caller closes it) that what is written below it
     goes through, as ``dir_fd``; :func:`read_directory` opens it for listing or a flush.
 
-    Each directory of the path is opened below the one before it, never following a link once the way has passed a
-    directory that accounts other than its owner can write (:data:`_OPEN_TO_OTHERS`, the shared tree itself, ``/tmp``):
-    any member of the group could have put one there, to any directory the account that follows it can write. Links
-    above that point (``/var/run``, a mount reached through a link of the host's) are followed. With ``make``, each
-    missing directory is made with that mode (:func:`make_shared_dirs`).
+    Each directory of the path is opened below the one before it, never following another account's link once the way
+    has passed a directory that accounts other than its owner can write (:data:`_OPEN_TO_OTHERS`, the shared tree
+    itself, ``/tmp``): any member of the group could have put one there, to any directory the account that follows it
+    can write. Links above that point (``/var/run``, a mount reached through a link of the host's), and this account's
+    and root's own anywhere, are followed. With ``make``, each missing directory is made with that mode
+    (:func:`make_shared_dirs`).
 
     Raises:
         OSError: ``ELOOP`` for a link not followed or too many links, ``ENOENT`` for a missing directory without
@@ -115,20 +118,31 @@ class _Walk:
     def follow(self, name: str) -> tuple[str, ...]:
         """The parts of the link ``name`` here to walk instead of it; an absolute one starts again from ``/``.
 
+        Below a directory others can write, only a link of this account's or root's is followed, which no other account
+        can make: it is opened itself (``O_PATH``), so the link whose owner is checked is the one read.
+
         Raises:
-            OSError: ``ELOOP`` when the way has passed a directory others can write, or after too many links.
+            OSError: ``ELOOP`` for another account's link below a directory others can write, or after too many links.
         """
-        if self.shared:
-            raise OSError(
-                errno.ELOOP, "a link in a directory other accounts can write is not followed", str(self.here / name)
-            )
+        link = os.open(name, _LINK, dir_fd=self.descriptor)
+        try:
+            owner = os.fstat(link).st_uid
+            if self.shared and owner not in (0, os.geteuid()):
+                raise OSError(
+                    errno.ELOOP,
+                    f"a link of uid {owner} in a directory other accounts can write is not followed",
+                    str(self.here / name),
+                )
+            target = Path(os.readlink("", dir_fd=link))
+        finally:
+            os.close(link)
         self.links += 1
         if self.links > _MAX_LINKS:
             raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), str(self.here / name))
-        target = Path(os.readlink(name, dir_fd=self.descriptor))
         if not target.is_absolute():
             return target.parts
         self._move(os.open("/", _WAY), Path("/"))
+        self.shared = False  # the target's own way decides from here
         return target.parts[1:]
 
     def enter(self, name: str, info: os.stat_result, make: int | None) -> None:

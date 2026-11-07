@@ -24,7 +24,7 @@ import pytest
 
 from hyperloom_common import shared_storage
 from hyperloom_common.shared_storage import make_shared_dirs, setgid_warnings, writable_problems
-from hyperloom_common.tests.shared_accounts import other_accounts
+from hyperloom_common.tests.shared_accounts import other_accounts, theirs
 
 _SRC = str(Path(shared_storage.__file__).parents[1])
 
@@ -321,9 +321,9 @@ def unshared(tmp_path: Path) -> Iterator[Path | None]:
         shutil.rmtree(base)
 
 
-def _planted(tmp_path: Path) -> tuple[Path, Path]:
-    """A directory the group writes (``2775``) holding a link ``planted`` to a directory only its owner may enter,
-    with a file ``kept`` in it: what a member of the group can do to the account that writes there next."""
+def _planted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """A directory the group writes (``2775``) holding another account's link ``planted`` to a directory only its owner
+    may enter, with a file ``kept`` in it: what a member of the group can do to the account that writes there next."""
     shared = tmp_path / "shared"
     shared.mkdir()
     shared.chmod(0o2775)
@@ -331,6 +331,7 @@ def _planted(tmp_path: Path) -> tuple[Path, Path]:
     private.mkdir(mode=0o700)
     (private / "kept.json").write_text("kept\n")
     (shared / "planted").symlink_to(private)
+    theirs(shared / "planted", monkeypatch)
     return shared, private
 
 
@@ -348,31 +349,43 @@ def _planted(tmp_path: Path) -> tuple[Path, Path]:
     ],
 )
 def test_a_link_at_a_directory_of_the_path_is_never_followed_below_a_directory_the_group_writes(
-    unshared, tmp_path, write
+    unshared, tmp_path, monkeypatch, write
 ):
     base = unshared or tmp_path  # below /tmp the refusal holds all the more
-    shared, private = _planted(base)
+    shared, private = _planted(base, monkeypatch)
     source = base / "source"
     source.write_text("theirs")
     target = shared / "planted" / "kept.json"
     namespace = {"os": os, "target": target, "source": source, **vars(shared_storage)}
     exec("from hyperloom_common.io import WriteOptions, atomic_write_json", namespace)
-    with pytest.raises(OSError, match="a link in a directory other accounts can write is not followed") as raised:
+    with pytest.raises(OSError, match="in a directory other accounts can write is not followed") as raised:
         exec(write, namespace)
     assert raised.value.errno == errno.ELOOP and raised.value.filename == str(shared / "planted")
     assert sorted(path.name for path in private.iterdir()) == ["kept.json"]
     assert (private / "kept.json").read_text() == "kept\n"
 
 
-def test_a_link_deeper_below_a_directory_the_group_writes_is_not_followed_either(unshared, tmp_path):
+def test_a_link_deeper_below_a_directory_the_group_writes_is_not_followed_either(unshared, tmp_path, monkeypatch):
     """A member of the group can make a directory of its own there, writable by itself alone, and put the link in it."""
-    shared, private = _planted(unshared or tmp_path)
-    theirs = shared / "theirs"
-    theirs.mkdir(mode=0o755)
-    (theirs / "planted").symlink_to(private)
+    shared, private = _planted(unshared or tmp_path, monkeypatch)
+    deeper = shared / "theirs"
+    deeper.mkdir(mode=0o755)
+    (deeper / "planted").symlink_to(private)
+    theirs(deeper / "planted", monkeypatch)
     with pytest.raises(OSError, match="not followed"):
-        shared_storage.write_shared_bytes(theirs / "planted" / "kept.json", b"theirs")
+        shared_storage.write_shared_bytes(deeper / "planted" / "kept.json", b"theirs")
     assert (private / "kept.json").read_text() == "kept\n"
+
+
+def test_a_link_of_this_accounts_own_below_a_directory_the_group_writes_is_followed(tmp_path):
+    """No other account can make a link that is this account's (or root's): a user's own link to a bigger disk."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o2775)
+    (tmp_path / "disk").mkdir()
+    (shared / "data").symlink_to(tmp_path / "disk")
+    shared_storage.write_shared_bytes(shared / "data" / "kept.json", b"ours")
+    assert (tmp_path / "disk" / "kept.json").read_bytes() == b"ours"
 
 
 def test_a_link_below_directories_only_their_owners_write_is_followed(unshared):
@@ -444,3 +457,20 @@ def test_a_new_shared_file_never_takes_a_name_that_is_there_and_never_writes_thr
     os.close(descriptor)
     assert (tmp_path / "free.jsonl").read_bytes() == b"x" and _mode(tmp_path / "free.jsonl") == 0o664
     assert sorted(path.name for path in tmp_path.iterdir()) == ["free.jsonl", "outside", "taken.jsonl"]
+
+
+def test_past_a_link_of_this_accounts_own_the_way_of_its_target_decides_what_is_followed(unshared, monkeypatch):
+    """A user's own link from the shared tree to a disk of its own: below that disk's directories, which no other
+    account can write, any link is followed again."""
+    if unshared is None:
+        pytest.skip("the home directory or one above it can be written by other accounts")
+    shared = unshared / "shared"
+    shared.mkdir()
+    shared.chmod(0o2775)
+    disk = unshared / "disk"
+    (disk / "real").mkdir(parents=True)
+    (shared / "data").symlink_to(disk)
+    (disk / "inner").symlink_to("real")
+    theirs(disk / "inner", monkeypatch)
+    shared_storage.write_shared_bytes(shared / "data" / "inner" / "kept.json", b"ours")
+    assert (disk / "real" / "kept.json").read_bytes() == b"ours"

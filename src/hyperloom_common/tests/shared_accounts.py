@@ -148,6 +148,20 @@ def _runnable_python(uid: int) -> str | None:
     return None
 
 
+#: An account no one on the host is: the owner of a link "another account" put there.
+_ANOTHER_ACCOUNT = 60999
+
+
+def theirs(link: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Make ``link`` another account's: chowned to one where this is root, else this account seen as another."""
+    if os.geteuid() == 0:
+        os.lchown(link, _ANOTHER_ACCOUNT, _ANOTHER_ACCOUNT)
+    else:
+        euid = os.geteuid()
+        monkeypatch.setattr(os, "geteuid", lambda: euid + 1)
+    return link
+
+
 @contextmanager
 def other_accounts() -> Iterator[Accounts]:
     """:class:`Accounts` for one test, skipping it where they cannot be had; their directory is removed after it."""

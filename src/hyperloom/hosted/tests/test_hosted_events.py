@@ -19,6 +19,7 @@ import pytest
 from hyperloom.hosted import events as hosted_events
 from hyperloom.hosted.events import EVENT_MAX_BYTES, SEGMENT_MAX_BYTES, HostedProgressEvents, segment_name
 from hyperloom.hosted.host_info import Var, take_host_info
+from hyperloom_common.tests.shared_accounts import theirs
 from hyperloom.plugs import ManifestSources, PlugContext, PlugHost, builtin_registry, resolve_manifest
 
 _SRC = str(Path(hosted_events.__file__).parents[2])
@@ -188,13 +189,14 @@ def test_a_newest_segment_this_account_cannot_read_is_passed_over_and_no_id_it_m
     assert len(shortest) >= hosted_events._MIN_EVENT_BYTES, "a bound on what a segment holds, not a guess"
 
 
-def test_a_link_put_where_the_events_directory_goes_is_never_followed(tmp_path):
+def test_a_link_another_account_put_where_the_events_directory_goes_is_never_followed(tmp_path, monkeypatch):
     state = tmp_path / "state"
     state.mkdir()
     state.chmod(0o2775)
     private = tmp_path / "private"
     private.mkdir(mode=0o700)
     (state / "events").symlink_to(private)
+    theirs(state / "events", monkeypatch)
     with pytest.raises(OSError, match="not followed"):
         HostedProgressEvents(state / "events", "r")
     assert list(private.iterdir()) == []
