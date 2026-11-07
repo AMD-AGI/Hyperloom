@@ -333,11 +333,14 @@ def test_a_login_the_host_replaces_or_makes_after_the_launch_is_not_shown(outsid
     assert not (hf / "new").exists()
 
 
-@pytest.mark.parametrize("entry", ["home", "ancestor", "root"])
-def test_a_path_entry_that_is_or_holds_the_home_shows_none_of_its_logins(outside_tmp, monkeypatch, entry):
-    """``PATH=$HOME:...``, an ancestor of the home, or ``/``: the app's home holds its logins (an SSH key, a netrc,
-    the GitHub CLI's, Claude's, git's), and none is readable inside, while the program on ``PATH`` still runs; the
-    home and the ancestor are never bound whole."""
+@pytest.mark.parametrize("variable", ["PATH", "PYTHONPATH"])
+@pytest.mark.parametrize("entry", ["home", "ancestor", "root", "ssh", "config", "config_link", "config_gh", "claude"])
+def test_a_path_entry_that_is_or_holds_the_home_shows_none_of_its_logins(outside_tmp, monkeypatch, entry, variable):
+    """``PATH=$HOME:...``, an ancestor of the home, ``/``, or a login directory in the home no variable names
+    (``~/.ssh``, ``~/.config`` or a link to it, ``~/.config/gh``, ``~/.claude``), on ``PATH`` or ``PYTHONPATH``: the
+    app's home holds its logins (an SSH key, a netrc, the GitHub CLI's, Claude's, git's), and none is readable
+    inside, while the program on ``PATH`` still runs; the home, the ancestor and the login directory are never bound
+    whole."""
     isolation = BwrapIsolation(usable_bwrap())
     home, work = outside_tmp / "users" / "u", outside_tmp / "work"
     work.mkdir()
@@ -352,12 +355,25 @@ def test_a_path_entry_that_is_or_holds_the_home_shows_none_of_its_logins(outside
     tool = _write(home / "bin/tool", "#!/bin/sh\necho tool ran\n")
     tool.chmod(0o755)
     monkeypatch.setenv("HOME", str(home))
-    shown = {"home": home, "ancestor": outside_tmp / "users", "root": Path("/")}[entry]
-    env = {"HOME": str(home), "PATH": f"{shown}:{home / 'bin'}:/usr/bin:/bin"}
+    (outside_tmp / "config-link").symlink_to(home / ".config")
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    shown = {
+        "home": home,
+        "ancestor": outside_tmp / "users",
+        "root": Path("/"),
+        "ssh": home / ".ssh",
+        "config": home / ".config",
+        "config_link": outside_tmp / "config-link",
+        "config_gh": home / ".config/gh",
+        "claude": home / ".claude",
+    }[entry]
+    env = {"HOME": str(home), "PATH": f"{home / 'bin'}:/usr/bin:/bin"}
+    env[variable] = f"{shown}:{env['PATH']}" if variable == "PATH" else str(shown)
     readable = toolchain_paths(env, "tool", writable=(work,))
     masked = credential_paths(env, allowed=(*readable, work), writable=(work,))
     confinement = Confinement(writable=(work,), readable=readable, masked=masked)
-    assert not {str(home), str(outside_tmp / "users")} & set(confinement.policy().read_only)
+    whole = {home, outside_tmp / "users", *(path.parent for path in paths.values())}
+    assert not {str(path) for path in whole} & set(confinement.policy().read_only)
 
     seen = _run(isolation, confinement, env, paths, work)
 
