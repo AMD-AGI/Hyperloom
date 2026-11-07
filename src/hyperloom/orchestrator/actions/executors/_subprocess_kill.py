@@ -387,30 +387,6 @@ def stamp_server_ready(server_log_path: str, boot_sec: float) -> None:
         log.warning("_subprocess_kill: could not stamp server-ready time (%s)", exc)
 
 
-def clear_server_ready_stamp(server_log_path: str) -> None:
-    """Drop any ready stamp an earlier round left in this output directory."""
-    try:
-        _round_layout(server_log_path).clear_ready_stamp()
-    except OSError as exc:
-        log.warning("_subprocess_kill: could not clear stale server-ready stamp (%s)", exc)
-
-
-def post_ready_runtime_sec(
-    server_log_path: str,
-    *,
-    started_unix: float,
-    runtime_sec: float,
-) -> float | None:
-    """Return how long a round ran *after* its server was ready."""
-    try:
-        stamp = _round_layout(server_log_path).read_ready_stamp()
-    except OSError:
-        return None
-    if stamp is None or stamp.ready_unix < started_unix:
-        return None
-    return max(0.0, min(float(runtime_sec), float(runtime_sec) - stamp.boot_sec))
-
-
 def session_deadline_to_remaining_sec(session_deadline_sec: float | None) -> float | None:
     """Convert an in-process session deadline into seconds still left on it."""
     if session_deadline_sec is None:
@@ -792,10 +768,8 @@ __all__ = [
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "STOP_GATE_POLL_SECONDS",
-    "clear_server_ready_stamp",
     "default_benchmark_timeout_sec",
     "kill_my_spawned_server",
-    "post_ready_runtime_sec",
     "resolve_benchmark_timeouts",
     "run_with_session_kill",
     "session_deadline_to_remaining_sec",
