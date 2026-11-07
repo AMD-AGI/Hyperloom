@@ -2299,30 +2299,31 @@ restore_persisted_framework_env() {
 }
 
 read_dotenv_var() {
-  local name="$1"
+  local name="$1" value
   [ -f "$DOTENV" ] || return 0
   # A .env that keeps no credentials lends none, and one another account can write lends only what install.sh's
-  # loader takes from it (runtime_env_dotenv_key_lent): that account would otherwise choose the gateway this account's
-  # key goes to, or the interpreter it runs.
+  # loader takes from it (runtime_env_dotenv_lent): that account would otherwise choose the gateway this account's
+  # key goes to, the interpreter it runs or the repository and index it installs from.
   if [ -n "${DOTENV_CREDENTIALS_ELSEWHERE:-}" ] &&
      [[ " $RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS $RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS " == *" $name "* ]]; then
     return 0
   fi
-  if [ -n "${DOTENV_NOT_PRIVATE:-}" ] && ! runtime_env_dotenv_key_lent "$name"; then
-    return 0
-  fi
   # `|| true` keeps a no-match grep from tripping pipefail/set -e when this is
   # used inside a ${VAR:-$(read_dotenv_var ...)} default expansion.
-  { grep -E "^[[:space:]]*(export[[:space:]]+)?${name}=" "$DOTENV" 2>/dev/null || true; } | tail -n 1 \
-    | sed -E "s/^[[:space:]]*(export[[:space:]]+)?${name}=//; s/^[\"']//; s/[\"']$//"
+  value="$({ grep -E "^[[:space:]]*(export[[:space:]]+)?${name}=" "$DOTENV" 2>/dev/null || true; } | tail -n 1 \
+    | sed -E "s/^[[:space:]]*(export[[:space:]]+)?${name}=//; s/^[\"']//; s/[\"']$//")"
+  if [ -n "${DOTENV_NOT_PRIVATE:-}" ] && [ -n "$value" ] && ! runtime_env_dotenv_lent "$name" "$value"; then
+    return 0
+  fi
+  [ -z "$value" ] || printf '%s\n' "$value"
 }
 
 # Upsert KEY=VALUE into .env, matching an optional leading-whitespace / export
 # prefix so a pre-existing line is replaced (never duplicated). Pure-bash.
 upsert_dotenv_var() {
   local key="$1" value="$2" tmp found=0 line stripped
-  # A .env another account can write lends only runtime_env_dotenv_key_lent's keys, so no other is written there.
-  if [ -n "${DOTENV_NOT_PRIVATE:-}" ] && ! runtime_env_dotenv_key_lent "$key"; then
+  # A .env another account can write lends only what runtime_env_dotenv_lent allows, so nothing else is written there.
+  if [ -n "${DOTENV_NOT_PRIVATE:-}" ] && ! runtime_env_dotenv_lent "$key" "$value"; then
     warn "${key} is not written to ${DOTENV}, which another account can write (${DOTENV_NOT_PRIVATE}); export it in the shell that runs hyperloom"
     return 0
   fi

@@ -21,7 +21,7 @@ from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
     is_allowed_kernel_agent_env_key,
-    is_allowed_not_private_dotenv_key,
+    is_lent_not_private_dotenv_assignment,
     is_python_package_root,
 )
 from hyperloom_common.llm.llm_config import (
@@ -252,9 +252,9 @@ def _load_dotenv_fallback() -> dict[str, Any]:
 def _allowed_dotenv_vars(env_file: Path, parsed: Mapping[str, str]) -> dict[str, str]:
     """The assignments of ``env_file`` it may lend, each other one named in a warning, never its value.
 
-    A ``.env`` another account can write (``_dotenv_not_private``) lends a narrower set: nothing that routes this
-    account's traffic or picks what it executes (``is_allowed_not_private_dotenv_key``). The shell's copy is
-    load_dotenv_no_clobber in assets/runtime_env.sh.
+    A ``.env`` another account can write (``_dotenv_not_private``) lends only the names and values
+    ``is_lent_not_private_dotenv_assignment`` lists: nothing that picks what this account runs or fetches or where its
+    traffic goes. The shell's copy is load_dotenv_no_clobber in assets/runtime_env.sh.
     """
     not_private = _dotenv_not_private(env_file)
     if not_private is None:
@@ -264,8 +264,11 @@ def _allowed_dotenv_vars(env_file: Path, parsed: Mapping[str, str]) -> dict[str,
         for key in dropped_vars:
             print(f"Preflight: WARNING — ignoring unsupported .env key {key} from {env_file}", file=sys.stderr)
         return safe_vars
-    safe_vars, dropped_vars = filter_untrusted_env_mapping(parsed, allow_predicate=is_allowed_not_private_dotenv_key)
-    for key in dropped_vars:
+    safe_vars = {}
+    for key, value in parsed.items():
+        if is_lent_not_private_dotenv_assignment(key, value):
+            safe_vars[key] = str(value)
+            continue
         print(
             f"Preflight: WARNING — ignoring .env key {key} from {env_file}, which another account can write "
             f"({not_private})",

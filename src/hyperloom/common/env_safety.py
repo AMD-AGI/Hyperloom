@@ -36,6 +36,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping
+from types import MappingProxyType
 
 log = logging.getLogger(__name__)
 
@@ -239,31 +240,26 @@ DOTENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "VLLM_",
 )
 
-# Names of DOTENV_EXACT_ALLOWLIST and DOTENV_PREFIX_ALLOWLIST a checkout's ``.env`` lends only when no other account can
-# write it: each routes this account's traffic (the proxies, the model hub's endpoint) or picks the interpreter, the
-# libraries or the packages an install or a run executes. From a ``.env`` another account can write (a checkout on
-# shared storage) that account would choose them, and so run code as this account or read what it sends; such a
-# ``.env`` lends only what is_allowed_not_private_dotenv_key allows. The shell loader's copy of every list this
-# predicate reads is in assets/runtime_env.sh (RUNTIME_ENV_DOTENV_*); test_dotenv_allow_list.py holds them equal.
-DOTENV_NOT_PRIVATE_REFUSED_NAMES: frozenset[str] = frozenset(
+# What a checkout's ``.env`` another account can write (a checkout on shared storage) lends, as each name and the values
+# it may carry: that account chooses everything in such a file, so only a choice among values this account ships, none
+# of which names a program, a package, a path, a host or a model, and no credential. Every other name of the allow
+# lists picks what an install or a run executes or fetches (GEAK_REPO, VLLM_ROCM_INDEX, *_ROOT, *_BIN), where this
+# account's traffic or its key goes (the proxies, OPENAI_BASE_URL, OPENAI_CUSTOM_HEADERS, GEAK_BASE_URL) or text
+# written unescaped into a file this account sources (the model names), so it is lent only from a private ``.env``;
+# and a lent name with any other value is not lent either (FRAMEWORK names a script path). Each value is compared whole,
+# as the loaders read it. The shell loader's copy is RUNTIME_ENV_DOTENV_NOT_PRIVATE_LENT in
+# assets/runtime_env.sh; test_dotenv_allow_list.py holds the two equal, and FRAMEWORK's values to the framework
+# registry.
+DOTENV_NOT_PRIVATE_LENT_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
-        "GEAK_CLAUDE_BIN",
-        "GEAK_CODEX_BIN",
-        "GEAK_E2E_RUNNER",
-        "GEAK_NODE_BIN",
-        "GEAK_ROOT",
-        "HF_ENDPOINT",
-        "HIP_PATH",
-        "HYPERLOOM_WHEEL_REPO",
-        "INFERENCE_OPTIMIZER_FORCE_PYTHON",
-        "PYTHON",
-        "ROCM_PATH",
-        "SGLANG_ROCM_INDEX_URL",
-        "VIRTUAL_ENV",
-        "VLLM_PYTHON",
-        "VLLM_VENV_ROOT",
-        *_PROXY_ENV_NAMES,
-        *_RUNTIME_PATH_ENV_NAMES,
+        "FRAMEWORK": frozenset({"atom", "custom", "sglang", "vllm", "xdit"}),
+        "HF_DATASETS_OFFLINE": frozenset({"0", "1"}),
+        "HF_HUB_OFFLINE": frozenset({"0", "1"}),
+        "HYPERLOOM_BENCHMARK_BACKEND": frozenset({"bypass", "magpie"}),
+        "HYPERLOOM_DOTENV_CREDENTIALS": frozenset({"kernel-agent-env"}),
+        "HYPERLOOM_FRAMEWORK_ENV": frozenset({"isolated", "shared"}),
+        "HYPERLOOM_LLM_MODE": frozenset({"anthropic", "deepseek", "openai"}),
+        "HYPERLOOM_RUN_MODE": frozenset({"baremetal", "docker"}),
     }
 )
 
@@ -488,9 +484,16 @@ def is_allowed_dotenv_key(key: object) -> bool:
 
 
 def is_allowed_not_private_dotenv_key(key: object) -> bool:
-    """True when a ``.env`` another account can write may lend ``key``: is_allowed_dotenv_key, less
-    DOTENV_NOT_PRIVATE_REFUSED_NAMES."""
-    return is_allowed_dotenv_key(key) and str(key or "").strip().upper() not in DOTENV_NOT_PRIVATE_REFUSED_NAMES
+    """True when a ``.env`` another account can write may lend ``key``, with one of the values
+    DOTENV_NOT_PRIVATE_LENT_VALUES gives it (is_lent_not_private_dotenv_assignment)."""
+    upper = str(key or "").strip().upper()
+    return is_allowed_dotenv_key(upper) and upper in DOTENV_NOT_PRIVATE_LENT_VALUES
+
+
+def is_lent_not_private_dotenv_assignment(key: object, value: object) -> bool:
+    """True when a ``.env`` another account can write lends ``key=value``: the name and that value are both listed."""
+    upper = str(key or "").strip().upper()
+    return is_allowed_not_private_dotenv_key(upper) and str(value) in DOTENV_NOT_PRIVATE_LENT_VALUES[upper]
 
 
 def is_allowed_kernel_agent_env_key(key: object) -> bool:

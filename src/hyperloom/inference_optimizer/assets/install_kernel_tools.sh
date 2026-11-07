@@ -229,9 +229,9 @@ esac
 upsert_dotenv_var() {
   local key="$1" value="$2" tmp found=0 line stripped
   [ -n "$key" ] || return 0
-  # write_env_file's dotenv_not_private: a .env another account can write lends only runtime_env_dotenv_key_lent's
-  # keys, so no other is written there (the kernel-agent env file carries them).
-  [ -z "${dotenv_not_private:-}" ] || runtime_env_dotenv_key_lent "$key" || return 0
+  # write_env_file's dotenv_not_private: a .env another account can write lends only what runtime_env_dotenv_lent
+  # allows, so nothing else is written there (the kernel-agent env file carries it).
+  [ -z "${dotenv_not_private:-}" ] || runtime_env_dotenv_lent "$key" "$value" || return 0
   tmp="$(mktemp)"
   if [ -f "$DOTENV" ]; then
     while IFS= read -r line || [ -n "$line" ]; do

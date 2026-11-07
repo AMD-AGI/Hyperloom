@@ -425,38 +425,23 @@ runtime_env_write_kernel_agent_credentials() {
   mv -f -- "$written" "$file" || { rm -f -- "$written"; return 1; }
 }
 
-# What a .env another account can write (runtime_env_dotenv_not_private) lends, by name: the keys
-# is_allowed_not_private_dotenv_key in hyperloom/common/env_safety.py allows, read from copies of the lists it reads.
-# RUNTIME_ENV_DOTENV_ALLOWED_KEYS is DOTENV_EXACT_ALLOWLIST, RUNTIME_ENV_DOTENV_ALLOWED_PREFIXES DOTENV_PREFIX_ALLOWLIST,
-# RUNTIME_ENV_DOTENV_BLOCKED_KEYS BLOCKED_UNTRUSTED_ENV_NAMES (the loader and interpreter variables: LD_PRELOAD,
-# NODE_OPTIONS, PYTHONPATH, BASH_ENV, ...), and RUNTIME_ENV_DOTENV_NOT_PRIVATE_REFUSED_KEYS
-# DOTENV_NOT_PRIVATE_REFUSED_NAMES (what routes this account's traffic or picks what it executes).
-# test_dotenv_allow_list.py holds each copy equal to its list and runtime_env_dotenv_key_lent to the predicate.
-RUNTIME_ENV_DOTENV_ALLOWED_KEYS="ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS CLAUDE_CODE_OAUTH_TOKEN \
-CLAUDE_MODEL CODEX_MODEL DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DEEPSEEK_MODEL DSH_MODEL FRAMEWORK GEAK_CLAUDE_MODEL \
-HF_DATASETS_OFFLINE HF_HOME HF_HUB_CACHE HF_HUB_OFFLINE HF_TOKEN HIP_PATH HTTPS_PROXY HTTP_PROXY \
-HYPERLOOM_BENCHMARK_BACKEND HYPERLOOM_DOCKER_TARGET_HOST HYPERLOOM_FRAMEWORK_ENV HYPERLOOM_LLM_MODE \
-HYPERLOOM_RUNTIME_DIR HYPERLOOM_RUN_MODE HYPERLOOM_SKILL_PATH HYPERLOOM_WHEEL_REPO HYPERLOOM_WHEEL_TAG \
-INFERENCE_OPTIMIZER_FORCE_PYTHON KERNEL_AGENT_ENV KERNEL_OPT_BACKEND_ORDER NO_PROXY OPENAI_API_KEY OPENAI_BASE_URL \
-OPENAI_CUSTOM_HEADERS ROCM_PATH SGLANG_ROCM_EXTRA SGLANG_ROCM_INDEX_URL SGLANG_ROCM_PYPI_VERSION USER_DATA_PATH \
-VIRTUAL_ENV VLLM_PYTHON VLLM_VENV_ROOT"
-RUNTIME_ENV_DOTENV_ALLOWED_PREFIXES="AITER_ FORGE_ GEAK_ KERNELFORGE_ HF_ HYPERLOOM_ INFERENCE_OPTIMIZER_ KERNEL_OPT_ \
-SGLANG_ VLLM_"
-RUNTIME_ENV_DOTENV_BLOCKED_KEYS="AGENTX_KEEP_ALIVE_ENV BASH_ENV CDPATH ENV GCONV_PATH GIT_SSH_COMMAND IFS LD_AUDIT \
-LD_LIBRARY_PATH LD_PRELOAD NODE_OPTIONS PATH PERL5OPT PYTHONHOME PYTHONINSPECT PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE \
-SHELLOPTS"
-RUNTIME_ENV_DOTENV_NOT_PRIVATE_REFUSED_KEYS="GEAK_CLAUDE_BIN GEAK_CODEX_BIN GEAK_E2E_RUNNER GEAK_NODE_BIN GEAK_ROOT \
-HF_ENDPOINT HIP_PATH HTTPS_PROXY HTTP_PROXY HYPERLOOM_RUNTIME_DIR HYPERLOOM_WHEEL_REPO INFERENCE_OPTIMIZER_FORCE_PYTHON \
-KERNEL_AGENT_ENV NO_PROXY PYTHON ROCM_PATH SGLANG_ROCM_INDEX_URL VIRTUAL_ENV VLLM_PYTHON VLLM_VENV_ROOT"
+# What a .env another account can write (runtime_env_dotenv_not_private) lends: each NAME=VALUE,VALUE... is a name and
+# the values it may carry there, DOTENV_NOT_PRIVATE_LENT_VALUES in hyperloom/common/env_safety.py, which says why so
+# few. test_dotenv_allow_list.py holds the two equal and runtime_env_dotenv_lent to
+# is_lent_not_private_dotenv_assignment.
+RUNTIME_ENV_DOTENV_NOT_PRIVATE_LENT="FRAMEWORK=atom,custom,sglang,vllm,xdit HF_DATASETS_OFFLINE=0,1 HF_HUB_OFFLINE=0,1 \
+HYPERLOOM_BENCHMARK_BACKEND=bypass,magpie HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env \
+HYPERLOOM_FRAMEWORK_ENV=isolated,shared HYPERLOOM_LLM_MODE=anthropic,deepseek,openai HYPERLOOM_RUN_MODE=baremetal,docker"
 
-# Status 0 when a .env another account can write lends the variable named $1 (any case, as preflight compares it).
-runtime_env_dotenv_key_lent() {
-  local upper="${1^^}" prefix
+# Status 0 when a .env another account can write lends the variable named $1 (any case, as preflight compares it) with
+# the value $2, compared whole.
+runtime_env_dotenv_lent() {
+  local upper="${1^^}" entry
   [[ "$upper" =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
-  [[ " $RUNTIME_ENV_DOTENV_BLOCKED_KEYS $RUNTIME_ENV_DOTENV_NOT_PRIVATE_REFUSED_KEYS " != *" $upper "* ]] || return 1
-  [[ " $RUNTIME_ENV_DOTENV_ALLOWED_KEYS " != *" $upper "* ]] || return 0
-  for prefix in $RUNTIME_ENV_DOTENV_ALLOWED_PREFIXES; do
-    [[ "$upper" != "$prefix"* ]] || return 0
+  for entry in $RUNTIME_ENV_DOTENV_NOT_PRIVATE_LENT; do
+    [ "${entry%%=*}" = "$upper" ] || continue
+    [[ ",${entry#*=}," == *",$2,"* && "$2" != *,* ]]
+    return
   done
   return 1
 }
@@ -466,9 +451,9 @@ runtime_env_dotenv_key_lent() {
 # HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env) lends none: its RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS and
 # RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS lines are skipped and counted in DOTENV_SKIPPED_CREDENTIAL_COUNT, and
 # the credentials come from the shell or this container's kernel-agent env file alone. A .env another account can write
-# lends, besides, only what runtime_env_dotenv_key_lent allows: every other line is skipped, its name (never its value)
-# in DOTENV_REFUSED_KEYS and in one warning on stderr, so another account's LD_PRELOAD, NODE_OPTIONS, PYTHONPATH or
-# HTTPS_PROXY never reaches this account's shell. A private .env is read as before: install_kernel_tools.sh and
+# lends, besides, only the names and values runtime_env_dotenv_lent allows: every other line is skipped, its name (never
+# its value) in DOTENV_REFUSED_KEYS and in one warning on stderr, so another account's LD_PRELOAD, NODE_OPTIONS,
+# PYTHONPATH, HTTPS_PROXY, GEAK_REPO or OPENAI_BASE_URL never reaches this account's shell. A private .env is read as before: install_kernel_tools.sh and
 # install_baremetal.sh themselves keep names there (PYTHONPATH, MAGPIE_PYTHON, TRACELENS_INTERNAL_ROOT, TL_EXTENSION)
 # that preflight's list does not carry and the documented shell flows read back. Preflight's copy of both skips is in
 # _load_dotenv_fallback in cli/preflight_env.py.
@@ -515,6 +500,10 @@ load_dotenv_no_clobber() {
           continue
         fi
         [ "$key" = HYPERLOOM_RUN_MODE ] || continue
+        if [ -n "$not_private" ] && ! runtime_env_dotenv_lent "$key" "$value"; then
+          [[ " $refused " == *" $key "* ]] || refused+="${refused:+ }$key"
+          continue
+        fi
       else
         [ "$key" = HYPERLOOM_RUN_MODE ] && continue
         if [ "$skip_credentials" -eq 1 ] &&
@@ -522,7 +511,7 @@ load_dotenv_no_clobber() {
           skipped=$((skipped + 1))
           continue
         fi
-        if [ -n "$not_private" ] && ! runtime_env_dotenv_key_lent "$key"; then
+        if [ -n "$not_private" ] && ! runtime_env_dotenv_lent "$key" "$value"; then
           [[ " $refused " == *" $key "* ]] || refused+="${refused:+ }$key"
           continue
         fi
