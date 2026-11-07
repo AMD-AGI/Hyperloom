@@ -6,7 +6,8 @@
 Each finished test yields at most one lesson:
 
 * ``worked``: a committed or merged improvement. An AgentX session's says its outputs were not checked: that gate reads
-  speed and the request error rate, so a change to what the model says is kept all the same.
+  speed and the request error rate, so a change to what the model says is kept all the same. One that brought in a
+  change a landed retraction later undid names the retraction.
 * ``failed``: a regression or a flat result, which no one should repeat on the same state.
 * ``pitfall``: a candidate that failed to run, or ran faster but failed the accuracy check or was blocked.
 
@@ -102,7 +103,8 @@ def lesson_of(record: TestRecord, snapshot: BlackboardSnapshot) -> Lesson | None
     if record.landed_retraction:
         return lesson(LessonKind.PITFALL, f"{gain}, retracts {record.retracts}", judged.gain_pct)
     if record.conclusion in _WORKED:
-        kept = f"{gain}, {record.conclusion.value} as {record.commit_id}{_unchecked(snapshot.profile)}"
+        undone = "".join(f", {item}" for item in later_retractions(record, snapshot))
+        kept = f"{gain}, {record.conclusion.value} as {record.commit_id}{_unchecked(snapshot.profile)}{undone}"
         return lesson(LessonKind.WORKED, kept, judged.gain_pct)
     if judged.verdict is Verdict.BLOCKED:
         held_back_by = ", ".join(judged.refused_by) or "the accuracy check"
@@ -110,6 +112,19 @@ def lesson_of(record: TestRecord, snapshot: BlackboardSnapshot) -> Lesson | None
     if judged.verdict in _NO_LESSON:
         return None
     return lesson(LessonKind.FAILED, f"{judged.verdict.value} at {gain}", judged.gain_pct)
+
+
+def later_retractions(record: TestRecord, snapshot: BlackboardSnapshot) -> tuple[str, ...]:
+    """The landed retractions that later undid a change the test's commit brought in, one phrase each: those its
+    commit lacks while holding what they undo, where the state it was tried on did not hold it yet."""
+
+    unretracted = snapshot.unretracted()
+    before = {item.request_id for item in unretracted.get(record.request.parent_commit, ())}
+    return tuple(
+        f"later retracted by {item.commit_id}: {item.retracts}"
+        for item in unretracted.get(record.commit_id or "", ())
+        if item.request_id not in before
+    )
 
 
 def _unchecked(profile: SessionProfile | None) -> str:
