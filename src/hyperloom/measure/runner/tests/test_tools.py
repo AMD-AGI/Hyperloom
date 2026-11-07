@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
+import sys
 
 import pytest
 
-from hyperloom.measure.runner.tools import ToolError, ensure_inferencex
+from hyperloom.measure.runner import tools
+from hyperloom.measure.runner.tools import ToolError, ensure_inference_suite, ensure_inferencex
 
 
 def _git(path, *args):
@@ -78,3 +81,68 @@ def test_an_unknown_commit_is_refused(upstream, tmp_path, monkeypatch):
 
     with pytest.raises(ToolError, match="git fetch failed"):
         ensure_inferencex("a" * 40, tmp_path / "cache")
+
+
+_MANIFEST = b'{"schema": "inference-suite-staging/1", "tools": {}}\n'
+_STAGING = hashlib.sha256(_MANIFEST).hexdigest()
+
+
+class _Stage:
+    """``python -m inference_suite stage`` as the runner calls it: writes ``manifest`` into the tool cache it is given."""
+
+    def __init__(self, manifest: bytes = _MANIFEST, returncode: int = 0) -> None:
+        self.manifest, self.returncode, self.argv = manifest, returncode, []
+
+    def __call__(self, argv, **kwargs):
+        self.argv.append(argv)
+        cache = argv[argv.index("--tool-cache") + 1]
+        with open(f"{cache}/staging_manifest.json", "wb") as manifest:
+            manifest.write(self.manifest)
+        return subprocess.CompletedProcess(argv, self.returncode, "", "stage refused")
+
+
+def test_a_staging_the_runner_cache_holds_is_used_without_staging_again(tmp_path, monkeypatch):
+    held = tmp_path / "runner-cache" / "inference-suite" / _STAGING
+    held.mkdir(parents=True)
+    (held / "staging_manifest.json").write_bytes(_MANIFEST)
+    stage = _Stage()
+    monkeypatch.setattr(tools.subprocess, "run", stage)
+
+    assert ensure_inference_suite(_STAGING, tmp_path / "ix", tmp_path / "runner-cache") == held
+    assert stage.argv == []
+
+
+def test_a_missing_staging_is_staged_from_the_inferencex_checkout_into_its_own_directory(tmp_path, monkeypatch):
+    stage = _Stage()
+    monkeypatch.setattr(tools.subprocess, "run", stage)
+
+    staged = ensure_inference_suite(_STAGING, tmp_path / "ix", tmp_path / "runner-cache")
+
+    assert staged == tmp_path / "runner-cache" / "inference-suite" / _STAGING
+    assert stage.argv == [
+        [
+            sys.executable,
+            "-m",
+            "inference_suite",
+            "stage",
+            "--source",
+            str(tmp_path / "ix"),
+            "--tool-cache",
+            str(staged),
+        ]
+    ]
+
+
+@pytest.mark.parametrize("stage", [_Stage(manifest=b"{}\n"), _Stage(returncode=2)], ids=["other pins", "stage failed"])
+def test_a_staging_that_is_not_the_sheets_is_removed_and_refused(tmp_path, monkeypatch, stage):
+    monkeypatch.setattr(tools.subprocess, "run", stage)
+
+    with pytest.raises(ToolError, match=f"not the sheet's {_STAGING}"):
+        ensure_inference_suite(_STAGING, tmp_path / "ix", tmp_path / "runner-cache")
+    assert list((tmp_path / "runner-cache" / "inference-suite").iterdir()) == []
+
+
+def test_a_staging_that_is_not_a_manifest_sha256_is_refused_before_anything_is_staged(tmp_path):
+    with pytest.raises(ToolError, match="not a staging manifest sha256"):
+        ensure_inference_suite("sha256:" + _STAGING, tmp_path / "ix", tmp_path / "runner-cache")
+    assert not (tmp_path / "runner-cache").exists()

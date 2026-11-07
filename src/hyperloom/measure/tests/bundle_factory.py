@@ -134,7 +134,17 @@ def point_document(yaml_text: str) -> dict[str, Any]:
     return {"yaml": yaml_text, "sha256": hashlib.sha256(yaml_text.encode()).hexdigest()}
 
 
-STAGING = "c" * 64
+#: A staging manifest, and its sha256, which is how a sheet names the staging.
+STAGING_MANIFEST = b'{"schema": "inference-suite-staging/1", "tools": {}}\n'
+STAGING = hashlib.sha256(STAGING_MANIFEST).hexdigest()
+
+
+def stage_into(runner_cache: Path) -> Path:
+    """Lay :data:`STAGING_MANIFEST` where a runner whose cache is ``runner_cache`` looks for the sheet's staging."""
+    tools = runner_cache / "inference-suite" / STAGING
+    tools.mkdir(parents=True, exist_ok=True)
+    (tools / "staging_manifest.json").write_bytes(STAGING_MANIFEST)
+    return tools
 
 
 @functools.lru_cache(maxsize=None)

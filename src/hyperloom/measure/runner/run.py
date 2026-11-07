@@ -87,12 +87,13 @@ from hyperloom.measure.runner.rewrite import Placement, rewrite_config
 from hyperloom.measure.runner.rounds import write_rounds
 from hyperloom.measure.runner.service import Progress, RunnerFailure, join_notes, wait_for_file, write_status
 from hyperloom.measure.runner.snapshot import SnapshotError, check_snapshot
-from hyperloom.measure.runner.tools import ToolError, ensure_inferencex, ensure_magpie
+from hyperloom.measure.runner.cache_layout import CACHE_ENV, DEFAULT_CACHE_DIR
+from hyperloom.measure.runner.tools import ToolError, ensure_inference_suite, ensure_inferencex, ensure_magpie
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.spec import SPEC_SCHEMA_V1, MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
-from hyperloom.orchestrator.actions.executors import harvest_leaked_artifacts
+from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV, harvest_leaked_artifacts
 from hyperloom.orchestrator.actions.executors._aiter_serving_once import build_image_own_once
 from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
 
@@ -278,6 +279,9 @@ def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Fa
     """Tools, attachments, farm and the rewritten YAML; returns the point path and the InferenceX checkout."""
     try:
         inferencex = ensure_inferencex(spec.tools.inferencex, ctx.cache)
+        if spec.tools.staging is not None:
+            runner_cache = Path(ctx.environ.get(CACHE_ENV) or DEFAULT_CACHE_DIR)
+            ctx.environ[TOOL_CACHE_ENV] = str(ensure_inference_suite(spec.tools.staging, inferencex, runner_cache))
         if spec.procedure.benchmark_backend == _MAGPIE:
             ctx.environ["MAGPIE_PATH"] = str(ensure_magpie(spec.tools.magpie, ctx.cache))
     except ToolError as exc:

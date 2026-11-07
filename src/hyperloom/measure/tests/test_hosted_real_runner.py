@@ -16,6 +16,8 @@ import pytest
 
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.local_templates import image_env
+from hyperloom.measure.runner.cache_layout import CACHE_ENV
+from hyperloom.measure.tests.bundle_factory import stage_into
 from hyperloom.measure.returncodes import HOSTED_SPEC_REJECTED_RC
 from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_call, make_rig
@@ -74,6 +76,7 @@ def _rigs(tmp_path: Path, command: tuple[str, ...]):
     """A factory of rigs over the runner ``command``: ``envs`` are added to the template's, ``config`` to the backend's."""
     repo = tmp_path / "inferencex"
     commit = _git_repo(repo)
+    runner_cache = stage_into(tmp_path / "runner-cache").parents[1]
     built: list[Rig] = []
 
     def make(*, envs: Mapping[str, str] | None = None, config: Mapping[str, Any] | None = None, **spec) -> Rig:
@@ -84,7 +87,7 @@ def _rigs(tmp_path: Path, command: tuple[str, ...]):
             gpus=1,
             sealed=True,
             signing=True,
-            envs={**image_env(), "INFERENCEX_REPO": str(repo), **(envs or {})},
+            envs={**image_env(), "INFERENCEX_REPO": str(repo), CACHE_ENV: str(runner_cache), **(envs or {})},
         )
         r = make_rig(
             tmp_path,
