@@ -24,6 +24,7 @@ from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
+from ._pd_role_trace import ROLE_STEADY_STATE_MODE, analyze_role_traces
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
@@ -808,6 +809,14 @@ def _analysis_payload(task_params: dict[str, Any], *, trace_path: str, framework
     return payload
 
 
+def _pd_main_role(profiled: _ProfileOutcome) -> str:
+    """The PD role whose trace the profile adopted as its main trace, or '' outside a PD cluster."""
+    role_traces = profiled.result.get("role_traces") if isinstance(profiled.result, dict) else None
+    if not isinstance(role_traces, dict):
+        return ""
+    return next((role for role, path in role_traces.items() if path and path == profiled.trace_path), "")
+
+
 def _hot_kernels(ta_result: dict[str, Any]) -> list[Any]:
     """The hot kernels an analysis surfaced."""
     return ta_result.get("hot_kernels_top15") or ta_result.get("hot_kernels") or []
@@ -931,16 +940,39 @@ class RooflineExecutor:
             return profiled
         self._record_profile_findings(profiled)
         payload = _analysis_payload(ctx.task.params or {}, trace_path=profiled.trace_path, framework=arm.framework)
+        main_role = _pd_main_role(profiled)
+        if main_role:
+            payload.setdefault("steady_state_mode", ROLE_STEADY_STATE_MODE[main_role])
 
         analysis = await self._analyze(ctx, recorder, payload)
         if not isinstance(analysis, _AnalysisOutcome):
             remember_trace_failure(self.shared_state, payload, analysis)
             return analysis
+        if main_role:
+            await self._record_role_analyses(ctx, profiled, main_role, analysis, framework=arm.framework)
         attribution_degraded = _flag_attribution_degraded(analysis.result, profiled.result)
         analysed = _AnalysedProfile(profiled, analysis)
         if _wants_compute_bound_reprofile(analysis.result):
             analysed = await self._compute_bound_reprofile(ctx, recorder, arm, analysis) or analysed
         return self._conclude(ctx, recorder, analysed, attribution_degraded=attribution_degraded, started=started)
+
+    async def _record_role_analyses(
+        self,
+        ctx: RunnerContext,
+        profiled: _ProfileOutcome,
+        main_role: str,
+        analysis: _AnalysisOutcome,
+        *,
+        framework: str,
+    ) -> None:
+        """Analyse the PD roles other than ``main_role`` and record every role's summary on ``last_trace_analyze_by_role``."""
+        role_traces = dict(profiled.result.get("role_traces") or {})
+        self.shared_state.last_trace_analyze_by_role = await analyze_role_traces(
+            role_traces,
+            session_dir=Path(ctx.extra["session_dir"]),
+            framework=framework,
+            known={main_role: analysis.result},
+        )
 
     async def _profile_until_usable(
         self, ctx: RunnerContext, recorder: Any, arm: _ProfileArm
@@ -1194,12 +1226,23 @@ class RooflineExecutor:
             detail=f"hot_kernels={len(hot)}",
             duration_s=time.monotonic() - started,
         )
+        steady = str(cached.get("steady_state_trace") or "")
+        try:
+            from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import record_profile_paths
+
+            profile_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip() or str(Path(trace_path).parent)
+            record_profile_paths(
+                profile_trace=profile_dir,
+                steady_state_trace=steady or trace_path,
+            )
+        except (OSError, RuntimeError, ValueError, TypeError):
+            log.debug("roofline: could not record profile paths into multi-node state", exc_info=True)
         result = {
             "status": status,
             "executed_at_iso": _now_iso(),
             "snapshot_id": cached.get("roofline_snapshot_id"),
             "last_profile_trace": trace_path,
-            "steady_state_trace": cached.get("steady_state_trace", ""),
+            "steady_state_trace": steady,
             "analysis_md_path": cached.get("analysis_md_path", ""),
             "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
             "profile_workspace": profile.result.get("workspace"),

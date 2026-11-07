@@ -335,6 +335,10 @@ def _spawn_remote(group: _ServerGroup, node_rank: int, dirs: _LaunchDirs, *, pid
     # Fall back to $HYPERLOOM_MN_PROFILE_TRACE_DIR so traces still reach a shared dir when a reused server skips this
     # launch.
     tpd = (dirs.torch_profiler_dir or "").strip() or os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
+    role = group.pd.role.strip().lower()
+    if tpd and role:
+        # A PD group writes under <dir>/<role> so prefill and decode traces stay attributable.
+        tpd = str(Path(tpd) / role)
     if tpd:
         # Pin profiler output to a shared dir; mkdir failure is non-fatal.
         try:

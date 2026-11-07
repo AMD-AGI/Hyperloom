@@ -230,6 +230,17 @@ class EvalRun:
     out_dir: str
     tasks: str = "gsm8k"
     limit: str | None = None
+    include_path: str | None = None
+
+
+def resolve_eval_include_path(inferencex_root: str | None, tasks: str, explicit: str | None = None) -> str | None:
+    """Return the lm-eval include path: explicit value, else InferenceX utils/evals for gsm8k when present."""
+    if explicit:
+        return explicit
+    if "gsm8k" not in {t.strip() for t in tasks.split(",")} or not inferencex_root:
+        return None
+    evals_dir = Path(inferencex_root) / "utils" / "evals"
+    return str(evals_dir) if evals_dir.is_dir() else None
 
 
 def build_eval_command(run: EvalRun) -> list[str]:
@@ -256,6 +267,8 @@ def build_eval_command(run: EvalRun) -> list[str]:
     ]
     if run.limit:
         cmd += ["--limit", run.limit]
+    if run.include_path:
+        cmd += ["--include_path", run.include_path]
     return cmd
 
 

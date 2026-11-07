@@ -1350,6 +1350,17 @@ def _pin_accuracy_eval_envs(envs: dict[str, Any]) -> None:
         _eval_value = os.environ.get(_eval_key, "").strip()
         if _eval_value and _eval_key not in envs:
             envs[_eval_key] = _eval_value
+    # Stock lm-eval gsm8k uses a bare dataset id; point it at InferenceX's pinned task YAML.
+    if "MAGPIE_EVAL_INCLUDE_PATH" not in envs:
+        from .bypass_engine import resolve_eval_include_path
+
+        _include = resolve_eval_include_path(
+            os.environ.get("INFERENCEX_PATH", "").strip(),
+            str(envs.get("MAGPIE_EVAL_TASKS") or "gsm8k"),
+            os.environ.get("MAGPIE_EVAL_INCLUDE_PATH", "").strip(),
+        )
+        if _include:
+            envs["MAGPIE_EVAL_INCLUDE_PATH"] = _include
     # PD (router-fronted): lm_eval's default token-id prompts are rejected by the
     # sglang_router's /v1/completions (HTTP 422, StringOrArray), collapsing the
     # accuracy eval. Force string prompts so the gate works. Explicit env /

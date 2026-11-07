@@ -296,6 +296,9 @@ class _Round:
         rc = 0 if _eval_only(bench_envs) else _run_subprocess(client_cmd, self.timeout_s, self.workspace, "client")
         if rc == 0 and _run_eval_enabled(bench_envs):
             _ensure_eval_deps(sys.executable)
+            eval_tasks = (
+                str(bench_envs.get("MAGPIE_EVAL_TASKS") or os.environ.get("MAGPIE_EVAL_TASKS", "")).strip() or "gsm8k"
+            )
             eval_cmd = bypass_engine.build_eval_command(
                 bypass_engine.EvalRun(
                     python_exe=sys.executable,
@@ -303,11 +306,17 @@ class _Round:
                     base_url=self.base_url,
                     conc=self.conc,
                     out_dir=str(self.workspace / "lm_eval"),
-                    tasks=str(bench_envs.get("MAGPIE_EVAL_TASKS") or os.environ.get("MAGPIE_EVAL_TASKS", "")).strip()
-                    or "gsm8k",
+                    tasks=eval_tasks,
                     limit=(
                         str(bench_envs.get("MAGPIE_EVAL_LIMIT") or os.environ.get("MAGPIE_EVAL_LIMIT", "")).strip()
                         or None
+                    ),
+                    include_path=bypass_engine.resolve_eval_include_path(
+                        self.inferencex_root,
+                        eval_tasks,
+                        str(
+                            bench_envs.get("MAGPIE_EVAL_INCLUDE_PATH") or os.environ.get("MAGPIE_EVAL_INCLUDE_PATH", "")
+                        ).strip(),
                     ),
                 )
             )

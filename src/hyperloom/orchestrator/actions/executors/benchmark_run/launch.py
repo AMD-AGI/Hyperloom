@@ -293,9 +293,11 @@ class _BenchmarkLaunchMixin:
             ``None`` when the round may proceed -- including every unavailable
             verdict, which must never cost a round.
         """
+        from .._multi_node_env import is_multi_node
         from ..magpie_agentx import native_config
 
-        if native_config(round_.config_path):
+        # Multi-node engines are launched remotely with per-role argv; the local framework does not judge it.
+        if is_multi_node() or native_config(round_.config_path):
             return None
         from ....bringup import check_server_argv
         from ....bringup.argv_preflight import OK, PARSED_AFTER_DROP, UNAVAILABLE, ArgvRepair
@@ -461,6 +463,18 @@ class _BenchmarkLaunchMixin:
         )
         if stopped is not None:
             return stopped
+        if is_multi_node():
+            from .._multi_node_server_lifecycle import pd_engines_lost_reason
+
+            lost = await asyncio.to_thread(pd_engines_lost_reason)
+            if lost:
+                log.warning("baseline_executor: %s; error_class=mn_engine_lost.", lost)
+                return self._reaped_round_failure(
+                    round_.output_dir,
+                    workspaces_before,
+                    started_unix,
+                    {"error_class": "mn_engine_lost", "error": lost, **round_.capture_meta},
+                )
         # Detokenizer-stall watchdog reap: the server came up healthy but went silent for the stall grace window
         # (hung engine / wedged detokenizer).
         if finished.returncode == DETOKENIZER_STALL_RETURNCODE:
