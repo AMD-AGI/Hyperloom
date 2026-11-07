@@ -44,6 +44,7 @@ from hyperloom.measure.tests.bundle_factory import (
 )
 from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from inference_suite import INFERENCEX_CLIENT_COMMIT
 
 SHEET_IMAGE = spec_document_v1()["image"]["digest"]
 POINT = {"benchmark": {"model": "/m", "framework": "sglang", "envs": {"TP": 1, "CONC": 4, "RUN_EVAL": "false"}}}
@@ -162,16 +163,21 @@ def _sheet_v2(**changes) -> dict:
     }
 
 
-def test_a_v2_sheet_hands_the_test_its_frozen_base_and_staging_and_signs_a_v2_manifest(tmp_path, env, monkeypatch):
+def test_a_v2_sheet_hands_the_test_its_frozen_base_and_the_runners_own_staging_and_signs_a_v2_manifest(
+    tmp_path, env, monkeypatch
+):
     backend = _Backend(_ok)
     monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    sheet = _sheet_v2()
+    sheet["tools"] = {**sheet["tools"], "inference_suite": {"staging": "c" * 64}}  # the application's staging
 
-    assert _go(tmp_path, env, _sheet_v2()) == 0
+    assert _go(tmp_path, env, sheet) == 0
 
     (call,) = backend.calls
     assert (call.session_facts.base_launch, call.session_facts.staging) == (base_launch(), STAGING)
     assert "HYPERLOOM_BENCHMARK_BACKEND" not in env
-    assert env["INFERENCE_SUITE_TOOL_CACHE"] == str(tmp_path / "runner-cache" / "inference-suite" / STAGING)
+    tool_cache = tmp_path / "runner-cache" / "inference-suite" / INFERENCEX_CLIENT_COMMIT
+    assert env["INFERENCE_SUITE_TOOL_CACHE"] == str(tool_cache)
     manifest = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes())
     assert (manifest.runner.inference_suite_staging, manifest.runner.magpie_commit) == (STAGING, None)
 

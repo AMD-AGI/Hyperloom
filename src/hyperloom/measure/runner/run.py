@@ -87,7 +87,7 @@ from hyperloom.measure.runner.rewrite import Placement, rewrite_config
 from hyperloom.measure.runner.rounds import write_rounds
 from hyperloom.measure.runner.service import Progress, RunnerFailure, join_notes, wait_for_file, write_status
 from hyperloom.measure.runner.snapshot import SnapshotError, check_snapshot
-from hyperloom.measure.runner.cache_layout import CACHE_ENV, DEFAULT_CACHE_DIR
+from hyperloom.measure.runner.cache_layout import CACHE_ENV, DEFAULT_CACHE_DIR, LOCAL_WHEELS_DIR
 from hyperloom.measure.runner.tools import ToolError, ensure_inference_suite, ensure_inferencex, ensure_magpie
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.spec import SPEC_SCHEMA, SPEC_SCHEMA_V1, MeasurementSpec, fingerprint, spec_sha256
@@ -123,6 +123,8 @@ class _Context:
     out_dir: Path
     work: Path
     cache: Path
+    #: The sandbox's checked wheels, the only source an offline inference_suite staging installs from.
+    wheels: Path
     environ: MutableMapping[str, str]
     started: float
     #: Watches the visible cards for a process that is not this sandbox's; the signed result states what it saw.
@@ -134,6 +136,8 @@ class _Context:
     #: The directory the test's compilers write below, on this host's temporary disk; made once the sheet names the
     #: test (:func:`_compile_dir`) and removed when the run ends.
     compile: Path | None = None
+    #: The sha256 of the inference_suite staging manifest this runner staged for a v2 sheet (:func:`_prepare`).
+    staging: str | None = None
 
     @property
     def files(self) -> Path:
@@ -298,7 +302,8 @@ def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Fa
         inferencex = ensure_inferencex(spec.tools.inferencex, ctx.cache)
         if spec.tools.staging is not None:
             runner_cache = Path(ctx.environ.get(CACHE_ENV) or DEFAULT_CACHE_DIR)
-            ctx.environ[TOOL_CACHE_ENV] = str(ensure_inference_suite(spec.tools.staging, inferencex, runner_cache))
+            staged = ensure_inference_suite(inferencex, runner_cache, ctx.wheels)
+            ctx.environ[TOOL_CACHE_ENV], ctx.staging = str(staged.tool_cache), staged.staging
         if spec.procedure.benchmark_backend == _MAGPIE:
             ctx.environ["MAGPIE_PATH"] = str(ensure_magpie(spec.tools.magpie, ctx.cache))
     except ToolError as exc:
@@ -427,7 +432,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         on_output=progress.touch,
         env_overrides=dict(spec.process_env),
         unset_envs=spec.unset_envs,
-        session_facts=SessionFacts((), str(inferencex), spec.tools.staging, p.base_launch),
+        session_facts=SessionFacts((), str(inferencex), ctx.staging, p.base_launch),
         attachments=_case_attachments(spec),
         phases=ctx.phases,
         short_prompts=p.short_prompts,
@@ -524,12 +529,13 @@ class _Findings:
     jit_cache: dict | None = None
 
 
-def _tool_facts(spec: MeasurementSpec) -> dict[str, str | None]:
-    """What the manifest says the test ran: the staging a v2 sheet names, or the Magpie commit of a v1 sheet, which
-    this runner still measures through Magpie."""
+def _tool_facts(ctx: _Context, spec: MeasurementSpec) -> dict[str, str | None]:
+    """What the manifest says the test ran: for a v2 sheet the staging this runner staged, which the sheet's (the
+    application's) never equals byte for byte, or the Magpie commit of a v1 sheet, which this runner still measures
+    through Magpie."""
     if spec.schema == SPEC_SCHEMA_V1:
         return {"magpie_commit": spec.tools.magpie}
-    return {"inference_suite_staging": spec.tools.staging}
+    return {"inference_suite_staging": ctx.staging}
 
 
 def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Findings) -> None:
@@ -555,7 +561,7 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
                 "power_cap_w": first.power_cap_w if first else None,
                 "partition_mode": first.partition_mode if first else None,
                 "hyperloom_version": _version(),
-                **_tool_facts(spec),
+                **_tool_facts(ctx, spec),
                 "inferencex_commit": spec.tools.inferencex,
                 "gpu_ids": visible,
                 "rule_pack": rule_pack_identity(),
@@ -765,7 +771,7 @@ def run(
         write_status(out_dir, state=_FAILED, error_class=failure.error_class, message=str(failure))
         return failure.exit_code
     watch = CardWatch(_visible(environ), own_sandbox_processes(environ), guard)
-    ctx = _Context(in_dir, out_dir, work, scratch / "cache", environ, time.time(), watch)
+    ctx = _Context(in_dir, out_dir, work, scratch / "cache", scratch / LOCAL_WHEELS_DIR, environ, time.time(), watch)
     _begin_phases(ctx)
     with Progress(out_dir, files_dir=ctx.files) as progress:
         try:
