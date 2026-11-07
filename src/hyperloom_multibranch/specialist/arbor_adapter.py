@@ -69,6 +69,7 @@ from hyperloom.measure.compile import (
     locate_installed_package,
 )
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS, SURFACE_ENV_KEYS
+from hyperloom_multibranch.repo.isolated_git import pinned_git
 from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.worktree import SKIPPED
@@ -421,9 +422,13 @@ def pass_dossier(checkout: Path, session: Path) -> Path | None:
 
 
 def _shipped(checkout: Path) -> frozenset[str]:
-    """The dossiers ``checkout`` ships, the ones git tracks under :data:`DOSSIER_DIR`."""
+    """The dossiers ``checkout`` ships, the ones git tracks under :data:`DOSSIER_DIR`, read with no program the
+    checkout's config names run (:func:`~hyperloom_multibranch.repo.isolated_git.pinned_git`): Arbor writes it."""
 
-    listed = subprocess.run(["git", "ls-files", "--", DOSSIER_DIR], cwd=checkout, capture_output=True, text=True)
+    try:
+        listed = pinned_git(checkout, "ls-files", "--", DOSSIER_DIR)
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
     depth = len(PurePosixPath(DOSSIER_DIR).parts)
     tracked = (PurePosixPath(line).parts for line in listed.stdout.splitlines())
     return frozenset(parts[depth] for parts in tracked if len(parts) > depth)
@@ -734,12 +739,11 @@ def _root_refusals(root: object, workspace: Path) -> list[str]:
 
 
 def _has_commit(workspace: Path, sha: str) -> bool:
-    found = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"],
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-    )
+    """Whether ``sha`` is a commit of the workspace, the agent's to write, asked with no program its config names run."""
+    try:
+        found = pinned_git(workspace, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}")
+    except (OSError, subprocess.SubprocessError):
+        return False
     return found.returncode == 0 and bool(found.stdout.strip())
 
 
