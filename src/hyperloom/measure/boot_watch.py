@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.measure.jit.modules import module_build_limit_sec
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 
@@ -83,17 +84,16 @@ _TAIL_BYTES = 8192
 _UTF8 = "utf-8"
 
 
-def boot_limit_sec(benchmark: Mapping[str, Any], timeout_sec: float) -> float | None:
-    """How long the server of a round on ``benchmark`` may take to be ready; ``None`` when no stamp can say it is.
+def boot_limit_sec(point: BenchmarkPoint, timeout_sec: float) -> float | None:
+    """How long the server of a round on ``point`` may take to be ready; ``None`` when no stamp can say it is.
 
     The budget is the one the point carries (``server_lifecycle.server_ready_timeout_s``), never more than the round's
     ``timeout_sec``; a point that carries none gets the cap itself, which is what the launcher writes into that field.
     """
-    if str(benchmark.get("framework") or "").lower() not in _SERVER_FRAMEWORKS:
+    if point.framework.lower() not in _SERVER_FRAMEWORKS:
         return None
-    lifecycle = benchmark.get("server_lifecycle")
-    carried = lifecycle.get("server_ready_timeout_s") if isinstance(lifecycle, Mapping) else None
-    budget = float(carried) if isinstance(carried, (int, float)) and carried > 0 else timeout_sec
+    carried = point.server_ready_timeout_s
+    budget = carried if carried is not None and carried > 0 else timeout_sec
     return BOOT_SHARE * min(budget, timeout_sec)
 
 

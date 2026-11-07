@@ -24,6 +24,7 @@ import pytest
 import yaml
 
 from hyperloom.measure import boot_watch, local
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.measure.boot_watch import BOOT_SHARE, boot_limit_sec, boot_seconds
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
@@ -181,16 +182,21 @@ def test_only_a_round_that_boots_a_server_is_watched(monkeypatch, tmp_path) -> N
     assert watched == [2.0]
 
 
+def _benchmark(framework: str, ready_timeout_s: object = None) -> BenchmarkPoint:
+    lifecycle = {"server_ready_timeout_s": ready_timeout_s}
+    return BenchmarkPoint.from_document({"benchmark": {"framework": framework, "server_lifecycle": lifecycle}})
+
+
 def test_the_limit_is_a_share_of_what_the_point_allows_and_never_of_more_than_the_round_may_take() -> None:
-    assert boot_limit_sec({"framework": "sglang"}, 3600) == BOOT_SHARE * 3600 == 1800
-    point_allows = {"framework": "vllm", "server_lifecycle": {"server_ready_timeout_s": 2700}}
-    assert boot_limit_sec(point_allows, 3600) == BOOT_SHARE * 2700
-    assert boot_limit_sec({**point_allows, "server_lifecycle": {"server_ready_timeout_s": 7200}}, 3600) == 1800
+    assert boot_limit_sec(_benchmark("sglang"), 3600) == BOOT_SHARE * 3600 == 1800
+    assert boot_limit_sec(_benchmark("vllm", 2700), 3600) == BOOT_SHARE * 2700
+    assert boot_limit_sec(_benchmark("vllm", 7200), 3600) == 1800
+    assert boot_limit_sec(_benchmark("vllm", 0), 3600) == 1800
 
 
 @pytest.mark.parametrize("framework", ["custom", "xdit", ""])
 def test_a_round_whose_server_never_stamps_a_ready_banner_has_no_limit(framework: str) -> None:
-    assert boot_limit_sec({"framework": framework}, 3600) is None
+    assert boot_limit_sec(_benchmark(framework), 3600) is None
 
 
 def test_the_literals_the_guard_copies_equal_their_definitions() -> None:

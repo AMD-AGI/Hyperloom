@@ -34,7 +34,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom_common.env import is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.outside_facts import (
@@ -325,8 +325,8 @@ def _point_config(point: Path) -> dict[str, Any]:
     return yaml.safe_load(Path(point).read_text(encoding=_UTF8)) or {}
 
 
-def _point_envs(point: Path) -> dict[str, Any]:
-    return dict((_point_config(point).get("benchmark") or {}).get("envs") or {})
+def _point(point: Path) -> BenchmarkPoint:
+    return read_benchmark_point(Path(point))
 
 
 def _validate(call: TestCall) -> None:
@@ -363,10 +363,9 @@ def _validate_profile(call: TestCall) -> None:
         raise TestCallRefused("a profile test profiles one point; it is not a sweep")
     if call.accuracy:
         raise TestCallRefused("a profile test does not run accuracy")
-    benchmark = _point_config(call.points[0]).get("benchmark") or {}
-    torch_profiler = (benchmark.get("profiler") or {}).get("torch_profiler") or {}
-    client_profiling = str((benchmark.get("envs") or {}).get("PROFILE", "")).strip() == "1"
-    if torch_profiler.get("enabled") is not True or not (client_profiling or is_magpie_agentx(benchmark)):
+    point = _point(call.points[0])
+    client_profiling = str(point.envs.get("PROFILE", "")).strip() == "1"
+    if not point.torch_profiler or not (client_profiling or point.agentx):
         raise TestCallRefused(
             f"{call.points[0]} does not turn the torch profiler on (torch_profiler, and PROFILE=1 unless AgentX)"
         )
@@ -402,7 +401,7 @@ def _validate_repro(call: TestCall) -> None:
 
 def _check_run_eval(point: Path, accuracy: bool) -> None:
     """The point must say, explicitly, whether it runs accuracy; an unset ``RUN_EVAL`` means on in the old flow."""
-    raw = _point_envs(point).get(ENV_RUN_EVAL)
+    raw = _point(point).envs.get(ENV_RUN_EVAL)
     if raw is None:
         raise TestCallRefused(f"{point} does not set RUN_EVAL; an unset value runs accuracy")
     if is_truthy(raw, default=True) != accuracy:
@@ -410,7 +409,7 @@ def _check_run_eval(point: Path, accuracy: bool) -> None:
 
 
 def _levels(points: Sequence[Path]) -> list[int]:
-    return [int(_point_envs(point).get(ENV_CONC) or 0) for point in points]
+    return [int(_point(point).envs.get(ENV_CONC) or 0) for point in points]
 
 
 def _check_sweep_levels(points: Sequence[Path]) -> None:
@@ -425,10 +424,10 @@ def _patch_profile_client(call: TestCall) -> None:
     The checkout is the one the point names, else the session's; a test with neither (an AgentX point, whose client is
     Magpie's, or a framework with no InferenceX script) has none to patch.
     """
-    benchmark = _point_config(call.points[0]).get("benchmark") or {}
+    point = _point(call.points[0])
     facts = call.session_facts
-    root = benchmark.get("inferencex_path") or (facts.inferencex_path if facts is not None else None)
-    if not root or is_magpie_agentx(benchmark) or framework_registry.is_scriptable(benchmark.get("framework")):
+    root = point.inferencex_path or (facts.inferencex_path if facts is not None else None)
+    if not root or point.agentx or framework_registry.is_scriptable(point.framework):
         return
     try:
         patch_profile_client(root)
@@ -545,7 +544,7 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
         settings["INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC"] = str(call.silence_timeout_sec)
     if facts is not None and facts.inferencex_path:
         settings["INFERENCEX_PATH"] = facts.inferencex_path
-    if call.kind == _PROFILE and (body := _point_envs(call.points[0]).get(_PROFILE_BODY_ENV)):
+    if call.kind == _PROFILE and (body := _point(call.points[0]).envs.get(_PROFILE_BODY_ENV)):
         settings[_PROFILE_BODY_ENV] = str(body)
     settings.update({str(key): str(value) for key, value in call.env_overrides.items()})
     saved = {key: os.environ.get(key) for key in (*AMBIENT_SHAPE_ENVS, *settings)}
@@ -612,7 +611,7 @@ def _booting(run: _Run, point: int, round_args: dict[str, Any]) -> contextlib.Ab
     call = run.call
     if run.boot is None or round_args.get("server_already_ready") or call.serving_lease is not None:
         return contextlib.nullcontext()
-    limit = boot_limit_sec(_point_config(call.points[point]).get("benchmark") or {}, call.timeout_sec)
+    limit = boot_limit_sec(_point(call.points[point]), call.timeout_sec)
     return contextlib.nullcontext() if limit is None else run.boot.watching(limit)
 
 
@@ -669,11 +668,10 @@ def _round_shape(run: _Run, point: int, name: str, kwargs: dict[str, Any], resul
     """What a round's call says about it, for reading the phases off the marks it left."""
     lifecycle = kwargs.get("server_lifecycle")
     role = ROLE_BOOT if kwargs.get("lifecycle_boot_only") else ROLE_WARMUP if name == _WARMUP else ROLE_MEASURE
-    benchmark = _point_config(run.call.points[point]).get("benchmark") or {}
     stays_up = lifecycle is not None and not lifecycle.get("cleanup", True)
     return RoundShape(
         role,
-        is_magpie_agentx(benchmark),
+        _point(run.call.points[point]).agentx,
         bool(kwargs.get("server_already_ready")),
         _is_failure(result),
         ROUND_COLLECT if stays_up else TEARDOWN,
@@ -714,7 +712,7 @@ def _held_lifecycle(run: _Run, warmup: int | None) -> _Lifecycle | None:
     its server after the measured round. Any other test (an AgentX test has no evaluation) runs as before.
     """
     call = run.call
-    agentx = is_magpie_agentx(_point_config(call.points[0]).get("benchmark") or {})
+    agentx = _point(call.points[0]).agentx
     if not (call.accuracy and _warms(warmup) and not agentx) and not _checks_held(call):
         return None
     lifecycle = _Lifecycle(run)
@@ -862,7 +860,7 @@ async def _sweep(run: _Run) -> None:
 def _boot_envs(point: Path) -> dict[str, str]:
     """The environment a boot round of ``point`` is run with: the backend's boot phase, no evaluation, one request."""
     phase = dict(resolve_backend().boot_phase_envs)
-    if is_magpie_agentx(_point_config(point).get("benchmark") or {}):
+    if _point(point).agentx:
         return phase
     return {**phase, **_BOOT_CLIENT_ENVS}
 
@@ -965,7 +963,7 @@ def _run_case(run: _Run, port: int) -> None:
 
 
 def _model_of(call: TestCall) -> str:
-    return str((_point_config(call.points[0]).get("benchmark") or {}).get("model") or "")
+    return _point(call.points[0]).model
 
 
 async def _short_prompts(run: _Run) -> None:
@@ -1045,7 +1043,7 @@ def _set_aside(run: _Run) -> None:
 def _ranks(call: TestCall) -> int:
     """The worker processes ruppell's check expects: the point's tensor-parallel size."""
     try:
-        return max(1, int(_point_envs(call.points[0]).get(ENV_TP) or 1))
+        return max(1, int(_point(call.points[0]).envs.get(ENV_TP) or 1))
     except (TypeError, ValueError):
         return 1
 
