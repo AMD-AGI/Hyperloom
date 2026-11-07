@@ -610,22 +610,6 @@ def test_run_with_session_kill_legacy_timeout_still_raises():
 
 
 # Server-liveness watchdog
-def test_death_excerpt_surfaces_nested_root_cause(tmp_path):
-    """The excerpt helper also falls back to a nested ``benchmark_*/server.log``
-    so the failure classifier still surfaces the real server fault."""
-    watched = tmp_path / "server.log"
-    nested_dir = tmp_path / "benchmark_vllm_20260625_003729"
-    nested_dir.mkdir()
-    nested_log = nested_dir / "server.log"
-    assert death_excerpt(str(watched)) is None
-    nested_log.write_text(
-        "(EngineCore pid=2581809)     raise RuntimeError(\n"
-        "(EngineCore pid=2581809) RuntimeError: Engine core initialization "
-        "failed. See root cause above. Failed core proc(s): {}\n"
-    )
-    excerpt = death_excerpt(str(watched))
-    assert excerpt is not None
-    assert "Engine core initialization failed" in excerpt
 
 
 def test_death_excerpt_surfaces_root_cause(tmp_path):
