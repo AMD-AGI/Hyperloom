@@ -1695,9 +1695,10 @@ ensure_inferencex() {
 
 # --- 3b. InferenceSuite offline staging (D11) ---
 #
-# A round fetches nothing: it runs the InferenceX client and GSM8K task staged
-# here at the commit inference_suite.pins pins, and refuses with staging_missing
-# when the tool cache's manifest lists anything absent, changed or off-pin.
+# A round fetches nothing: it runs the InferenceX client, GSM8K task, AgentX
+# aggregator and AgentX harness venv staged here at the commit
+# inference_suite.pins pins, and refuses with staging_missing when the tool
+# cache's manifest lists anything absent, changed or off-pin.
 INFERENCE_SUITE_TOOL_CACHE="${INFERENCE_SUITE_TOOL_CACHE:-${_open_source_root}/inference-suite-tools}"
 
 ensure_inference_suite_staging() {
