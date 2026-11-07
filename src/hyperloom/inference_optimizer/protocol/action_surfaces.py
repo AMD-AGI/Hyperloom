@@ -131,7 +131,7 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             typical_runtime_min=5.0,
             lease_ttl_sec=4200,
             requires_lanes=("server_lifecycle", "benchmark_lane"),
-            description="Launch a fresh server with NO accepted modifications, run Magpie benchmark, and set baseline_tput.",
+            description="Launch a fresh server with NO accepted modifications, benchmark it, and set baseline_tput.",
         ),
         "conc_sweep": ActionMetadata(
             name="conc_sweep",
