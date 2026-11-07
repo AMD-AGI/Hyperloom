@@ -166,10 +166,10 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
     return Path(str(getattr(args, "model", "") or "")).name
 
 
-# Bump when a change makes previously recorded AgentX measurements incomparable.
-# The MLPerf client is a different workload, but it is opt-in: the epoch stays
-# so aiperf sessions remain resumable. The backend name is what resume compares.
-AGENTX_MEASUREMENT_EPOCH = 1
+# Bump when a change makes previously recorded measurements incomparable. Epoch 2 is the move of every round onto
+# inference_suite. The MLPerf client is a different AgentX workload, but it is opt-in: the backend name is what resume
+# compares for it, so a bump does not invalidate unchanged sessions of the other client.
+MEASUREMENT_EPOCH = 2
 
 
 def _requested_framework(args: Any) -> str:
@@ -224,8 +224,15 @@ def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
     }
 
 
-def agentx_state_is_stale(state: Any) -> str:
-    """Return why a resumed session's AgentX state is unusable, or ``\"\"``."""
+def measurement_state_is_stale(state: Any) -> str:
+    """Return why a resumed session's measurements cannot anchor this run, or ``\"\"``."""
+    had_epoch = int(getattr(state, "measurement_epoch", 0) or 0)
+    if had_epoch < MEASUREMENT_EPOCH:
+        return (
+            f"session carries measurement epoch {had_epoch}, this build measures "
+            f"epoch {MEASUREMENT_EPOCH}; the recorded results come from a different "
+            "measurement path and cannot anchor or be compared against"
+        )
     want_mode = _benchmark_mode()
     had_mode = str(getattr(state, "benchmark_mode", "") or "")
     if had_mode and had_mode != want_mode:
@@ -235,17 +242,9 @@ def agentx_state_is_stale(state: Any) -> str:
             "sets of measurements would overwrite each other"
         )
     if is_agentx_mode(want_mode):
-        had_epoch = int(getattr(state, "agentx_epoch", 0) or 0)
-        if had_epoch != AGENTX_MEASUREMENT_EPOCH:
-            return (
-                f"session carries AgentX epoch {had_epoch}, this build measures "
-                f"epoch {AGENTX_MEASUREMENT_EPOCH}; the recorded results describe "
-                "a different workload and cannot anchor or be compared against"
-            )
         from hyperloom.common.agentx_workload import agentic_backend
 
-        # Sessions recorded before the backend was persisted are aiperf.
-        had_backend = str(getattr(state, "agentx_backend", "") or "") or "aiperf"
+        had_backend = str(getattr(state, "agentx_backend", "") or "")
         want_backend = agentic_backend()
         if had_backend != want_backend:
             return (
@@ -853,12 +852,10 @@ def _seed_shared_state(
     _model_identity = resolve_model_display_name(args)
     benchmark_mode = _benchmark_mode()
     agentx_backend = ""
-    agentx_epoch = 0
     if is_agentx_mode(benchmark_mode):
         from hyperloom.common.agentx_workload import agentic_backend
 
         agentx_backend = agentic_backend()
-        agentx_epoch = AGENTX_MEASUREMENT_EPOCH
     workload = _workload_fields(args)
     conc_sweep_enabled = _conc_sweep_enabled(args, benchmark_mode)
     conc_sweep_concs = _parse_conc_sweep_concs(args, benchmark_mode)
@@ -899,7 +896,7 @@ def _seed_shared_state(
         **_phase_toggle_fields(args),
         conc_sweep_enabled=conc_sweep_enabled,
         benchmark_mode=benchmark_mode,
-        agentx_epoch=agentx_epoch,
+        measurement_epoch=MEASUREMENT_EPOCH,
         agentx_backend=agentx_backend,
         agentx_accuracy=not getattr(args, "no_agentx_accuracy", False),
         grading=seed_grading(framework, benchmark_mode),

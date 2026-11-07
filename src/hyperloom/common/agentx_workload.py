@@ -86,9 +86,9 @@ CANON_FINALISATION_SEC = 300.0
 
 
 def agentic_backend(env: Mapping[str, str] | None = None) -> str:
-    """Return ``mlperf`` or ``magpie`` from ``HYPERLOOM_AGENTIC_BACKEND``."""
+    """Return ``mlperf`` or ``inferencex`` from ``HYPERLOOM_AGENTIC_BACKEND``."""
     runtime = os.environ if env is None else env
-    return "mlperf" if str(runtime.get(BACKEND_ENV) or "").strip().lower() == "mlperf" else "magpie"
+    return "mlperf" if str(runtime.get(BACKEND_ENV) or "").strip().lower() == "mlperf" else "inferencex"
 
 
 def is_mlperf_backend(env: Mapping[str, str] | None = None) -> bool:
