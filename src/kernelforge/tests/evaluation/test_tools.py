@@ -94,6 +94,44 @@ def test_correctness_fail_snr(tmp_path):
     assert "output" in result  # tail kept on FAIL
 
 
+@pytest.mark.parametrize(
+    ("snr", "allclose", "expected"),
+    [(60.0, False, False), (30.0, True, True), (29.9, True, False)],
+)
+def test_correctness_requires_every_reported_contract_check(tmp_path, snr, allclose, expected):
+    drv = _write_driver(tmp_path, "d.py", f"print('SNR: {snr} dB')\nprint('allclose: {allclose}')\n")
+
+    result = asyncio.run(run_correctness(drv, snr_threshold=30.0))
+
+    assert result["passed"] is expected
+    assert result["allclose"] is allclose
+    assert result["snr_db"] == snr
+    assert result["outcome"] == ("pass" if expected else "correctness_failure")
+    if not expected:
+        assert "output" in result
+
+
+def test_correctness_failed_driver_cannot_be_overridden_by_passing_metrics(tmp_path):
+    drv = _write_driver(tmp_path, "d.py", "print('SNR: 60.0 dB')\nprint('allclose: True')\nraise SystemExit(3)\n")
+
+    result = asyncio.run(run_correctness(drv))
+
+    assert result["passed"] is False
+    assert result["outcome"] == "driver_error"
+
+
+@pytest.mark.parametrize("checks", [(True, False), (False, True)])
+def test_correctness_a_failed_case_cannot_be_hidden_by_a_passing_case(tmp_path, checks):
+    body = "print('SNR: 60.0 dB')\n" + "".join(f"print('allclose: {check}')\n" for check in checks)
+    drv = _write_driver(tmp_path, "d.py", body)
+
+    result = asyncio.run(run_correctness(drv))
+
+    assert result["passed"] is False
+    assert result["allclose"] is False
+    assert result["outcome"] == "correctness_failure"
+
+
 def test_correctness_allclose_and_maxdiff(tmp_path):
     drv = _write_driver(tmp_path, "d.py", "print('allclose: True')\nprint('max_diff: 1.2e-05')\n")
     result = asyncio.run(run_correctness(drv))
