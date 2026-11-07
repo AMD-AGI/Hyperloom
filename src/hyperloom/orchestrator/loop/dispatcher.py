@@ -524,10 +524,9 @@ class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator)
                 continue
             base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
             child_key_prefix = f"{base_key}-reconcile"
-            if await self.tasks.exists_with_key_prefix(
-                task.kind,
-                child_key_prefix,
-                states=("succeeded", "queued", "running"),
+            if any(
+                child.state in ("succeeded", "queued", "running")
+                for child in await self.tasks.with_key_prefix(task.kind, child_key_prefix)
             ):
                 continue
             for attempt in range(1, 6):
