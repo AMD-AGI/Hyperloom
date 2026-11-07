@@ -5,10 +5,11 @@
 
 Steps: the request validates (done by its constructor, plus the toolbox's own: no preset ``request_id``, a
 ``retest_of`` that names an accepted request, a PROFILE that no live profile already covers); the parent recipe is read
-from the experiment repository; the delta applies, changes an explore's parent recipe, and the environment compiles; the
-measurement surface matches the canonical one, and a test that carries the accuracy evaluation serves a context that
-evaluation can run in. Compile, points, surface and the evaluation's context come from
-hosted measurement (``hyperloom.measure``) through the one :class:`MeasurementPlanner` seam.
+from the experiment repository; the delta applies, changes an explore's parent recipe, keeps the weight precision of the
+session's root recipe, and the environment compiles; the measurement surface matches the canonical one, and a test that
+carries the accuracy evaluation serves a context that evaluation can run in. Compile, points, surface and the
+evaluation's context come from hosted measurement (``hyperloom.measure``) through the one :class:`MeasurementPlanner`
+seam.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from typing import Protocol
 
 from hyperloom.common.outside_facts import TUNABLEOP_ENABLED_ENV, TUNABLEOP_TABLE_ENV, TUNABLEOP_TUNING_ENV
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply, diff
+from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, RecipeError, apply, diff
 from hyperloom.common.outside_facts import AITER_META_WHEEL_DIR
 from hyperloom.measure.compile import BaseImageMismatchError, BlobStore, CompiledEnvironment
 from hyperloom.measure.eval_context import EvalContextError
@@ -43,6 +44,7 @@ from hyperloom_multibranch.toolbox.short_prompts import (
     decide,
     no_patch_files,
 )
+from hyperloom_multibranch.toolbox.weight_precision import weight_precision_changes
 
 
 #: PyTorch tunes a GEMM shape the first time a server runs it when TunableOp is switched on (the value ``1``, nothing else
@@ -127,6 +129,24 @@ def _check_online_tuning(candidate: Recipe) -> None:
     envs = candidate.launch.envs
     if envs.get(TUNABLEOP_ENABLED_ENV) == "1" and envs.get(TUNABLEOP_TUNING_ENV) != "0":
         raise RequestRejected(ONLINE_TUNING_REASON, ONLINE_TUNING_CODE)
+
+
+def _check_weight_precision(root_commit: str, root: LaunchConfig, candidate: Recipe) -> None:
+    """Refuse a candidate whose launch changes the model's weight precision from the session's root recipe, up or down.
+
+    The root's precision is the session's: comparing with the parent instead would let a parent that carries a change
+    pass it on. Flags the root sets and the candidate keeps pass, and so does every flag that is not one of
+    :data:`~.weight_precision.WEIGHT_PRECISION_FLAGS` (the KV cache dtype, the attention backend, fusions, any env var).
+    """
+    changed = weight_precision_changes(root, candidate.launch)
+    if changed:
+        raise RequestRejected(
+            f"the candidate changes the model's weight precision from the session's root recipe (commit "
+            f"{root_commit}): {'; '.join(changed)}; the weight precision of the session cannot change, down or up: "
+            "keep the weights' quantization, dtype and checkpoint flags as the root sets them (the KV cache dtype, "
+            "attention compute precision and activation quantization may change)",
+            DELTA_NOT_APPLICABLE_CODE,
+        )
 
 
 def _check_aiter_sources(accepted: object, missing: str | None) -> None:
@@ -255,6 +275,7 @@ class Acceptance:
         self._long_context = setup.long_context
         self._explore_accuracy = setup.explore_accuracy
         self._aiter_builds_missing = setup.aiter_builds_missing
+        self._root: tuple[str, LaunchConfig] | None = None
 
     def with_required_accuracy(self, request: TestRequest) -> TestRequest:
         """The request an InferenceX campaign runs: ``baseline``, ``explore``, ``confirm``, ``integration`` and
@@ -292,6 +313,7 @@ class Acceptance:
         if not replay:
             _check_explore_changes_the_parent(recipe, candidate, request)
             _check_online_tuning(candidate)
+            _check_weight_precision(*await self._root_launch(), candidate)
         planned = self._plan(recipe, request)
         if not replay:
             _check_aiter_sources(planned, self._aiter_builds_missing)
@@ -351,6 +373,16 @@ class Acceptance:
                 "profile_exists",
                 existing_request_id=existing,
             )
+
+    async def _root_launch(self) -> tuple[str, LaunchConfig]:
+        """The session's root commit and its launch as every candidate's is composed (``apply`` with no change, which
+        keeps the last of a flag the root gives twice, as a candidate's launch does); read once, since a repository
+        takes one root."""
+        if self._root is None:
+            commit = await self._repo.root()
+            root = await self._repo.read_recipe(commit)
+            self._root = commit, apply(root, RecipeDelta()).launch
+        return self._root
 
     async def _read_parent(self, request: TestRequest) -> Recipe:
         try:

@@ -78,7 +78,7 @@ class TestWithdrawn(ToolboxError):
 REJECTION_CODES = (
     "invalid_request",  # the request breaks the contract of 3.7
     "unknown_parent",  # the parent commit is not in the experiment repository
-    "delta_not_applicable",  # the delta does not fit the parent recipe, or a patch does not apply
+    "delta_not_applicable",  # the delta does not fit the parent recipe, a patch does not apply, or it changes the root's weight precision
     "base_image_mismatch",  # the recipe's base image is not the active framework image
     "surface_mismatch",  # the measurement surface differs from the active canonical one
     "unknown_retest",  # ``retest_of`` names no accepted request
