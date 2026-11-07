@@ -80,6 +80,31 @@ CREDENTIAL_FILE_SUFFIXES = ("_KEY_FILE", "_KEY_PATH", "_TOKEN_FILE", "_TOKEN_PAT
 XDG_VARIABLES = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
 #: Hugging Face's login files under its config directory (``HF_HOME``, else ``$XDG_CACHE_HOME/huggingface``).
 HF_LOGIN_FILES = ("token", "stored_tokens")
+#: Where tools keep their logins in a home, relative to it: a path a search-path or data variable names that is one of
+#: these, or holds one, is never bound whole (:func:`_around_logins`), though no variable names it (``~/.config`` is
+#: the XDG configuration directory when ``XDG_CONFIG_HOME`` is unset).
+HOME_LOGINS = (
+    ".ssh",
+    ".gnupg",
+    ".netrc",
+    ".git-credentials",
+    ".config",
+    ".claude",
+    ".claude.json",
+    ".codex",
+    ".docker",
+    ".aws",
+    ".kube",
+    ".azure",
+    ".pypirc",
+    ".npmrc",
+    ".password-store",
+    ".vault-token",
+    ".local/share/keyrings",
+)
+#: Where tools keep their logins in the XDG configuration directory (``~/.config``, or ``XDG_CONFIG_HOME``), so that
+#: a path below it is not bound whole when it is one of these either.
+CONFIG_LOGINS = ("gh", "gcloud", "git", "hub", "rclone", "containers")
 #: Variables whose value is a CA bundle the child needs to read.
 CA_VARIABLES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO", "CURL_CA_BUNDLE")
 #: Variables whose ``:``-separated entries the child searches for programs, libraries and modules.
@@ -651,8 +676,16 @@ def _which(program: str, environ: Mapping[str, str], *, outside: tuple[Path, ...
 
 def _credential_roots(environ: Mapping[str, str]) -> tuple[Path, ...]:
     """The credential locations of the child's environment and of this process's own (the child's home may be
-    re-pointed; the app's is where its logins are), resolved."""
+    re-pointed; the app's is where its logins are), and the well-known login locations in each home
+    (:data:`HOME_LOGINS`) and configuration directory (:data:`CONFIG_LOGINS`), there or not, resolved."""
     found = [*_sources(environ, _app_home(environ), ()), *_sources(os.environ, _app_home(os.environ), ())]
+    homes = [home for home in dict.fromkeys((_app_home(environ), _app_home(os.environ), _passwd_home())) if home]
+    configs = [home / ".config" for home in homes]
+    configs += [
+        Path(env["XDG_CONFIG_HOME"]) for env in (environ, os.environ) if env.get("XDG_CONFIG_HOME", "")[:1] == "/"
+    ]
+    found.extend(home / login for home in homes for login in HOME_LOGINS)
+    found.extend(config / login for config in configs for login in CONFIG_LOGINS)
     found.append(_passwd_home() or _ROOT)
     return tuple(dict.fromkeys(_real(path) for path in found if path != _ROOT))
 

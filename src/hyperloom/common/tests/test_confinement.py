@@ -329,6 +329,43 @@ def test_an_entry_that_holds_a_credential_location_is_bound_entry_by_entry_aroun
     assert tool.parent in found
 
 
+@pytest.mark.parametrize("variable", ["PATH", "PYTHONPATH", "MODEL_PATH", "SSL_CERT_FILE"])
+@pytest.mark.parametrize(
+    "entry", [".ssh", ".config", "config-link", ".claude", ".netrc", ".config/gh", "xdg/gh", "xdg", "users"]
+)
+def test_a_well_known_login_location_in_the_home_is_not_bound_whole_though_no_variable_names_it(
+    tmp_path, monkeypatch, no_child_python, variable, entry
+):
+    """``~/.ssh``, ``~/.config`` (``XDG_CONFIG_HOME`` unset), a tool's directory in it (or in ``XDG_CONFIG_HOME``),
+    ``~/.claude`` and ``~/.netrc`` hold logins though no variable names them: one on a search path is not bound, nor
+    is a link to it, and what holds one only entry by entry around it; a program directory below one still is."""
+    home, xdg = tmp_path / "users" / "u", tmp_path / "xdg"
+    logins = [
+        _write(home / ".ssh/id_rsa"),
+        _write(home / ".config/gh/hosts.yml"),
+        _write(home / ".claude/.credentials.json"),
+        _write(home / ".netrc"),
+        _write(xdg / "gh/hosts.yml"),
+    ]
+    tools = [_write(home / ".config/tool/bin/tool"), _write(home / ".claude/local/claude")]
+    (tmp_path / "config-link").symlink_to(home / ".config")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    named = {"config-link": tmp_path / "config-link", "xdg/gh": xdg / "gh", "xdg": xdg, "users": tmp_path / "users"}
+    shown = named.get(entry, home / entry)
+    entries = (shown, *(tool.parent for tool in tools))
+    environ = {"HOME": str(home), "PATH": "/usr/bin", "XDG_CONFIG_HOME": str(xdg)}
+    environ[variable] = os.pathsep.join(map(str, entries))
+
+    found = toolchain_paths(environ, "sh", writable=())
+
+    assert shown not in found
+    assert {tool.parent for tool in tools} <= set(found)
+    masked = credential_paths(environ, app_environ={}, allowed=found)
+    policy = Confinement(readable=found, masked=masked).policy()
+    assert [login for login in logins if not _absent_inside(login, policy)] == []
+
+
 def test_the_system_roots_stay_whole_whatever_credential_location_lies_below_them(tmp_path, monkeypatch):
     """A home or login under ``/etc`` or ``/opt`` (baked into an image) leaves the system roots as they are: the
     masks hide it there."""
