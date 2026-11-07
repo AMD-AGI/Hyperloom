@@ -58,9 +58,7 @@ _PROGRESS_ERRORS = (urllib.error.URLError, http.client.HTTPException, OSError, V
 #: Each :class:`AgentxResult` throughput figure, by its path in the aggregate's ``request_metrics``.
 _THROUGHPUT_PATHS: Mapping[str, tuple[str, ...]] = {
     "request_throughput": ("qps", "mean"),
-    "output_tokens_per_second": ("throughput", "output", "tokens_per_second"),
-    "input_tokens_per_second": ("throughput", "input", "tokens_per_second"),
-    "total_tokens_per_second": ("throughput", "total", "tokens_per_second"),
+    **{f"{kind}_tokens_per_second": ("throughput", kind, "tokens_per_second") for kind in ("output", "input", "total")},
     "duration_seconds": ("throughput", "duration_seconds"),
 }
 _LATENCY_NAMES = ("ttft", "tpot", "e2el")

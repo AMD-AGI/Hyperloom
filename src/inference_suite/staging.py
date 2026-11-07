@@ -58,7 +58,7 @@ AGENTX_VENV_DIR = "agentx-venv"
 AGENTX_PYTHON = f"{AGENTX_VENV_DIR}/bin/python"
 AGENTX_CLI_MODULE = "agentx_cli"
 #: The interpreters the harness supports (``agentx-harness`` 1.0.13 declares 3.11 to 3.13).
-AGENTX_PYTHON_VERSIONS = ((3, 11), (3, 12), (3, 13))
+AGENTX_PYTHON_VERSIONS = tuple((3, minor) for minor in range(11, 14))
 #: What a round and its eval run from InferenceX, relative to its project directory.
 INFERENCEX_SUBSET = (
     "infx/__init__.py",
