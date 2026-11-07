@@ -25,7 +25,7 @@ from .kernel_round_budget import rebench_round_sec
 from hyperloom_common.env import env_float, env_int
 from hyperloom_common.jsonio import read_json
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
-from inference_suite import CLIENT_FILE, inferencex_root
+from inference_suite import CLIENT_ROOT_ENV, CLIENT_SCRIPT, inferencex_root
 from ..actions.executors._round_folder import read_round_launch
 from ..actions.executors._suite_config import staged_tool_cache
 from ..actions.executors._workload_envs import geak_metric_axis
@@ -64,10 +64,10 @@ def _staged_inferencex() -> Path:
 
 
 def _geak_client_env(handoff: Mapping[str, Any]) -> dict[str, str]:
-    """The client script GEAK's InferenceX adapter runs; the adapter cannot find it in the staged layout by itself."""
+    """The client file GEAK's InferenceX adapter runs as ``python <file>``: the staged client is a package module."""
     if handoff.get("bench_client") != _INFERENCEX_CLIENT:
         return {}
-    return {"INFERENCEX_BENCH_SERVING": str(Path(handoff["inferencex_path"]) / CLIENT_FILE)}
+    return {"INFERENCEX_BENCH_SERVING": str(CLIENT_SCRIPT), CLIENT_ROOT_ENV: str(handoff["inferencex_path"])}
 
 
 def _with_framework_on_path(env_spec: dict[str, Any]) -> dict[str, Any]:

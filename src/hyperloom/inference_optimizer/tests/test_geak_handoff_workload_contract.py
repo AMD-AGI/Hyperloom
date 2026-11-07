@@ -19,7 +19,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 from inference_suite.contracts import LaunchDelta
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
-from inference_suite.staging import CLIENT_FILE
+from inference_suite.staging import CLIENT_ROOT_ENV, CLIENT_SCRIPT
 from inference_suite.tests.test_compose import _launch
 
 from ._geak_helpers import measured_in_suite_round, stop_geak_before_launch
@@ -518,4 +518,5 @@ async def test_a_fixed_handoff_points_geaks_inferencex_client_at_the_staged_scri
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     [captured_env] = launches
-    assert captured_env["INFERENCEX_BENCH_SERVING"] == str(Path(handoff["inferencex_path"]) / CLIENT_FILE)
+    assert captured_env["INFERENCEX_BENCH_SERVING"] == str(CLIENT_SCRIPT)
+    assert captured_env[CLIENT_ROOT_ENV] == handoff["inferencex_path"]

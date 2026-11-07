@@ -73,6 +73,10 @@ GSM8K_TASK = "infx/evals/gsm8k.yaml"
 CLIENT_MODULE = "infx.bench_serving.benchmark_serving"
 #: The file :data:`CLIENT_MODULE` loads, relative to the staged InferenceX root.
 CLIENT_FILE = f"{CLIENT_MODULE.replace('.', '/')}.py"
+#: A file that runs :data:`CLIENT_MODULE` from the staged root named in :data:`CLIENT_ROOT_ENV`, for a harness that runs
+#: its client as a file.
+CLIENT_SCRIPT = Path(__file__).parent / "load" / "client_script.py"
+CLIENT_ROOT_ENV = "INFERENCE_SUITE_CLIENT_ROOT"
 #: The AgentX harness requirements InferenceX pins, under the staged InferenceX root.
 AGENTX_REQUIREMENTS = "infx/bench/agentic/requirements.txt"
 #: The module that aggregates an AgentX replay's export, from the staged InferenceX root.
