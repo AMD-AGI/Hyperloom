@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
@@ -109,3 +111,49 @@ def test_geak_pin_ignores_a_session_fill(tmp_path, monkeypatch):
     envs = materialize(write_config(tmp_path / "point.yaml", envs={"TP": 2}), tmp_path / "o")["envs"]
     pin = resolve_gpu_pin(recipe_envs=envs, environ={"ROCR_VISIBLE_DEVICES": "4,5"})
     assert (pin["value"], pin["source"]) == ("4,5", "process_env")
+
+
+def test_the_launch_env_reindexes_an_inherited_hip_mask(tmp_path, monkeypatch):
+    """The child inherits the coordinator's HIP mask, which indexes into the SESSION's cards."""
+    from hyperloom.common.env_safety import build_benchmark_env
+    from hyperloom.inference_optimizer.cli import preflight
+
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", _HOST_MASK)
+    preflight._normalize_hip_visible_devices()
+    assert os.environ["HIP_VISIBLE_DEVICES"] == _HOST_MASK
+    envs = materialize(
+        write_config(tmp_path / "point.yaml", envs={"TP": 1, "ROCR_VISIBLE_DEVICES": "7"}), tmp_path / "o"
+    )["envs"]
+    env = build_benchmark_env(envs)
+    assert (env["ROCR_VISIBLE_DEVICES"], env["HIP_VISIBLE_DEVICES"]) == ("7", "0")
+
+
+def test_a_points_own_hip_mask_stays_inside_its_own_rocr_view(tmp_path, monkeypatch):
+    """``ROCR=4,5,6,7`` with ``HIP=2,3`` is cards 6 and 7; the point chose that subset itself."""
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", _HOST_MASK)
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", _HOST_MASK)
+    envs = materialize(
+        write_config(
+            tmp_path / "point.yaml",
+            envs={"TP": 2, "ROCR_VISIBLE_DEVICES": "4,5,6,7", "HIP_VISIBLE_DEVICES": "2,3"},
+        ),
+        tmp_path / "o",
+    )["envs"]
+    assert (envs["ROCR_VISIBLE_DEVICES"], envs["HIP_VISIBLE_DEVICES"]) == ("4,5,6,7", "2,3")
+
+
+def test_an_uninherited_hip_mask_is_not_written_into_the_config(tmp_path, monkeypatch):
+    """Nothing to override: a variable the process does not export cannot reach the child stale."""
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", _HOST_MASK)
+    envs = materialize(
+        write_config(tmp_path / "point.yaml", envs={"TP": 1, "ROCR_VISIBLE_DEVICES": "7"}), tmp_path / "o"
+    )["envs"]
+    assert not {"HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"} & envs.keys()
+
+
+def test_a_config_materialized_before_the_fill_record_is_refused_with_a_way_out(tmp_path, monkeypatch):
+    """Such a config carries the mask of the process that wrote it, and nothing marks it as a fill."""
+    legacy = write_config(tmp_path / "legacy.yaml", envs={"TP": 1, "ROCR_VISIBLE_DEVICES": "4,5,6,7"})
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0")
+    with pytest.raises(ValueError, match="re-materialize it from its source config"):
+        materialize(legacy, tmp_path / "o")

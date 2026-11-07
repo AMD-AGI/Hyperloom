@@ -17,6 +17,7 @@ from hyperloom.common.visible_devices import (
     HIP_LEVEL_VARS,
     VISIBLE_DEVICE_VARS,
     effective_mask_tokens,
+    hip_mask_within_rocr,
     is_rocr_level,
     mask_tokens,
     parse_device_list,
@@ -42,7 +43,8 @@ def pin_rocr_visible_devices(envs: dict[str, Any], *, tp: int) -> None:
     is not the point's, so a config re-run in another process lands on that process's
     cards. ROCR ids are physical, so a point id outside the session's mask would land on
     another session's card and is refused. A mask narrower than ``tp`` is widened from the
-    session's cards, or from ``0..tp-1`` when the process has no mask.
+    session's cards, or from ``0..tp-1`` when the process has no mask. The HIP-level masks
+    are re-indexed into the resulting view (:func:`_align_hip_masks`).
 
     Raises:
         ValueError: The point's mask names a card outside the process's mask.
@@ -55,7 +57,9 @@ def pin_rocr_visible_devices(envs: dict[str, Any], *, tp: int) -> None:
         raise ValueError(
             f"benchmark.envs.{ROCR_VISIBLE_DEVICES_ENV}={value!r} names card(s) {','.join(outside)} "
             f"outside this process's {ROCR_VISIBLE_DEVICES_ENV}={','.join(session)!r}; pin the point to cards "
-            "inside the session's mask or drop its mask."
+            f"inside the session's mask or drop its mask. A config materialized before {ROCR_AUTOFILL_ENV} "
+            "existed carries the mask of the process that wrote it and is read here as a pin: re-materialize "
+            "it from its source config instead of re-running the materialized copy."
         )
     mask = point or session
     if len(mask) < tp:
@@ -74,6 +78,29 @@ def pin_rocr_visible_devices(envs: dict[str, Any], *, tp: int) -> None:
         envs.pop(ROCR_AUTOFILL_ENV, None)
     else:
         envs[ROCR_AUTOFILL_ENV] = envs[ROCR_VISIBLE_DEVICES_ENV]
+    _align_hip_masks(envs)
+
+
+def _align_hip_masks(envs: dict[str, Any]) -> None:
+    """Re-index the HIP-level masks into the ROCr view this point launches on.
+
+    A HIP-level mask indexes INTO what ROCr exposed, and the one the benchmark child inherits is
+    the coordinator's: the CLI preflight writes ``0..n-1`` of the SESSION mask into the process env
+    (``cli/preflight.py:_normalize_hip_visible_devices``) and the round env is that process env
+    under ``benchmark.envs``. A point mask narrower than the session's leaves that inherited mask
+    naming devices ROCr no longer exposes, and HIP refuses to start on it, so the view is re-indexed
+    here, beside the mask it belongs to. Only the variables the process actually exports are
+    rewritten -- a variable nothing inherits needs no override. A point that sets a HIP-level mask
+    itself is choosing a subset inside its own ROCr view and is left alone.
+    """
+    if any(var in envs for var in HIP_LEVEL_VARS):
+        return
+    inherited = [var for var in HIP_LEVEL_VARS if os.environ.get(var, "").strip()]
+    value = hip_mask_within_rocr(envs)
+    if not inherited or value is None:
+        return
+    for var in inherited:
+        envs[var] = value
 
 
 def _cards_outside(point: list[str], session: list[str]) -> list[str]:
