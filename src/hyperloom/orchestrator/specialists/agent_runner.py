@@ -69,9 +69,9 @@ from .launch_env import (
     SandboxedProcess,
     Spawn,
     agent_pid,
+    claude_login_isolation,
     codex_sandbox_off,
     prepare_launch,
-    require_claude_login,
     resolve_launch_isolation,
     stage_mcp_config,
     stamp_reap_mark,
@@ -518,6 +518,8 @@ class LocalAgentRunner:
         isolation = _launch_isolation()
         env = dict(spec.env)
         argv = list(spec.argv)
+        if backend == AGENT_BACKEND_CLAUDE:
+            isolation = _claude_isolation(isolation, env)
         claim = self._prepare(spec, backend, env, argv, isolation)
         try:
             spawned = await self._spawned(spec, argv, env, isolation)
@@ -697,7 +699,6 @@ class LocalAgentRunner:
                     argv[:] = without_codex_sandbox(argv)
             else:
                 _wire_claude(spec, env, argv, mcp_json)
-                _require_login(isolation, env)
             stage_mcp_config(isolation, spec.workspace, argv)
             if spec.gpus == 0:
                 for name in GPU_MASK_ENV_NAMES:
@@ -938,10 +939,11 @@ class LocalAgentRunner:
         }
 
 
-def _require_login(isolation: AgentIsolation, env: Mapping[str, str]) -> None:
-    """Refuse a claude CLI that could not log in where it runs (:func:`~.launch_env.require_claude_login`)."""
+def _claude_isolation(isolation: AgentIsolation, env: Mapping[str, str]) -> AgentIsolation:
+    """How to isolate a claude CLI launched with ``env``: unconfined where a sandbox could not log it in and need not
+    be used, refused where it must be (:func:`~.launch_env.claude_login_isolation`)."""
     try:
-        require_claude_login(isolation, env)
+        return claude_login_isolation(isolation, env)
     except SpecialistAgentUnavailableError as exc:
         raise AgentConfigError(str(exc)) from exc
 

@@ -7,6 +7,7 @@ process manager: what the agent reaches, how it is stopped, and how a sandbox th
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 import tempfile
@@ -18,13 +19,22 @@ import pytest
 
 from hyperloom_common.git_safety import app_git, recorded_admin_dir, trusted_admin_dir, worktree_head
 from hyperloom_common.tests._bwrap_host import usable_bwrap
-from hyperloom.common.agent_isolation import BwrapIsolation
+from hyperloom.common import agent_isolation
+from hyperloom.common.agent_isolation import BwrapIsolation, session_isolation_lines
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
 from hyperloom.orchestrator.specialists import agent_runner, launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss
-from hyperloom.orchestrator.specialists.launch_env import LaunchPlace, SandboxedProcess, prepare_launch
+from hyperloom.orchestrator.specialists.agent_runner import AgentConfigError
+from hyperloom.orchestrator.specialists.launch_env import (
+    CLAUDE_LOGIN_REFUSAL,
+    CLAUDE_LOGIN_UNCONFINED,
+    CLAUDE_TOKEN_VARIABLES,
+    LaunchPlace,
+    SandboxedProcess,
+    prepare_launch,
+)
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSpawn,
     SpecialistSubprocessConfig,
@@ -81,6 +91,12 @@ mv worktree worktree.orig && ln -s {host} worktree
 echo '{{"summary": "mine"}}' > specialist_done.partial.json
 sleep 1.5
 echo '{{"summary": "done", "proposal_set": []}}' > specialist_done.json
+"""
+#: The stand-in claude CLI whose one login is its file under the app's home: it notes whether it could read it.
+_LOGIN_FILE_ONLY = """#!/bin/sh
+cat > /dev/null
+{{ cat {login} > /dev/null 2>&1 && echo read || echo unreadable; }} > login_seen
+echo '{{"summary": "ran", "proposal_set": []}}' > specialist_done.json
 """
 _CANARY = "APP-SECRET-CANARY"
 _TRAPPED = """#!/bin/sh
@@ -359,6 +375,53 @@ async def test_a_cancelled_sandboxed_cli_runs_its_own_stop_and_a_failed_setup_re
     status = await wait_finished(runner, failed)
     await runner.collect(failed)
     assert status.returncode is None and "sandbox could not be set up: bwrap: Can't find source path" in status.error
+
+
+async def test_a_claude_cli_with_only_its_login_file_runs_unconfined_here_and_is_refused_in_a_hosted_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The real chooser and probe, through the dispatcher and the agent runner: bubblewrap works here, and a claude CLI
+    with no login in its environment runs unconfined (its login file is read), said once and counted for the session
+    report; given a token it runs sandboxed, where that file is not there; a hosted run refuses it."""
+    found = usable_bwrap()
+    monkeypatch.setattr(launch_env, "choose_agent_isolation", agent_isolation.choose_agent_isolation)
+    login = tmp_path / "home" / ".claude" / ".credentials.json"
+    login.parent.mkdir(parents=True)
+    login.write_text('{"claudeAiOauth": {}}', encoding="utf-8")
+    monkeypatch.setenv("HOME", str(login.parent.parent))
+    for name in (*CLAUDE_TOKEN_VARIABLES, "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CONFIG_DIR", "HYPERLOOM_SPECIALIST_USER"):
+        monkeypatch.delenv(name, raising=False)
+    cli = _script(tmp_path / "cli" / "bin" / "claude", _LOGIN_FILE_ONLY.format(login=login))
+    runner = make_runner(tmp_path / "session")
+
+    with caplog.at_level(logging.WARNING):
+        local = await _dispatcher(cli).run(_spawn(tmp_path / "ws"))
+        handle = await runner.launch(make_spec(tmp_path / "w", argv=(str(cli),)))
+        status = await wait_finished(runner, handle)
+        await runner.collect(handle)
+
+    assert (local.error, local.exit_code, status.returncode, status.error) == ("", 0, 0, "")
+    assert not isinstance(handle.session.proc, SandboxedProcess)
+    seen = [(tmp_path / name / "login_seen").read_text(encoding="utf-8") for name in ("ws", "w")]
+    assert seen == ["read\n", "read\n"]
+    warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    unconfined = CLAUDE_LOGIN_UNCONFINED
+    assert len(warnings) == 1 and warnings[0].endswith(f"({unconfined})"), warnings
+    assert session_isolation_lines() == (f"agent isolation: 2 agent launches ran unconfined: {unconfined}",)
+
+    with monkeypatch.context() as token:
+        token.setenv("CLAUDE_CODE_OAUTH_TOKEN", "token-for-the-test")
+        confined = await _dispatcher(cli).run(_spawn(tmp_path / "ws-token"))
+    assert (confined.error, confined.exit_code) == ("", 0)
+    assert (tmp_path / "ws-token" / "login_seen").read_text(encoding="utf-8") == "unreadable\n"
+
+    agent_isolation.require_agent_isolation(bwrap=found.path)  # a hosted run whose layer's bubblewrap is this one
+    hosted = await _dispatcher(cli).run(_spawn(tmp_path / "ws-hosted"))
+    with pytest.raises(AgentConfigError) as refused:
+        await runner.launch(make_spec(tmp_path / "w-hosted", argv=(str(cli),)))
+    assert hosted.error == f"specialist agent runtime unavailable (backend=claude): {CLAUDE_LOGIN_REFUSAL}"
+    assert str(refused.value) == CLAUDE_LOGIN_REFUSAL
+    assert not any((tmp_path / name / "login_seen").exists() for name in ("ws-hosted", "w-hosted"))
 
 
 def test_a_ray_actors_process_manager_runs_the_sandbox_and_its_status_reaches_this_host(
