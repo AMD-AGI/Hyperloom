@@ -10,6 +10,7 @@ import logging
 import os
 import subprocess
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -426,8 +427,13 @@ class _BenchmarkLaunchMixin:
             round_, finished._replace(workspace=workspace), boot, round_warnings
         )
 
-    async def _suite_round_result(self, round_: _BenchmarkRound, route: SuiteRoute, *, warmup: bool) -> dict[str, Any]:
-        """Run ``round_`` on inference_suite and read the run_dir it wrote into the round's result."""
+    async def _suite_round_result(
+        self, round_: _BenchmarkRound, route: SuiteRoute, *, warmup: bool, warnings: Sequence[str] = ()
+    ) -> dict[str, Any]:
+        """Run ``round_`` on inference_suite and read the run_dir it wrote into the round's result.
+
+        ``warnings`` are what the passes before this round left for its result to carry.
+        """
         # A lone round owns its server; a cold-start warmup boots the one the rounds after it reuse.
         mode = (
             LifecycleMode.REUSE if round_.server_already_ready else LifecycleMode.BOOT if warmup else LifecycleMode.OWN
@@ -467,7 +473,7 @@ class _BenchmarkLaunchMixin:
         )
         # The run_dir is where this round's server log, ready stamp and eval results are.
         ran_round = round_._replace(result_dir=layout.root, watchdog_server_log=str(layout.server_log))
-        warnings = list(measurement.pop("nonfatal_warnings", []) or [])
+        warnings = [*warnings, *(measurement.pop("nonfatal_warnings", []) or [])]
         if ran.report.failed_step is not None or not self._measurement_succeeded(measurement):
             return _suite_round_failure(ran_round, finished, measurement, warnings)
         result = await self._succeeded_round_result(ran_round, finished, measurement, warnings)

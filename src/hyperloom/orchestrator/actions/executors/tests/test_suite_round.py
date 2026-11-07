@@ -41,7 +41,7 @@ def session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (cache / "staging_manifest.json").write_bytes(_STAGED)
     monkeypatch.setenv(TOOL_CACHE_ENV, str(cache))
     monkeypatch.setattr(_suite_config, "_resolve_probe_python", lambda framework: f"/venv/{framework}/python")
-    monkeypatch.setattr(_suite_config, "is_multi_node", lambda: False)
+    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: None)
     monkeypatch.setattr(_suite_config, "ray_exec_enabled", lambda: False)
     return session_dir
 
@@ -74,18 +74,38 @@ def test_a_session_without_a_frozen_base_stays_on_the_backend(session: Path, tmp
     assert suite_route(None, _write_point(tmp_path / "point.yaml")) is None
 
 
-@pytest.mark.parametrize("seam", ["is_multi_node", "ray_exec_enabled"])
-def test_multi_node_and_ray_leased_rounds_stay_on_the_backend(session, tmp_path, monkeypatch, seam: str) -> None:
-    monkeypatch.setattr(_suite_config, seam, lambda: True)
+def test_ray_leased_rounds_stay_on_the_backend(session, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(_suite_config, "ray_exec_enabled", lambda: True)
 
     assert suite_route(session, _write_point(tmp_path / "point.yaml")) is None
 
 
 def test_a_point_the_translation_does_not_carry_stays_on_the_backend(session: Path, tmp_path: Path) -> None:
     point = tmp_path / "point.yaml"
-    _write_point(point, BENCHMARK_BASE_URL="http://head:8888")
+    _write_point(point)
+    document = yaml.safe_load(point.read_text())
+    document["benchmark"]["profiler"]["torch_profiler"]["enabled"] = True
+    point.write_text(yaml.safe_dump(document))
 
     assert suite_route(session, point) is None
+
+
+def test_a_client_only_session_runs_external_rounds_against_its_server(session, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: "http://10.0.0.2:30000")
+    rounds = _rounds()
+    monkeypatch.setattr(_suite_config, "run_round", rounds.run_round)
+    point = _write_point(tmp_path / "slot" / "point.yaml")
+    route = suite_route(session, point)
+    assert route is not None and route.server_url == "http://10.0.0.2:30000"
+
+    ran = run_suite_round(
+        route, SuiteRound(point, point.parent, round_lifecycle(point.parent, LifecycleMode.OWN)), on_poll=lambda: None
+    )
+
+    assert ran.report.run_status is RunStatus.COMPLETED
+    (config,) = [call.config for call in rounds.calls]
+    assert config.lifecycle.mode is LifecycleMode.EXTERNAL
+    assert (config.server.host, config.server.port) == ("10.0.0.2", 30000)
 
 
 def test_a_lone_round_owns_its_server_and_a_cold_start_pair_shares_one_through_the_slot(tmp_path: Path) -> None:

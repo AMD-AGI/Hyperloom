@@ -68,7 +68,7 @@ def suite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setenv(_SCRUBBED_ENV, "1")
     monkeypatch.setattr(_grid_runner, "_resolve_session_dir", lambda: session)
     monkeypatch.setattr(_suite_config, "_resolve_probe_python", lambda framework: sys.executable)
-    monkeypatch.setattr(_suite_config, "is_multi_node", lambda: False)
+    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: None)
     monkeypatch.setattr(_suite_config, "ray_exec_enabled", lambda: False)
 
     def no_magpie(*args, **kwargs):
@@ -240,3 +240,36 @@ class _cancelled_scope:
 
     def __exit__(self, *exc):
         return False
+
+
+def test_a_multi_node_variant_restarts_the_cluster_and_measures_it_externally_after_a_discarded_pass(
+    monkeypatch, suite
+):
+    from hyperloom.orchestrator.actions.executors import _multi_node_env
+
+    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: "http://10.0.0.2:30000")
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
+    monkeypatch.setattr(_multi_node_env, "mn_bench_warmup_enabled", lambda: True)
+    restarts: list[str] = []
+
+    async def restart(run, at, rounds):
+        restarts.append(at.variant.name)
+
+    monkeypatch.setattr(_grid_runner, "_restart_multi_node_server", restart)
+
+    row, calls, slot = _play(
+        monkeypatch,
+        suite,
+        LaunchAttempt(outcome=READY, metrics=_COLD),
+        LaunchAttempt(outcome=READY, metrics=_HOT),
+        launch=GridLaunch(warmup_before_measure=False),
+    )
+
+    assert row.status == "succeeded", row
+    assert row.output_throughput == pytest.approx(_HOT["output_throughput"])
+    assert restarts == ["vA"]
+    warm, measured = (call.config for call in calls)
+    assert {warm.lifecycle.mode, measured.lifecycle.mode} == {LifecycleMode.EXTERNAL}
+    assert (measured.server.host, measured.server.port) == ("10.0.0.2", 30000)
+    assert (warm.fixed.seed, measured.fixed.seed) == (WARMUP_SEED, MEASURED_SEED)
+    assert Path(warm.paths.run_dir).parent == slot / "mn_warmup"

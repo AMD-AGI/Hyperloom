@@ -64,7 +64,7 @@ def suite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setenv(TOOL_CACHE_ENV, str(cache))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(tmp_path / "leaks"))
     monkeypatch.setattr(_suite_config, "_resolve_probe_python", lambda framework: sys.executable)
-    monkeypatch.setattr(_suite_config, "is_multi_node", lambda: False)
+    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: None)
     monkeypatch.setattr(_suite_config, "ray_exec_enabled", lambda: False)
 
     def no_magpie(*args, **kwargs):
@@ -165,3 +165,35 @@ def test_a_round_refused_before_it_ran_fails_as_staging_missing(monkeypatch, sui
 
 def test_an_eval_failure_of_a_suite_round_is_eval_rooted() -> None:
     assert BaselineExecutor._is_eval_rooted_failure({"error_class": FailedStep.EVAL_FAILED.value})
+
+
+def test_a_multi_node_round_restarts_the_cluster_and_measures_it_externally_after_a_discarded_pass(monkeypatch, suite):
+    from hyperloom.orchestrator.actions.executors import _multi_node_env
+
+    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: "http://10.0.0.2:30000")
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
+    monkeypatch.setattr(_multi_node_env, "mn_bench_warmup_enabled", lambda: True)
+    restarts: list[str] = []
+
+    async def restart(self, round_, *, server_args, resolved_model):
+        restarts.append(str(round_.output_dir))
+
+    monkeypatch.setattr(BaselineExecutor, "_restart_multi_node_server", restart)
+
+    result, rounds = _play(
+        monkeypatch,
+        suite,
+        LaunchAttempt(outcome=READY, metrics=_COLD),
+        LaunchAttempt(outcome=READY, metrics=_HOT),
+        baseline_double_run=False,
+    )
+
+    assert result["status"] == "succeeded", result
+    assert result["output_throughput"] == pytest.approx(_HOT["output_throughput"])
+    assert restarts == [str(suite.ws)]
+    warm, measured = (call.config for call in rounds.calls)
+    assert {warm.lifecycle.mode, measured.lifecycle.mode} == {LifecycleMode.EXTERNAL}
+    assert (warm.server.host, warm.server.port) == ("10.0.0.2", 30000)
+    assert (warm.fixed.seed, measured.fixed.seed) == (WARMUP_SEED, MEASURED_SEED)
+    assert Path(warm.paths.run_dir).parent == suite.ws / "mn_warmup"
+    assert not measured.telemetry.enabled
