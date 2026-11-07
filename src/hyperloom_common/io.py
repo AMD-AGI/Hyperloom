@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import make_shared_dirs, write_shared_bytes
+from hyperloom_common.shared_storage import Flush, make_shared_dirs, write_shared_bytes
 
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
 
@@ -163,8 +163,7 @@ def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions =
             path,
             data,
             private_mode=_private_mode(path, options),
-            fsync=options.fsync,
-            fsync_dir=options.fsync_dir,
+            flush=Flush(file=options.fsync, directory=options.fsync_dir),
         )
         return
     if options.make_parents:

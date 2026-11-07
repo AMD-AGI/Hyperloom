@@ -34,6 +34,7 @@ import stat
 import tempfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -359,19 +360,26 @@ def create_shared_file(path: Path) -> None:
     write_shared_bytes(path, b"")
 
 
+@dataclass(frozen=True)
+class Flush:
+    """What :func:`write_shared_bytes` flushes to disk: the new ``file`` before the rename, its ``directory`` after."""
+
+    file: bool = False
+    directory: bool = False
+
+
 def write_shared_bytes(
     path: Path,
     data: bytes,
     *,
     mode: int = SHARED_FILE_MODE,
     private_mode: int | None = None,
-    fsync: bool = False,
-    fsync_dir: bool = False,
+    flush: Flush = Flush(),
 ) -> None:
     """Write ``data`` to a new file beside ``path`` and rename it over ``path``: the file is then this account's,
     whoever owned the one it replaced. Below shared storage (:func:`parent_is_shared`) the file has ``mode`` whatever
-    the umask; anywhere else ``private_mode`` when given, else ``mode`` masked by the umask. ``fsync`` flushes the file
-    before the rename, ``fsync_dir`` the directory after it."""
+    the umask; anywhere else ``private_mode`` when given, else ``mode`` masked by the umask. ``flush`` says what is
+    flushed to disk; a flush that fails raises its ``OSError``."""
     with _directory_of(path) as (directory, name, widen):
         if widen or private_mode is None:
             private_mode = _final_mode(mode, widen)
@@ -379,7 +387,7 @@ def write_shared_bytes(
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(data)
-                if fsync:
+                if flush.file:
                     handle.flush()
                     os.fsync(handle.fileno())
             os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
@@ -387,7 +395,7 @@ def write_shared_bytes(
             with suppress(OSError):
                 os.unlink(temporary, dir_fd=directory)
             raise
-        if fsync_dir:
+        if flush.directory:
             flushed = read_directory(directory)
             try:
                 os.fsync(flushed)
@@ -545,6 +553,7 @@ def ownership(path: Path) -> str:
 __all__ = [
     "SHARED_DIR_MODE",
     "SHARED_FILE_MODE",
+    "Flush",
     "copy_shared_file",
     "create_new_shared_file",
     "create_shared_file",
