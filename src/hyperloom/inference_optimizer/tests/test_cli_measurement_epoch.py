@@ -62,3 +62,9 @@ def test_a_reset_session_still_resumes(tmp_path, monkeypatch, native_benchmark):
     state = SharedState.load_or_init(tmp_path)
     assert (state.baseline_tput, state.agentx_backend) == (0.0, "inferencex")
     assert cb.measurement_state_is_stale(state) == ""
+
+
+def test_a_state_written_before_valid_measurement_judged_its_evidence_is_refused(tmp_path):
+    # Epoch 2 recorded benchmark_backend and benchmark_valid as constraint fields; epoch 3 records valid_measurement.
+    (tmp_path / "state.json").write_text('{"benchmark_mode": "agentx", "measurement_epoch": 2}', encoding="utf-8")
+    assert "epoch 2" in cb.measurement_state_is_stale(SharedState.load_or_init(tmp_path))
