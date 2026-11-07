@@ -52,8 +52,8 @@ from hyperloom.common.outside_facts import (
 )
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.inference_optimizer.framework_registry import extra_args_env
-from hyperloom.inference_optimizer.session.base_launch import base_launch_path, read_base_launch
 from hyperloom.inference_optimizer.session.paths import resolve_dep_dir
+from hyperloom.orchestrator.state.base_launch import frozen_base
 from inference_suite import EXIT_REFUSED, RoundResult, manifest_sha256, run_round
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name
 from inference_suite.contracts import (
@@ -501,16 +501,16 @@ def suite_route(session_dir: Path | None, config_path: Path) -> SuiteRoute | Non
     """The route the point at ``config_path`` runs on inference_suite, or ``None`` while it stays on the backend."""
     if session_dir is None:
         return None
-    base = read_base_launch(Path(session_dir))
-    if base is None or _declined(config_path):
+    frozen = frozen_base(Path(session_dir))
+    if frozen is None or _declined(config_path):
         return None
     tool_cache = resolve_dep_dir(TOOL_CACHE_DIR, TOOL_CACHE_ENV)
     return SuiteRoute(
-        base=base,
-        base_path=base_launch_path(Path(session_dir)),
+        base=frozen.launch,
+        base_path=frozen.path,
         tool_cache=tool_cache,
         manifest_sha256=manifest_sha256(tool_cache),
-        framework_python=_resolve_probe_python(base.framework),
+        framework_python=_resolve_probe_python(frozen.launch.framework),
         server_url=client_only_server_url(),
     )
 

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.session.base_launch import write_base_launch
+from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors import _suite_config
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
@@ -36,7 +36,7 @@ _STAGED = b'{"schema": "inference-suite-staging/1", "tools": {}}\n'
 def session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    write_base_launch(session_dir, _base("sglang"))
+    freeze_base(session_dir, _base("sglang"))
     cache = tmp_path / "tools"
     cache.mkdir()
     (cache / "staging_manifest.json").write_bytes(_STAGED)
@@ -68,9 +68,10 @@ def test_a_point_of_a_session_with_a_frozen_base_runs_on_the_suite(session: Path
 
 
 def test_a_session_without_a_frozen_base_stays_on_the_backend(session: Path, tmp_path: Path) -> None:
-    (session / "base_launch.json").unlink()
+    unfrozen = tmp_path / "unfrozen"
+    unfrozen.mkdir()
 
-    assert suite_route(session, _write_point(tmp_path / "point.yaml")) is None
+    assert suite_route(unfrozen, _write_point(tmp_path / "point.yaml")) is None
     assert suite_route(None, _write_point(tmp_path / "point.yaml")) is None
 
 

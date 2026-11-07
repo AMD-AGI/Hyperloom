@@ -62,7 +62,15 @@ def frozen_session_base() -> FrozenBase | None:
     Raises:
         BaseLaunchMismatch: The file and the digest the session recorded disagree.
     """
-    session = session_dir()
+    return frozen_base(session_dir())
+
+
+def frozen_base(session: Path) -> FrozenBase | None:
+    """The frozen base of the session at ``session``, ``None`` when it froze none.
+
+    Raises:
+        BaseLaunchMismatch: The file and the digest the session recorded disagree.
+    """
     recorded = SharedState.load_or_init(session).base_launch_digest
     base = read_base_launch(session)
     found = base.digest() if base is not None else ""
@@ -80,4 +88,11 @@ def session_server_base() -> ServerBase:
     return ServerBase() if frozen is None else _server_base(frozen.launch)
 
 
-__all__ = ["BaseLaunchMismatch", "FrozenBase", "ServerBase", "frozen_session_base", "session_server_base"]
+__all__ = [
+    "BaseLaunchMismatch",
+    "FrozenBase",
+    "ServerBase",
+    "frozen_base",
+    "frozen_session_base",
+    "session_server_base",
+]
