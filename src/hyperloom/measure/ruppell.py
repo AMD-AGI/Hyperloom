@@ -19,7 +19,7 @@ profile whose traced attempt failed runs again without it.
   whoever can write the cache, and nothing the server writes lands in the cache.
 * **Build.** ``runtime/build.sh`` in the test's own image, before the server starts: the tool library links the image's
   ROCm profiler SDK and the GPU code is built for the card's architecture.
-* **Launch.** Magpie and InferenceX own the server's command line, so the server is not wrapped in ``ruppell run``: the
+* **Launch.** The round owns the server's command line, so the server is not wrapped in ``ruppell run``: the
   environment ``ruppell run`` would give its command goes into the point's ``benchmark.envs``. It is taken from
   ``ruppell run`` itself (a probe command that prints its environment), so ruppell's own rules apply (the tool library,
   its early load, the NCCL plugin, packet capture off on ROCm 7.2.0-7.2.2 and, under the SGLang adapter, 7.2.4, a value
