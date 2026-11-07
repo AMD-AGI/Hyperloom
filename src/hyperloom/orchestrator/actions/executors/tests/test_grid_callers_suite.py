@@ -5,7 +5,8 @@
 
 The contract: a conc sweep arm boots one server on its first rung, measures that rung on it, reuses it for every rung
 after, and every rung serves the same launch; the arm's server and an explore variant's server are reaped with
-``stop`` on the directory their rounds shared it through, however the rounds ended.
+``stop`` on the directory their rounds shared it through, however the rounds ended; a specialist rebench is one round
+that owns its server on the port it reports.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from hyperloom.orchestrator.kernel import conc_sweep
 from hyperloom.orchestrator.kernel.conc_sweep import run_conc_sweep
 from hyperloom.orchestrator.rehearsal import READY, LaunchAttempt, LaunchScenario, ScriptedRounds, VirtualClock
 from hyperloom.orchestrator.rehearsal import installed_clock
+from hyperloom.orchestrator.specialists.rebench import RebenchBenchmark, RebenchServer, run_specialist_rebench
 from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite.contracts import LifecycleMode, WorkloadKind
 from inference_suite.tests.test_compose import _launch
@@ -138,3 +140,21 @@ def test_an_explore_variants_server_is_reaped_through_its_slot(monkeypatch, suit
 
     slot = tmp_path / "explore" / "v00_v0"
     assert suite.stopped == eligible == [slot]
+
+
+def test_a_specialist_rebench_runs_one_round_that_owns_its_server_on_the_port_it_reports(monkeypatch, suite, tmp_path):
+    rounds = _rounds(monkeypatch, 1)
+
+    result = asyncio.run(
+        run_specialist_rebench(
+            output_dir=tmp_path / "rebench",
+            benchmark=RebenchBenchmark(config_path=suite.point),
+            server=RebenchServer(extra_envs={"RUN_EVAL": "false"}, port=_PORT),
+        )
+    )
+
+    assert result["ok"] is True, result
+    assert result["output_throughput"] == pytest.approx(_HOT["output_throughput"])
+    (config,) = (call.config for call in rounds.calls)
+    assert config.lifecycle.mode is LifecycleMode.OWN
+    assert config.server.port == result["port"] == _PORT

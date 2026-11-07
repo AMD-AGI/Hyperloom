@@ -53,11 +53,11 @@ class RebenchBenchmark:
     """Which benchmark a rebench runs: the base config and the overrides applied to it.
 
     Attributes:
-        config_path: Base Magpie YAML; the packaged baseline when ``None``.
+        config_path: Base point YAML; the packaged baseline when ``None``.
         model_path: Override of the benchmark model path.
         gpu_type: Pin of the generic benchmark script's GPU type.
         benchmark_script: Force-pinned benchmark script.
-        magpie_python: Interpreter that can import Magpie.
+        magpie_python: Interpreter that can import Magpie, for a point that stays on the Magpie backend.
     """
 
     config_path: str | Path | None = None
@@ -193,17 +193,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="specialist_rebench",
         description=(
-            "Optional gate-comparable rebench on the specialist's leased cards using the Magpie serving path."
+            "Optional gate-comparable rebench on the specialist's leased cards, on the serving path the session's "
+            "rounds run on."
         ),
     )
-    parser.add_argument("--config", default=None, help="Base Magpie YAML (defaults to packaged baseline).")
+    parser.add_argument("--config", default=None, help="Base point YAML (defaults to packaged baseline).")
     parser.add_argument("--output", required=True, help="Output directory (conventionally inside the worktree).")
     parser.add_argument("--extra-args", default="", help="Server args merged ahead of the variant args.")
     parser.add_argument("--port", type=int, default=0, help="Server port (0 uses an OS-assigned port).")
     parser.add_argument("--model-path", default=None, help="Override benchmark model path.")
     parser.add_argument("--gpu-type", default=None, help="Pin the generic benchmark script GPU type.")
     parser.add_argument("--benchmark-script", default=None, help="Force-pin a benchmark script.")
-    parser.add_argument("--magpie-python", default=None, help="Interpreter that can import Magpie.")
+    parser.add_argument(
+        "--magpie-python", default=None, help="Interpreter that can import Magpie (Magpie backend only)."
+    )
     parser.add_argument("--env", action="append", default=[], help="Per-run env override KEY=VAL (repeatable).")
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
