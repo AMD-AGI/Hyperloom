@@ -6,7 +6,10 @@ specialist left at its path."""
 
 from __future__ import annotations
 
+import errno
 from pathlib import Path
+
+import pytest
 
 from hyperloom.orchestrator.specialists.worktrees import HeldWorktree
 
@@ -74,3 +77,26 @@ def test_a_worktree_that_was_a_link_when_the_specialist_started_is_never_read(tm
     assert refusal.startswith(f"worktree_refused: {linked} was not a directory of its own when the specialist started")
     assert not linked.is_symlink() and (real / "mod.py").is_file()
     assert HeldWorktree.before_launch(tmp_path / "missing").refusal().endswith("when the specialist started")
+
+
+@pytest.mark.parametrize("swap", ["link", "directory"])
+def test_a_file_is_read_through_the_worktree_given_never_through_what_took_its_place(tmp_path: Path, swap: str) -> None:
+    worktree = _worktree(tmp_path)
+    held = HeldWorktree.before_launch(worktree)
+    (worktree / "done.json").write_text("mine", encoding="utf-8")
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / "done.json").write_text("CANARY", encoding="utf-8")
+
+    assert held.intact() and held.read_text("done.json") == "mine"
+    worktree.rename(worktree.with_name("worktree.orig"))
+    if swap == "link":
+        worktree.symlink_to(host)
+    else:
+        worktree.mkdir()
+        (worktree / "done.json").write_text("CANARY", encoding="utf-8")
+
+    assert not held.intact()
+    with pytest.raises(OSError) as refused:
+        held.read_text("done.json")
+    assert refused.value.errno in ((errno.ELOOP, errno.ENOTDIR) if swap == "link" else (errno.ESTALE,))

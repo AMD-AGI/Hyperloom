@@ -411,6 +411,12 @@ def test_read_done_bad_json(tmp_path: Path) -> None:
     assert SpecialistSubprocessDispatcher._read_done(p) is None
 
 
+def test_read_done_not_utf8(tmp_path: Path) -> None:
+    p = tmp_path / "done.json"
+    p.write_bytes(b'{"summary": "\xff"}')
+    assert SpecialistSubprocessDispatcher._read_done(p) is None
+
+
 def test_read_done_non_dict(tmp_path: Path) -> None:
     p = tmp_path / "done.json"
     p.write_text("[1,2,3]", encoding="utf-8")
