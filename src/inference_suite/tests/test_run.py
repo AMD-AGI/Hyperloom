@@ -3,8 +3,8 @@
 
 """Contract of a round: one round per call into an empty run_dir, which does not change once the call returns, GPU
 samples from the measured window alone, KV samples tagged by phase, a fixed profile round's window around its
-measured pass, the checks that refuse a round before its server starts, a reuse round on
-the server a boot round left, and the CLI's ``run`` and ``stop`` round trips."""
+measured pass, an AgentX profile round's window on the replay's phase clock, the checks that refuse a round before its
+server starts, a reuse round on the server a boot round left, and the CLI's ``run`` and ``stop`` round trips."""
 
 from __future__ import annotations
 
@@ -52,9 +52,9 @@ from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
 from inference_suite.runtime import server as runtime_server
 from inference_suite.runtime import watch
 from inference_suite.runtime.phases import Phase
-from inference_suite.staging import GSM8K_TASK, StagingReport
+from inference_suite.staging import AGENTX_PYTHON, GSM8K_TASK, StagingReport
 from inference_suite.tests.test_base_launch_contract import _base
-from inference_suite.tests.test_config_contract import _SHA, _config, _eval
+from inference_suite.tests.test_config_contract import _AGENTX, _SHA, _config, _eval
 
 pytestmark = pytest.mark.skipif(not Path("/proc/net/tcp").exists(), reason="needs Linux procfs")
 
@@ -64,10 +64,11 @@ _SERVER = textwrap.dedent(
     import http.server, json, os, sys
     port = int(sys.argv[sys.argv.index("--port") + 1])
     print("server starting on", port, flush=True)
+    metrics = b"sglang:token_usage 0.25\\nsglang:max_total_num_tokens 4096\\nsglang:num_running_reqs 8\\n"
 
     class Health(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            body = b"sglang:token_usage 0.25\\nsglang:max_total_num_tokens 4096\\n" if self.path == "/metrics" else b""
+            body = metrics if self.path == "/metrics" else b""
             self.send_response(200 if self.path in ("/health", "/metrics") else 404)
             self.end_headers()
             self.wfile.write(body)
@@ -81,7 +82,8 @@ _SERVER = textwrap.dedent(
                 with open(os.path.join(trace_dir, "rank0.trace.json.gz"), "w") as trace:
                     trace.write("trace")
             refused = os.environ.get("FAKE_PROFILE_REFUSED") == "1"
-            self.send_response(500 if refused else 200)
+            known = self.path in ("/start_profile", "/stop_profile")
+            self.send_response(500 if refused else 200 if known else 404)
             self.end_headers()
 
         def log_message(self, *args):
@@ -124,6 +126,49 @@ _EVAL = textwrap.dedent(
                    "versions": {"gsm8k": 3}}, fh)
     with open(request["probe_file"], "w") as fh:
         json.dump({"tripped": False, "samples_seen": 200, "length_ratio_observed": 0.01}, fh)
+    """
+)
+_HARNESS = textwrap.dedent(
+    """
+    import http.server, json, os, sys, threading, time
+    argv = sys.argv[1:]
+    value = lambda flag: argv[argv.index(flag) + 1]
+    if "agentx_cli" not in argv:
+        result = {"num_requests_successful": 2,
+                  "request_accounting": {"records_total": 4, "records_warmup_dropped": 2, "records_error_dropped": 0,
+                                         "records_dropped_total": 2},
+                  "request_metrics": {"qps": {"mean": 3.0}}}
+        with open(os.path.join(os.environ["RESULT_DIR"], os.environ["RESULT_FILENAME"] + ".json"), "w") as fh:
+            json.dump(result, fh)
+        sys.exit(0)
+    with open(os.environ["FAKE_CLIENT_CALLS"], "a") as calls:
+        calls.write(json.dumps(argv) + "\\n")
+    begun = time.time_ns()
+    phases = {"warmup": {"start_ns": begun}}
+
+    class Progress(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps({"phases": phases}).encode())
+
+        def log_message(self, *args):
+            pass
+
+    api = http.server.HTTPServer((value("--api-host"), int(value("--api-port"))), Progress)
+    threading.Thread(target=api.serve_forever, daemon=True).start()
+    time.sleep(0.4)
+    phases["profiling"] = {"start_ns": time.time_ns()}
+    for _ in range(8):
+        print("request done", flush=True)
+        time.sleep(0.2)
+    phases["profiling"]["requests_end_ns"] = time.time_ns()
+    time.sleep(0.2)
+    artifacts = value("--output-artifact-dir")
+    os.makedirs(artifacts, exist_ok=True)
+    with open(os.path.join(artifacts, "profile_export.jsonl"), "w") as export:
+        for phase in ("warmup", "warmup", "profiling", "profiling"):
+            export.write(json.dumps({"metadata": {"benchmark_phase": phase}, "metrics": {}}) + "\\n")
     """
 )
 _FIXED = FixedWorkload(
@@ -174,6 +219,12 @@ class _Rig:
         (client / "benchmark_serving.py").write_text(_CLIENT)
         (root / GSM8K_TASK).parent.mkdir(parents=True)
         (root / GSM8K_TASK).write_text("task: gsm8k\n")
+        harness = tmp_path / "fake_harness.py"
+        harness.write_text(_HARNESS)
+        harness_python = root / AGENTX_PYTHON
+        harness_python.parent.mkdir(parents=True)
+        harness_python.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{harness}" "$@"\n')
+        harness_python.chmod(0o755)
         server_script = tmp_path / "fake_server.py"
         server_script.write_text(_SERVER)
         self.eval_script = tmp_path / "fake_eval.py"
@@ -367,6 +418,41 @@ def test_a_fixed_profile_window_the_server_refuses_leaves_no_trace_and_the_round
     assert report.profile is not None and not report.profile.has_step_traces and report.profile.trace_dirs == ()
     capture = json.loads(layout.profile_capture.read_text())
     assert capture["window_open_unix"] is None and "/start_profile" in capture["error"]
+
+
+def test_an_agentx_profile_round_replays_and_opens_its_window_from_the_first_profiling_request(rig):
+    agentx_base = replace(rig.base, query=replace(rig.base.query, workload=Workload.AGENTX, isl=None, osl=None))
+    rig.base_path.write_text(json.dumps(agentx_base.to_document()))
+    config = rig.config("r1")
+    window = ProfileConfig(enabled=True, agentx_open_after_sec=0.2, agentx_duration_sec=0.4)
+    config = replace(
+        config,
+        server=replace(config.server, base=BaseRef(str(rig.base_path), agentx_base.digest())),
+        workload=WorkloadKind.AGENTX,
+        fixed=None,
+        agentx=replace(_AGENTX, warmup_seed=_AGENTX.seed),
+        profile=window,
+    )
+
+    result = run.run_round(config)
+
+    report, layout = result.report, result.layout
+    assert report.run_status is RunStatus.COMPLETED, report.failure_detail
+    calls = [json.loads(line) for line in rig.calls.read_text().splitlines()]
+    (replay,) = [call for call in calls if isinstance(call, list)]
+    assert [call["path"] for call in calls if isinstance(call, dict)] == ["/start_profile", "/stop_profile"]
+    launch = Launch.from_document(json.loads(layout.launch.read_text()))
+    assert launch.client is not None and list(launch.client.argv[1:]) == replay
+    assert launch.client.seed == launch.client.warmup_seed == _AGENTX.seed
+    assert report.agentx is not None and report.agentx.counts["successful"] == 2 and report.codes.client == 0
+    marks = _marks(layout)
+    assert marks[Phase.WARMUP.value] < marks[Phase.MEASURED.value] < marks[Phase.FINISHED.value]
+    capture = json.loads(layout.profile_capture.read_text())
+    assert capture["window_open_unix"] - capture["profiling_start_unix"] >= 0.2
+    assert capture["running_requests_in_window"] == 8 and capture["error"] is None
+    profile = report.profile
+    assert profile is not None and profile.has_step_traces and profile.running_requests_in_window == 8
+    assert profile.window_open_unix == capture["window_open_unix"]
 
 
 def test_the_refusal_says_whether_the_host_holds_a_redacted_value(rig, monkeypatch):
