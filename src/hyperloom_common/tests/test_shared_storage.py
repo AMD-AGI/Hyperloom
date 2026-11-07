@@ -419,3 +419,15 @@ def test_a_link_at_the_final_name_is_refused_or_replaced_never_followed(tmp_path
     assert not (parent / "file-link").is_symlink(), "the link itself is replaced by rename"
     assert ((elsewhere / "file").read_text(), _mode(elsewhere / "file"), _mode(elsewhere)) == ("theirs", 0o600, 0o700)
     assert not (tmp_path / "nowhere").exists()
+
+
+def test_a_link_to_shared_storage_is_not_taken_for_it(tmp_path):
+    shared = _setgid_parent(tmp_path / "shared")
+    (tmp_path / "link").symlink_to(shared)
+    _here(
+        "from pathlib import Path\nfrom hyperloom_common import shared_storage as s\n"
+        f"s.make_shared_dirs(Path({str(tmp_path / 'link' / 'a')!r}))\n"
+        f"s.write_shared_bytes(Path({str(tmp_path / 'link' / 'f')!r}), b'x')\n",
+        umask=0o022,
+    )
+    assert (_mode(shared / "a") & 0o777, _mode(shared / "f")) == (0o755, 0o644), "judged by lstat: a link is not shared"
