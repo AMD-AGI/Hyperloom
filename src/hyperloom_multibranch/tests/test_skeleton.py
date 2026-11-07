@@ -133,7 +133,7 @@ from hyperloom_multibranch.scheduling import judge
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.integrator import ADOPTING_LEAD
-from hyperloom_multibranch.scheduling.launch_isolation import LOCAL_SANDBOX, LOCAL_TEST, NO_ACCOUNT, LaunchIsolation
+from hyperloom_multibranch.scheduling.launch_isolation import NO_ACCOUNT, LaunchIsolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.lifecycle import (
@@ -244,8 +244,9 @@ IMAGE_CHECK = ImageCheckReport(
     {"python": "/usr/bin/python3"},
     (FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone"),),
 )
-#: How the session's peers launch its agents and tests: the specialists unconfined, as no account is configured.
-ISOLATION = LaunchIsolation("none", "none", "none", False, (NO_ACCOUNT, LOCAL_SANDBOX, LOCAL_TEST))
+#: How the session's peers launch its agents and tests: all unconfined, as no account is configured and no bubblewrap
+#: is found.
+ISOLATION = LaunchIsolation("none", "none", "none", False, (NO_ACCOUNT, "bubblewrap: not found"))
 #: The review gate pauses a session with Arbor agents for a person; these sessions open their branches without one,
 #: as ``run --no-review-gate`` does, and the review's own tests turn it on.
 SETTINGS = RunSettings(

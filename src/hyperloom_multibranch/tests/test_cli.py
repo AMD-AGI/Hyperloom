@@ -78,12 +78,7 @@ from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, c
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run
 from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version
 from hyperloom_multibranch.scheduling import local_peers
-from hyperloom_multibranch.scheduling.launch_isolation import (
-    LOCAL_SANDBOX,
-    LOCAL_TEST,
-    LaunchIsolation,
-    launch_isolation,
-)
+from hyperloom_multibranch.scheduling.launch_isolation import NO_ACCOUNT, LaunchIsolation, launch_isolation
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.peers import PeerFactory
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH, ProcessRecord
@@ -1689,7 +1684,7 @@ def test_a_spec_measured_locally_runs_on_this_containers_cards_with_no_grant_san
 
 
 @pytest.mark.usefixtures("ready_environment")
-def test_a_spec_measured_locally_ends_for_good_while_its_sandboxes_and_tests_would_run_unconfined_here(
+def test_a_spec_measured_locally_ends_for_good_while_its_specialists_would_run_unconfined_here(
     host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(hosted_run_module, "launch_isolation", launch_isolation)
@@ -1701,8 +1696,9 @@ def test_a_spec_measured_locally_ends_for_good_while_its_sandboxes_and_tests_wou
     assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
     error = str(document["error"])
     assert error.startswith("a hosted run launches nothing unconfined beside its credentials, and here ")
-    assert "agent and dev sandboxes and tests run unconfined on this host" in error
-    assert LOCAL_SANDBOX in error and LOCAL_TEST in error
+    assert error.endswith(f"here specialists run unconfined on this host ({NO_ACCOUNT})"), (
+        "the layer's bubblewrap confines the sandboxes and tests the run starts here"
+    )
     assert agent_cli == [] and not any(host.workspace.iterdir())
 
 

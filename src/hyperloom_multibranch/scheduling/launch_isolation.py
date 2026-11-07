@@ -10,8 +10,10 @@ the path that launches it, never from a chooser that path does not call:
 - a specialist is started by the agent runner as the account
   :func:`~hyperloom.orchestrator.specialists.launch_env.resolve_launch_user` gives, the function the runner calls, and
   unconfined when it gives none;
-- an agent or dev sandbox on this host runs its commands as the application's own account, with its environment;
-- a test measured on this host's cards runs as the application's own account.
+- an agent or dev sandbox on this host runs its commands under bubblewrap where
+  :func:`~hyperloom.common.agent_isolation.choose_sandbox_isolation`, the function it calls, gives it, else unconfined;
+- a test measured on this host's cards runs under bubblewrap where
+  :func:`~hyperloom.sandbox.confined.local_test_isolation` gives it, else unconfined.
 
 A session measured in a grant's sandboxes runs its agent and dev sandboxes and its tests there (:data:`HOSTED`), not on
 this host.
@@ -23,9 +25,19 @@ import dataclasses
 import logging
 from dataclasses import dataclass
 
-from hyperloom.common.agent_isolation import ACCOUNT, NONE, REFUSED, isolation_required
+from hyperloom.common.agent_isolation import (
+    ACCOUNT,
+    BWRAP,
+    NONE,
+    REFUSED,
+    BwrapIsolation,
+    IsolationRefused,
+    choose_sandbox_isolation,
+    isolation_required,
+)
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV, RunAsError
 from hyperloom.orchestrator.specialists.launch_env import resolve_launch_user
+from hyperloom.sandbox.confined import local_test_isolation
 
 log = logging.getLogger(__name__)
 
@@ -33,19 +45,14 @@ log = logging.getLogger(__name__)
 HOSTED = "hosted"
 #: Why a specialist is started unconfined.
 NO_ACCOUNT = f"the agent runner starts a specialist as the account {SPECIALIST_USER_ENV} names, and it is not set"
-#: Why an agent or dev sandbox on this host is unconfined.
-LOCAL_SANDBOX = (
-    "an agent or dev sandbox on this host runs its commands as the application's own account, with its environment"
-)
-#: Why a test on this host's cards is unconfined.
-LOCAL_TEST = "a test on this host's cards runs as the application's own account"
 
 
 @dataclass(frozen=True)
 class LaunchIsolation:
     """How a session's ``specialists``, its agent and dev ``sandboxes`` and its ``tests`` are launched: each
     :data:`~hyperloom.common.agent_isolation.ACCOUNT`, :data:`~hyperloom.common.agent_isolation.NONE` (unconfined),
-    :data:`~hyperloom.common.agent_isolation.REFUSED` or, for sandboxes and tests, :data:`HOSTED`; ``required`` whether
+    :data:`~hyperloom.common.agent_isolation.REFUSED` or, for sandboxes and tests,
+    :data:`~hyperloom.common.agent_isolation.BWRAP` or :data:`HOSTED`; ``required`` whether
     a specialist must be isolated here; ``reasons`` why a launch on this host is not isolated."""
 
     specialists: str
@@ -86,8 +93,20 @@ def launch_isolation(*, local: bool) -> LaunchIsolation:
         specialists, why = REFUSED, (str(refused),)
     else:
         specialists, why = (NONE, (NO_ACCOUNT,)) if account is None else (ACCOUNT, ())
-    where, here = (NONE, (LOCAL_SANDBOX, LOCAL_TEST)) if local else (HOSTED, ())
-    return LaunchIsolation(specialists, where, where, isolation_required(), (*why, *here))
+    where, here = _local_sandbox_isolation() if local else (HOSTED, ())
+    tests, test_why = local_test_isolation() if local else (HOSTED, ())
+    reasons = tuple(dict.fromkeys((*why, *here, *test_why)))
+    return LaunchIsolation(specialists, where, tests, isolation_required(), reasons)
+
+
+def _local_sandbox_isolation() -> tuple[str, tuple[str, ...]]:
+    """How an agent or dev sandbox on this host is launched now, and why it is not isolated."""
+
+    try:
+        found = choose_sandbox_isolation()
+    except IsolationRefused as refused:
+        return REFUSED, refused.reasons
+    return (BWRAP, ()) if isinstance(found, BwrapIsolation) else (NONE, found.reasons)
 
 
 def announce_launch_isolation(isolation: LaunchIsolation) -> None:
@@ -104,8 +123,6 @@ def announce_launch_isolation(isolation: LaunchIsolation) -> None:
 
 __all__ = [
     "HOSTED",
-    "LOCAL_SANDBOX",
-    "LOCAL_TEST",
     "NO_ACCOUNT",
     "LaunchIsolation",
     "announce_launch_isolation",
