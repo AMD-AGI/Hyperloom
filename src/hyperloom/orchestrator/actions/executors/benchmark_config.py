@@ -34,7 +34,7 @@ from hyperloom.common.agentx_workload import (
     is_agentx_client_script,
     is_mlperf_backend,
 )
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import is_magpie_agentx, read_benchmark_point
 from hyperloom.common.env_safety import valid_env_key
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
@@ -300,12 +300,8 @@ def prepare_agentx_runtime(
         active = agentx_enabled(runtime_env)
         if not active and config_path:
             try:
-                materialized = yaml.safe_load(Path(config_path).read_text(encoding=_UTF8)) or {}
-                benchmark = materialized.get("benchmark") if isinstance(materialized, dict) else {}
-                active = isinstance(benchmark, dict) and is_agentx_client_script(
-                    str(benchmark.get("benchmark_script") or "")
-                )
-            except (OSError, ValueError, TypeError):
+                active = is_agentx_client_script(read_benchmark_point(Path(config_path)).benchmark_script)
+            except (OSError, ValueError, yaml.YAMLError):
                 active = False
     if not active:
         return None

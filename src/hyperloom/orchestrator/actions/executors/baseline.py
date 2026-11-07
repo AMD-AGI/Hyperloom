@@ -23,6 +23,7 @@ import yaml
 
 from hyperloom_common.coerce import optional_positive_float
 from hyperloom_common.env import is_truthy
+from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.common.perf_metric import agentx_active, with_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_SINGLE,
@@ -608,6 +609,14 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         )
 
 
+def _readable_point(config_path: Path) -> BenchmarkPoint | None:
+    """The point at ``config_path``, or ``None`` when it cannot be read."""
+    try:
+        return read_benchmark_point(Path(config_path))
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+
+
 class BaselineExecutor(BenchmarkRunExecutor):
     """Class form for tests / DI; ``baseline_executor`` is the bare callable."""
 
@@ -626,16 +635,14 @@ class BaselineExecutor(BenchmarkRunExecutor):
         the same ``--result-dir`` marker with a different client call, and judging
         them would let an unrelated shape veto a workload whose own script is fine.
         """
-        try:
-            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
+        point = _readable_point(config_path)
+        if point is None:
             return None
-        bench = (cfg.get("benchmark") if isinstance(cfg, dict) else {}) or {}
-        override = str(bench.get("benchmark_script") or "").strip()
+        override = point.benchmark_script.strip()
         if override:
             return override
-        framework = str(bench.get("framework") or "").strip().lower()
-        runner = str(bench.get("runner_type") or "").strip().lower()
+        framework = point.framework.strip().lower()
+        runner = point.runner_type.strip().lower()
         if not framework or not runner:
             return None
         return f"{framework}_{runner}.sh"
@@ -643,22 +650,14 @@ class BaselineExecutor(BenchmarkRunExecutor):
     @staticmethod
     def _model_from_config(config_path: Path) -> str:
         """Read the benchmark model path out of the materialized config."""
-        try:
-            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            return ""
-        bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
-        return str((bench or {}).get("model") or "").strip()
+        point = _readable_point(config_path)
+        return point.model.strip() if point is not None else ""
 
     @staticmethod
     def _inferencex_root_from_config(config_path: Path) -> str:
         """Resolve the InferenceX checkout the subprocess will ``cd`` into."""
-        try:
-            cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-            bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
-            path = str((bench or {}).get("inferencex_path") or "").strip()
-        except (OSError, yaml.YAMLError):
-            path = ""
+        point = _readable_point(config_path)
+        path = point.inferencex_path.strip() if point is not None else ""
         return path or os.environ.get("INFERENCEX_PATH", "").strip()
 
     def _after_materialize_config(
