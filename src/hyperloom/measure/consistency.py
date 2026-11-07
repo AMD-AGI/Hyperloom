@@ -79,6 +79,8 @@ __all__ = [
     "load_checklist",
     "main",
     "run_checklist",
+    "SessionNotMeasurable",
+    "session_facts",
     "summarize",
 ]
 
@@ -756,18 +758,26 @@ def build_parser(prog: str = "python -m hyperloom.measure.consistency") -> argpa
     return parser
 
 
-def session_facts(config_path: Path) -> SessionFacts:
-    """What both sides of every test take from the session the config names: its frozen base launch, and the
-    inference_suite staging the application's tool cache holds.
+class SessionNotMeasurable(ValueError):
+    """The session froze no base launch, or the application's tool cache holds no staging manifest."""
+
+
+def session_facts(session: Path) -> SessionFacts:
+    """What every test of the session at ``session`` carries: its frozen base launch, and the inference_suite staging
+    the application's tool cache holds. A v2 sheet needs both, so a session missing either is refused before any test.
 
     Raises:
+        SessionNotMeasurable: The session froze no base, or the tool cache holds no staging manifest.
         BaseLaunchMismatch: The session's ``base_launch.json`` is not the base it recorded.
     """
-    session = Path(json.loads(Path(config_path).read_text(encoding=_UTF8))["session_dir"])
     frozen = frozen_base(session)
-    return SessionFacts(
-        staging=manifest_sha256(staged_tool_cache()), base_launch=None if frozen is None else frozen.launch
-    )
+    if frozen is None:
+        raise SessionNotMeasurable(f"the session {session} froze no base launch")
+    tool_cache = staged_tool_cache()
+    staging = manifest_sha256(tool_cache)
+    if staging is None:
+        raise SessionNotMeasurable(f"the inference_suite tool cache {tool_cache} holds no staging manifest")
+    return SessionFacts(staging=staging, base_launch=frozen.launch)
 
 
 def _with_facts(item: ChecklistItem, facts: SessionFacts) -> ChecklistItem:
@@ -781,7 +791,7 @@ def items_from_arguments(args: argparse.Namespace) -> list[ChecklistItem] | None
     """The checklist of the command line with ``--repeats`` and the session's facts applied; ``None`` (after a message)
     when it is unusable."""
     try:
-        facts = session_facts(args.config)
+        facts = session_facts(Path(json.loads(args.config.read_text(encoding=_UTF8))["session_dir"]))
         items = [_with_facts(item, facts) for item in load_checklist(args.checklist)]
     except (OSError, ValueError, KeyError, BaseLaunchMismatch) as exc:
         print(f"checklist or session unusable: {exc}", file=sys.stderr)
