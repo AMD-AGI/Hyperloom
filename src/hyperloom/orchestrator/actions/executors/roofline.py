@@ -19,6 +19,9 @@ from typing import Any, Awaitable, Callable, Sequence
 
 from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom_common.timeutil import now_iso
+from hyperloom_common.jsonio import read_json_strict
+from inference_suite.contracts import FailedStep, Report
+from inference_suite.contracts.layout import REPORT_FILE
 from ...phases.machine_state import LifecycleMark, record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
@@ -371,48 +374,31 @@ def _drain_instrumentation(executor: Any) -> dict[str, Any] | None:
     return report if isinstance(report, dict) else None
 
 
+_SERVER_DIED_STEPS = frozenset({FailedStep.SERVER_DIED, FailedStep.SERVER_EXITED_BEFORE_READY})
+
+
 def _server_liveness_probe(session_dir: Path, task_id: str) -> dict[str, Any]:
-    """Report, without touching them, whether the servers this task started outlived the profile. Never raises.
+    """Report, from this task's run_dir ``report.json`` files, whose server died and whose outlived its teardown.
 
-    ``dead_with_pidfile`` is the one this exists for: teardown unlinks the pidfile, so a pidfile naming a dead
-    process means the engine died instead of being torn down. That run can still have exported a complete trace,
-    which is exactly why the result dict alone cannot show it.
+    A run whose engine died can still have exported a complete trace, which is exactly why the result dict alone
+    cannot show it.
     """
-    from hyperloom_common.proctree import running
-
-    from ._server_lifecycle import _looks_like_server_process
-
     runs_dir = session_dir / "runs"
     if not runs_dir.is_dir():
         return {}
-    entries: list[dict[str, Any]] = []
-    try:
-        pid_files = sorted(runs_dir.rglob("*.pid"))
-    except OSError as exc:
-        return {"error": repr(exc)}
-    for pid_file in pid_files:
-        if task_id and task_id not in str(pid_file):
-            continue
-        try:
-            pid = int(pid_file.read_text(encoding="utf-8").split()[0])
-        except (OSError, IndexError, ValueError):
-            continue
-        alive = running(pid)
-        entries.append(
-            {
-                "pid_file": str(pid_file.relative_to(session_dir)),
-                "pid": pid,
-                "alive": alive,
-                # A live pid that no longer looks like a server is pid reuse, not a surviving engine.
-                "is_server": _looks_like_server_process(pid) if alive else False,
-            }
-        )
+    reports = [path for path in sorted(runs_dir.rglob(REPORT_FILE)) if task_id in str(path)]
+    steps = {path.parent: Report.from_document(read_json_strict(path)).failed_step for path in reports}
+    entries = [
+        {"run_dir": str(run_dir.relative_to(session_dir)), "failed_step": step.value}
+        for run_dir, step in steps.items()
+        if step in _SERVER_DIED_STEPS or step is FailedStep.TEARDOWN_INCOMPLETE
+    ]
     if not entries:
-        return {"pidfiles": 0}
+        return {"reports": len(reports)}
     return {
-        "pidfiles": len(entries),
-        "alive": sum(1 for e in entries if e["alive"]),
-        "dead_with_pidfile": sum(1 for e in entries if not e["alive"]),
+        "reports": len(reports),
+        "server_died": sum(1 for step in steps.values() if step in _SERVER_DIED_STEPS),
+        "server_outlived_teardown": sum(1 for step in steps.values() if step is FailedStep.TEARDOWN_INCOMPLETE),
         "entries": entries,
     }
 
