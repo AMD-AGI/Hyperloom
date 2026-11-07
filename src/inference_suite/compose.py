@@ -6,9 +6,9 @@
 The order is fixed: base, user removals, user additions, candidate removals, candidate additions, the golden layer (when
 the round applies it), the guard (the round's model path, address and GPU mask), the runner's layer (with the
 framework's metrics flag when the round scrapes ``/metrics``), then the profiler layer of a profile round. A layer's
-flag beats every earlier group of the same flag; a later alias of it wins only because the engine applies the last one. Neither the user nor the candidate may set what the guard or the runner owns,
-nor, under a golden layer, what golden owns; such a layer is refused, not overridden, so the refusal names whose layer
-it was.
+flag beats every earlier group of the same flag; a later alias of it wins only because the engine applies the last
+one. Neither the user nor the candidate may set what the guard or the runner owns, nor, under a golden layer, what
+golden owns; such a layer is refused, not overridden, so the refusal names whose layer it was.
 """
 
 from __future__ import annotations
