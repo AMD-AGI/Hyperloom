@@ -48,7 +48,8 @@ Read the session directory from the CLI's launch-info output.
 
 Open-source dependencies are cloned pod-local, not under `runtime/`:
 `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/`
-contains Magpie, TraceLens, GEAK, and InferenceX.
+contains TraceLens, GEAK, and the InferenceSuite tool cache
+(`$INFERENCE_SUITE_TOOL_CACHE`, default `inference-suite-tools/`).
 
 **Launcher rule:** do not hand-build, create, delete, or repair paths under the
 pod-local open-source root or under `$USER_DATA_PATH/runtime/`. Those assets are
