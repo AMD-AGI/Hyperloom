@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.actions.executors._grid_base import VARIANT_CONFIG_FILE, variant_config_of
-from hyperloom.orchestrator.actions.executors._accuracy_gate import ACCURACY_DIR
+from hyperloom.orchestrator.actions.executors._accuracy_gate import ACCURACY_DIR, AccuracyReference
 from hyperloom.orchestrator.actions.executors._suite_config import AccuracyRound
 from hyperloom.orchestrator.actions.executors.benchmark_run import accuracy
 from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import (
@@ -291,7 +291,8 @@ def test_an_explore_slot_is_gated_on_the_score_its_accuracy_round_wrote(tmp_path
             json.dumps({"results": {"gsm8k": {"exact_match,strict-match": score}}})
         )
     explore = object.__new__(_ExploreRound)
-    explore.framework, explore.baseline_accuracy, explore.ss = "sglang", 0.945, SharedState(benchmark_mode=_AGENTX)
+    explore.framework, explore.ss = "sglang", SharedState(benchmark_mode=_AGENTX)
+    explore.accuracy_reference = AccuracyReference(0.945, "")
     row: dict = {"gates": [], "reason": ""}
 
     explore._apply_accuracy_gate(row, slot)

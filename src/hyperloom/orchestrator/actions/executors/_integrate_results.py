@@ -50,6 +50,8 @@ class _PatchBench:
     session_deadline_sec: float | None = None
     variant_expected_sec: float | None = None
     benchmark_mode: str = ""
+    # The eval definition digest the session's baseline score was taken under.
+    accuracy_definition_digest: str = ""
 
     @classmethod
     def for_attempt(cls, attempt: IntegrateAttempt, params: dict[str, Any]) -> _PatchBench:
@@ -64,6 +66,7 @@ class _PatchBench:
             session_deadline_sec=session_deadline_sec,
             variant_expected_sec=variant_expected_sec,
             benchmark_mode=str(getattr(shared_state, "benchmark_mode", "") or ""),
+            accuracy_definition_digest=str(getattr(shared_state, "baseline_accuracy_definition_digest", "") or ""),
         )
 
 

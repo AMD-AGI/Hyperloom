@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.coerce import to_str_list
+from hyperloom_common.coerce import to_float, to_str_list
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import constraint_fields
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
@@ -21,6 +21,7 @@ from ...bringup import write_boot_observation
 from ...delivery import file_digest
 from ...delivery.ledger import append_record, load_records, mark_prepared
 from ._accuracy_gate import (
+    AccuracyReference,
     framework_run_eval_envs,
     grade_accuracy,
     is_eval_origin,
@@ -461,7 +462,7 @@ def _grade_bench_accuracy(
     measured = float(accuracy) if isinstance(accuracy, (int, float)) else None
     gate_evidence["accuracy_pass"] = grade_accuracy(
         eval_search_root,
-        params.get("accuracy_baseline"),
+        AccuracyReference(to_float(params.get("accuracy_baseline"), 0.0), bench_leg.accuracy_definition_digest),
         framework=framework,
         benchmark_mode=bench_leg.benchmark_mode,
     )
