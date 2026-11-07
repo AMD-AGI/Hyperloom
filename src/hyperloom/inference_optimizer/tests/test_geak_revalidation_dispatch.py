@@ -334,7 +334,7 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     monkeypatch.setattr(explore, "run_grid", capture_grid)
     monkeypatch.setattr(explore, "effective_fingerprint", observe_fingerprint)
     monkeypatch.setattr(explore, "maybe_serving_lease", lambda **_kwargs: None)
-    monkeypatch.setattr(explore, "teardown_lifecycle_server", lambda **_kwargs: None)
+    monkeypatch.setattr(explore, "teardown_variant_server", lambda *_args: [])
     result = await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=task, extra={"shared_state": state})
     )
@@ -1204,9 +1204,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.explore.teardown_lifecycle_server", lambda **_kwargs: None
-    )
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.teardown_variant_server", lambda *_args: [])
     await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=task, extra={"shared_state": state})
     )

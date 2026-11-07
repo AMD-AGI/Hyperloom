@@ -1067,7 +1067,7 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
             ),
         )
     except subprocess.TimeoutExpired as exc:
-        _teardown_variant_server(at.path, rounds.lifecycle)
+        teardown_variant_server(at.path, rounds.lifecycle)
         log.warning(
             "grid_runner: variant %s aborted: warmup timeout (timeout_sec=%d): %s",
             _variant_tag(run, at),
@@ -1083,7 +1083,7 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
         )
     stopped = stopped_by_the_run(proc.returncode)
     if stopped is not None:
-        survivors = _teardown_variant_server(at.path, rounds.lifecycle)
+        survivors = teardown_variant_server(at.path, rounds.lifecycle)
         attempt = _RoundAttempt(at, proc.returncode, started_unix, warmup_server_log, tuple(survivors))
         _abort_on_round_stop(run, stopped, attempt, round_label="warmup")
     pass_ = _BenchmarkPass(proc, started_unix, workspaces_before)
@@ -1124,7 +1124,7 @@ async def _warmup_throughput(
             warmup_tput or 0.0,
         )
         return warmup_tput
-    _teardown_variant_server(at.path, rounds.lifecycle)
+    teardown_variant_server(at.path, rounds.lifecycle)
     warmup_server_log = warmup_slot / "server.log"
     report_path = round_report_path(workspace)
     warmup_error = (
@@ -1229,7 +1229,7 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
     )
     stopped = stopped_by_the_run(proc.returncode)
     if stopped is not None:
-        survivors = _teardown_variant_server(at.path, rounds.lifecycle if rounds.auto_warmup else None)
+        survivors = teardown_variant_server(at.path, rounds.lifecycle if rounds.auto_warmup else None)
         attempt = _RoundAttempt(at, proc.returncode, started_unix, warm_slot / "server.log", tuple(survivors))
         _abort_on_round_stop(run, stopped, attempt, round_label="mn_warmup")
 
@@ -1277,7 +1277,7 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
             nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in harvested],
         )
     finally:
-        round_survivors = _teardown_variant_server(at.path, rounds.lifecycle if rounds.auto_warmup else None)
+        round_survivors = teardown_variant_server(at.path, rounds.lifecycle if rounds.auto_warmup else None)
     return _BenchmarkPass(proc, started_unix, workspaces_before, tuple(round_survivors))
 
 
@@ -1583,7 +1583,7 @@ async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
     spent_on = "this variant's server restart"
     if _warn_budget_cannot_admit(run, at.idx, rounds_left=1 + run.mn_warmup_rounds, spent_on=spent_on):
         if rounds.auto_warmup:
-            _teardown_variant_server(at.path, rounds.lifecycle)
+            teardown_variant_server(at.path, rounds.lifecycle)
         _abandon_rest_of_grid(run, at)
     await _run_multi_node_warmup(run, at, rounds)
     round_ = await _run_measured_round(run, at, rounds)
@@ -1670,11 +1670,12 @@ async def run_grid(
     return results
 
 
-def _teardown_variant_server(slot: Path, lifecycle: dict[str, Any] | None) -> list[int]:
-    """Stop every server this variant booted for its own rounds; return the pids still alive after SIGKILL.
+def teardown_variant_server(slot: Path, lifecycle: dict[str, Any] | None) -> list[int]:
+    """Stop every server the rounds sharing ``slot`` left up; return the pids still alive after SIGKILL.
 
-    ``lifecycle`` names the persistent server Magpie rounds shared, ``None`` when they shared none; the server
-    inference_suite rounds shared is recorded in ``slot`` itself.
+    ``slot`` is a variant's own slot, or the ``pid_dir`` a caller's rounds shared their server through. ``lifecycle``
+    names the persistent server Magpie rounds shared, ``None`` when they shared none; the server inference_suite
+    rounds shared is recorded in ``slot`` itself.
     """
     from ._server_lifecycle import stop_agentx_servers, teardown_lifecycle_server
 
@@ -1855,6 +1856,7 @@ __all__ = [
     "sanitize_script_name",
     "session_grid_bounds",
     "stopped_by_the_run",
+    "teardown_variant_server",
 ]
 
 
