@@ -194,6 +194,18 @@ async def test_an_integration_merge_lands_only_on_the_head_it_was_tested_on(tmp_
         await repo.commit_integration(root, CHUNKING, (tip,))
 
 
+async def test_the_root_stays_the_baseline_commit_however_far_the_integration_branch_moves(tmp_path, blobs):
+    repo = GitExperimentRepo(tmp_path / "experiments.git", blobs)
+    root = await repo.init_root(BASELINE)
+    await repo.create_branch("s1", root)
+    tip = await repo.commit("s1", root, CHUNKED, "enable chunked prefill")
+    merged = await repo.commit_integration(root, CHUNKING, (tip,))
+    later = await repo.commit(INTEGRATION_BRANCH, merged, apply(CHUNKED, CHUNKING), "again")
+
+    assert await repo.head(INTEGRATION_BRANCH) == later
+    assert await repo.root() == root
+
+
 async def test_an_integration_merge_keeps_what_either_side_leaves_unexpressed(repo):
     root = await repo.head(INTEGRATION_BRANCH)
     await repo.create_branch("s1", root)
