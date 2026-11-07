@@ -351,6 +351,43 @@ def test_a_sandbox_whose_paths_cannot_be_bound_safely_runs_as_before_locally_and
     assert provider.pool.free_cards() == (0,), "the refused create gave its card back"
 
 
+@pytest.mark.parametrize("location", ["home", "login-file"])
+def test_a_plan_path_that_is_a_credential_location_runs_the_sandbox_as_before_locally_and_is_refused_hosted(
+    area: Path,
+    providers: list[LocalSandboxProvider],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    location: str,
+) -> None:
+    """A mask hides what lies below a bound path, never the path itself: bound, the home (or a login file a variable
+    names) would show every credential in it unmasked, so its sandbox is not launched in bubblewrap."""
+    fake = FakeBwrap(area)
+    monkeypatch.setattr(confined, "choose_test_isolation", _given(fake.isolation()))
+    home = area / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / ".credentials.json").write_text("SECRET")
+    (home / ".netrc").write_text("SECRET")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("NETRC", str(home / ".netrc"))
+    named = home if location == "home" else home / ".netrc"
+    linked = area / "linked"
+    linked.symlink_to(named)  # resolved before it is compared: a link to the location is the location
+    provider = LocalSandboxProvider(
+        [_runner()], gpus=(0,), base_dir=area / "sandboxes", users=ProcessUsers(plan=RunnerPlan(readable=(linked,)))
+    )
+    providers.append(provider)
+    with caplog.at_level(logging.WARNING):
+        sandbox = provider.create("runner", role="measurement", timeout_sec=60, metadata={})
+    assert not sandbox.confined and fake.launches() == []
+    assert f"{linked} is a credential location of the app's, which its bind would show unmasked" in caplog.text
+    sandbox.kill()
+
+    monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process(hosted=True, layer_bwrap=str(fake.path)))
+    with pytest.raises(SandboxDenied, match="is a credential location"):
+        provider.create("runner", role="measurement", timeout_sec=60, metadata={})
+    assert fake.launches() == []
+
+
 def test_a_plan_that_would_show_the_app_s_state_runs_the_sandbox_as_before(
     area: Path, providers: list[LocalSandboxProvider], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
