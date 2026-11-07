@@ -10,13 +10,13 @@ whatever the measured program printed.
 
 from __future__ import annotations
 
-import contextlib
 import os
 import re
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["LINE_CHARS", "LIVE_LOGS", "clean_line", "last_output"]
+__all__ = ["LINE_CHARS", "LIVE_LOGS", "clean_line", "last_output", "last_output_below"]
 
 #: The logs of a running test that show whether it still makes progress; the one written last is reported.
 LIVE_LOGS = frozenset({"server.log", "benchmark_stderr.log", "benchmark_stdout.log"})
@@ -42,25 +42,68 @@ def last_output(directory: Path, now: float) -> tuple[float, str] | None:
 
     ``None`` when there is none or it cannot be read. The line is cleaned as :func:`clean_line` does. Only regular files
     are read, never a link: the logs are written by the measured program, which could name any file the reader can read.
+    ``directory`` itself is opened by its path; below it, as :func:`last_output_below` walks.
     """
-    found = []
-    for root, _, names in os.walk(directory):  # a directory that goes away during the walk is skipped, not raised
-        for path in (Path(root) / name for name in LIVE_LOGS.intersection(names)):
-            with contextlib.suppress(OSError):
-                status = path.lstat()
-                if stat.S_ISREG(status.st_mode):
-                    found.append((status.st_mtime, path))
-    if not found:
-        return None
-    written, newest = max(found)
-    tail = _tail(newest)
-    return None if tail is None else (max(0.0, now - written), clean_line(tail))
-
-
-def _tail(path: Path) -> str | None:
-    """The last ``_TAIL_BYTES`` of the regular file at ``path``; ``None`` for a link, anything else or an unreadable one."""
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # a pipe put there must not block
+        top = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        return last_output_below(top, now)
+    finally:
+        os.close(top)
+
+
+def last_output_below(dir_fd: int, now: float) -> tuple[float, str] | None:
+    """:func:`last_output` of the directory open at ``dir_fd`` (left open), walked by descriptor (``os.fwalk``): each
+    directory is opened from the one above it and no link is followed, so a directory the measured program swaps for a
+    link during the walk leads it nowhere, and the log is opened from its own directory's descriptor."""
+    newest: _Log | None = None
+    try:
+        for root, _, names, directory in os.fwalk(".", dir_fd=dir_fd):  # one that goes away is skipped, not raised
+            newest = _newer(newest, root, names, directory)
+        tail = None if newest is None else _tail(newest.name, dir_fd=newest.directory)
+    finally:
+        if newest is not None:
+            os.close(newest.directory)
+    if newest is None or tail is None:
+        return None
+    return max(0.0, now - newest.written), clean_line(tail)
+
+
+@dataclass(frozen=True)
+class _Log:
+    """A live log found by the walk: when it was ``written``, its ``path`` below the top, and its ``name`` in the
+    directory open at ``directory`` (a descriptor of its own, which its finder closes)."""
+
+    written: float
+    path: str
+    directory: int
+    name: str
+
+
+def _newer(newest: _Log | None, root: str, names: list[str], directory: int) -> _Log | None:
+    """``newest``, or the regular live log among ``names`` (in the directory open at ``directory``, at ``root``)
+    written after it, then holding a descriptor of its own of ``directory`` (``newest``'s is closed)."""
+    for name in sorted(LIVE_LOGS.intersection(names)):
+        try:
+            status = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except OSError:
+            continue
+        found = (status.st_mtime, os.path.join(root, name))
+        if stat.S_ISREG(status.st_mode) and (newest is None or found > (newest.written, newest.path)):
+            held = os.dup(directory)
+            if newest is not None:
+                os.close(newest.directory)
+            newest = _Log(*found, held, name)
+    return newest
+
+
+def _tail(path: Path | str, *, dir_fd: int | None = None) -> str | None:
+    """The last ``_TAIL_BYTES`` of the regular file at ``path`` (relative to ``dir_fd`` when given); ``None`` for a
+    link, anything else or an unreadable one."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)  # a pipe must not block
         with os.fdopen(descriptor, "rb") as handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 return None
