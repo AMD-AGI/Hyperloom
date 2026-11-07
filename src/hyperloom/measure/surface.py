@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_ISL,
@@ -40,7 +41,7 @@ from hyperloom.common.outside_facts import (
 )
 from hyperloom.contracts.recipe import RecipeError
 
-#: ``benchmark`` keys that fix what is measured.
+#: ``benchmark`` keys that fix what is measured, each a text field of :class:`BenchmarkPoint`.
 SURFACE_BENCH_KEYS: tuple[str, ...] = ("framework", "model", "benchmark_script")
 #: ``benchmark.envs`` keys that fix the workload shape and the evaluation.
 SURFACE_ENV_KEYS: tuple[str, ...] = (
@@ -128,14 +129,9 @@ class MeasurementSurface:
         }
 
 
-def _benchmark(config: Mapping[str, Any]) -> Mapping[str, Any]:
-    bench = config.get("benchmark")
-    return bench if isinstance(bench, Mapping) else {}
-
-
-def benchmark_envs(config: Mapping[str, Any]) -> Mapping[str, Any]:
-    envs = _benchmark(config).get("envs")
-    return envs if isinstance(envs, Mapping) else {}
+def _given(value: str) -> str | None:
+    """A text field of the point as the surface spells it: ``None`` for one the point leaves out."""
+    return _text(value) or None
 
 
 def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
@@ -145,13 +141,14 @@ def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
     and keeps the model's identity in ``benchmark.model``; any other names the directory in ``benchmark.model``.
     """
 
-    bench, envs = _benchmark(config), benchmark_envs(config)
-    fields: dict[str, str | None] = {f"benchmark.{key}": _text(bench.get(key)) for key in SURFACE_BENCH_KEYS}
+    point = BenchmarkPoint.from_document(config)
+    envs = point.envs
+    fields: dict[str, str | None] = {f"benchmark.{key}": _given(getattr(point, key)) for key in SURFACE_BENCH_KEYS}
     fields.update({f"envs.{key}": _text(envs.get(key)) for key in SURFACE_ENV_KEYS})
-    script, root = _text(bench.get("benchmark_script")), _text(bench.get("inferencex_path"))
+    script, root = _text(point.benchmark_script), point.inferencex_path
     script_path = Path(root) / "benchmarks" / script if script and root else None
     fields[SCRIPT_FIELD] = _sha256_file(script_path) if script_path and script_path.is_file() else None
-    model = _text(envs.get("MODEL_PATH")) or _text(bench.get("model"))
+    model = _text(envs.get("MODEL_PATH")) or _text(point.model)
     model_files = hash_model_files(Path(model)) if model and Path(model).is_dir() else None
     fields[_MODEL_FILES_FIELD] = json.dumps(model_files, sort_keys=True) if model_files is not None else None
     return MeasurementSurface(fields)
@@ -160,7 +157,7 @@ def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
 def point_values(config: Mapping[str, Any]) -> dict[str, str | None]:
     """The request counts of one point, which follow from its concurrency."""
 
-    envs = benchmark_envs(config)
+    envs = BenchmarkPoint.from_document(config).envs
     return {key: _text(envs.get(key)) for key in POINT_ENV_KEYS}
 
 
@@ -201,7 +198,7 @@ def check_point(
 ) -> None:
     """Hold one point to its request: concurrency, ``RUN_EVAL`` and the canonical request counts for it."""
 
-    envs = benchmark_envs(config)
+    envs = BenchmarkPoint.from_document(config).envs
     expected = {ENV_CONC: str(concurrency), ENV_RUN_EVAL: "true" if accuracy else "false", **reference}
     wrong = {key: (want, _text(envs.get(key))) for key, want in expected.items() if _text(envs.get(key)) != want}
     if wrong:
@@ -218,7 +215,6 @@ __all__ = [
     "SURFACE_ENV_KEYS",
     "MeasurementSurface",
     "SurfaceViolation",
-    "benchmark_envs",
     "check_launch_envs",
     "check_point",
     "check_surface",

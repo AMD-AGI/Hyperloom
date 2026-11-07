@@ -129,6 +129,19 @@ def test_a_sheet_that_does_not_parse_is_spec_rejected(tmp_path, env):
     assert not (tmp_path / "out" / "manifest.json").exists()
 
 
+@pytest.mark.parametrize(
+    ("point", "hashes"),
+    [({"model": "/m"}, {}), ({"benchmark": {"framework": "sglang"}}, {"config.json": "ab" * 32})],
+    ids=["no benchmark block", "hashed model files with no model"],
+)
+def test_a_sheet_whose_point_names_no_model_to_hash_is_spec_rejected(tmp_path, env, point, hashes):
+    text = yaml.safe_dump(point)
+    config = [{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}]
+
+    assert _go(tmp_path, env, _sheet(config=config, model_hashes=hashes)) == 3
+    assert _status(tmp_path)["error_class"] == "spec_rejected"
+
+
 def test_a_missing_signing_key_stops_the_runner_at_start(tmp_path, env):
     del env["HYPERLOOM_SIGNING_KEY_FILE"]
 
