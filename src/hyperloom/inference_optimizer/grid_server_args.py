@@ -15,6 +15,10 @@ from typing import Any
 
 from hyperloom_common.coerce import optional_positive_int
 from inference_suite import argv as _argv
+
+# Re-exported for multibranch-dev's blackboard.knowledge.warm_start, specialist.arbor_adapter and
+# toolbox.weight_precision; removed with 5.12 once they are gone.
+from inference_suite.argv import remove_server_args, tokenize_server_args_preserving_json  # noqa: F401
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 
