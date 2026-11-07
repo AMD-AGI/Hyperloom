@@ -16,7 +16,7 @@ from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS
 
 #: Directory shapes a profile writes capture sidecars into, matched per path
 #: component: a run_dir's capture directory exactly, or a name *starting* with
-#: ``graph_capture`` (a Magpie workspace's bare ``graph_capture``). Anchored,
+#: ``graph_capture`` (a bare ``graph_capture`` directory). Anchored,
 #: unlike the filename rule below: a directory is named for what it holds, so an
 #: unanchored token would also condemn e.g. ``torch_profiler_with_graph_capture/``
 #: -- and because the capture-only preflight is an ``all(...)``, one such false
