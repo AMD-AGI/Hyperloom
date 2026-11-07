@@ -54,11 +54,7 @@ from ...state.shared_state import (
     resolve_graded_comparison,
     stack_base_params,
 )
-from ..stop_attribution import (
-    StoppedByTheRun,
-    stopped_by_the_run_class,
-    variant_budget_stop,
-)
+from ..stop_attribution import StoppedByTheRun, stopped_by_the_run_class, variant_budget_stop
 from ._accuracy_gate import AccuracyReference, parse_eval_results
 from . import _framework_switch_manifest as _switch_manifest
 from .explore_prefilter.declared_levers import declared_lever_payload
@@ -353,14 +349,14 @@ def filter_context_copy_drafts(
         tmp_root = Path(tmp_dir)
         try:
             base = _materialized_launch(recipe, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base")
-        except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
+        except _UNREADABLE_LAUNCH as exc:
             log.warning("explore: could not materialize the base to read its speculative decoding (%s)", exc)
             base = ("", {})
         for idx, gv in enumerate(grid):
             against = base
             try:
                 launch = _materialized_launch(recipe, gv, tmp_root / f"v{idx}")
-            except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
+            except _UNREADABLE_LAUNCH as exc:
                 log.warning("explore: could not materialize %s to read its speculative decoding (%s)", gv.name, exc)
                 launch = (str(gv.extra_server_args or ""), {str(k): str(v) for k, v in (gv.extra_envs or {}).items()})
                 against = ("", {})
@@ -718,11 +714,7 @@ class _ExploreRound:
         self.running_tput = self.base_tput
         self.running_perf: Any = None
         self.keep_threshold_pct = float(params["keep_threshold_pct"])
-        # The measured baseline outranks a proposed one, whose score no inference_suite round took.
-        self.accuracy_reference = AccuracyReference.of_baseline(self.ss)
-        if self.accuracy_reference.score <= 0:
-            proposed = to_float(params.get("accuracy_baseline"), 0.0) or to_float(params.get("baseline_accuracy"), 0.0)
-            self.accuracy_reference = AccuracyReference(proposed or 0.0, "")
+        self.accuracy_reference = AccuracyReference.of_session(self.ss, params)
         # A context-copying draft is refused on the synthetic benchmark, whose repetition loops it would copy.
         self.refuse_context_copy = not agentx_active(
             benchmark_mode=getattr(self.ss, "benchmark_mode", "")
