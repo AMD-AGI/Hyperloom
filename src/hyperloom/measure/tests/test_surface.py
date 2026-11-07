@@ -157,3 +157,47 @@ def test_a_configuration_with_no_benchmark_block_is_refused() -> None:
     for read in (extract_surface, point_values, lambda c: check_point(c, concurrency=1, accuracy=False, reference={})):
         with pytest.raises(PointError, match="benchmark mapping"):
             read({"model": "m"})
+
+
+#: Each spelling as the surface spelled it before every reader moved onto BenchmarkPoint (commit a438e0dbd^).
+_PARENT_SPELLINGS = [
+    ("framework", "", "", "577c55411f01506f10525b8d1a9b050668e3b298a8de34bf547ffc5ed7b6a3a4"),
+    ("framework", "  ", "", "577c55411f01506f10525b8d1a9b050668e3b298a8de34bf547ffc5ed7b6a3a4"),
+    ("framework", 0, "0", "434c122728b7b7a59ef944686e0ab0d410adbc524c06676961cf90256225f39c"),
+    ("framework", False, "false", "29210b5ffafefd3b7c82688d67e5fafa772fd249f2482478acad037416b55eb9"),
+    ("framework", [], "[]", "65890228c5b66b68faa71adfb36921cf2f779826382f0710f3c6fed18f7d2394"),
+    ("framework", {}, "{}", "10c877d4a398c85fd44fbae1412efbb2ff28d15ebb27b304face9fee1ce3af10"),
+    ("framework", True, "true", "02944ee3def8ab4f356e8d0ab207f5f87c57fbb2d3a1f92d6922c5296b44a456"),
+    ("framework", 1.0, "1", "70d4c70d735a301fdaaaa5e42024fbbcbc332558193d37ac7d62f24d7b32bc09"),
+    ("model", "", "", "51050b23e9b2aa7fd49fd5571b78706c8d132ac7857009ed548d2134e401f1b2"),
+    ("model", "  ", "", "51050b23e9b2aa7fd49fd5571b78706c8d132ac7857009ed548d2134e401f1b2"),
+    ("model", 0, "0", "2c4f142b681595b7d32be4992977be33891492c181b641a5f49faf13c609880d"),
+    ("model", False, "false", "9f2ffff89146754d400232e6b7a0a16e1f0ccfcacd9a441efefac57d8a1cf74f"),
+    ("model", [], "[]", "c041373ebc4dd700e34d6925a5009532655b7e45065166de091320b082a2d8ac"),
+    ("model", {}, "{}", "40ed54ea5b94d4b64af8a8e0a76487a93d00ef77755ac3f3981719bfea23677c"),
+    ("model", True, "true", "3fe1d7f5ba7ae338d1c03e71e0ef87a9890c11fd9c0234a0d3fde426a9659866"),
+    ("model", 1.0, "1", "ca21f71fb851711acbdb74d4f8248208adabed1fad76eabff817ae498c75bb7f"),
+    ("benchmark_script", "", "", "7bc9ca4b4f1368a77726cdbe821d17a806670608b90e19422a46496b65f4e990"),
+    ("benchmark_script", "  ", "", "7bc9ca4b4f1368a77726cdbe821d17a806670608b90e19422a46496b65f4e990"),
+    ("benchmark_script", 0, "0", "4704821def878f1ef1bd6059317db456afa88b7fd9f0597cc4ef52459c0431c6"),
+    ("benchmark_script", False, "false", "a3ed3ae44b649952bc6010470689eefe5098e98fbe9f9f002855f304267893d2"),
+    ("benchmark_script", [], "[]", "d81bca751aa43da8e2f77684dfdb4fd4451160d40377b1b85eb76955024f8b0e"),
+    ("benchmark_script", {}, "{}", "30f1c1c9c50ad40bd20bc6131f8b0a70c77ef220d3cc0e147e32be2b5f968220"),
+    ("benchmark_script", True, "true", "548e4b89efb3740b6612268696f11ef4d05433f15670bb65da9e3802f21f7bba"),
+    ("benchmark_script", 1.0, "1", "0164e567a990c556fe1cc2189e733677c8b2aca5cf0690c1b3af4822b4f4c0d3"),
+]
+
+
+@pytest.mark.parametrize(("key", "value", "spelled", "sha256"), _PARENT_SPELLINGS)
+def test_a_falsy_or_non_text_field_keeps_the_surface_hash_it_had(
+    key: str, value: object, spelled: str, sha256: str
+) -> None:
+    benchmark = {
+        "framework": "sglang",
+        "model": "/nonexistent/model",
+        "benchmark_script": "bench.sh",
+        "envs": {"ISL": 1024},
+    }
+    surface = extract_surface({"benchmark": {**benchmark, key: value}})
+
+    assert (surface.fields[f"benchmark.{key}"], surface.sha256) == (spelled, sha256)
