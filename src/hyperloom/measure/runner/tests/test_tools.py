@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import errno
-import hashlib
 import subprocess
 import sys
 import threading
@@ -15,8 +14,9 @@ from pathlib import Path
 import pytest
 
 from hyperloom.measure.runner import tools
-from hyperloom.measure.runner.tools import ToolError, ensure_inference_suite, ensure_inferencex
-from inference_suite import CLIENT_FILE
+from hyperloom.measure.runner.tools import StagedSuite, ToolError, ensure_inference_suite, ensure_inferencex
+from hyperloom.measure.tests.bundle_factory import STAGING, STAGING_MANIFEST, stage_into
+from inference_suite import CLIENT_FILE, INFERENCEX_CLIENT_COMMIT
 
 
 def _git(path, *args):
@@ -104,42 +104,46 @@ def test_an_unknown_commit_is_refused(upstream, tmp_path, monkeypatch):
         ensure_inferencex("a" * 40, tmp_path / "cache")
 
 
-_MANIFEST = b'{"schema": "inference-suite-staging/1", "tools": {}}\n'
-_STAGING = hashlib.sha256(_MANIFEST).hexdigest()
-
-
 class _Stage:
-    """``python -m inference_suite stage`` as the runner calls it: writes ``manifest`` into the tool cache it is given."""
+    """``python -m inference_suite stage`` as the runner calls it: lays a verifying staging into the tool cache it is
+    given, or exits ``returncode`` without one."""
 
-    def __init__(self, manifest: bytes = _MANIFEST, returncode: int = 0) -> None:
-        self.manifest, self.returncode, self.argv = manifest, returncode, []
+    def __init__(self, returncode: int = 0) -> None:
+        self.returncode, self.argv = returncode, []
 
     def __call__(self, argv, **kwargs):
         self.argv.append(argv)
-        cache = argv[argv.index("--tool-cache") + 1]
-        with open(f"{cache}/staging_manifest.json", "wb") as manifest:
-            manifest.write(self.manifest)
-        return subprocess.CompletedProcess(argv, self.returncode, "", "stage refused")
+        if self.returncode == 0:
+            cache = Path(argv[argv.index("--tool-cache") + 1])
+            stage_into(cache.parents[1])
+        return subprocess.CompletedProcess(argv, self.returncode, STAGING + "\n", "staging_missing: no wheel")
 
 
-def test_a_staging_the_runner_cache_holds_is_used_without_staging_again(tmp_path, monkeypatch):
-    held = tmp_path / "runner-cache" / "inference-suite" / _STAGING
-    held.mkdir(parents=True)
-    (held / "staging_manifest.json").write_bytes(_MANIFEST)
+def _ensure(tmp_path):
+    return ensure_inference_suite(tmp_path / "ix", tmp_path / "runner-cache", tmp_path / "wheels")
+
+
+def _destination(tmp_path):
+    return tmp_path / "runner-cache" / "inference-suite" / INFERENCEX_CLIENT_COMMIT
+
+
+def test_a_staging_the_runner_cache_holds_intact_is_used_without_staging_again(tmp_path, monkeypatch):
+    held = stage_into(tmp_path / "runner-cache")
     stage = _Stage()
     monkeypatch.setattr(tools.subprocess, "run", stage)
 
-    assert ensure_inference_suite(_STAGING, tmp_path / "ix", tmp_path / "runner-cache") == held
+    assert _ensure(tmp_path) == StagedSuite(held, STAGING) and held == _destination(tmp_path)
     assert stage.argv == []
 
 
-def test_a_missing_staging_is_staged_from_the_inferencex_checkout_into_its_own_directory(tmp_path, monkeypatch):
+def test_a_missing_staging_is_staged_offline_from_the_checkout_into_the_directory_of_the_pin(tmp_path, monkeypatch):
     stage = _Stage()
     monkeypatch.setattr(tools.subprocess, "run", stage)
 
-    staged = ensure_inference_suite(_STAGING, tmp_path / "ix", tmp_path / "runner-cache")
+    staged = _ensure(tmp_path)
 
-    assert staged == tmp_path / "runner-cache" / "inference-suite" / _STAGING
+    destination = _destination(tmp_path)
+    assert staged == StagedSuite(destination, STAGING)
     assert stage.argv == [
         [
             sys.executable,
@@ -149,24 +153,29 @@ def test_a_missing_staging_is_staged_from_the_inferencex_checkout_into_its_own_d
             "--source",
             str(tmp_path / "ix"),
             "--tool-cache",
-            str(staged),
+            str(destination),
+            "--wheels",
+            str(tmp_path / "wheels"),
         ]
     ]
 
 
-@pytest.mark.parametrize("stage", [_Stage(manifest=b"{}\n"), _Stage(returncode=2)], ids=["other pins", "stage failed"])
-def test_a_staging_that_is_not_the_sheets_is_removed_and_refused(tmp_path, monkeypatch, stage):
+def test_a_damaged_staging_is_handed_to_stage_which_decides_and_the_runner_reports_its_own_manifest(
+    tmp_path, monkeypatch
+):
+    held = stage_into(tmp_path / "runner-cache")
+    (held / "staging_manifest.json").write_bytes(STAGING_MANIFEST.replace(b"inferencex", b"other"))
+    stage = _Stage()
     monkeypatch.setattr(tools.subprocess, "run", stage)
 
-    with pytest.raises(ToolError, match=f"not the sheet's {_STAGING}"):
-        ensure_inference_suite(_STAGING, tmp_path / "ix", tmp_path / "runner-cache")
-    assert not (tmp_path / "runner-cache" / "inference-suite" / _STAGING).exists()
+    assert _ensure(tmp_path) == StagedSuite(held, STAGING) and len(stage.argv) == 1
 
 
-def test_a_staging_that_is_not_a_manifest_sha256_is_refused_before_anything_is_staged(tmp_path):
-    with pytest.raises(ToolError, match="not a staging manifest sha256"):
-        ensure_inference_suite("sha256:" + _STAGING, tmp_path / "ix", tmp_path / "runner-cache")
-    assert not (tmp_path / "runner-cache").exists()
+def test_a_failed_stage_is_a_tool_error_naming_its_stderr(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools.subprocess, "run", _Stage(returncode=2))
+
+    with pytest.raises(ToolError, match="exited 2.*staging_missing: no wheel"):
+        _ensure(tmp_path)
 
 
 def test_two_runners_on_a_new_staging_stage_it_once_and_both_get_the_whole_tree(tmp_path, monkeypatch):
@@ -180,18 +189,15 @@ def test_two_runners_on_a_new_staging_stage_it_once_and_both_get_the_whole_tree(
 
     monkeypatch.setattr(tools.subprocess, "run", slow_stage)
     with ThreadPoolExecutor(2) as pool:
-        first = pool.submit(ensure_inference_suite, _STAGING, tmp_path / "ix", tmp_path / "runner-cache")
+        first = pool.submit(_ensure, tmp_path)
         assert entered.wait(10)
-        second = pool.submit(ensure_inference_suite, _STAGING, tmp_path / "ix", tmp_path / "runner-cache")
+        second = pool.submit(_ensure, tmp_path)
         time.sleep(0.2)
         assert not second.done()
         release.set()
         staged = {first.result(10), second.result(10)}
 
-    assert staged == {tmp_path / "runner-cache" / "inference-suite" / _STAGING} and len(stage.argv) == 1
-    assert (
-        tmp_path / "runner-cache" / "inference-suite" / _STAGING / "staging_manifest.json"
-    ).read_bytes() == _MANIFEST
+    assert staged == {StagedSuite(_destination(tmp_path), STAGING)} and len(stage.argv) == 1
 
 
 def test_a_runner_cache_that_cannot_be_written_is_a_tool_error(tmp_path, monkeypatch):
@@ -202,4 +208,4 @@ def test_a_runner_cache_that_cannot_be_written_is_a_tool_error(tmp_path, monkeyp
     monkeypatch.setattr(Path, "mkdir", read_only)
 
     with pytest.raises(ToolError, match="cannot be staged into"):
-        ensure_inference_suite(_STAGING, tmp_path / "ix", tmp_path / "runner-cache")
+        _ensure(tmp_path)

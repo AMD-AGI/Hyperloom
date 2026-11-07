@@ -8,8 +8,9 @@ sha256 of the exact bytes written (:meth:`MeasurementSpec.sha256`, recorded in t
 *fingerprint* of the measurement content that is stable across sessions (:func:`fingerprint`), so the same measurement
 deduplicates inside a campaign and compares across campaigns.
 
-A v2 sheet carries the session's frozen base launch whole (``procedure.base_launch``) and names the inference_suite
-staging the runner runs by its manifest's sha256 (``tools.inference_suite.staging``). A v1 sheet, written while tests
+A v2 sheet carries the session's frozen base launch whole (``procedure.base_launch``) and names the application's
+inference_suite staging by its manifest's sha256 (``tools.inference_suite.staging``); a hosted runner stages the same
+pins itself and its result manifest names its own staging. A v1 sheet, written while tests
 ran through Magpie, named a Magpie commit and a benchmark backend instead; the journal and the archive keep those, so a
 v1 sheet still loads, but nothing writes one.
 
@@ -235,8 +236,8 @@ class Attachment:
 
 @dataclass(frozen=True)
 class ToolCommits:
-    """The tools a sheet names: the InferenceX commit, and the sha256 of the inference_suite staging manifest the runner
-    stages and runs (``staging``). A v1 sheet named a Magpie commit (``magpie``) and no staging."""
+    """The tools a sheet names: the InferenceX commit, and the sha256 of the application's inference_suite staging
+    manifest (``staging``). A v1 sheet named a Magpie commit (``magpie``) and no staging."""
 
     inferencex: str
     staging: str | None = None

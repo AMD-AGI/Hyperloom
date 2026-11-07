@@ -16,9 +16,12 @@ from typing import Any
 from hyperloom.measure import signing
 from hyperloom.measure.bundle import BundleExpectation
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
+from hyperloom.measure.runner.tools import INFERENCE_SUITE_DIR
 from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
 from inference_suite.contracts import BaseLaunch, Workload
+from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL
 from inference_suite.recipe.resolve import UnreadSource
+from inference_suite.staging import INFERENCEX_REQUIRED, MANIFEST_FILE, StagedTool, StagingManifest, tool_root
 
 REQUEST_ID = "6c0e0000-0000-5000-8000-000000000001"
 SPEC_FINGERPRINT = "a1b2c3d4e5f60718"
@@ -134,16 +137,28 @@ def point_document(yaml_text: str) -> dict[str, Any]:
     return {"yaml": yaml_text, "sha256": hashlib.sha256(yaml_text.encode()).hexdigest()}
 
 
-#: A staging manifest, and its sha256, which is how a sheet names the staging.
-STAGING_MANIFEST = b'{"schema": "inference-suite-staging/1", "tools": {}}\n'
+#: The bytes of each file :func:`stage_into` stages, and the manifest naming them.
+_STAGED_FILE = b"staged\n"
+STAGING_MANIFEST = StagingManifest(
+    {
+        INFERENCEX_TOOL: StagedTool(
+            INFERENCEX_CLIENT_COMMIT, {path: hashlib.sha256(_STAGED_FILE).hexdigest() for path in INFERENCEX_REQUIRED}
+        )
+    }
+).to_bytes()
+#: The sha256 of :data:`STAGING_MANIFEST`, which is how a sheet names the staging.
 STAGING = hashlib.sha256(STAGING_MANIFEST).hexdigest()
 
 
 def stage_into(runner_cache: Path) -> Path:
-    """Lay :data:`STAGING_MANIFEST` where a runner whose cache is ``runner_cache`` looks for the sheet's staging."""
-    tools = runner_cache / "inference-suite" / STAGING
-    tools.mkdir(parents=True, exist_ok=True)
-    (tools / "staging_manifest.json").write_bytes(STAGING_MANIFEST)
+    """Lay a staging that verifies, with :data:`STAGING_MANIFEST`, where a runner whose cache is ``runner_cache``
+    stages its inference_suite tools; returns that tool cache."""
+    tools = runner_cache / INFERENCE_SUITE_DIR / INFERENCEX_CLIENT_COMMIT
+    for path in INFERENCEX_REQUIRED:
+        staged = tool_root(tools, INFERENCEX_TOOL, INFERENCEX_CLIENT_COMMIT) / path
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(_STAGED_FILE)
+    (tools / MANIFEST_FILE).write_bytes(STAGING_MANIFEST)
     return tools
 
 
