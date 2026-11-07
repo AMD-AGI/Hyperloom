@@ -38,6 +38,7 @@ from kernelforge.workflows.gemm_tune.evidence import (
     write_demand,
 )
 
+from hyperloom.common.benchmark_config import BenchmarkPoint, PointError, read_benchmark_point
 from hyperloom.common.outside_facts import (
     AITER_LOG_TUNED_CONFIG_ENV,
     AITER_TUNED_HIT,
@@ -56,7 +57,7 @@ __all__ = [
     "cuda_graph_batch_sizes",
     "demand_from_logs",
     "explicit_demand",
-    "read_benchmark",
+    "read_point",
     "served_workload",
     "write_demand_of",
 ]
@@ -81,15 +82,14 @@ _ENV_OF_TABLE = {table: env for env, (table, _tuner) in DENSE_TABLES.items()}
 _GRAPH_GROUP = "sizes"
 
 
-def read_benchmark(path: Path) -> Mapping[str, Any]:
-    """The ``benchmark`` section of the point YAML at ``path``; empty when it is too large, unreadable or not a mapping."""
+def read_point(path: Path) -> BenchmarkPoint | None:
+    """The point YAML at ``path``; ``None`` when it is too large, unreadable or not shaped as a point."""
     try:
         if path.stat().st_size > POINT_CONFIG_MAX_BYTES:
-            return {}
-        section = (yaml.safe_load(path.read_text(encoding=_UTF8)) or {})["benchmark"]
-    except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
-        return {}
-    return section if isinstance(section, Mapping) else {}
+            return None
+        return read_benchmark_point(path)
+    except (OSError, PointError, yaml.YAMLError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -101,11 +101,6 @@ class ServedWorkload:
     precision: str
     tp: int
     conc: int
-
-
-def _envs(benchmark: Mapping[str, Any]) -> Mapping[str, Any]:
-    envs = benchmark.get("envs")
-    return envs if isinstance(envs, Mapping) else {}
 
 
 def _positive(value: Any, what: str) -> int:
@@ -126,24 +121,24 @@ def served_workload(landed: Path) -> ServedWorkload:
         ToolFailure: When the test left no readable point, serves a framework this tool does not tune for, or its model
             is not a directory with a ``config.json`` here (Forge reads the model's shapes and routing from it).
     """
-    points = [found for found in (read_benchmark(path) for path in sorted(landed.glob(POINT_CONFIG_GLOB))) if found]
+    points = [found for found in map(read_point, sorted(landed.glob(POINT_CONFIG_GLOB))) if found is not None]
     if not points:
         raise ToolFailure(
             f"the test landed no readable point configuration ({POINT_CONFIG_GLOB}) to take its workload from"
         )
     first = points[0]
-    framework = str(first.get("framework") or "").strip().lower()
+    framework = first.framework.strip().lower()
     if framework != SERVED_FRAMEWORK:
         raise ToolFailure(
             f"kernel_tune tunes aiter tables for {SERVED_FRAMEWORK}; the test served {framework or 'no framework'!r}"
         )
-    model, precision = str(first.get("model") or "").strip(), str(first.get("precision") or "").strip().lower()
+    model, precision = first.model.strip(), first.precision.strip().lower()
     if not precision:
         raise ToolFailure("the test's point configuration names no precision")
     if not (Path(model) / "config.json").is_file():
         raise ToolFailure(f"the model of the test ({model!r}) is not a model directory (config.json) readable here")
-    tp = _positive(_envs(first).get(ENV_TP, 1), ENV_TP)
-    conc = max(_positive(_envs(point).get(ENV_CONC, 1), ENV_CONC) for point in points)
+    tp = _positive(first.envs.get(ENV_TP, 1), ENV_TP)
+    conc = max(_positive(point.envs.get(ENV_CONC, 1), ENV_CONC) for point in points)
     return ServedWorkload(model, framework, precision, tp, conc)
 
 
