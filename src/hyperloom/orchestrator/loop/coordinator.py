@@ -58,6 +58,7 @@ from ..bus.gpu_pool import (
 )
 from ..bus.resource_lock import SqliteLeaseBackend
 from ..state.shared_state import SharedState, effective_closing_grace_sec
+from ..state.state_file import database_file_mode
 from .signals import SignalDrain
 from .intent_router import IntentRouter
 from hyperloom.inference_optimizer.model_config_utils import infer_model_class
@@ -229,11 +230,9 @@ class Coordinator:
         self.backends = dict(backends)
         self.reactor_turn_timeout_sec = resolve_reactor_turn_timeout_sec()
 
-        # Persistence layer
-        self._open_persistence()
-
-        # Persistent session state (state.json) — load existing for resume.
+        # Persistent session state (state.json) — load existing for resume; its operator pins decide the database's mode.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        self._open_persistence()
         # Thread live SharedState into the runner so executors get it via ctx.extra.
         self.sub.shared_state = self.shared_state
         self._init_gpu_pools()
@@ -314,7 +313,7 @@ class Coordinator:
         # The session directory can sit on a networked filesystem where WAL's
         # shared-memory mapping corrupts the database, so the mode is resolved
         # before the file is opened.
-        self.db = SqliteConnection(db_path)
+        self.db = SqliteConnection(db_path, file_mode=database_file_mode(self.shared_state))
 
         self.bus = MessageBus(self.db)
         self.locks = SqliteLeaseBackend(self.db)

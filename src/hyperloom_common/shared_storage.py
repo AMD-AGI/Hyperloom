@@ -32,6 +32,7 @@ SHARED_FILE_MODE = 0o664
 
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+_APPEND = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
 _PROBE_PREFIX = ".hl-writable-"
 #: The suffix of the new file a writer makes beside the one it replaces.
 _TEMPORARY_SUFFIX = ".tmp"
@@ -88,6 +89,43 @@ def create_shared_file(path: Path) -> None:
         os.fchmod(descriptor, SHARED_FILE_MODE)
     finally:
         os.close(descriptor)
+
+
+def open_shared_append(path: Path) -> int:
+    """``path`` opened for appending, never through a link: made ``664`` by ``fchmod`` when this call creates it, so the
+    next account of the group appends to it too, and opened as it is when it exists. One another account made without
+    group write fails ``EACCES``: a file that is appended to cannot be replaced by rename."""
+    try:
+        descriptor = os.open(path, _APPEND | os.O_CREAT | os.O_EXCL, 0o600)  # the umask never decides it: fchmod below
+    except FileExistsError:
+        return os.open(path, _APPEND)
+    try:
+        os.fchmod(descriptor, SHARED_FILE_MODE)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def open_shared(path: Path, access: int, mode: int = SHARED_FILE_MODE) -> int:
+    """Open ``path`` for ``access`` (``os.O_RDWR``, ``os.O_WRONLY | os.O_APPEND``) without following a link, creating it
+    with ``mode`` (default ``664``) when it is not there, and return the descriptor.
+
+    A file that exists is opened as it is, never truncated, chmodded or replaced by rename: a lock or a log that
+    another process holds open would be left on an unlinked inode. Another account's ``0600`` file therefore raises
+    ``PermissionError``.
+    """
+    flags = access | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open(path, flags, stat.S_IRUSR | stat.S_IWUSR)  # the umask never decides it: fchmod below
+    except FileExistsError:
+        return os.open(path, access | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fchmod(descriptor, mode)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def write_shared_bytes(path: Path, data: bytes, *, mode: int = SHARED_FILE_MODE) -> None:
@@ -226,6 +264,8 @@ __all__ = [
     "create_shared_file",
     "current_umask",
     "make_shared_dirs",
+    "open_shared",
+    "open_shared_append",
     "open_shared_replacement",
     "ownership",
     "share_new_directory",

@@ -16,8 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs
+from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs, open_shared_append
 
+_UTF8 = "utf-8"
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
 
 
@@ -88,8 +89,9 @@ class WriteOptions:
     one group write in turn, and the rename replaces the file whoever owned it; the three
     options above are then ignored, and the parents ``make_parents`` creates are ``2775``
     (:func:`~hyperloom_common.shared_storage.make_shared_dirs`). Never use it for a file that holds a credential or
-    that anything executes or sources. ``fsync`` and ``fsync_dir`` raise the
-    ``OSError`` of a flush that fails: a caller that asks for durability learns
+    that anything executes or sources. ``share_parents`` makes the parents ``make_parents`` creates ``2775`` while the
+    file keeps its own mode: a file only its owner may read still lives in a directory the group can write.
+    ``fsync`` and ``fsync_dir`` raise the ``OSError`` of a flush that fails: a caller that asks for durability learns
     when it did not get it.
     """
 
@@ -100,10 +102,13 @@ class WriteOptions:
     preserve_mode: bool = False
     group_read: bool = False
     shared: bool = False
+    share_parents: bool = False
 
 
 #: A crash-safe replace: parents created, the data and the rename flushed to disk, an existing file's mode kept.
 DURABLE = WriteOptions(make_parents=True, fsync=True, fsync_dir=True, preserve_mode=True)
+#: A replace in a tree the accounts of one group write in turn: the file ``664``, the parents it creates ``2775``.
+SHARED = WriteOptions(make_parents=True, shared=True)
 
 
 @dataclass(frozen=True)
@@ -148,7 +153,7 @@ def _owner_mode(tmp: Path, path: Path, options: WriteOptions) -> None:
 def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions = WriteOptions()) -> None:
     """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``)."""
     path = Path(path)
-    if options.make_parents and options.shared:
+    if options.make_parents and (options.shared or options.share_parents):
         make_shared_dirs(path.parent)
     elif options.make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -174,7 +179,7 @@ def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions =
 
 def atomic_write_text(path: str | Path, text: str, *, options: WriteOptions = WriteOptions()) -> None:
     """Atomically write ``text`` to ``path`` as UTF-8; see :func:`atomic_write_bytes`."""
-    atomic_write_bytes(path, text.encode("utf-8"), options=options)
+    atomic_write_bytes(path, text.encode(_UTF8), options=options)
 
 
 def atomic_write_json(
@@ -203,11 +208,24 @@ def append_jsonl(
     path = Path(path)
     if make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
-    line = _json.dumps(row, ensure_ascii=fmt.ensure_ascii, sort_keys=fmt.sort_keys)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(line + "\n")
-        if fsync:
-            _fsync_handle(fh)
+    with path.open("a", encoding=_UTF8) as fh:
+        _write_line(fh, row, fsync, fmt)
+
+
+def append_shared_jsonl(path: Path, row: Any, *, fsync: bool = False, fmt: JsonLineFormat = JsonLineFormat()) -> None:
+    """:func:`append_jsonl` to a file the accounts of one group append to in turn: a new file is ``664`` and the parents
+    it creates ``2775``, whatever the umask, and the file is never opened through a link
+    (:func:`~hyperloom_common.shared_storage.open_shared_append`)."""
+    path = Path(path)
+    make_shared_dirs(path.parent)
+    with os.fdopen(open_shared_append(path), "a", encoding=_UTF8) as fh:
+        _write_line(fh, row, fsync, fmt)
+
+
+def _write_line(fh: Any, row: Any, fsync: bool, fmt: JsonLineFormat) -> None:
+    fh.write(_json.dumps(row, ensure_ascii=fmt.ensure_ascii, sort_keys=fmt.sort_keys) + "\n")
+    if fsync:
+        _fsync_handle(fh)
 
 
 def safe_mtime(path: Path) -> float:
@@ -220,6 +238,7 @@ def safe_mtime(path: Path) -> float:
 
 __all__ = [
     "DURABLE",
+    "SHARED",
     "JsonFormat",
     "JsonLineFormat",
     "WriteOptions",
@@ -227,6 +246,7 @@ __all__ = [
     "atomic_write_text",
     "atomic_write_json",
     "append_jsonl",
+    "append_shared_jsonl",
     "fsync_directory",
     "fsync_tree",
     "fsync_tree_directories",
