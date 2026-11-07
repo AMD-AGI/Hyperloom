@@ -46,13 +46,14 @@ from inference_suite.contracts import (
     Telemetry,
     WorkloadKind,
 )
-from inference_suite.contracts.base_launch import Workload
+from inference_suite.contracts.base_launch import LaunchSource, SourceKind, Workload
 from inference_suite.contracts.launch import Launch, LayerSource, VersionCheck
 from inference_suite.contracts.report import Report
 from inference_suite.eval.definition import EvalPlan
 from inference_suite.framework_probe import FrameworkInstall, FrameworkProbeError
 from inference_suite.parser_check import FlagRefusal, RefusedFlag
 from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
+from inference_suite.recipe.image_version import NO_RECIPE_IMAGE
 from inference_suite.runtime import server as runtime_server
 from inference_suite.runtime import watch
 from inference_suite.runtime.phases import Phase
@@ -371,12 +372,25 @@ def test_kv_samples_cover_the_ready_server_and_carry_their_phase(rig):
     assert all(row["capacity_tokens"] == 4096 for row in kv["samples"])
 
 
-def test_a_round_with_kv_telemetry_off_scrapes_no_metrics(rig):
-    config = rig.config("r1", telemetry=replace(rig.config("r1").telemetry, kv=False))
+def _user_file_base(rig) -> None:
+    rig.base = replace(
+        rig.base,
+        source=LaunchSource(kind=SourceKind.USER_FILE, path="launch.sh", files={"launch.sh": _SHA}),
+        image=NO_RECIPE_IMAGE,
+    )
+    rig.base_path.write_text(json.dumps(rig.base.to_document()))
+
+
+@pytest.mark.parametrize("kv", [True, False])
+def test_a_user_file_sglang_base_serves_metrics_exactly_when_the_round_scrapes_them(rig, kv):
+    _user_file_base(rig)
+    config = rig.config("r1", telemetry=replace(rig.config("r1").telemetry, kv=kv))
     result = run.run_round(config)
 
     assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
-    assert not result.layout.kv_metrics.exists()
+    argv = Launch.from_document(json.loads(result.layout.launch.read_text())).argv
+    assert ("--enable-metrics" in argv) is kv
+    assert result.layout.kv_metrics.exists() is kv
 
 
 _FIXED_WINDOW = ProfileConfig(

@@ -4,9 +4,9 @@
 """Compose a round's launch from its frozen base and the config's layers.
 
 The order is fixed: base, user removals, user additions, candidate removals, candidate additions, the golden layer (when
-the round applies it), the guard (the round's model path, address and GPU mask), the runner's layer, then the profiler
-layer of a profile round. A layer's flag beats every earlier group of the same flag; a later alias of it wins only
-because the engine applies the last one. Neither the user nor the candidate may set what the guard or the runner owns,
+the round applies it), the guard (the round's model path, address and GPU mask), the runner's layer (with the
+framework's metrics flag when the round scrapes ``/metrics``), then the profiler layer of a profile round. A layer's
+flag beats every earlier group of the same flag; a later alias of it wins only because the engine applies the last one. Neither the user nor the candidate may set what the guard or the runner owns,
 nor, under a golden layer, what golden owns; such a layer is refused, not overridden, so the refusal names whose layer
 it was.
 """
@@ -95,9 +95,8 @@ def _layer_refusal(source: LayerSource, touch: _Touch, owned: _Touch, golden_hel
     return None
 
 
-def _owned(base: BaseLaunch, server_flags: ServerFlags) -> _Touch:
-    guard = (server_flags.model, server_flags.host, server_flags.port, server_flags.served_model_name)
-    flags = base.runner_owned.flags() | {canonical_flag_name(flag) for flag in guard if flag}
+def _owned(base: BaseLaunch, runner_flags: Iterable[str | None]) -> _Touch:
+    flags = base.runner_owned.flags() | {canonical_flag_name(flag) for flag in runner_flags if flag}
     return _Touch(flags=flags, env=frozenset({*base.runner_owned.env, GPU_MASK_ENV}), golden=())
 
 
@@ -171,7 +170,8 @@ class _Composer:
         self.unset_env(delta.env_unset, source)
         self.set_env(delta.env_set, source)
 
-    def apply_runner(self, runner: RunnerLayer) -> None:
+    def apply_runner(self, runner: RunnerLayer, metrics_flag: str | None) -> None:
+        """Merge ``runner``, then ``metrics_flag`` when the round scrapes the server's ``/metrics``."""
         prepended: dict[str, EnvValue] = {}
         for name, value in runner.env_prepend.items():
             previous = self.env.get(name)
@@ -183,6 +183,8 @@ class _Composer:
             current = next((arg for arg in reversed(self.args) if _named(arg, canonical_flag_name(flag))), None)
             if current is None or len(current.values) != 1 or float(current.values[0]) < floor:
                 self.add_args((flag, _number_text(floor)), LayerSource.RUNNER)
+        if metrics_flag is not None:
+            self.add_args((metrics_flag,), LayerSource.RUNNER)
 
 
 def _named(arg: LaunchArg, name: str) -> bool:
@@ -222,10 +224,12 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
         return Refusal(FailedStep.BASE_DIGEST_MISMATCH, LayerSource.BASE, detail)
     config.check_base(base)
     framework = Framework(base.framework)
-    server_flags = framework_facts(framework).server_flags
+    spec = framework_facts(framework)
+    server_flags = spec.server_flags
     if server_flags is None:
         raise LaunchError(f"{framework.value} runs no server, so it has no launch to compose")
-    refusal = _first_refusal(server, base, _owned(base, server_flags))
+    guard_flags = (server_flags.model, server_flags.host, server_flags.port, server_flags.served_model_name)
+    refusal = _first_refusal(server, base, _owned(base, (*guard_flags, spec.metrics_flag)))
     if refusal is not None:
         return refusal
 
@@ -238,7 +242,7 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     guard_args, guard_env = _guard(server, server_flags)
     composer.add_args(guard_args, LayerSource.GUARD)
     composer.set_env(guard_env, LayerSource.GUARD)
-    composer.apply_runner(server.runner)
+    composer.apply_runner(server.runner, spec.metrics_flag if config.telemetry.kv else None)
     if facts.profiler is not None:
         composer.apply_delta(facts.profiler, LayerSource.PROFILE)
 

@@ -78,9 +78,12 @@ _KNOBS |= {"PORT", "MAGPIE_TRUST_REMOTE_CODE"}
 
 
 def _listed_args(framework: str) -> tuple[set, set]:
-    """The flags only Magpie's launch has, and those only the suite's: the round's address and served name."""
+    """The flags only Magpie's launch has, and those only the suite's: the round's address and served name, and
+    sglang's metrics switch for the KV telemetry."""
     magpie = {("host", ("0.0.0.0",))} if framework == "sglang" else set()
     suite = {("host", ("127.0.0.1",))}
+    if framework == "sglang":
+        suite.add(("enable-metrics", ()))
     if framework != "atom":
         suite.add(("served-model-name", (_MODEL,)))
     if framework == "vllm":

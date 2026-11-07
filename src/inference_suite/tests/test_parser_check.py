@@ -37,7 +37,8 @@ class ServerArgs:
                      "--chunked-prefill-size", "--speculative-algorithm", "--speculative-num-steps",
                      "--watchdog-timeout"):
             parser.add_argument(flag)
-        parser.add_argument("--disable-radix-cache", action="store_true")
+        for switch in ("--disable-radix-cache", "--enable-metrics"):
+            parser.add_argument(switch, action="store_true")
         parser.add_argument("--attention-backend", choices=("triton", "aiter"))
         return parser
 """
