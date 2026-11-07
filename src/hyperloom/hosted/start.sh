@@ -137,11 +137,12 @@ if [ -f "$ca" ]; then
 fi
 
 # apptainer marks the root mount unbindable, and bwrap's bind of / then fails with EINVAL: make it private once. Not
-# fatal: without CAP_SYS_ADMIN (plain docker) the caller wraps each bwrap call in `unshare --mount` instead.
+# fatal: without CAP_SYS_ADMIN (plain docker) a launch retries only under the unshare beside the layer's bwrap, and
+# agents are refused without one (an unshare from PATH is never taken for the layer's bwrap).
 if ! command -v mount >/dev/null 2>&1; then
-  echo "hosted layer: the image has no mount (util-linux), so the root mount stays as it is; wrap each bwrap call in 'unshare --mount'" >&2
+  echo "hosted layer: the image has no mount (util-linux), so the root mount stays as it is; where bubblewrap cannot bind it, agents run only under an unshare beside the layer's bwrap, and are refused without one" >&2
 elif ! why="$(mount --make-rprivate / 2>&1)"; then
-  echo "hosted layer: mount --make-rprivate / failed (${why:-no message}), so the root mount stays as it is; wrap each bwrap call in 'unshare --mount'" >&2
+  echo "hosted layer: mount --make-rprivate / failed (${why:-no message}), so the root mount stays as it is; where bubblewrap cannot bind it, agents run only under an unshare beside the layer's bwrap, and are refused without one" >&2
 fi
 
 exec "$layer/app_bootstrap.sh"
