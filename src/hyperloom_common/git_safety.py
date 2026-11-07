@@ -127,10 +127,12 @@ def _app_owned_dir(path: Path, group: int | None = None) -> None:
 def trusted_admin_dir(worktree: Path, common: Path | None = None) -> Path:
     """The admin directory of the linked worktree ``worktree``, proven to be the app's.
 
-    Ownership alone does not prove it when whoever writes the worktree writes files the app's uid owns (a sandbox
-    whose user namespace maps its user to the app's): it can lay out an admin directory of its own beside a gitfile
-    naming it. A caller that knows the repository it made the worktree from passes its git directory as ``common``,
-    and the admin directory must then be one of that repository's.
+    The path the gitfile names is resolved before anything is checked, and the resolved path is what is returned and
+    what git is given, so no symlink is followed after the check. Ownership alone does not prove it when whoever writes
+    the worktree writes files the app's uid owns (a sandbox whose user namespace maps its user to the app's): it can
+    lay out an admin directory of its own beside a gitfile naming it. One in the worktree is refused; for one it lays
+    out anywhere else it writes, a caller that knows the repository it made the worktree from passes its git directory
+    as ``common``, and the admin directory must then be one of that repository's.
 
     The app is its uid, and, when ``common`` is a shared git directory (setgid), the group that directory is in too:
     the run's legs, accounts of that group, make the repository and its worktrees in turn. No one else writes there,
@@ -145,9 +147,12 @@ def trusted_admin_dir(worktree: Path, common: Path | None = None) -> Path:
     first = read_text_nofollow(gitfile).strip()
     if not first.startswith("gitdir:"):
         raise OSError(errno.EINVAL, "not a gitdir pointer", str(gitfile))
-    admin = Path(first.removeprefix("gitdir:").strip())
-    if not admin.is_absolute():
-        admin = worktree / admin
+    named = Path(first.removeprefix("gitdir:").strip())
+    # Resolved once, here, and only the resolved path is checked and handed to git: a symlink on the way (one the
+    # worktree's writer owns) could be pointed elsewhere between this check and each git run that resolves it again.
+    admin = Path(os.path.realpath(named if named.is_absolute() else worktree / named))
+    if admin.is_relative_to(os.path.realpath(worktree)):
+        raise OSError(errno.EPERM, "the admin dir lies in the worktree, which its writer writes", str(admin))
     group = _shared_group(common)
     _app_owned_dir(admin, group)
     _app_owned_dir(admin.parent, group)
@@ -210,7 +215,9 @@ def app_git(
     """Run ``git <args>`` in ``worktree`` against its trusted admin dir, never against what the worktree holds.
 
     No program the repository's config names runs: the ``NO_PROGRAMS`` pins, every configured driver program blanked,
-    and no transport. A repository nested in the tree is the caller's to keep out (see the module docstring).
+    and no transport. The driver programs are read from the config just before the command, which reads it again; the
+    config lies in the admin and common directories, the app's (on shared storage, its accounts'), so no one else
+    writes a driver in between. A repository nested in the tree is the caller's to keep out (see the module docstring).
     ``env`` adds variables of the caller's (an index file, an identity) under the ones that keep this so; ``common``
     is as :func:`trusted_admin_dir`'s. In a shared repository (a setgid ``common``) git runs under the shared child
     umask, so what it makes -- objects, refs, the worktree's files -- stays the group's to write.
