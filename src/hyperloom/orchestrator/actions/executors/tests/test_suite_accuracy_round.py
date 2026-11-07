@@ -229,7 +229,7 @@ def test_the_accuracy_round_entry_reports_the_step_the_round_failed_at(session, 
     )
     monkeypatch.setattr(_suite_config, "run_round", lambda config, cancel: failed)
 
-    outcome = asyncio.run(run_accuracy_round(slot, point, session=session, timeout_sec=900.0, deadline=None))
+    outcome = asyncio.run(run_accuracy_round(AccuracyRound(point, slot, 900.0), session=session))
 
     assert outcome == AccuracyRoundOutcome(slot, failed_step_error_class(FailedStep.EVAL_FAILED))
 
@@ -240,6 +240,6 @@ def test_a_session_that_froze_no_base_has_no_accuracy_round(tmp_path) -> None:
     slot = tmp_path / "slot"
     point = _write(slot / "point.yaml", _agentx_point(_agentx_base()))
 
-    outcome = asyncio.run(run_accuracy_round(slot, point, session=unfrozen, timeout_sec=900.0, deadline=None))
+    outcome = asyncio.run(run_accuracy_round(AccuracyRound(point, slot, 900.0), session=unfrozen))
 
     assert outcome == AccuracyRoundOutcome(slot, failed_step_error_class(FailedStep.CONFIG_INVALID))

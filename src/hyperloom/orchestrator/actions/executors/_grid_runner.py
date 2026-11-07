@@ -85,6 +85,7 @@ from .magpie_agentx import ServerArgvInvalidError, materialize_grid_variant
 from ._workload_envs import BenchmarkTarget, LaunchLayer
 
 from ._grid_base import (
+    VARIANT_CONFIG_FILE,
     GridRound,
     GridVariant,
     failed_step_class,
@@ -1754,7 +1755,7 @@ def _attach_grid_launch_evidence(
         }:
             continue
         slot = output_root / f"variant_{idx:02d}_{_safe(grid[idx].name)}"
-        config_path = slot / "config.yaml"
+        config_path = slot / VARIANT_CONFIG_FILE
         workspace = Path(result.workspace) if result.workspace else None
         primary_log = Path(result.server_log_path) if result.server_log_path else slot / "server.log"
         actual_log = _measurement_server_log_path(primary_log, workspace, slot=slot)
@@ -1941,7 +1942,7 @@ def _build_variant_yaml(
     # The final write to the argument env; nothing below may touch it.
     seal_server_argv(envs, point.framework)
     output_subdir.mkdir(parents=True, exist_ok=True)
-    out_path = output_subdir / "config.yaml"
+    out_path = output_subdir / VARIANT_CONFIG_FILE
     with out_path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
     return out_path

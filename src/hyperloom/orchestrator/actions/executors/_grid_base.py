@@ -56,6 +56,14 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 TS_FAILED = "FAILED"
 TS_SKIPPED_DEDUP = "SKIPPED_DEDUP"
 
+#: The point YAML a grid variant's rounds run from, in the variant's slot beside the rounds' workspaces.
+VARIANT_CONFIG_FILE = "config.yaml"
+
+
+def variant_config_of(workspace: str) -> Path:
+    """The point YAML the grid round whose workspace is ``workspace`` ran from."""
+    return Path(workspace).parent / VARIANT_CONFIG_FILE
+
 
 def sync_benchmark_timeout(config_path: Path, timeout_sec: float) -> None:
     """Hold the round of the point at ``config_path`` to the same cap as the enclosing benchmark process."""
