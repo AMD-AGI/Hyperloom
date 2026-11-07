@@ -12,8 +12,8 @@ numbers cannot, such as which of two alike branches to stop.
 
 :data:`H0` is the first champion: the evidence rules, no text rules, every number at its default. A playbook never
 overrides the :data:`SAFETY_ENVELOPE`, which the judge reads beside it and the scheduler enforces: a branch with a
-candidate waiting for its confirm or a near-bar or stranded lead is no stop candidate, a probation draw stands, the
-numbers stay in their bounds, the audit stays on, and a playbook changes one thing at a time. A challenger session
+candidate waiting for its confirm or a stranded lead is no stop candidate, a probation draw stands, the numbers stay
+in their bounds, the audit stays on, and a playbook changes one thing at a time. A challenger session
 whose judge ordered a stop the envelope refused plays the champion from then on.
 :func:`problems` is the static check (R0) every new playbook passes before it is tried.
 
@@ -121,7 +121,7 @@ BOUNDS: Mapping[str, tuple[float, float]] = {
 
 #: What the judge reads beside every playbook and the scheduler enforces; no playbook changes it.
 SAFETY_ENVELOPE = (
-    "A branch with a candidate waiting for its confirm, a near-bar lead or a stranded lead is no stop candidate.",
+    "A branch with a candidate waiting for its confirm or a stranded lead is no stop candidate.",
     "A branch drawn for probation runs its probation tests: the draw stands, so stopping keeps being tested.",
     "The numbers stay within their bounds; the stop audit and the decision records stay on.",
     "A new playbook changes one number or one rule of its parent, so what follows can be laid to it.",

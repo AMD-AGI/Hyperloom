@@ -94,8 +94,10 @@ from ._multi_node_env import client_only_server_url
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 from ._ray_backend import SuiteLeasedRound, strip_visible_devices_from_config
 from ._ray_serving import ServingLease
+from ._agentx_checkpoint import AgentxCheckpoint, SuiteRoundCheckpoint
 from ._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
+    AgentxCheckpointMissed,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     resolve_benchmark_timeouts,
     session_deadline_to_remaining_sec,
@@ -559,6 +561,7 @@ class SuiteRound:
     round's prefix cache. ``boot_only`` marks a round that only brings the server up, running the point as a
     ``MAGPIE_RUN_PHASE=server`` point: no load and no eval. ``env_drop`` names host variables the round's server and client do not inherit.
     ``serving_lease`` is the Ray lease whose actor runs the round on the GPUs it holds, ``None`` to run it here.
+    ``checkpoint`` stops an AgentX round that trails its reference; its ruling lands in ``round_dir``.
     """
 
     config_path: Path
@@ -569,6 +572,7 @@ class SuiteRound:
     env_drop: frozenset[str] = frozenset()
     serving_lease: ServingLease | None = None
     boot_only: bool = False
+    checkpoint: AgentxCheckpoint | None = None
 
 
 @dataclass(frozen=True)
@@ -709,7 +713,11 @@ def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable
         raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc
     if request.warmup and config.fixed is not None:
         config = replace(config, fixed=replace(config.fixed, seed=WARMUP_SEED))
-    return _run_config(config, request.serving_lease, on_poll)
+    checkpoint = None
+    if request.checkpoint is not None:
+        checkpoint = SuiteRoundCheckpoint(request.checkpoint, slot=request.round_dir, run_dir=Path(run_dir))
+        checkpoint.clear()
+    return _run_config(config, request.serving_lease, on_poll, checkpoint)
 
 
 @dataclass(frozen=True)
@@ -748,19 +756,34 @@ def run_accuracy_suite_round(route: SuiteRoute, request: AccuracyRound, *, on_po
     return _run_config(config, request.serving_lease, on_poll)
 
 
-def _run_config(config: SuiteConfig, lease: ServingLease | None, on_poll: Callable[[], None]) -> RoundResult:
+def _run_config(
+    config: SuiteConfig,
+    lease: ServingLease | None,
+    on_poll: Callable[[], None],
+    checkpoint: SuiteRoundCheckpoint | None = None,
+) -> RoundResult:
     if lease is not None:
-        return _run_leased(config, lease)
+        return _run_leased(config, lease, checkpoint)
+    judge = None if checkpoint is None else checkpoint.judge()
+    stopped_by_checkpoint = ""
     with cancel_scope_listener() as scope:
 
         def cancel() -> str:
+            nonlocal stopped_by_checkpoint
             on_poll()
-            return "" if scope is None else scope.reason
+            if judge is not None and not stopped_by_checkpoint:
+                try:
+                    judge.tick(time.monotonic())
+                except AgentxCheckpointMissed as exc:
+                    stopped_by_checkpoint = str(exc)
+            return stopped_by_checkpoint or ("" if scope is None else scope.reason)
 
         return run_round(config, cancel=cancel)
 
 
-def _leased_round(config: SuiteConfig, config_path: Path) -> SuiteLeasedRound:
+def _leased_round(
+    config: SuiteConfig, config_path: Path, checkpoint: SuiteRoundCheckpoint | None = None
+) -> SuiteLeasedRound:
     deadlines = config.deadlines
     remaining = (
         None if deadlines.deadline_unix is None else deadlines.deadline_unix - time.time() + _LEASED_BACKSTOP_SLACK_SEC
@@ -771,10 +794,11 @@ def _leased_round(config: SuiteConfig, config_path: Path) -> SuiteLeasedRound:
         env=dict(os.environ),
         timeout=deadlines.boot_sec + deadlines.round_sec + deadlines.eval_sec + _LEASED_BACKSTOP_SLACK_SEC,
         session_remaining_sec=remaining,
+        checkpoint=checkpoint,
     )
 
 
-def _run_leased(config: SuiteConfig, lease: ServingLease) -> RoundResult:
+def _run_leased(config: SuiteConfig, lease: ServingLease, checkpoint: SuiteRoundCheckpoint | None) -> RoundResult:
     """Run ``config`` in ``lease``'s actor, which holds the round's GPUs in Ray, and read back the report it wrote.
 
     Raises:
@@ -785,7 +809,7 @@ def _run_leased(config: SuiteConfig, lease: ServingLease) -> RoundResult:
     config_path = run_dir.with_name(f"{run_dir.name}{LEASED_CONFIG_SUFFIX}")
     config_path.write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding=_UTF8)
     try:
-        returncode, _stdout, stderr = lease.run_session_kill(_leased_round(config, config_path))
+        returncode, _stdout, stderr = lease.run_session_kill(_leased_round(config, config_path, checkpoint))
     except subprocess.TimeoutExpired as exc:
         raise SuiteRoundRefused(RAY_ROUND_UNPLACED_CLASS, str(exc)) from exc
     layout = RunLayout(run_dir)

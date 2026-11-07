@@ -55,6 +55,7 @@
       "environment_fault",
       "framework_agent_phase_done",
       "global_converged",
+      "host_gpus_unavailable",
       "max_ticks",
       "model_config_incompatible",
       "model_context_window_too_small",

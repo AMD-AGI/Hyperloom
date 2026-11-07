@@ -46,6 +46,12 @@ def test_a_host_fault_is_infrastructure_not_a_verdict_about_the_model():
     assert sr.outcome_status(ENV_FAULT, 1.0) != "failed"
 
 
+def test_a_host_without_idle_gpus_is_infrastructure_not_a_verdict_about_the_model():
+    """Another workload holding the GPUs says nothing about the combo the run was optimizing."""
+    assert sr.HOST_GPUS_UNAVAILABLE in sr.INFRASTRUCTURE_STOP_REASONS
+    assert sr.outcome_status(sr.HOST_GPUS_UNAVAILABLE, 0.0) == "aborted"
+
+
 def test_a_refused_argv_is_the_harness_faulting_not_the_model():
     """An argument the installed parser never had is a harness fault, so it reads like one."""
     assert ARGV_INVALID in sr.INFRASTRUCTURE_STOP_REASONS

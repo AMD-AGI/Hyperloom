@@ -43,7 +43,10 @@ FUSED_MOE = re.compile(
     r"\[aiter\]\s+\[fused_moe\]\s+using\s+(?P<stage>\S+)\s+(?P<tag>\([^)]*\)|\S+)\s+for\s+\((?P<tuple>[^)]*)\)"
 )
 
-# The same tuple, on the line that says the lookup MISSED.
+# The dispatch tag aiter prints when the lookup found no tuned row.
+_UNTUNED_DISPATCH_TAG = "default"
+
+# The same tuple, on the line that names the fallback a missed lookup took.
 FUSED_MOE_MISS = re.compile(r"\[aiter\]\s+\[fused_moe\]\s+no tuned (?P<flavour>\S+) config for\s+\((?P<tuple>[^)]*)\)")
 
 # Field order of the aiter fused-MoE dispatch tuple, read off a production log:
@@ -307,6 +310,8 @@ class _LogScan:
     consulted: set[str] = field(default_factory=set)
     dispatch: dict[str, Any] = field(default_factory=dict)
     vllm_moe: dict[str, list[str]] = field(default_factory=lambda: {"hit": [], "miss": []})
+    # ``default`` MoE dispatches per tuple whose fallback line has not been seen yet; that line is the same lookup.
+    moe_unpaired_defaults: dict[tuple[str, ...], int] = field(default_factory=dict)
     # Present only when a bound was hit, so its absence means the report describes the whole log.
     truncated: dict[str, Any] = field(default_factory=dict)
 
@@ -360,30 +365,41 @@ def _record_dense_lookup(scan: _LogScan, match: re.Match, line: str, *, max_keys
 
 
 def _record_moe_dispatch(scan: _LogScan, match: re.Match) -> None:
-    """Record the stage a fused-MoE dispatch ran, and the token count it ran it for.
+    """Record the stage a fused-MoE dispatch ran, the token count it ran it for, and whether its lookup missed.
 
     One model dispatches DIFFERENT stages at different token counts, so a single
     "saw 1stage" boolean collapses the decode range away and suppresses tuning
-    that 2stage would have covered.
+    that 2stage would have covered. aiter prints ``default`` in place of the
+    kernel names exactly when no tuned row was found.
     """
     parts = moe_tuple(match.group("tuple"))
     moe = _moe_dispatch_record(scan)
     stage_key = f"{match.group('stage')}/{match.group('tag')}"
     record = moe["by_stage"].setdefault(stage_key, {"tokens": set(), "tuple": parts})
-    token = _record_moe_key(moe, parts, miss=False)
+    missed = match.group("tag") == _UNTUNED_DISPATCH_TAG
+    if missed:
+        lookup = tuple(parts)
+        scan.moe_unpaired_defaults[lookup] = scan.moe_unpaired_defaults.get(lookup, 0) + 1
+    token = _record_moe_key(moe, parts, miss=missed)
     if token is not None:
         record["tokens"].add(token)
 
 
 def _record_moe_miss(scan: _LogScan, match: re.Match) -> None:
-    """Record a fused-MoE lookup that found no tuned row.
+    """Record the fallback a fused-MoE lookup with no tuned row took, and the miss when nothing counted it yet.
 
-    The dispatch line says which stage ran, not whether a tuned row was found --
-    it prints identically either way.
+    aiter prints this after the ``default`` dispatch of the same lookup, which already counted the miss; a line
+    with no such dispatch before it is the only record of its lookup.
     """
     moe = _moe_dispatch_record(scan)
     moe["fallback_flavour"] = match.group("flavour")
-    _record_moe_key(moe, moe_tuple(match.group("tuple")), miss=True)
+    parts = moe_tuple(match.group("tuple"))
+    lookup = tuple(parts)
+    unpaired = scan.moe_unpaired_defaults.get(lookup, 0)
+    if unpaired:
+        scan.moe_unpaired_defaults[lookup] = unpaired - 1
+        return
+    _record_moe_key(moe, parts, miss=True)
 
 
 def _moe_dispatch_record(scan: _LogScan) -> dict[str, Any]:
@@ -599,25 +615,29 @@ def demand_for_tuner(report: dict[str, Any], tuner_name: str) -> dict[str, Any] 
     return None
 
 
-# Upper bound aiter clamps the gl=1 padding to; beyond it every M shares one row.
+# aiter's get_padded_m(..., gl=1) holds M at 8192 past it, but only for an output wider than 4096.
 _PADDED_M_CAP = 8192
+_WIDE_N = 4096
 # aiter's gl=0 padding rounds M up to a multiple of 16 up to this M.
 _PADDED_M_STEP16_MAX = 256
 
 
-def padded_m(m: int) -> int:
-    """The M a tuned row is written at to serve ``m`` through one of aiter's lookups.
+def padded_m(m: int, n: int = 0) -> int:
+    """The M a tuned row is written at to serve ``m`` through one of aiter's lookups, for output width ``n``.
 
     aiter tries the exact M, then the gl=0 padding, then the gl=1 power of two.
     Up to 256 the gl=0 multiple of 16 is the bucket, so the CUDA-graph batch
     sizes keep rows of their own; above it the power of two collapses the many
-    distinct prefill M. M=1 is its own row: its gl=0 bucket is 16.
+    distinct prefill M. M=1 is its own row: its gl=0 bucket is 16. The power of
+    two is held at 8192 only for a wide N, where aiter pads past it.
     """
     if m <= 1:
         return 1
     if m <= _PADDED_M_STEP16_MAX:
         return -(-m // 16) * 16
-    return min(1 << (m - 1).bit_length(), _PADDED_M_CAP)
+    if m > _PADDED_M_CAP and n > _WIDE_N:
+        return _PADDED_M_CAP
+    return 1 << (m - 1).bit_length()
 
 
 def demand_shapes(
@@ -649,7 +669,7 @@ def demand_shapes(
     if bucket:
         grouped: dict[tuple, dict[str, Any]] = {}
         for shape in shapes:
-            padded = padded_m(shape["M"])
+            padded = padded_m(shape["M"], shape["N"])
             rest = tuple(sorted((f, v) for f, v in shape.items() if f not in ("M", "requests")))
             got = grouped.get((padded, rest))
             if got is None:
@@ -716,18 +736,23 @@ def moe_ck_missed_keys(report: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def moe_untuned_csv_text(
-    key: dict[str, Any],
-    *,
+    *keys: dict[str, Any],
     tokens: list[int] | None = None,
 ) -> str:
-    """Render one observed MoE key as an aiter untuned-fmoe CSV."""
+    """Render observed MoE keys as one aiter untuned-fmoe CSV, at ``tokens`` or else each key's missed tokens.
+
+    Rows are tuned in file order until the deadline, so the (key, token) rows missed most often come first.
+    """
     header = list(MOE_KEY_FIELDS)
-    want = tokens or key.get("untuned_tokens") or key.get("tokens") or []
-    lines = [",".join(header)]
-    for token in sorted({int(t) for t in want}):
-        row = [str(token)] + [str(key.get(f, "")) for f in header[1:]]
-        lines.append(",".join(row))
-    return "\n".join(lines) + "\n"
+    rows: list[tuple[int, str]] = []
+    for key in keys:
+        want = tokens or key.get("untuned_tokens") or []
+        counts = key.get("untuned_token_counts") or {}
+        for token in sorted({int(t) for t in want}):
+            row = [str(token)] + [str(key.get(f, "")) for f in header[1:]]
+            rows.append((to_int(counts.get(str(token))) or 0, ",".join(row)))
+    rows.sort(key=lambda row: -row[0])
+    return "\n".join([",".join(header), *(line for _, line in rows)]) + "\n"
 
 
 def write_demand(report: dict[str, Any], path: Path) -> Path:

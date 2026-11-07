@@ -14,7 +14,15 @@ from typing import Any
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.session.resume_guard import confirmed_stopped_scope
 
-from ..state.task_registry import IllegalTransition, Task, TaskNotFound
+from ..state.task_registry import (
+    TERMINAL_STATES,
+    IllegalTransition,
+    Task,
+    TaskNotFound,
+    TaskSpec,
+    create_on_free_key,
+    task_dispatch_class,
+)
 from ._current_best_lift import _StackKey, _orphan_stack_key, _stacked_keep_keys
 from ._integrate_promotion import _IntegrateMarker, _KeptResultScan, _integrate_marker_of, _task_recorded_a_result
 
@@ -230,6 +238,30 @@ class ResumeRecoveryMixin:
         else:
             report["fixes"].append({"kind": "cleared_stale_pending_integrate", "task_id": task_id})
         self._clear_pending_integrate(pending, gc_runtime=True)
+        # A lost environment stopped the measurement, not a verdict, so the candidate is still owed one.
+        if task is not None and gone_scope:
+            await self._requeue_stopped_integrate(task, report)
+
+    async def _requeue_stopped_integrate(self, task: Task, report: dict[str, Any]) -> None:
+        """Queue an integrate the lost environment stopped again, under the next free retry key."""
+        created = await create_on_free_key(
+            self.tasks,
+            TaskSpec(
+                kind=task.kind,
+                params=task.params,
+                idempotency_key=task.idempotency_key,
+                requires_lanes=task.requires_lanes,
+                lease_ttl_sec=task.lease_ttl_sec,
+                dispatch_class=task_dispatch_class(task),
+            ),
+            spent=lambda twin: twin.state in TERMINAL_STATES,
+        )
+        if created is None:
+            report["warnings"].append({"kind": "pending_integrate_requeue_exhausted", "task_id": task.task_id})
+            return
+        report["fixes"].append(
+            {"kind": "requeued_pending_integrate", "task_id": task.task_id, "requeued_task_id": created[0].task_id}
+        )
 
     async def _resume_recover_pending_warm_replay(
         self,

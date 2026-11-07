@@ -319,3 +319,66 @@ async def test_explicit_recipe_replacement_survives_following_keep_and_replay(na
         assert launch["append_args"] == replacement
         assert "--enable-hierarchical-cache" not in launch["append_args"]
         assert _OPTION not in launch["append_args"]
+
+
+_PROTECTED = ("--model-path", "--tp", "--tensor-parallel-size", "--port", "--host")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replayed", [False, True], ids=["live", "resume-replay"])
+async def test_a_native_replace_removal_keep_persists_only_what_hyperloom_appends(
+    native_session, tmp_path, monkeypatch, replayed
+):
+    """Magpie refuses a protected option in append_args, so a KEEP must persist the overlay, not Magpie's argv."""
+    from hyperloom.orchestrator.loop._integrate_promotion import _integrate_keep_variant
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+    recipe = _PREFIX + ["--tp", "1", "--host", "0.0.0.0", "--port", "30000", "--enable-hierarchical-cache"]
+    session = native_session(recipe=recipe)
+    observed = _stub_gpu(monkeypatch, session, effective=recipe + ["--mem-fraction-static", "0.8"])
+    replaced = await _explore(
+        session,
+        tmp_path,
+        name="replace-stack",
+        candidate={"extra_args": "--mem-fraction-static 0.8 --enable-hierarchical-cache", "args_mode": "replace"},
+    )
+    session.state.current_best = replaced["winners"][0]
+    controls = {"remove_args": ["--enable-hierarchical-cache"]}
+    bench, _ = await integrate_patch.IntegratePatchExecutor(session_dir=tmp_path)._bench_patch(
+        _integrate_results._PatchBench(
+            params={"config_path": str(session.config), **stack_base_params(session.state.current_best)},
+            output_root=tmp_path / "integrate-removal",
+            specialist_task_id="removal",
+            benchmark_mode="agentx",
+            launch_controls=controls,
+        ),
+        extra_server_args_applied="",
+        extra_envs_applied={},
+    )
+    result = {
+        "status": "kept",
+        "specialist_task_id": "removal",
+        "extra_server_args_applied": "",
+        "extra_envs_applied": {},
+        **_integrate_results._kept_launch(controls, bench),
+        "bench_result": bench,
+    }
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = session.state
+    task = None if replayed else SimpleNamespace(task_id="t-int", params={"specialist_task_id": "removal"})
+
+    variant = _integrate_keep_variant(result, task, bench, float(bench["output_throughput"]), "")
+    assert coord.writeback.lift_to_current_best("integrate_patch", float(bench["output_throughput"]), variant)
+    await _explore(
+        session,
+        tmp_path,
+        name="after-removal",
+        candidate={"extra_envs": {"SGLANG_TEST": "1"}},
+        base=stack_base_params(session.state.current_best),
+    )
+
+    kept_args = shlex.split(session.state.current_best["extra_server_args"])
+    assert not set(kept_args) & set(_PROTECTED)
+    assert observed[-1]["append_args"] == ["--mem-fraction-static", "0.8"]
+    assert not set(observed[-1]["append_args"]) & set(_PROTECTED)

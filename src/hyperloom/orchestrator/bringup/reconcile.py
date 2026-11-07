@@ -154,6 +154,7 @@ class Reconciler:
     Attributes:
         last_report (ReconcileReport): What the most recent pass did; read by
             the maintenance tick, which leaves lease sweeping to this pass.
+            Failure accounting reads :meth:`take_failed_tasks` instead.
     """
 
     def __init__(
@@ -184,6 +185,16 @@ class Reconciler:
         self._session_dir = links.session_dir
         self._result_pending = links.result_pending
         self.last_report = ReconcileReport()
+        self._untaken_failed_tasks: list[str] = []
+
+    def take_failed_tasks(self) -> list[str]:
+        """Return the tasks every pass failed since the last call, and forget them.
+
+        Returns:
+            list[str]: Failed task ids, oldest pass first.
+        """
+        taken, self._untaken_failed_tasks = self._untaken_failed_tasks, []
+        return taken
 
     async def run(self, now_unix: float) -> ReconcileReport:
         """Run every rule in order, the projection rebuild last.
@@ -209,6 +220,7 @@ class Reconciler:
                 log.exception("reconcile: rule %s raised", rule.__name__)
                 report.failures.append(rule.__name__)
         self.last_report = report
+        self._untaken_failed_tasks.extend(report.failed_tasks)
         if report.acted:
             log.info(
                 "RECONCILE: settled=%s handed_off=%s failed_tasks=%d leases_reaped=%d",

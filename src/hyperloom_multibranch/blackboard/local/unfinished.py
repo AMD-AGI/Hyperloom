@@ -8,8 +8,6 @@
 * a commit of a stopped branch whose last merge onto the integration head was not stackable: that answer stands until
   the head moves in a way that offers the commit again, while a commit not merge-tested yet, or skipped on a conflict,
   is the integrator's to offer again, not a lead;
-* a measured explore that kept accuracy and fell short of its bar, having gained more than :data:`NEAR_BAR_SHARE`
-  of it;
 * a blocked candidate whose repair never finished;
 * an explore withdrawn before its result, a branch stop's withdrawal included, unless another explore measured its
   change.
@@ -21,8 +19,8 @@ naming the lead. It drops out of the brief of a start commit too once a replay o
 it builds on and released with no test (:func:`refused_replays`): the change could not be made for that head, the
 toolbox refusing it or the change no longer applying; otherwise one lead would be claimed and released that way again
 and again, on branch after branch. A commit drops out once the integrator offers it again. The leads
-come in that order, unstackable commits and near misses by gain, unfinished repairs and withdrawn explores newest
-first, one for each direction and each change, at most :data:`MAX_UNFINISHED` of them.
+come in that order, unstackable commits by gain, unfinished repairs and withdrawn explores newest first, one for each
+direction and each change, at most :data:`MAX_UNFINISHED` of them.
 """
 
 from __future__ import annotations
@@ -51,9 +49,6 @@ from hyperloom_multibranch.blackboard.changes import describe_change
 from hyperloom_multibranch.blackboard.local.state import BlackboardState
 from hyperloom_multibranch.blackboard.local.views import committed
 
-#: How much of its bar a measured explore that fell short of it must have gained to be worth finishing. A share of the
-#: bar, not points, so a lower bar does not offer gains within the measurement noise.
-NEAR_BAR_SHARE = 0.5
 MAX_UNFINISHED = 8
 #: How soon after its branch stopped a claim's release is the stop's, not the answer of a replay that could not be made.
 STOP_RELEASE_SECONDS = 60.0
@@ -83,9 +78,9 @@ def _explore(record: TestRecord) -> bool:
 
 
 def hinted_gain(record: TestRecord) -> float | None:
-    """The gain ``record``'s judgement lets a hint rank by, a near-bar lead or a direction's best gain: one whose
-    accuracy passed, or one below its bar whose eval did not run, since an explore short of its bar skips it; above
-    the bar only the confirm's passed eval counts, so a fast but wrong change ranks nothing. ``None`` otherwise."""
+    """The gain ``record``'s judgement lets a hint rank by, a direction's best gain: one whose accuracy passed, or
+    one below its bar whose eval did not run, since an explore short of its bar skips it; above the bar only the
+    confirm's passed eval counts, so a fast but wrong change ranks nothing. ``None`` otherwise."""
 
     judgement = record.judgement
     if judgement is None or record.conclusion is Conclusion.ACCURACY_FAILED:
@@ -94,16 +89,6 @@ def hinted_gain(record: TestRecord) -> float | None:
         return judgement.gain_pct
     below = judgement.accuracy is AccuracyVerdict.NOT_MEASURED and judgement.gain_pct < judgement.threshold_pct
     return judgement.gain_pct if below else None
-
-
-def _near_bar(record: TestRecord) -> bool:
-    judgement, gain = record.judgement, hinted_gain(record)
-    return (
-        judgement is not None
-        and gain is not None
-        and record.conclusion is Conclusion.RECORDED_ONLY
-        and judgement.threshold_pct * NEAR_BAR_SHARE < gain < judgement.threshold_pct
-    )
 
 
 def _merge_found(state: BlackboardState, request_id: str | None) -> str:
@@ -232,11 +217,6 @@ def unfinished_leads(
         if record.request_id not in refused and not _taken_up(record, records, held, replayed)
     }
     explores = [record for record in newest if _explore(record) and record.request_id in untaken]
-    near = [
-        _lead(state, record, UnfinishedReason.NEAR_BAR, f"bar {record.judgement.threshold_pct:.2f}%")
-        for record in explores
-        if _near_bar(record) and record.judgement is not None
-    ]
     repairs = [
         _lead(state, record, UnfinishedReason.REPAIR_UNFINISHED)
         for record in explores
@@ -250,7 +230,7 @@ def unfinished_leads(
         and not _measured_elsewhere(record, records, replayed)
     ]
     unstackable = [lead for lead in _not_stackable(state, view) if lead.request_id in untaken]
-    leads = _distinct((*_by_gain(unstackable), *_by_gain(near), *repairs, *withdrawn), records, replayed)
+    leads = _distinct((*_by_gain(unstackable), *repairs, *withdrawn), records, replayed)
     return tuple(leads[:MAX_UNFINISHED])
 
 
@@ -273,19 +253,10 @@ def _distinct(
     return kept
 
 
-def near_misses(records: Iterable[TestRecord]) -> int:
-    """How many of ``records`` are explores that kept accuracy and fell short of their bar after gaining more than
-    :data:`NEAR_BAR_SHARE` of it: near misses worth finishing."""
-
-    return sum(1 for record in records if _explore(record) and _near_bar(record))
-
-
 __all__ = [
     "MAX_UNFINISHED",
-    "NEAR_BAR_SHARE",
     "STOP_RELEASE_SECONDS",
     "hinted_gain",
-    "near_misses",
     "refused_replays",
     "unfinished_leads",
 ]

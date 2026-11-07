@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.agent_backends.base import (
+    _SESSION_BASE_ENVIRONMENT,
     AgentRunSpec,
     AgentRuntimeConfig,
     AgentToolPolicy,
@@ -74,6 +75,11 @@ def _stability_env() -> dict[str, str]:
     env: dict[str, str] = {}
     apply_llm_stability_env(env)
     return env
+
+
+def _session_defaults() -> dict[str, str]:
+    """What every Claude session carries with no overlay: the base session env, then the stability env."""
+    return {**_SESSION_BASE_ENVIRONMENT, **_stability_env()}
 
 
 def _recording_claude_backend(spawned: list[dict[str, str]]) -> ClaudeBackend:
@@ -261,7 +267,7 @@ async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path, 
         )
     )
 
-    assert captured["options"].kwargs["env"] == _stability_env()
+    assert captured["options"].kwargs["env"] == _session_defaults()
 
 
 async def test_claude_hands_the_session_environment_to_its_cli(tmp_path, monkeypatch):
@@ -291,7 +297,7 @@ async def test_claude_hands_the_session_environment_to_its_cli(tmp_path, monkeyp
         )
     )
 
-    assert captured["options"].kwargs["env"] == {**_stability_env(), "AITER_JIT_DIR": "/lane/1/jit"}
+    assert captured["options"].kwargs["env"] == {**_session_defaults(), "AITER_JIT_DIR": "/lane/1/jit"}
 
 
 def test_codex_hands_the_session_environment_to_its_app_server(tmp_path):

@@ -276,7 +276,9 @@ class SandboxPool:
         except SandboxGone:
             pass  # already closed, which is what this asks for
         except SandboxError:
-            log.exception("sandbox %s could not be closed; its own timeout will end it", runner.sandbox_id)
+            # A local sandbox has ended all the same (its timer is cancelled) and keeps its cards out of the pool; a hosted
+            # one is ended by its own timeout.
+            log.exception("sandbox %s could not be closed cleanly", runner.sandbox_id)
         finally:
             self._forget(runner.sandbox_id)
 

@@ -128,6 +128,18 @@ class Launch:
         return json.dumps([self.settings, self.envs, self.controls], sort_keys=True)
 
 
+def handed_server_args(config_path: Path) -> str:
+    """The server args Hyperloom composed and handed the launcher of a config the grid materializer built.
+
+    The env-composed layout carries them in the framework's ``EXTRA_*_ARGS``; a native one in its own
+    ``launch_overrides.append_args``, which Magpie lays over the recipe argv it owns and protects.
+    """
+    point = read_benchmark_point(config_path)
+    if not point.agentx:
+        return config_server_argv(config_path).text
+    return " ".join(point.agentx_launch.append_args)
+
+
 def read_launch(config_path: Path, unset_envs: Iterable[str] = ()) -> Launch:
     """Read the launch a config built by the grid materializer starts, whichever layout it carries.
 

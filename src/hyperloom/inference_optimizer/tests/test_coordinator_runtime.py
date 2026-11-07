@@ -254,6 +254,42 @@ async def test_stop_signals_follow_the_normal_terminal_path(session_dir, stop_si
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_sigterm_stays_captured_until_the_inflight_round_is_cancelled(session_dir, monkeypatch):
+    """A second SIGTERM while the stop tears the round's server down must not kill the process outright."""
+    from hyperloom.orchestrator.loop.signals import SignalDrain
+
+    def _launch_disposition(_signum, _frame):
+        pass
+
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    c._stop.set()
+    seen: list[tuple[str, Any]] = []
+
+    async def _close(*, reason):
+        seen.append(("close_sequence", signal.getsignal(signal.SIGTERM)))
+
+    async def _cancel(*, reason, exempt=frozenset()):
+        seen.append(("cancel_inflight", signal.getsignal(signal.SIGTERM)))
+        return []
+
+    c.phase_close.ensure_close_sequence = _close
+    c._recipe_kb_t4_hook = _noop_finalize
+    monkeypatch.setattr(c.dispatcher, "cancel_inflight_actions", _cancel)
+    previous = signal.signal(signal.SIGTERM, _launch_disposition)
+    try:
+        await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=1, install_signal_handlers=True))
+        await c.stop()
+        seen.append(("stopped", signal.getsignal(signal.SIGTERM)))
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert seen == [
+        ("close_sequence", SignalDrain._noop_handler),
+        ("cancel_inflight", SignalDrain._noop_handler),
+        ("stopped", _launch_disposition),
+    ]
+
+
 # MockBackend
 @pytest.mark.asyncio
 async def test_mock_backend_plays_scripted_turns():
@@ -2202,14 +2238,24 @@ async def test_handle_unpromotable_profile_clears_the_initial_analysis_gate(sess
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ending", ["cancelled", "succeeded"])
-@pytest.mark.parametrize("phase", ["PRELUDE", "ENABLEMENT"])
-async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_unbooked(session_dir, ending, phase):
-    """A cancelled initial analysis, or one that ended before a restart booked it, must not hold the phase.
+@pytest.mark.parametrize(
+    ("phase", "ending", "asks_again"),
+    [
+        ("PRELUDE", "cancelled", True),
+        ("PRELUDE", "succeeded", False),
+        ("ENABLEMENT", "cancelled", False),
+        ("ENABLEMENT", "succeeded", False),
+    ],
+)
+async def test_a_phase_settles_the_initial_analysis_gate_when_its_task_ended_unbooked(
+    session_dir, phase, ending, asks_again
+):
+    """An initial analysis that ended without being booked must not hold the phase on the task that ended.
 
     Neither path reaches the writeback that clears the marker: the dispatcher returns early for a
     cancelled result, and a restart between the runner's terminal write and booking loses the outcome.
-    Both phases that hold for the marker have to release it.
+    Both phases release the marker, except that PRELUDE asks again for an analysis that was cancelled
+    before it ran and holds on that one instead.
     """
     from hyperloom.orchestrator.phases import machine_state as phase_state
 
@@ -2230,7 +2276,12 @@ async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_un
         await c.tasks.transition(task.task_id, ending)
         assert phase_state.compute_next_phase(c.shared_state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
         await c.phase_machine.advance_phase_if_needed()
-        assert c.shared_state.auto_roofline_pending_task_id == ""
+        marker = c.shared_state.auto_roofline_pending_task_id
+        if asks_again:
+            assert marker not in ("", task.task_id)
+            assert (await c.tasks.get(marker)).state == "queued"
+        else:
+            assert marker == ""
     finally:
         await c.stop()
 

@@ -49,9 +49,11 @@ _runtime_env_read_quoted_value() {
   done
 }
 
-# Which workspace a run uses, and so where its kernel-agent.env.sh lands, is decided here and nowhere else:
-# install.sh sets its paths through runtime_env_forget_stale_workspace and runtime_env_derive_runtime_paths, and
-# preflight (cli/preflight_env.py) asks runtime_env_kernel_agent_env_path for the file install.sh wrote.
+# Which workspace a run uses, and so which kernel-agent.env.sh it gets, follows one rule, kept here: install.sh sets
+# its paths through runtime_env_forget_stale_workspace and runtime_env_derive_runtime_paths, and the documented source
+# line and the slurm job ask runtime_env_kernel_agent_env_path for the file install.sh wrote. Preflight does not call
+# this file: cli/preflight_env.py mirrors the rule in Python (_workspace_selection, _kernel_agent_env_candidate), and
+# test_install_session_paths.py holds both to the same answer.
 #
 #   - A .env that `hyperloom setup` wrote (setup_dotenv_is_authoritative) names the workspace: the caller's
 #     USER_DATA_PATH and the paths derived from it are what an earlier workspace left in the shell, so they are
@@ -70,11 +72,146 @@ runtime_env_forget_stale_workspace() {
 }
 
 # Fill the runtime paths from USER_DATA_PATH; call once the workspace is selected.
+#
+# kernel-agent.env.sh carries credentials and is sourced, so it never lives under USER_DATA_PATH, which every pod of
+# the user shares and can write: by default it is in a directory of this account's own on the container's disk,
+# one per runtime dir so the workspaces of one container keep apart. The temporary directory is the one place every
+# container has that is its own. Its name is predictable, so every reader and writer holds it to
+# runtime_env_private_kernel_agent_env. The runtime dir is keyed absolute (runtime_env_absolute_path), as preflight
+# keys it after `hyperloom` has made USER_DATA_PATH absolute.
 runtime_env_derive_runtime_paths() {
   HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
-  KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
+  runtime_env_forget_legacy_kernel_agent_env
+  if [ -z "${KERNEL_AGENT_ENV:-}" ]; then
+    local key
+    key="$(runtime_env_absolute_path "$HYPERLOOM_RUNTIME_DIR" | sha256sum)"
+    KERNEL_AGENT_ENV="${TMPDIR:-/tmp}/hyperloom-$(id -u)-${key:0:16}/kernel-agent.env.sh"
+  fi
   # Legacy variable kept for compatibility; open-source checkouts use install.sh's _open_source_root.
   HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
+}
+
+# Print $1 as an absolute path, without a newline: a leading ~ or ~name expanded as Python's os.path.expanduser
+# expands it, a relative path put under the physical working directory (os.getcwd(), which is what `hyperloom` makes
+# USER_DATA_PATH absolute against), and empty and . components dropped. Nothing else is resolved, neither .. nor a
+# link. Preflight's copy is _absolute_path in cli/preflight_env.py; test_install_session_paths.py holds the two equal.
+runtime_env_absolute_path() {
+  local path="$1" name home="" found=0 rest out="" part
+  if [ "${path:0:1}" = '~' ]; then
+    name="${path%%/*}"
+    name="${name:1}"
+    if [ -z "$name" ] && [ "${HOME+set}" = set ]; then
+      home="$HOME" found=1
+    elif [[ -z "$name" || "$name" == *[!0-9]* ]] && home="$(_runtime_env_passwd_home "${name:-$(id -u)}")"; then
+      # getent reads an all-digit key as a uid, where Python looks up a user of that name.
+      found=1
+    fi
+    if [ "$found" -eq 1 ]; then
+      home="${home%"${home##*[!/]}"}"
+      path="${home}${path:$((${#name} + 1))}"
+      path="${path:-/}"
+    fi
+  fi
+  case "$path" in /*) ;; *) path="$(pwd -P)/$path" ;; esac
+  rest="$path/"
+  while [ -n "$rest" ]; do
+    part="${rest%%/*}"
+    rest="${rest#*/}"
+    case "$part" in '' | .) ;; *) out+="/$part" ;; esac
+  done
+  printf '%s' "${out:-/}"
+}
+
+# The home directory of the account named, or numbered, $1 in the passwd database; status 1 when there is none.
+_runtime_env_passwd_home() {
+  local entry
+  entry="$(getent passwd -- "$1" 2>/dev/null)" || return 1
+  IFS=: read -r _ _ _ _ _ entry _ <<< "$entry"
+  printf '%s' "$entry"
+}
+
+# Where kernel-agent.env.sh was written before it left the user's directory: the runtime dir, and the default one.
+runtime_env_legacy_kernel_agent_env_paths() {
+  [ -z "${HYPERLOOM_RUNTIME_DIR:-}" ] || printf '%s\n' "${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh"
+  [ -z "${USER_DATA_PATH:-}" ] || [ "${HYPERLOOM_RUNTIME_DIR:-}" = "${USER_DATA_PATH}/runtime" ] ||
+    printf '%s\n' "${USER_DATA_PATH}/runtime/kernel-agent.env.sh"
+}
+
+# A KERNEL_AGENT_ENV that names one of those places is what an older install left in .env or in a shell that sourced
+# the file; the path is derived again rather than written to or read from there.
+runtime_env_forget_legacy_kernel_agent_env() {
+  local legacy
+  [ -n "${KERNEL_AGENT_ENV:-}" ] || return 0
+  while IFS= read -r legacy; do
+    [ "${KERNEL_AGENT_ENV:-}" != "$legacy" ] || unset KERNEL_AGENT_ENV
+  done < <(runtime_env_legacy_kernel_agent_env_paths)
+}
+
+# Remove the copy an older install left in those places, which other accounts' pods can rewrite; one that cannot be
+# removed is named, never read.
+runtime_env_remove_legacy_kernel_agent_env() {
+  local legacy
+  while IFS= read -r legacy; do
+    [ -e "$legacy" ] || [ -L "$legacy" ] || continue
+    rm -f -- "$legacy" 2>/dev/null ||
+      printf '[runtime-env WARN] cannot remove the old shared copy of the kernel-agent env file %s; it is not read\n' \
+        "$legacy" >&2
+  done < <(runtime_env_legacy_kernel_agent_env_paths)
+}
+
+# kernel-agent.env.sh carries credentials and is sourced, and its default place is a predictable name in a
+# temporary directory other accounts can write. So it is written and read only in a directory of this account's, not
+# a link, that its group and others cannot write, and read only as a regular file of this account's, not a link, that
+# its group and others cannot write. This is that rule's one owner: install.sh's writers call it with `write` (which
+# makes the directory 0700 when missing; the file itself is renamed into place), and runtime_env_kernel_agent_env_path,
+# behind the documented source line and the slurm job, calls it to read. A reader also refuses a directory or file that
+# does not exist: a path printed for it could be created by another account before the caller sources it. Preflight
+# reads the file in Python (_kernel_agent_env_problem in cli/preflight_env.py, with the same words);
+# test_install_session_paths.py holds every reader to the same refusals. Status 1 and why on stderr, naming the entry,
+# never what the file holds.
+runtime_env_private_kernel_agent_env() {
+  local file="$1" mode="${2:-read}" dir
+  dir="$(dirname -- "$file")"
+  if [ "$mode" = write ] && [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    # shellcheck disable=SC2174  # 0700 is for the file's own directory; the parents it may make are only ancestors
+    mkdir -p -m 700 -- "$dir" || return 1
+  fi
+  _runtime_env_private_entry "$file" "$dir" directory || return 1
+  [ "$mode" = read ] || return 0
+  _runtime_env_private_entry "$file" "$file" 'regular file'
+}
+
+# Status 0 when $2, the kernel-agent env file $1 or its directory, exists and is a $3 that passes the rule; else
+# status 1 and why on stderr.
+_runtime_env_private_entry() {
+  local problem
+  if [ ! -e "$2" ] && [ ! -L "$2" ]; then
+    printf '[runtime-env ERROR] no kernel-agent env file at %s: %s does not exist; %s\n' "$1" "$2" \
+      "install.sh writes it on this container's own disk, so run install.sh in this container first, with the same workspace." >&2
+    return 1
+  fi
+  problem="$(_runtime_env_not_private "$2" "$3")"
+  [ -n "$problem" ] || return 0
+  printf '[runtime-env ERROR] refusing the kernel-agent env file %s: %s %s; %s\n' "$1" "$2" "$problem" \
+    "it carries credentials and is sourced, so it is only written and read in a directory of this account's that no other account can write. Set KERNEL_AGENT_ENV to a file in such a directory on this container's own disk, or TMPDIR to such a directory, and re-run install.sh." >&2
+  return 1
+}
+
+# Why the entry $1, which should be a $2 (`directory` or `regular file`), fails that rule; nothing when it passes.
+_runtime_env_not_private() {
+  local owner_mode uid
+  uid="$(id -u)"
+  if [ -L "$1" ]; then
+    printf 'is a symbolic link'
+  elif { [ "$2" = directory ] && [ ! -d "$1" ]; } || { [ "$2" != directory ] && [ ! -f "$1" ]; }; then
+    printf 'is not a %s' "$2"
+  elif ! owner_mode="$(stat -c '%u %a' -- "$1")"; then
+    printf 'cannot be inspected'
+  elif [ "${owner_mode% *}" != "$uid" ]; then
+    printf 'belongs to uid %s, not to this account (uid %s)' "${owner_mode% *}" "$uid"
+  elif (( 8#${owner_mode#* } & 8#022 )); then
+    printf 'can be written by its group or others (mode %s)' "${owner_mode#* }"
+  fi
 }
 
 load_dotenv_no_clobber() {
@@ -137,18 +274,26 @@ load_dotenv_no_clobber() {
   return 0
 }
 
-# Print the kernel-agent.env.sh install.sh writes for the checkout $1 (default $REPO_ROOT) under the caller's
-# environment, or nothing when no workspace is named. Run it in a command substitution: it loads .env into the shell
-# that runs it.
+# Print the kernel-agent.env.sh install.sh wrote for the checkout $1 (default $REPO_ROOT) under the caller's
+# environment. Status 1 and nothing printed, with why on stderr, when no workspace is named, when install.sh has not
+# written the file in this container, or when another account could have written it
+# (runtime_env_private_kernel_agent_env); a caller sources the path only on status 0:
+#   kernel_agent_env_file="$(. .../runtime_env.sh; runtime_env_kernel_agent_env_path)" && . "$kernel_agent_env_file"
+# Run it in a command substitution: it loads .env into the shell that runs it.
 runtime_env_kernel_agent_env_path() {
   local REPO_ROOT="${1:-${REPO_ROOT:-}}"
   if [ -n "$REPO_ROOT" ]; then
     runtime_env_forget_stale_workspace
     load_dotenv_no_clobber || return 1
   fi
+  runtime_env_forget_legacy_kernel_agent_env
   if [ -z "${KERNEL_AGENT_ENV:-}" ]; then
-    [ -n "${HYPERLOOM_RUNTIME_DIR:-}${USER_DATA_PATH:-}" ] || return 0
+    if [ -z "${HYPERLOOM_RUNTIME_DIR:-}${USER_DATA_PATH:-}" ]; then
+      printf '%s\n' "[runtime-env ERROR] no kernel-agent env file to load: none of KERNEL_AGENT_ENV, HYPERLOOM_RUNTIME_DIR, USER_DATA_PATH is set; export USER_DATA_PATH and run install.sh in this container first." >&2
+      return 1
+    fi
     runtime_env_derive_runtime_paths
   fi
+  runtime_env_private_kernel_agent_env "$KERNEL_AGENT_ENV" || return 1
   printf '%s\n' "$KERNEL_AGENT_ENV"
 }

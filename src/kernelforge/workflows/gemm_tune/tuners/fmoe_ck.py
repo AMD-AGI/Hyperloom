@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
 from .base import BaseTuner, TuneResult, micro_metrics
-from ..utils import find_tuner_script, resolve_aiter_root, run_subprocess, TUNER_ENV_VARS
+from ..utils import find_tuner_script, resolve_aiter_root, TUNER_ENV_VARS
 from .. import tune_robustness as _tr
 
 log = logging.getLogger(__name__)
@@ -229,10 +230,6 @@ class FmoeCKTuner(BaseTuner):
         script = find_tuner_script("fmoe_ck")
         assert script is not None  # validated already
 
-        import time
-
-        run_start_time = time.time()
-
         untuned_csv, key_source = self._resolve_untuned_csv()
         tuned_csv = self.work_dir / "tuned_fmoe.csv"
         profile_csv = self.work_dir / "profile_fmoe.csv"
@@ -240,30 +237,18 @@ class FmoeCKTuner(BaseTuner):
         base_args = self._base_args(profile_csv)
 
         aiter_root = resolve_aiter_root()
-        cwd = aiter_root if aiter_root else None
-
-        env_override = _tr.compare_temp_env()
-        compare_dir = Path(env_override["TMPDIR"]) / "aiter_compare"
         invocation = _tr.TunerInvocation(str(script), base_args, untuned_csv, tuned_csv, self.work_dir, aiter_root)
-        isolated = _tr.is_isolation_enabled()
-        iso_candidate = None
-        if isolated:
-            rc, stdout, stderr, iso_candidate = _tr.run_isolated(
-                invocation,
-                _tr.IsolationGuard(
-                    outer_timeout_s=self.ctx.timeout_s,
-                    gpu_ids=getattr(self.ctx, "gpu_ids", "") or "",
-                    blocklist=self._fault_blocklist(),
-                ),
-            )
-        else:
-            rc, stdout, stderr = run_subprocess(
-                invocation.command(),
-                cwd=cwd,
-                timeout_s=self.ctx.timeout_s,
-                log_file=self.work_dir / "tune.log",
-                env_override=env_override,
-            )
+        # One run per row, sharing the timeout: aiter writes nothing until every row of a run finishes. The
+        # persistent fault blocklist stays the isolation-mode opt-in.
+        rc, stdout, stderr, candidate_csv = _tr.run_isolated(
+            invocation,
+            _tr.IsolationGuard(
+                outer_timeout_s=self.ctx.timeout_s,
+                gpu_ids=getattr(self.ctx, "gpu_ids", "") or "",
+                blocklist=self._fault_blocklist() if _tr.is_isolation_enabled() else None,
+                deadline_unix=time.time() + self.ctx.timeout_s,
+            ),
+        )
 
         if rc == 124:
             return TuneResult(
@@ -287,10 +272,6 @@ class FmoeCKTuner(BaseTuner):
             # Try parsing from stderr (some versions print there)
             shape_results = self._parse_compare_output(stderr)
 
-        # Find candidate CSV.
-        candidate_csv = (
-            iso_candidate if isolated else _tr._latest_candidate(compare_dir, tuned_csv.stem, run_start_time)
-        )
         return self._tune_result(shape_results, candidate_csv, key_source)
 
     def _base_args(self, profile_csv: Path) -> list[str]:

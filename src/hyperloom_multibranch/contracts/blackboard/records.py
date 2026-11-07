@@ -728,6 +728,33 @@ class UnfinishedLead:
     detail: str = ""
 
 
+#: Arbor's status of a direction of its map still to work; any other status sets the direction aside, with its ``why``.
+MAP_OPEN = "open"
+
+
+@dataclass(frozen=True)
+class MapDirection:
+    """A direction of Arbor's map: its map ``id`` (``m-...``), ``title``, Arbor ``status`` and the ``why`` of it.
+
+    ``holder`` is the Arbor branch the share the direction is in was dealt to, empty for one in no share; the branch
+    holds an open direction while it runs. ``ops`` are the profile ops the direction acts on when the map names them
+    exactly; without them, its id, title and why name its ops.
+    """
+
+    id: str
+    title: str
+    status: str
+    why: str = ""
+    holder: str = ""
+    ops: tuple[str, ...] = ()
+
+    @property
+    def open(self) -> bool:
+        """Still to work; the map set aside a direction of any other status."""
+
+        return self.status == MAP_OPEN
+
+
 @dataclass(frozen=True)
 class StartupBrief:
     """What a fill specialist reads at start; ``leads`` and ``lessons`` come from cross-session recall.
@@ -737,7 +764,9 @@ class StartupBrief:
     on any branch. ``focus`` is the bottleneck the scheduler opened the branch on, empty when it named none.
     ``settings_menu`` is the settings this session has not tried and ``code_menu`` the source and kernel changes, each
     ranked for the branch, a line each, the ops it acts on and its family's note indented under it; none for a branch
-    of the menu's control.
+    of the menu's control. ``agent_map`` is what the branch is shown of Arbor's map, in the map's order: the
+    directions that name its focus op, those a running Arbor branch holds, each with its holder in ``map_holders``,
+    and those the map set aside; none in a session without a map.
     """
 
     start_commit: str
@@ -749,6 +778,8 @@ class StartupBrief:
     focus: str = ""
     settings_menu: tuple[str, ...] = ()
     code_menu: tuple[str, ...] = ()
+    agent_map: tuple[MapDirection, ...] = ()
+    map_holders: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -840,7 +871,8 @@ class BlackboardSnapshot:
     """Everything the blackboard held at ``taken_at``, read at once: what the RSI, the dashboard and the exports use.
     ``resolved_patches`` are the model-written patches of every merge recorded, in the order the merges were.
     ``op_shares`` holds, by commit, the op shares :meth:`RecordSearch.op_shares` gives it: a commit no tool profiled
-    has those of the last profiled commit of the same recipe."""
+    has those of the last profiled commit of the same recipe. ``agent_map`` holds the directions of Arbor's map the
+    scheduler wrote last, in the map's order; none in a session without a map."""
 
     taken_at: float
     profile: SessionProfile | None
@@ -861,6 +893,7 @@ class BlackboardSnapshot:
     resolved_patches: tuple[ResolvedPatch, ...] = ()
     agent_manifests: Mapping[str, AgentManifestRecord] = field(default_factory=dict)
     card_holds: tuple[CardHold, ...] = ()
+    agent_map: tuple[MapDirection, ...] = ()
 
     @property
     def baseline(self) -> BaselineRecord | None:
@@ -911,11 +944,19 @@ class BlackboardSnapshot:
         made = next((record for record in self.records if record.commit_id == commit_id), None)
         return made.judgement.recorded_value if made is not None and made.judgement is not None else {}
 
+    def map_holders(self) -> dict[str, str]:
+        """The Arbor branch that holds each open direction of ``agent_map``, by the direction's id: its ``holder``
+        while the lineage shows that branch running. Once the branch stops, the direction is held by none."""
+
+        running = {node.branch for node in self.lineage.branches if node.stopped_at is None}
+        return {item.id: item.holder for item in self.agent_map if item.open and item.holder in running}
+
 
 __all__ = [
     "CLAIM_TOKEN_LENGTH",
     "ENVIRONMENT_FIELDS",
     "LESSON_ID",
+    "MAP_OPEN",
     "MAX_OP_SHARES",
     "SHORT_COMMIT",
     "AgentManifestRecord",
@@ -944,6 +985,7 @@ __all__ = [
     "priced_usd",
     "LlmUsageRecord",
     "ManifestFingerprint",
+    "MapDirection",
     "MergeAttempt",
     "MergeState",
     "BlackboardSnapshot",

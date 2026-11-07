@@ -25,7 +25,8 @@ from ..policy.gate import (
     validate_freeform_wave_task,
 )
 from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_TASK_RETRY, record_event, trajectory_scope
-from .runner import SpecialistFailureType, specialist_patch_preflight_error
+from .failure_class import SpecialistFailureType, classify_specialist_failure
+from .runner import specialist_patch_preflight_error
 
 if TYPE_CHECKING:
     from ..loop.coordinator import Coordinator
@@ -415,7 +416,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         Returns ``True`` when a retry was scheduled (the caller must then skip
         this attempt's delegated_result + bookkeeping). Only infra failures
-        (timeout / crash / stale-heartbeat, per ``classify_specialist_failure``)
+        (timeout / crash / stale-heartbeat / dead holder, per ``classify_specialist_failure``)
         are retried, capped at :data:`SPECIALIST_AUTO_RETRY_MAX`; the failure
         reason is injected into the retry prompt. Disabled when
         ``INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY`` is set to ``0``.
@@ -434,14 +435,12 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         cap = _auto_retry_cap()
         if cap <= 0:
             return False
-        from .runner import classify_specialist_failure
-
         result_dict = result.result if isinstance(result.result, dict) else {}
         runner_status = str(result_dict.get("runner_status") or "")
         # The specialist executor never raises, so the reason lives in the
         # result envelope rather than on SubAgentResult.
         error = str(result.error or result_dict.get("error") or "")
-        ftype, retry_eligible = classify_specialist_failure(runner_status, error)
+        ftype, retry_eligible = classify_specialist_failure(runner_status, error, error_class=result.error_class)
         if not retry_eligible:
             return False
         params = task.params or {}
