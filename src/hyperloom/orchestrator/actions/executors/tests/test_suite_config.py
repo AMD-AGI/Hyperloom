@@ -74,7 +74,7 @@ _MAGPIE = {
 
 #: The knobs the config carries as fields instead of server environment.
 _KNOBS = {"TP", "CONC", "ISL", "OSL", "RANDOM_RANGE_RATIO", "MAX_MODEL_LEN", "NUM_PROMPTS", "NUM_WARMUPS", "RUN_EVAL"}
-_KNOBS |= {"PORT", "MAGPIE_TRUST_REMOTE_CODE"}
+_KNOBS |= {"PORT", "BENCH_TRUST_REMOTE_CODE"}
 
 
 def _listed_args(framework: str) -> tuple[set, set]:
@@ -107,7 +107,7 @@ def _point_envs(framework: str) -> dict[str, str]:
     return {
         "TP": "2", "CONC": "64", "ISL": "1024", "OSL": "1024", "RANDOM_RANGE_RATIO": "1", "MAX_MODEL_LEN": "8192",
         "NUM_PROMPTS": "640", "NUM_WARMUPS": "8", "RUN_EVAL": "true", "ROCR_VISIBLE_DEVICES": "4,5",
-        "PORT": "8888", "MAGPIE_TRUST_REMOTE_CODE": "1", "PATH": "/opt/venv/bin:/usr/bin",
+        "PORT": "8888", "BENCH_TRUST_REMOTE_CODE": "1", "PATH": "/opt/venv/bin:/usr/bin",
         "AITER_LOG_TUNED_CONFIG": "1", extra_name: extra,
     }  # fmt: skip
 
@@ -223,10 +223,10 @@ def test_the_fixed_workload_of_a_point_is_the_one_its_round_sends() -> None:
 
 
 def test_a_server_phase_point_boots_the_server_and_runs_no_load_or_eval() -> None:
-    config = suite_config(_point("vllm", MAGPIE_RUN_PHASE="server"), _base("vllm"), _settings(LifecycleMode.BOOT))
+    config = suite_config(_point("vllm", HYPERLOOM_RUN_PHASE="server"), _base("vllm"), _settings(LifecycleMode.BOOT))
 
     assert (config.workload, config.fixed, config.eval.enabled) == (WorkloadKind.NONE, None, False)
-    assert "MAGPIE_RUN_PHASE" not in config.server.user.env_set
+    assert "HYPERLOOM_RUN_PHASE" not in config.server.user.env_set
 
 
 def test_an_eval_only_point_runs_the_eval_and_no_load_on_the_held_server() -> None:
@@ -441,14 +441,14 @@ def test_an_operator_keep_alive_is_kept() -> None:
 
 
 def test_an_mlperf_server_phase_point_boots_the_server_and_runs_no_harness() -> None:
-    config = suite_config(_mlperf_point(MAGPIE_RUN_PHASE="server"), _base("sglang"), _settings(LifecycleMode.BOOT))
+    config = suite_config(_mlperf_point(HYPERLOOM_RUN_PHASE="server"), _base("sglang"), _settings(LifecycleMode.BOOT))
 
     assert (config.workload, config.mlperf) == (WorkloadKind.NONE, None)
 
 
 def test_an_mlperf_server_phase_point_boots_the_server_its_measured_round_reuses() -> None:
     base = _base("sglang")
-    boot = suite_config(_mlperf_point(MAGPIE_RUN_PHASE="server"), base, _settings(LifecycleMode.BOOT))
+    boot = suite_config(_mlperf_point(HYPERLOOM_RUN_PHASE="server"), base, _settings(LifecycleMode.BOOT))
     reuse = suite_config(_mlperf_point(), base, _settings(LifecycleMode.REUSE))
 
     assert boot.server.served_model_name == reuse.server.served_model_name == "kimi-k3"

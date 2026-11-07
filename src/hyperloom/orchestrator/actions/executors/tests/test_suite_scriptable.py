@@ -101,7 +101,7 @@ def test_a_scriptable_profile_point_captures_the_script_run() -> None:
 @pytest.mark.parametrize(
     ("envs", "settings", "message"),
     [
-        ({"MAGPIE_RUN_PHASE": "server"}, _settings(), "neither boots one nor reuses one"),
+        ({"HYPERLOOM_RUN_PHASE": "server"}, _settings(), "neither boots one nor reuses one"),
         ({}, _settings(LifecycleMode.REUSE), "neither boots one nor reuses one"),
         ({"BENCHMARK_BASE_URL": "http://head:8888"}, _settings(), "not the external server at http://head:8888"),
         ({}, replace(_settings(), server_url="http://head:8888"), "not the external server at http://head:8888"),

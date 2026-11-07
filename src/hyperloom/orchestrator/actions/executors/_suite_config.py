@@ -151,9 +151,9 @@ WARMUP_SEED = 1
 
 _PORT_ENV = "PORT"
 _GPU_MASK_ENV = "ROCR_VISIBLE_DEVICES"
-_RUN_PHASE_ENV = "MAGPIE_RUN_PHASE"
+_RUN_PHASE_ENV = "HYPERLOOM_RUN_PHASE"
 _SERVER_ONLY_PHASE = "server"
-_CLIENT_TRUST_ENV = "MAGPIE_TRUST_REMOTE_CODE"
+_CLIENT_TRUST_ENV = "BENCH_TRUST_REMOTE_CODE"
 _TOKENIZER_MODE_ENV = "HYPERLOOM_CLIENT_TOKENIZER_MODE"
 _REMOTE_SERVER_ENV = "BENCHMARK_BASE_URL"
 _PROBE_ENV = "HYPERLOOM_EVAL_PROBE"
@@ -723,7 +723,7 @@ def _scriptable_config(
 def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings) -> SuiteConfig:
     """The config one round of the point ``document`` runs from, composed on ``base``.
 
-    A point whose ``MAGPIE_RUN_PHASE`` is ``server`` only boots the server, so its round runs no load and no eval; one
+    A point whose ``HYPERLOOM_RUN_PHASE`` is ``server`` only boots the server, so its round runs no load and no eval; one
     that sets ``EVAL_ONLY`` runs the eval and no load, as InferenceX's ``run_benchmark_serving`` does. A client-only round (``settings.server_url`` or the point's ``BENCHMARK_BASE_URL``) holds its server as ``external``.
 
     Raises:
@@ -907,7 +907,7 @@ class SuiteRound:
 
     ``warmup`` marks a discarded round, which draws its prompts with the warmup seed so it cannot prime the measured
     round's prefix cache. ``boot_only`` marks a round that only brings the server up, running the point as a
-    ``MAGPIE_RUN_PHASE=server`` point: no load and no eval. ``env_drop`` names host variables the round's server and client do not inherit.
+    ``HYPERLOOM_RUN_PHASE=server`` point: no load and no eval. ``env_drop`` names host variables the round's server and client do not inherit.
     ``serving_lease`` is the Ray lease whose actor runs the round on the GPUs it holds, ``None`` to run it here.
     ``checkpoint`` stops an AgentX round that trails its reference; its ruling lands in ``round_dir``.
     """
