@@ -361,7 +361,9 @@ def runner_template_payload(
     foreground and only when the directories were made), then starts :func:`runner_start_shell_line` with
     ``runner_args`` under ``nohup`` in the background, with ``env`` set for it alone and its output in ``boot_log``
     (``runner-boot.log`` next to the scratch directory, never inside the runner's own). A step that never returned
-    would keep the sandbox from ever turning ready (see the module's documentation). ``runner_args`` get
+    would keep the sandbox from ever turning ready (see the module's documentation), and so would a background part
+    that held the step's stdin, stdout or stderr: a platform reading the step's output to its end would wait for the
+    runner, so the background part has its own. ``runner_args`` get
     ``--spec-wait-sec`` :data:`TEMPLATE_SPEC_WAIT_SEC` unless they name it.
 
     A start that fails before anything wrote ``status.json`` (the directories, ``pre``, or the started line ending
@@ -381,7 +383,7 @@ def runner_template_payload(
     failed = _START_FAILED.replace("@OUT@", shlex.quote(dirs[1] if len(dirs) > 1 else _TEMPLATE_DIRS[1])).replace(
         "@BOOT@", shlex.quote(boot_log)
     )
-    background = f'( ({assignments}nohup sh -c {start} >{shlex.quote(boot_log)} 2>&1 || hl_start_failed "$?") &)'
+    background = f'( ({assignments}nohup sh -c {start} >{shlex.quote(boot_log)} 2>&1 || hl_start_failed "$?") </dev/null >/dev/null 2>&1 &)'
     made = "mkdir -p " + " ".join(shlex.quote(directory) for directory in dirs)
     return (
         f"{failed}; {{ " + " && ".join(part for part in (made, pre, background) if part) + '; } || hl_start_failed "$?"'
