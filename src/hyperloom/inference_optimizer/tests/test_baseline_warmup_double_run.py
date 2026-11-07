@@ -1753,8 +1753,8 @@ def test_a_native_agentx_warmup_keeps_its_seed(tmp_path, monkeypatch):
     assert env == {}
 
 
-def test_baseline_single_round_when_script_not_builtin(tmp_path):
-    """A non-builtin benchmark script falls back to one round even with double-run on."""
+def test_baseline_single_round_when_lifecycle_refused(tmp_path):
+    """A config server_lifecycle refuses falls back to one round even with double-run on."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -1767,13 +1767,19 @@ def test_baseline_single_round_when_script_not_builtin(tmp_path):
             "output_dir": str(output_dir),
             "timeout_sec": 10,
             "gpu_type": "mi300x",
-            "benchmark_script": "dsr1_fp8_mi300x.sh",
         }
     )
+    refused = {"eligible": False, "framework": "vllm", "port": 8888, "reason": "scriptable framework"}
 
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
+    with (
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ),
+        patch(
+            "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+            return_value=refused,
+        ),
     ):
         result = _run(executor(ctx))
 

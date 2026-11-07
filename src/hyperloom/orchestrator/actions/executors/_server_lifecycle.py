@@ -21,6 +21,7 @@ import yaml
 from hyperloom.common import rocm_smi
 from hyperloom.common.benchmark_config import PointError, read_benchmark_point
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.inference_optimizer import framework_registry
 from hyperloom_common.proctree import TERM_GRACE_SEC, group_members, running, signal_group
 from hyperloom.inference_optimizer.gpu_types import magpie_reuse_scripts
 from inference_suite import stop
@@ -163,11 +164,9 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     except (TypeError, ValueError):
         info["port"] = REUSE_PORT_DEFAULT
 
-    from .benchmark_backend import resolve_backend
-
-    refusal = resolve_backend().lifecycle_refusal(point, info["framework"])
-    if refusal is not None:
-        info["reason"] = refusal
+    workload_kind = point.workload_kind.strip().lower()
+    if workload_kind == framework_registry.SCRIPTABLE or framework_registry.is_scriptable(info["framework"]):
+        info["reason"] = "scriptable framework (server-less; no server_lifecycle)"
         return info
 
     from ._multi_node_env import is_multi_node

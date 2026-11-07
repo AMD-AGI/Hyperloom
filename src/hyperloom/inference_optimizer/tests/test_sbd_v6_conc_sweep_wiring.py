@@ -279,7 +279,14 @@ def test_a_rung_is_recorded_under_the_cap_its_runner_granted_it(session_dir: Pat
 
 def test_the_arm_says_which_execution_strategy_ran_the_ladder(session_dir: Path, baseline_yaml: Path):
     state = _state(baseline_yaml)
-    with session_scope(session_dir):
+    refused = {"eligible": False, "reason": "scriptable framework", "port": 8888, "framework": "xdit"}
+    with (
+        session_scope(session_dir),
+        patch(
+            "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
+            return_value=refused,
+        ),
+    ):
         _run(state, session_dir, recorder=_recorder(), run_grid=_all_succeed)
         ext = _sweep_event(session_dir)["ext"]
 

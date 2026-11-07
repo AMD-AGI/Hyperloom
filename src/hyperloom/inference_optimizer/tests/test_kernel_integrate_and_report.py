@@ -618,7 +618,6 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
 async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     session_dir, tmp_path, monkeypatch, output, total, intvty, stack, accuracy_outcome, decision
 ):
-    from hyperloom.orchestrator.actions.executors import benchmark_backend
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
@@ -628,13 +627,6 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     monkeypatch.setenv("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", "1")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "0")
     monkeypatch.setenv("RUN_EVAL", "true")
-    # AgentX currently falls back to one round; admit its script only in this
-    # test to exercise deferred double-run scheduling, not enable AgentX reuse.
-    monkeypatch.setattr(
-        benchmark_backend,
-        "MAGPIE_BUILTIN_SCRIPTS",
-        benchmark_backend.MAGPIE_BUILTIN_SCRIPTS | {"aiperf_client.sh"},
-    )
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
     target, patch_file = _write_patch_pair(tmp_path)
