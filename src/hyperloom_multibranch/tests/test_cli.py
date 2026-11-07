@@ -1752,7 +1752,8 @@ def test_a_spec_measured_locally_whose_tp_this_container_cannot_hold_ends_the_ru
 def test_a_spec_measured_locally_on_a_container_given_fewer_cards_than_rocm_smi_shows_ends_the_run_for_good(
     host: Host, agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("ROCR_VISIBLE_DEVICES")
+    for name in visible_devices.COUNTING_VISIBLE_DEVICE_VARS:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(visible_devices, "rocm_smi_gpu_count", lambda: 8)
     (tmp_path / "dri").mkdir()
     (tmp_path / "dri" / "renderD128").touch()
