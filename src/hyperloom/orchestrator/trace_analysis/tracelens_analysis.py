@@ -55,6 +55,7 @@ from ._collective_candidates_inject import _inject_collective_candidates
 from ._kernel_roofline import default_roofline_fields
 from ._kernel_search import refresh_kernel_search_roots
 from ._perf_report_analysis import analyze_perf_report
+from ._stream_overlap_repair import clamp_stream_overlaps
 from ._trace_gates import WorkloadShares, _evaluate_idle_gate_with_graph_guard, _evaluate_low_compute_gate
 from ._trace_inputs import (
     TraceInputs,
@@ -849,6 +850,22 @@ def _split_steady_state(run: AnalysisRun, job: TraceSplitJob) -> Path:
     return cli_trace_path
 
 
+def _clamp_chunk_stream_overlaps(run: AnalysisRun, chunk_path: Path) -> None:
+    """Truncate same-stream overrunning GPU events in the steady-state chunk before TraceLens reads it."""
+    try:
+        summary = clamp_stream_overlaps(chunk_path)
+    except (OSError, ValueError) as exc:
+        append_log(run.log_path, f"stream overlap clamp skipped for {chunk_path.name}: {exc}")
+        note_step(run.run_meta, "clamp_stream_overlaps", category="split", status="skipped", skip_reason=str(exc))
+        return
+    append_log(
+        run.log_path,
+        f"stream overlap clamp: {summary['clamped_events']} event(s), {summary['removed_ms']} ms removed "
+        f"(worst {summary['worst_event'] or '-'} {summary['worst_removed_ms']} ms) in {chunk_path.name}",
+    )
+    note_step(run.run_meta, "clamp_stream_overlaps", category="split", status="ok", **summary)
+
+
 def _resolve_capture_folder(run: AnalysisRun, trace_input: Path, analysis_trace_path: Path) -> Path | None:
     """Resolve the graph-capture folder TraceLens inference graph replay analysis reads, noting the step."""
     capture_folder: Path | None = (
@@ -979,6 +996,7 @@ def _analyse_trace(run: AnalysisRun, trace_input: Path, trace_files: list[Path])
     )
     split_dir = tracelens_dir / "trace_split"
     cli_trace_path = _split_steady_state(run, TraceSplitJob(analysis_trace_path, split_dir, tl_root))
+    _clamp_chunk_stream_overlaps(run, cli_trace_path)
 
     # Graph-capture folder for TraceLens inference graph replay analysis.
     capture_folder = _resolve_capture_folder(run, trace_input, analysis_trace_path)
