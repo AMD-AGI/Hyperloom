@@ -1679,7 +1679,7 @@ def teardown_variant_server(slot: Path, lifecycle: dict[str, Any] | None) -> lis
     names the persistent server Magpie rounds shared, ``None`` when they shared none; the server inference_suite
     rounds shared is recorded in ``slot`` itself.
     """
-    from ._server_lifecycle import stop_agentx_servers, teardown_lifecycle_server
+    from ._server_lifecycle import teardown_lifecycle_server
 
     survivors = list(stop(slot).survivors)
     if lifecycle is not None:
@@ -1688,7 +1688,7 @@ def teardown_variant_server(slot: Path, lifecycle: dict[str, Any] | None) -> lis
             framework=str(lifecycle.get("framework") or ""),
             port=int(lifecycle.get("port") or 0),
         )
-    return survivors + stop_agentx_servers(slot)
+    return survivors
 
 
 def _not_run_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> VariantResult:
