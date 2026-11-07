@@ -11,7 +11,14 @@ import statistics
 from typing import Any
 
 from hyperloom_common.coerce import to_float
-from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_TOTAL, graded_axes_of, holds_within_band
+from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
+    GRADED_TOTAL,
+    VERDICT_REVERT,
+    GradedComparison,
+    graded_axes_of,
+    holds_within_band,
+)
 
 
 def gain_pct(new: float | None, base: float) -> float | None:
@@ -20,6 +27,22 @@ def gain_pct(new: float | None, base: float) -> float | None:
     if coerced is None or coerced <= 0 or base <= 0:
         return None
     return (coerced - base) / base * 100.0
+
+
+def graded_gate_row(graded: GradedComparison, keep_threshold_pct: float, reason: str) -> dict[str, Any]:
+    """The gate row an attempt records for a graded verdict: the veto, the graded axes, or the output threshold.
+
+    The anchor is the reference; the floor the candidate has to clear belongs to the gate, as the tolerance does for
+    accuracy. A degraded pair fails the graded axes it could not supply.
+    """
+    on_axes = graded.graded_on_intvty or bool(graded.degrade_reason)
+    return {
+        "gate": graded.vetoed_by or ("graded_axes" if on_axes else "keep_threshold"),
+        "passed": False if graded.degrade_reason else graded.verdict != VERDICT_REVERT,
+        "observed": graded.candidate if graded.graded_on_intvty else gain_pct(graded.candidate, graded.reference),
+        "threshold": graded.reference if graded.graded_on_intvty else keep_threshold_pct,
+        "reason": reason,
+    }
 
 
 def gain_pct_or_zero(new: float, base: float) -> float:

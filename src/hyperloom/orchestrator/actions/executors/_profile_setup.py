@@ -390,7 +390,7 @@ def _apply_framework_profile(
     bench: dict[str, Any], envs: dict[str, Any], plan: CapturePlan, *, vllm_checkout: Path | None = None
 ) -> ProfileInstrumentation:
     framework = str(bench.get("framework") or "").lower()
-    patch_ok, sitecustomize, site = patch_for_profile(envs, framework, vllm_checkout=vllm_checkout)
+    patch_ok, sitecustomize, site, _annotations = patch_for_profile(envs, framework, vllm_checkout=vllm_checkout)
     if "atom" in framework:
         caps = _atom_tracelens_caps()
         conc = int(envs.get("CONC") or DEFAULT_CONC)
@@ -429,12 +429,14 @@ def write_tracelens_patch_status(envs: dict[str, Any], *, attempted: bool, patch
 
 class ProfilePatch(NamedTuple):
     """What patching for a profile gave its server: whether it takes the flags only the patch adds, whether SGLang
-    discovers shapes through ``sitecustomize``, and ``site``, the patched copy of the framework to put first on its
-    ``PYTHONPATH`` (``None``: nothing to put there)."""
+    discovers shapes through ``sitecustomize``, ``site``, the patched copy of the framework to put first on its
+    ``PYTHONPATH`` (``None``: nothing to put there), and whether its graph capture survives step ``annotations``
+    (false only when the patch, the graph-capture one in ``sitecustomize`` mode, was attempted and failed)."""
 
     patched: bool
     sitecustomize: bool
     site: Path | None
+    annotations: bool
 
 
 def patch_for_profile(envs: dict[str, Any], framework: str, *, vllm_checkout: Path | None = None) -> ProfilePatch:
@@ -452,7 +454,7 @@ def patch_for_profile(envs: dict[str, Any], framework: str, *, vllm_checkout: Pa
     sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
     write_tracelens_patch_status(envs, attempted=False, patched=False, fw=framework)
     if is_atom or not _tracelens_patch_enabled():
-        return ProfilePatch(False, sitecustomize, None)
+        return ProfilePatch(False, sitecustomize, None, True)
     if "vllm" in framework:
         patched = ensure_vllm_patched_for_tracelens(vllm_checkout)
     else:
@@ -469,9 +471,9 @@ def patch_for_profile(envs: dict[str, Any], framework: str, *, vllm_checkout: Pa
                 "It needs TRACELENS_ROOT with an exact "
                 "examples/custom_workflows/inference_analysis/sglang_gc_patch/sglang_<X_Y_Z> dir."
             )
-        return ProfilePatch(False, sitecustomize, site)
+        return ProfilePatch(False, sitecustomize, site, patch_ok)
     write_tracelens_patch_status(envs, attempted=True, patched=patch_ok, fw=framework)
-    return ProfilePatch(patch_ok, sitecustomize, site)
+    return ProfilePatch(patch_ok, sitecustomize, site, patch_ok)
 
 
 #: The server flag only TraceLens's SGLang roofline patch adds (``server_args.patch``, SGLang < 0.5.18), which an SGLang
@@ -520,9 +522,8 @@ def annotations_supported(envs: Mapping[str, Any]) -> bool:
 
     False only after a patch was attempted and failed: ``patch_for_profile`` writes the reason on
     exactly that path, and an image that ships the patch (``HYPERLOOM_ENABLE_PATCH=0``) keeps them.
-    Both profile paths ask this one question -- the fixed-sequence request body because an unpatched
-    server rejects the field, and the native path because Magpie probes the server whenever
-    ``detailed_annotations`` is true and raises, rather than degrading, when the fields are absent.
+    The fixed-sequence request body asks it because an unpatched server rejects the field; the native
+    path reads :attr:`ProfilePatch.annotations`, which also covers the ``sitecustomize`` graph-capture patch.
     """
     return envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") != _TRACELENS_PATCH_UNAVAILABLE
 

@@ -33,8 +33,10 @@ from hyperloom.sandbox.tests.test_sandbox_e2b import (
     GATEWAY_CUTS,
     KEY_SPENT_BODY,
     KEY_MEASUREMENT,
+    PENDING_TIMEOUT_MESSAGE,
     SANDBOX,
     _listed,
+    key_spent_body,
     _Service,
     service,  # noqa: F401 (the canned service the end-to-end case runs against)
 )
@@ -365,6 +367,32 @@ def test_a_sandbox_that_failed_while_its_create_was_cut_is_not_created_again_und
         _acquire(pool)
     assert _keys_created(service) == ["run-1:req-1:1", "run-1:req-1:1"]
     assert pool.active == 0
+
+
+def test_a_sandbox_that_timed_out_pending_while_its_create_was_cut_is_unavailable_not_failed(
+    service: _Service,
+) -> None:
+    """The replay is told the key is spent and that its sandbox ended in the service's pending timeout: no capacity in
+    time, as the 503 the cut hid would have said, so the attempt is unavailable and its key is not replaced."""
+    _platform_answers(service, GATEWAY_CUTS[0], (410, key_spent_body(PENDING_TIMEOUT_MESSAGE)))
+    pool = _e2b_pool(service)
+    with pytest.raises(SandboxUnavailable, match="pending_timeout: not running after") as unavailable:
+        _acquire(pool)
+    assert not isinstance(unavailable.value, (SandboxQuotaExceeded, AcquireTimedOut))
+    assert _keys_created(service) == ["run-1:req-1:1", "run-1:req-1:1"]
+    assert pool.active == 0
+
+
+def test_a_key_an_earlier_process_spent_on_a_failed_sandbox_is_replaced_not_the_end_of_the_attempt(
+    service: _Service,
+) -> None:
+    """The first send is told the key is spent, and the stored reason names the failure of that earlier sandbox: this
+    create made nothing, so the pool moves on to the attempt's next key."""
+    _platform_answers(service, (410, key_spent_body(CREATE_FAILED_MESSAGE)))
+    service.reply("GET", "/sandboxes/sbx-1", (200, _listed("sbx-1", dict(_THIS_RUN))))
+    runner = _acquire(_e2b_pool(service))
+    assert runner.sandbox_id == "sbx-1"
+    assert _keys_created(service) == ["run-1:req-1:1", "run-1:req-1:1:r1"]
 
 
 def test_a_create_cut_by_the_gateway_finds_its_pending_sandbox_through_the_pool(service: _Service) -> None:
