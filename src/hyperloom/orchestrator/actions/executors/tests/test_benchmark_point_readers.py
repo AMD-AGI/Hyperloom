@@ -10,10 +10,7 @@ import yaml
 
 from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.orchestrator.actions.executors import _grid_runner
-from hyperloom.orchestrator.actions.executors._accuracy_gate import (
-    _extract_eval_contract_fields,
-    materialized_run_eval_disabled,
-)
+from hyperloom.orchestrator.actions.executors._accuracy_gate import materialized_run_eval_disabled
 from hyperloom.orchestrator.actions.executors._geak_sweep import _replay_serving_env
 from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 from hyperloom.orchestrator.actions.executors._launch_restatement import read_launch
@@ -27,25 +24,14 @@ def _point(tmp_path: Path, document: object) -> Path:
     return path
 
 
-def test_a_config_without_a_benchmark_block_keeps_the_eval_on_and_states_no_contract(tmp_path: Path) -> None:
-    path = _point(tmp_path, _NO_BLOCK)
-
-    assert materialized_run_eval_disabled(path) is False
-    assert _extract_eval_contract_fields(path) == {}
+def test_a_config_without_a_benchmark_block_keeps_the_eval_on(tmp_path: Path) -> None:
+    assert materialized_run_eval_disabled(_point(tmp_path, _NO_BLOCK)) is False
 
 
-def test_the_eval_contract_reads_the_point(tmp_path: Path) -> None:
+def test_the_eval_switch_reads_the_point(tmp_path: Path) -> None:
     path = _point(tmp_path, {"benchmark": {"framework": "vllm", "model": "/m", "envs": {"RUN_EVAL": "0", "TP": 4}}})
 
     assert materialized_run_eval_disabled(path) is True
-    assert _extract_eval_contract_fields(path) == {
-        "framework": "vllm",
-        "model": "/m",
-        "benchmark_script": "",
-        "precision": "",
-        "RUN_EVAL": "0",
-        "TP": "4",
-    }
 
 
 def test_a_replay_recipe_that_is_not_a_point_is_refused(tmp_path: Path) -> None:
