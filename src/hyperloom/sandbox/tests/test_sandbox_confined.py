@@ -436,6 +436,31 @@ def test_a_plan_path_that_is_a_credential_location_runs_the_sandbox_as_before_lo
     assert fake.launches() == []
 
 
+def test_a_plan_that_refused_a_tree_runs_the_sandbox_as_before_locally_and_is_refused_hosted(
+    area: Path, providers: list[LocalSandboxProvider], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A plan whose maker found a tree it cannot bind safely (a model link into the home's ``.ssh``) says why; its
+    sandboxes are never launched in bubblewrap without it, nor with it."""
+    fake = FakeBwrap(area)
+    monkeypatch.setattr(confined, "choose_test_isolation", _given(fake.isolation()))
+    (area / "model").mkdir()
+    why = f"{area}/model/keys links to {area}/home/.ssh, in {area}/home/.ssh, a hidden entry of a home"
+    plan = RunnerPlan(readable=(area / "model",), refused=(why,))
+    provider = LocalSandboxProvider([_runner()], gpus=(0,), base_dir=area / "sandboxes", users=ProcessUsers(plan=plan))
+    providers.append(provider)
+    with caplog.at_level(logging.WARNING):
+        sandbox = provider.create("runner", role="measurement", timeout_sec=60, metadata={})
+    assert not sandbox.confined and fake.launches() == []
+    assert "runs unconfined, as before: " in caplog.text and why in caplog.text
+    sandbox.kill()
+
+    monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process(hosted=True, layer_bwrap=str(fake.path)))
+    with pytest.raises(SandboxDenied, match="a hidden entry of a home"):
+        provider.create("runner", role="measurement", timeout_sec=60, metadata={})
+    assert fake.launches() == []
+    assert provider.pool.free_cards() == (0,), "the refused create gave its card back"
+
+
 def test_a_plan_that_would_show_the_app_s_state_runs_the_sandbox_as_before(
     area: Path, providers: list[LocalSandboxProvider], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -181,6 +181,71 @@ def test_a_model_entry_linking_out_of_the_hub_binds_what_it_links_to_and_never_t
 
     linked = set(plan.readable) - {Path("/usr/bin/python3"), model}
     assert linked == {home / "config.json", home / "tokdir", data / "weights"}, plan.readable
+    assert plan.refused == ()
+
+
+_HIDDEN = "a hidden entry of a home where tools keep their logins"
+
+
+@pytest.mark.parametrize(
+    ("name", "target", "environ", "why"),
+    [
+        ("keys", "home/.ssh", {}, f"in {{root}}/home/.ssh, {_HIDDEN}"),
+        ("c", "home/.claude", {}, f"in {{root}}/home/.claude, {_HIDDEN}"),
+        ("conf", "home/.config", {}, f"in {{root}}/home/.config, {_HIDDEN}"),
+        ("a", "home/.aws", {}, f"in {{root}}/home/.aws, {_HIDDEN}"),
+        ("n", "home/.netrc", {}, f"in {{root}}/home/.netrc, {_HIDDEN}"),
+        ("id", "home/.ssh/id_rsa", {}, f"in {{root}}/home/.ssh, {_HIDDEN}"),
+        ("h", "home", {}, "a credential location of the app's"),
+        ("n", "logins/netrc", {"NETRC": "{root}/logins/netrc"}, "a credential location of the app's"),
+        ("gh", "xdg/gh", {"XDG_CONFIG_HOME": "{root}/xdg"}, "below the credential location {root}/xdg of the app's"),
+    ],
+)
+def test_a_model_entry_linking_into_a_credential_location_binds_nothing_and_the_plan_says_why(
+    tmp_path: Path, name: str, target: str, environ: dict[str, str], why: str
+) -> None:
+    """A mask hides a credential location below a bound path, never one the bound path is in: a link to the home's
+    ``.ssh``, ``.claude``, ``.config``, ``.aws`` or ``.netrc``, to the home, to a login file a variable names, or below
+    a credential directory a variable names, binds nothing. The plan says why, so its tests never run confined with it;
+    the model's other links bind as before."""
+    root = tmp_path.resolve()
+    home, model = root / "home", root / "model"
+    for path in ("home/.ssh/id_rsa", "home/.claude/.credentials.json", "home/.config/gh/hosts.yml", "home/.aws/x"):
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("SECRET")
+    for path in ("home/.netrc", "logins/netrc", "xdg/gh/hosts.yml", "home/tokdir/tok.json"):
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("SECRET" if "tokdir" not in path else "tokenizer")
+    model.mkdir()
+    (model / name).symlink_to(root / target)
+    (model / "tokenizer").symlink_to(home / "tokdir")
+    named = {"HOME": str(home), **{key: value.format(root=root) for key, value in environ.items()}}
+    plan = runner_plan(root / "session", model, {}, "/usr/bin/python3", named)
+
+    assert plan.readable == (Path("/usr/bin/python3"), model, home / "tokdir")
+    assert plan.refused == (
+        f"{model / name} links to {root / target}, {why.format(root=root)}, which its bind would show unmasked",
+    )
+
+
+def test_a_model_in_the_hub_cache_below_the_home_binds_its_blobs_and_the_hub(tmp_path: Path) -> None:
+    """The default hub cache is in the home's ``.cache``, which the plan binds anyway: a snapshot's links to their
+    blobs, and a model elsewhere linking into the hub, bind as they do anywhere else."""
+    home = tmp_path.resolve() / "home"
+    hub = home / ".cache" / "huggingface" / "hub"
+    blobs, snapshot = hub / "models--m" / "blobs", hub / "models--m" / "snapshots" / "abc"
+    blobs.mkdir(parents=True)
+    snapshot.mkdir(parents=True)
+    (blobs / "w").write_text("weights")
+    (snapshot / "weights").symlink_to("../../blobs/w")
+    elsewhere = tmp_path.resolve() / "model"
+    elsewhere.mkdir()
+    (elsewhere / "weights").symlink_to(blobs / "w")
+    for model in (snapshot, elsewhere):
+        plan = runner_plan(tmp_path / "session", model, {}, "/usr/bin/python3", {"HOME": str(home)})
+
+        assert plan.refused == ()
+        assert plan.readable == (Path("/usr/bin/python3"), model, blobs, hub)
 
 
 @pytest.mark.parametrize(
