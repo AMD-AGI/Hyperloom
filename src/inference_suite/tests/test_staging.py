@@ -548,6 +548,29 @@ def test_stage_refuses_a_source_off_the_pin_with_staging_missing(pinned, monkeyp
     assert err.startswith(f"{FailedStep.STAGING_MISSING.value}: ") and f"pinned at {'b' * 40}" in err
 
 
+@pytest.mark.parametrize("source", [False, True])
+def test_stage_without_git_on_path_is_refused_with_staging_missing(pinned, tmp_path, monkeypatch, capsys, source):
+    repo, cache = pinned
+    monkeypatch.setattr(staging, "_run_staging_step", _REAL_STAGING_STEP)
+    monkeypatch.setenv("PATH", str(tmp_path / "no-bin"))
+
+    assert _stage_cli(cache, *(("--source", str(repo)) if source else ())) == cli.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert err.startswith(f"{FailedStep.STAGING_MISSING.value}: ") and "'git'" in err
+    assert not (cache / MANIFEST_FILE).exists()
+
+
+def test_stage_into_a_cache_that_cannot_be_created_is_refused_with_staging_missing(pinned, tmp_path, capsys) -> None:
+    repo, _ = pinned
+    blocker = tmp_path / "a-file"
+    blocker.write_text("")
+    cache = blocker / "tools"
+
+    assert _stage_cli(cache, "--source", str(repo)) == cli.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert err.startswith(f"{FailedStep.STAGING_MISSING.value}: ") and str(cache) in err
+
+
 @pytest.mark.parametrize(("installed", "installs"), [(None, True), ("0.4.11", True), (LM_EVAL_VERSION, False)])
 def test_stage_installs_lm_eval_at_its_pin_into_the_staging_interpreter_unless_it_is_there(
     pinned, install, monkeypatch, capsys, installed, installs
