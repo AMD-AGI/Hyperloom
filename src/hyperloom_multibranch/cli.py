@@ -79,11 +79,12 @@ need the ``dev`` key (``HYPERLOOM_SANDBOX_KEY_DEV``) and ``USER_DATA_PATH``, the
 the same path; a usage error names what is missing.
 ``hosted run`` takes no arguments: it runs the session of the campaign spec a host injected, as
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
-sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`). Started again over a
-run whose ``session.json`` names a session, it finishes that session as ``final-only`` does. It tells the host the run
-is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment, a missing package of
-the ``hosted`` extra or the runner cache keeps a session from running, with exit code 2 for a refused spec or session
-and 1 otherwise; a crash leaves no ``exit.json``, and the host starts the run again.
+sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`) or on this container's
+cards, as the spec says. Started again over a run whose ``session.json`` names a session, it finishes that session as
+``final-only`` does. It tells the host the run is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when
+the spec, the environment, agents it cannot isolate, a missing package of the ``hosted`` extra or the runner cache keeps
+a session from running, with exit code 2 for a refused spec or session and 1 otherwise; a crash leaves no ``exit.json``,
+and the host starts the run again. Each command says at start how agents are isolated; manifest and report record it.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
@@ -120,6 +121,7 @@ from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_fr
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
+from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec
 from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
 from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
 from hyperloom.inference_optimizer.session.paths import workspace_root
@@ -140,14 +142,16 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     arm_grant_stop,
     campaign_spec,
     grant_deadline,
+    grant_tests_that_fit,
     hosted_storage,
     record_session,
     recorded_session,
     refuse_unhosted_branches,
     reported_stop_reason,
+    require_hosted_isolation,
+    require_local_image,
     run_argv,
     storage_problems,
-    toolbox_grant,
     write_final_exit,
 )
 from hyperloom_multibranch.scheduling import review
@@ -965,13 +969,13 @@ class ReadySession:
     services: SessionServices
 
 
-def hosted_ready_session(host: HostInfo, workload: Workload) -> ReadySession:
-    """:func:`ready_session` measured in the sandboxes of ``host``'s grant: the one builder of the peers of
-    ``hosted run`` and ``run --measurement hosted``."""
+def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = False) -> ReadySession:
+    """:func:`ready_session` measured in the sandboxes of ``host``'s grant, or this container's cards with ``local``:
+    the one builder of the peers of ``hosted run`` and ``run --measurement hosted``."""
 
     cache = hosted_runner_cache(os.environ)
-    inputs = PinnedToolboxInputs(host, cache)
-    return ready_session(workload, partial(load_hosted_peers, inputs=inputs), hosted_storage(host, os.environ, cache))
+    load = load_peers if local else partial(load_hosted_peers, inputs=PinnedToolboxInputs(host, cache))
+    return ready_session(workload, load, hosted_storage(host, os.environ, cache))
 
 
 def hosted_runner_cache(env: Mapping[str, str]) -> Path:
@@ -986,16 +990,6 @@ def hosted_runner_cache(env: Mapping[str, str]) -> Path:
             " storage the measurement sandboxes mount"
         )
     return Path(value)
-
-
-def grant_tests_that_fit(host: HostInfo) -> Callable[[int], int]:
-    """How many tests of a TP the grant ``host`` holds runs at once; raises ValueError when one does not fit, and
-    ImportError when the ``hosted`` extra is not installed."""
-
-    # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
-    from hyperloom_multibranch.toolbox.hosted_toolbox import parallel_tests_for
-
-    return partial(parallel_tests_for, toolbox_grant(host.grant_limits))
 
 
 def ready_session(
@@ -1046,16 +1040,19 @@ def hosted_run() -> int:
 
 
 def _hosted_start(host: HostInfo) -> HostedStart:
-    """A new session of the spec, or ``final-only`` over the session ``session.json`` names; raises ValueError when
-    the spec or that session is refused, ImportError when a package of the ``hosted`` extra is missing, and what
-    :func:`ready_session` raises."""
+    """A new session of the spec, or ``final-only`` over the session ``session.json`` names, measured where the spec
+    says; raises ValueError when the spec or that session is refused, ImportError when a package of the ``hosted``
+    extra is missing, and what :func:`require_hosted_isolation` and :func:`ready_session` raise."""
 
     deadline = grant_deadline(host, datetime.now(timezone.utc))
+    spec = campaign_spec(host)
+    require_hosted_isolation(spec, os.environ)
+    require_local_image(spec, os.environ)
     previous = recorded_session(host.state_dir)
     persisted = None if previous is None else persisted_run(previous)
-    settings = _hosted_settings(host, deadline.session_hours) if persisted is None else persisted.settings
+    settings = _hosted_settings(host, spec, deadline.session_hours) if persisted is None else persisted.settings
     require_session_environment(settings, os.environ)
-    ready = hosted_ready_session(host, settings.workload)
+    ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
     if persisted is not None:
         run = partial(final_only, persisted, ready.peer_factory, ready.services)
     else:
@@ -1071,12 +1068,13 @@ def _stop_before_grant_ends(deadline: GrantDeadline) -> None:
         arm_grant_stop(max(0.0, deadline.stop_after_sec))
 
 
-def _hosted_settings(host: HostInfo, session_hours: Callable[[float], float]) -> RunSettings:
-    spec = campaign_spec(host)
-    tests_that_fit = grant_tests_that_fit(host)
+def _hosted_settings(host: HostInfo, spec: CampaignSpec, session_hours: Callable[[float], float]) -> RunSettings:
+    local = spec.measurement == MEASUREMENT_LOCAL
+    tests_that_fit = machine_parallel_tests if local else grant_tests_that_fit(host)
     argv = run_argv(spec, session_hours(spec.max_hours), tests_that_fit(spec.tp))
     settings = settings_from(_parsed_run(argv), tests_that_fit)
-    refuse_unhosted_branches(settings, host, os.environ)
+    if not local:
+        refuse_unhosted_branches(settings, host, os.environ)
     return settings
 
 

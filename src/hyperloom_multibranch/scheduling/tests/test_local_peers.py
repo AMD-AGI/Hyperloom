@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import os
 import subprocess
 import urllib.request
@@ -22,12 +23,18 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from hyperloom.common import agent_isolation
+from hyperloom.common.agent_isolation import BWRAP, NONE
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path, is_magpie_agentx
+from hyperloom.common.env_safety import SPECIALIST_USER_ENV
 from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest
 from hyperloom.inference_optimizer import inferencex_checkout
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
+from hyperloom_common import bwrap as bwrap_module
+from hyperloom_common.bwrap import BwrapProbe
 from hyperloom_common.env import forge_explicitly_enabled
 from hyperloom.common.perf_metric import agentx_enabled
+from hyperloom.common import visible_devices
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBase, UnsupportedComponentError
@@ -57,7 +64,9 @@ from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.hosted_peers import HostedSandboxes
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayout, create_session
+from hyperloom_multibranch.scheduling import launch_isolation as launch_isolation_module
 from hyperloom_multibranch.scheduling import local_peers as local_peers_module
+from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, launch_isolation
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
     AGENTX_TRACE_SEC,
@@ -72,6 +81,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     measurement_host,
     model_backed_sessions,
     native_trees,
+    render_nodes,
     require_framework_package,
     specialist_command,
     specialist_recall,
@@ -402,6 +412,61 @@ def test_the_cards_are_the_ids_the_visible_device_mask_names(mask: str, monkeypa
     monkeypatch.setenv(mask, "6,2")
 
     assert machine_cards() == (6, 2)
+
+
+def _shown_and_held(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shown: int, held: int) -> None:
+    """No visible-device mask; ``rocm-smi`` shows ``shown`` cards and the machine holds ``held`` render nodes, beside a
+    node that is not one."""
+
+    for name in COUNTING_VISIBLE_DEVICE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(visible_devices, "rocm_smi_gpu_count", lambda: shown)
+    nodes = tmp_path / "dri"
+    nodes.mkdir()
+    (nodes / "card1").touch()
+    for number in range(held):
+        (nodes / f"renderD{128 + number}").touch()
+    monkeypatch.setattr(local_peers_module, "RENDER_NODE_DIR", str(nodes))
+
+
+@pytest.mark.parametrize(("shown", "held"), [(8, 8), (2, 3), (0, 0)])
+def test_without_a_mask_the_cards_are_as_many_as_rocm_smi_shows_when_the_machine_can_open_them(
+    shown: int, held: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shown_and_held(monkeypatch, tmp_path, shown, held)
+
+    assert machine_cards() == tuple(range(shown))
+
+
+def test_a_container_given_fewer_cards_than_rocm_smi_shows_names_both_counts_and_the_mask_to_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shown_and_held(monkeypatch, tmp_path, 8, 2)
+
+    with pytest.raises(PeersUnavailable) as refused:
+        machine_cards()
+
+    assert str(refused.value) == (
+        f"rocm-smi shows 8 cards, more than the 2 this machine can open (its render nodes, {tmp_path / 'dri'}/renderD*):"
+        " name the cards it was given in ROCR_VISIBLE_DEVICES"
+    )
+    with pytest.raises(ValueError, match="rocm-smi shows 8 cards, more than the 2 this machine can open"):
+        machine_parallel_tests(1)
+
+
+def test_a_mask_names_the_cards_whatever_render_nodes_the_machine_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _shown_and_held(monkeypatch, tmp_path, 8, 0)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5")
+
+    assert machine_cards() == (4, 5)
+
+
+def test_a_machine_without_render_nodes_holds_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(local_peers_module, "RENDER_NODE_DIR", str(tmp_path / "missing"))
+
+    assert render_nodes() == 0
 
 
 @pytest.mark.parametrize("framework", ["tensorrt-llm", "sglang"])
@@ -797,6 +862,60 @@ async def test_a_hosted_session_measures_in_the_services_sandboxes_under_its_too
         assert toolbox.trace_root == layout.toolbox and toolbox.blobs is built.setup.blobs
         assert built.peers.base_image_digest == IMAGE.digest
         assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
+
+
+@pytest.mark.parametrize(
+    ("problems", "launched", "level", "said_first"),
+    [
+        ((), BWRAP, logging.INFO, "agent isolation: specialists bwrap, sandboxes bwrap, tests bwrap"),
+        (
+            ("bwrap: not found",),
+            NONE,
+            logging.WARNING,
+            "specialists and agent and dev sandboxes and tests run unconfined on this host (",
+        ),
+    ],
+    ids=["bubblewrap", "no-bubblewrap"],
+)
+async def test_peers_on_this_machine_record_and_say_once_how_their_sandboxes_and_tests_run(
+    problems: tuple[str, ...],
+    launched: str,
+    level: int,
+    said_first: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    monkeypatch.delenv(SPECIALIST_USER_ENV, raising=False)
+    monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process())
+    monkeypatch.setattr(bwrap_module, "_PROBES", {})
+    monkeypatch.setattr(
+        bwrap_module, "_probe", lambda path, *_: BwrapProbe(path or "/usr/bin/bwrap", (0, 13, 1), problems)
+    )
+
+    with caplog.at_level(logging.INFO, logger=launch_isolation_module.__name__):
+        async with _peers(tmp_path, monkeypatch, WORKLOAD) as built:
+            isolation = built.peers.isolation
+
+    assert isolation == launch_isolation(local=True)
+    assert (isolation.specialists, isolation.sandboxes, isolation.tests) == (launched, launched, launched)
+    said = [record for record in caplog.records if record.name == launch_isolation_module.__name__]
+    assert [record.levelno for record in said] == [level]
+    assert said[0].getMessage().startswith(said_first)
+
+
+async def test_peers_measuring_in_the_services_sandboxes_record_their_sandboxes_and_tests_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    host = replace(HOST, backend=_service_sandboxes(monkeypatch, []))
+
+    async with _peers(tmp_path, monkeypatch, WORKLOAD, host) as built:
+        isolation = built.peers.isolation
+
+    assert (isolation.sandboxes, isolation.tests) == (HOSTED, HOSTED), "the grant's sandboxes run them, not this host"
+    assert not any(reason.startswith("running them as an account") for reason in isolation.reasons)
 
 
 async def test_an_agentx_test_in_the_services_sandboxes_may_outlast_its_trace_window_too(

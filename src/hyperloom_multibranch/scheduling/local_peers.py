@@ -70,6 +70,7 @@ from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet, ReproRunner
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule, Rule
 from hyperloom_multibranch.rulegate.service import GateService
+from hyperloom_multibranch.scheduling.launch_isolation import announce_launch_isolation, launch_isolation
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import AGENT_PORT, Workload
 from hyperloom_multibranch.specialist.fix_check import FixChecking
@@ -106,6 +107,8 @@ POINTS_DIR = "points"
 BENCHMARK_FILE = "benchmark.yaml"
 #: A claim's lease on the specialist tools: the runtime renews it every 10 minutes.
 CLAIM_TTL_SECONDS = 1800.0
+#: Where a machine's render nodes are, one ``renderD*`` for every card a process there can open.
+RENDER_NODE_DIR = "/dev/dri"
 #: The switch the main flow and the measurement renderer read an AgentX workload from
 #: (``hyperloom.common.perf_metric.agentx_enabled``).
 AGENTX_ENV = "HYPERLOOM_AGENTX"
@@ -327,7 +330,9 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     Raises :class:`PeersUnavailable` when the session's canonical measurement cannot be taken.
 
     Called on the event loop the session runs on. The toolbox is built, not started: the session starts it, and its
-    close releases the backend and the sandboxes. The MCP service is started; the session stop stops it.
+    close releases the backend and the sandboxes. The MCP service is started; the session stop stops it. How the
+    specialists, sandboxes and tests it launches are isolated is said once here, at WARNING when some are not
+    (:func:`~hyperloom_multibranch.scheduling.launch_isolation.announce_launch_isolation`).
     """
 
     from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
@@ -356,6 +361,8 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     briefs = _specialist_briefs(setup, repo)
     _serve_specialist_tools(mcp, toolbox, runtime_blackboard, briefs)
     sandboxes = branch_sandboxes(host.backend, setup, lambda branch: built.worktrees(branch))
+    isolation = launch_isolation(local=host.backend.on_this_machine)
+    announce_launch_isolation(isolation)
     leases = _lend_dev_sandboxes(mcp, setup, toolbox, runtime_blackboard, sandboxes)
     tokens = McpSpecialistTokens(mcp)
     rendered = canonical_dir / RENDERED_CANONICAL
@@ -377,7 +384,17 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     gate_service = GateService(gate_blackboard, toolbox, rule, toolbox)
     regression = RegressionSet(gate_blackboard, runner, repo, pool=session_cases(host.image.digest, gate_blackboard))
     return Peers(
-        runtime, toolbox, repo, gate_service, mcp, briefs, host.image.digest, gate, regression, built.dossier_pass
+        runtime,
+        toolbox,
+        repo,
+        gate_service,
+        mcp,
+        briefs,
+        host.image.digest,
+        gate,
+        regression,
+        isolation,
+        built.dossier_pass,
     )
 
 
@@ -468,9 +485,24 @@ def _lend_dev_sandboxes(
     return leases
 
 
+def render_nodes() -> int:
+    """How many render nodes, ``renderD*`` in :data:`RENDER_NODE_DIR`, this machine holds: one for every card a
+    process here can open, so a container a device plugin gave some of a node's cards holds theirs alone."""
+
+    from pathlib import Path
+
+    try:
+        return sum(1 for node in Path(RENDER_NODE_DIR).iterdir() if node.name.startswith("renderD"))
+    except OSError:
+        return 0
+
+
 def machine_cards() -> tuple[int, ...]:
     """The cards of this machine the session may use: the absolute ids the first visible-device mask set names, or,
-    when none is set, as many as ``rocm-smi`` shows from card 0; none when neither shows any.
+    when none is set, as many as ``rocm-smi`` shows from card 0; none when neither shows any. Raises
+    :class:`PeersUnavailable` when ``rocm-smi`` shows more cards than this machine holds render nodes
+    (:func:`render_nodes`): in a container given some of a node's cards it shows them all, and a test leased one it
+    was not given could not open it.
 
     The ids are absolute because every sandbox's ``ROCR_VISIBLE_DEVICES`` is set to its leased cards in place of the
     mask this process runs under; a mask of device UUIDs names no id, so it leaves no card. The main flow resolves its
@@ -483,7 +515,13 @@ def machine_cards() -> tuple[int, ...]:
         mask = os.environ.get(name)
         if mask is not None:
             return tuple(parse_device_list(mask))
-    return tuple(range(detect_gpu_count()))
+    shown, nodes = detect_gpu_count(), render_nodes()
+    if shown > nodes:
+        raise PeersUnavailable(
+            f"rocm-smi shows {shown} cards, more than the {nodes} this machine can open (its render nodes,"
+            f" {RENDER_NODE_DIR}/renderD*): name the cards it was given in ROCR_VISIBLE_DEVICES"
+        )
+    return tuple(range(shown))
 
 
 def measurement_host(env: Mapping[str, str], workload: Workload, backend: ToolboxBackend) -> MeasurementHost:
@@ -580,11 +618,15 @@ def _modified_tracked_files(root: str) -> list[str]:
 
 def machine_parallel_tests(tp: int) -> int:
     """How many tests of ``tp`` cards the local toolbox runs at once on this machine's cards; raises ``ValueError``
-    when a test of ``tp`` cards does not fit on them."""
+    when a test of ``tp`` cards does not fit on them, or its cards cannot be told (:func:`machine_cards`)."""
 
     from hyperloom_multibranch.toolbox.local_hosted import max_parallel_tests
 
-    return max_parallel_tests(len(machine_cards()), tp)
+    try:
+        cards = machine_cards()
+    except PeersUnavailable as exc:
+        raise ValueError(str(exc)) from exc
+    return max_parallel_tests(len(cards), tp)
 
 
 def specialist_model(env: Mapping[str, str]) -> str:
@@ -856,6 +898,7 @@ __all__ = [
     "InferenceXCheckout",
     "LocalCards",
     "MeasurementHost",
+    "RENDER_NODE_DIR",
     "SessionWiring",
     "SpecialistSessions",
     "ToolboxBackend",
@@ -866,6 +909,7 @@ __all__ = [
     "measurement_host",
     "model_backed_sessions",
     "peers_on",
+    "render_nodes",
     "require_framework_package",
     "specialist_command",
     "specialist_model",
