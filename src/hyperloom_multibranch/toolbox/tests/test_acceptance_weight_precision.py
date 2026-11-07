@@ -81,6 +81,11 @@ SETTINGS = [
     ("--dtype", "bfloat16", "float16", "--dtype"),
     ("--model", "/models/bf16", "/models/fp8", "the checkpoint"),
     ("--model-path", "/models/bf16", "/models/fp8", "the checkpoint"),
+    ("--revision", "abc123", "def456", "the checkpoint's revision"),
+    ("--config", "/cfg/a.yaml", "/cfg/b.yaml", "--config"),
+    ("--modelopt-quant", "fp8", "nvfp4", "--modelopt-quant"),
+    ("--torchao-config", "int4wo-128", "int8wo", "--torchao-config"),
+    ("--quantize-and-serve", "true", "false", "--quantize-and-serve"),
 ]
 
 
@@ -142,6 +147,26 @@ OTHER_FORMS = [
     ("--model-pa /models/fp8", "the checkpoint: (not set) -> /models/fp8"),
     ("--online_q /quant/a.yaml", "--online-quant-config: (not set) -> /quant/a.yaml"),
     ("--quantization-c.linear fp8_per_channel", "--quantization-config: (not set) -> .linear fp8_per_channel"),
+    # The same readings for the flags added with Arbor's copy of the list.
+    ("--revision=abc123", "the checkpoint's revision: (not set) -> abc123"),
+    ("--rev abc123", "the checkpoint's revision: (not set) -> abc123"),
+    ("--revision.x abc123", "the checkpoint's revision: (not set) -> .x abc123"),
+    ("--config=/cfg/b.yaml", "--config: (not set) -> /cfg/b.yaml"),
+    ("--conf /cfg/b.yaml", "--config: (not set) -> /cfg/b.yaml"),
+    ("--config.x /cfg/b.yaml", "--config: (not set) -> .x /cfg/b.yaml"),
+    ("--modelopt-quant=fp8", "--modelopt-quant: (not set) -> fp8"),
+    ("--modelopt_quant fp8", "--modelopt-quant: (not set) -> fp8"),
+    ("--modelopt fp8", "--modelopt-quant: (not set) -> fp8"),
+    ("--modelopt-quant.x fp8", "--modelopt-quant: (not set) -> .x fp8"),
+    ("--torchao-config=int4wo-128", "--torchao-config: (not set) -> int4wo-128"),
+    ("--torchao_config int4wo-128", "--torchao-config: (not set) -> int4wo-128"),
+    ("--torchao int4wo-128", "--torchao-config: (not set) -> int4wo-128"),
+    ("--torchao-config.x int4wo-128", "--torchao-config: (not set) -> .x int4wo-128"),
+    ("--quantize-and-serve", "--quantize-and-serve: (not set) -> (on)"),
+    ("--quantize-and-serve=true", "--quantize-and-serve: (not set) -> true"),
+    ("--quantize_and_serve", "--quantize-and-serve: (not set) -> (on)"),
+    ("--quantize", "--quantize-and-serve: (not set) -> (on)"),
+    ("--quantize-and-serve.x 1", "--quantize-and-serve: (not set) -> .x 1"),
 ]
 
 
@@ -294,7 +319,7 @@ def _changes(before: str, after: str) -> list[str]:
             "--quantization- x",
             ["--quantization-config: (not set) -> x", "--quantization-param-path: (not set) -> x"],
         ),
-        ("", "--mod /m", ["the checkpoint: (not set) -> /m"]),
+        ("", "--mod /m", ["--modelopt-quant: (not set) -> /m", "the checkpoint: (not set) -> /m"]),
         ("", "-- --max-num-seqs 8", []),
     ],
 )
@@ -311,3 +336,224 @@ def test_a_removal_from_the_resolved_launch_is_a_value_of_its_own() -> None:
 def test_a_removal_is_read_in_every_form_of_its_flag() -> None:
     removed = LaunchConfig(remove_args=("--quantization_config",))
     assert weight_precision_changes(LaunchConfig(), removed) == ["--quantization-config: (not set) -> <removed>"]
+
+
+# --- the override flags: what they set under a weight-precision key -------------------------------------------------
+
+HF = "--hf-overrides (dtype, quantization_config, torch_dtype)"
+JSON_ARGS = "--json-model-override-args (dtype, quantization_config, torch_dtype)"
+
+#: A candidate launch that sets a weight-precision key through an override flag, on a root that sets none, and the
+#: change it is refused for.
+OVERRIDES_ADDED = [
+    ('--hf-overrides \'{"torch_dtype": "float16"}\'', f'{HF}: (not set) -> torch_dtype="float16"'),
+    ('--hf-overrides \'{"dtype": "float16"}\'', f'{HF}: (not set) -> dtype="float16"'),
+    (
+        '--hf-overrides \'{"quantization_config": {"quant_method": "fp8"}}\'',
+        f'{HF}: (not set) -> quantization_config={{"quant_method":"fp8"}}',
+    ),
+    # At any depth of the value, through objects and arrays.
+    (
+        '--json-model-override-args \'{"text_config": {"quantization_config": {}}}\'',
+        f"{JSON_ARGS}: (not set) -> text_config.quantization_config={{}}",
+    ),
+    (
+        '--json-model-override-args \'{"layers": [{"torch_dtype": "float16"}]}\'',
+        f'{JSON_ARGS}: (not set) -> layers[0].torch_dtype="float16"',
+    ),
+    # vLLM's dotted form: its path ends at a key or passes through one, or its JSON value holds one.
+    ("--hf-overrides.torch_dtype float16", f'{HF}: (not set) -> torch_dtype="float16"'),
+    ("--hf-overrides.torch_dtype=float16", f'{HF}: (not set) -> torch_dtype="float16"'),
+    ("--hf_overrides.torch_dtype float16", f'{HF}: (not set) -> torch_dtype="float16"'),
+    ("--hf-overrides.text_config.torch_dtype float16", f'{HF}: (not set) -> text_config.torch_dtype="float16"'),
+    (
+        "--hf-overrides.quantization_config.quant_method fp8",
+        f'{HF}: (not set) -> quantization_config={{"quant_method":"fp8"}}',
+    ),
+    ('--hf-overrides.text_config \'{"dtype": "float16"}\'', f'{HF}: (not set) -> text_config.dtype="float16"'),
+    ("--hf-overrides.text_config.dtype+ float16", f'{HF}: (not set) -> text_config.dtype=["float16"]'),
+    # A prefix of an override flag is that flag.
+    ('--hf-over \'{"torch_dtype": "float16"}\'', f'{HF}: (not set) -> torch_dtype="float16"'),
+    ('--json-model \'{"dtype": "float16"}\'', f'{JSON_ARGS}: (not set) -> dtype="float16"'),
+    # A value that is not JSON counts by its text when the text names a key.
+    ("--hf-overrides torch_dtype=float16", f"{HF}: (not set) -> (unparsed) torch_dtype=float16"),
+    (
+        "--json-model-override-args {torch_dtype=float16}",
+        f"{JSON_ARGS}: (not set) -> (unparsed) {{torch_dtype=float16}}",
+    ),
+    (
+        "--hf-overrides.text_config torch_dtype=float16",
+        f"{HF}: (not set) -> (unparsed) .text_config torch_dtype=float16",
+    ),
+]
+
+
+@pytest.mark.parametrize(("server_args", "change"), OVERRIDES_ADDED)
+async def test_an_override_that_sets_a_weight_precision_key_is_refused(
+    tmp_path: Path, server_args: str, change: str
+) -> None:
+    await _refused_naming(tmp_path, _repo(), _delta(server_args), change)
+
+
+@pytest.mark.parametrize(
+    ("root_args", "server_args", "change"),
+    [
+        (
+            '--hf-overrides \'{"torch_dtype": "bfloat16"}\'',
+            '--hf-overrides \'{"torch_dtype": "float16"}\'',
+            f'{HF}: torch_dtype="bfloat16" -> torch_dtype="float16"',
+        ),
+        (
+            '--hf-overrides \'{"torch_dtype": "bfloat16", "max_position_embeddings": 32768}\'',
+            "--hf-overrides '{\"max_position_embeddings\": 65536}'",
+            f'{HF}: torch_dtype="bfloat16" -> (not set)',
+        ),
+        # The same value at another path is another setting.
+        (
+            '--hf-overrides \'{"text_config": {"torch_dtype": "bfloat16"}}\'',
+            '--hf-overrides \'{"torch_dtype": "bfloat16"}\'',
+            f'{HF}: text_config.torch_dtype="bfloat16" -> torch_dtype="bfloat16"',
+        ),
+        (
+            '--json-model-override-args \'{"quantization_config": {"quant_method": "fp8", "block": [128, 128]}}\'',
+            '--json-model-override-args \'{"quantization_config": {"quant_method": "fp8", "block": [64, 64]}}\'',
+            f'{JSON_ARGS}: quantization_config={{"block":[128,128],"quant_method":"fp8"}} -> quantization_config=',
+        ),
+        (
+            "--hf-overrides.torch_dtype bfloat16",
+            "--hf-overrides.torch_dtype float16",
+            f'{HF}: torch_dtype="bfloat16" -> torch_dtype="float16"',
+        ),
+    ],
+)
+async def test_an_override_that_changes_what_the_root_sets_under_a_key_is_refused(
+    tmp_path: Path, root_args: str, server_args: str, change: str
+) -> None:
+    await _refused_naming(tmp_path, _repo(root_args), _delta(server_args), change)
+
+
+async def test_an_override_flag_removed_from_the_resolved_launch_is_refused(tmp_path: Path) -> None:
+    """What the resolved launch's override sets cannot be read, so neither can what its removal changes."""
+    removal = _delta("--max-num-seqs 64", remove_args=("--hf-overrides",))
+    await _refused_naming(tmp_path, _repo(), removal, f"{HF}: (not set) -> <removed>")
+
+
+@pytest.mark.parametrize(
+    ("root_args", "server_args"),
+    [
+        ("", "--hf-overrides '{\"max_position_embeddings\": 65536}'"),
+        ("", "--hf-overrides.rope_scaling.factor 2"),
+        ("", "--hf-overrides.text_config.max_position_embeddings 4096"),
+        ("", '--json-model-override-args \'{"rope_scaling": {"type": "yarn", "factor": 4}}\''),
+        # A JSON key that only contains a key's name is not that key; only a value that is not JSON counts by its text.
+        ("", '--hf-overrides \'{"kv_cache_dtype": "fp8"}\''),
+        ("", "--hf-overrides max_position_embeddings=65536"),
+        (
+            '--hf-overrides \'{"torch_dtype": "bfloat16", "max_position_embeddings": 32768}\'',
+            '--hf-overrides \'{"max_position_embeddings": 65536, "torch_dtype": "bfloat16"}\'',
+        ),
+        ('--hf-overrides \'{"torch_dtype": "bfloat16"}\'', "--hf-overrides.torch_dtype bfloat16"),
+    ],
+)
+async def test_an_override_that_keeps_what_the_root_sets_under_the_keys_is_accepted(
+    tmp_path: Path, root_args: str, server_args: str
+) -> None:
+    assert await _refusal(tmp_path, _repo(root_args), _delta(server_args)) is None
+
+
+async def test_removing_an_override_that_sets_no_key_is_accepted(tmp_path: Path) -> None:
+    repo = _repo("--hf-overrides '{\"max_position_embeddings\": 32768}'")
+    assert await _refusal(tmp_path, repo, _delta("--max-num-seqs 64", remove_args=("--hf-overrides",))) is None
+
+
+# --- options of the frameworks that a spelling only begins, or that only begin one ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "server_args",
+    [
+        # vLLM's serve
+        "--config-format hf",
+        "--model-impl transformers",
+        "--model-class-overrides {}",
+        "--code-revision abc",
+        "--tokenizer-revision abc",
+        "--hf-token x",
+        "--hf-config-path /c",
+        # SGLang's server
+        "--model-checksum x",
+        "--model-config-parser x",
+        "--modelexpress-config x",
+        "--modelopt-checkpoint-restore-path /c",
+        "--modelopt-checkpoint-save-path /c",
+        "--modelopt-export-path /c",
+        "--hf-chat-template-name x",
+        "--torch-compile-max-bs 8",
+        # SGLang's diffusion server takes ``--mode`` for its ``--performance-mode``, though it begins ``--model``.
+        "--mode speed",
+    ],
+)
+def test_an_option_of_the_frameworks_is_read_as_itself(server_args: str) -> None:
+    assert _changes("", server_args) == []
+
+
+# --- Arbor's cases (arbor/tests/test_weight_precision.py) ------------------------------------------------------------
+
+BASE = "--tensor-parallel-size 1 --max-num-seqs 64 --kv-cache-dtype auto"
+
+
+def test_arbor_a_weight_quantization_added_is_a_change() -> None:
+    assert _changes(BASE, BASE + " --quantization fp8_per_channel") == ["--quantization: (not set) -> fp8_per_channel"]
+    assert _changes(BASE, BASE + " -q=mxfp4") == ["--quantization: (not set) -> mxfp4"]
+
+
+def test_arbor_removing_changing_or_reconfiguring_weight_precision_is_a_change() -> None:
+    quantized = BASE + " --quantization fp8"
+    assert _changes(quantized, BASE)
+    assert _changes(quantized, BASE + " --quantization mxfp8")
+    assert _changes(BASE, BASE + " --quantization-config '{\"a\": 1}'")
+    assert _changes(BASE, BASE + ' --online_quant_config \'{"global_quant_config": "ptpc_fp8"}\'')
+    assert _changes(BASE, BASE + " --dtype float16")
+    assert _changes(BASE + " --model-path /models/a-bf16", BASE + " --model-path /models/a-fp8")
+
+
+def test_arbor_intermediates_and_unchanged_weight_flags_are_not() -> None:
+    assert _changes(BASE, BASE.replace("--kv-cache-dtype auto", "--kv-cache-dtype fp8")) == []
+    assert _changes(BASE, BASE + " --enable-aiter-allreduce-fusion --attention-backend aiter") == []
+    assert _changes("--quantization fp8 " + BASE, BASE + " --quantization=fp8 --max-num-seqs 128") == []
+
+
+def test_arbor_the_spellings_a_parser_reads_as_a_listed_flag() -> None:
+    assert _changes(BASE, BASE + " -qfp8_per_channel") == ["--quantization: (not set) -> fp8_per_channel"]
+    assert _changes(BASE, BASE + " --dty float16") == ["--dtype: (not set) -> float16"]
+    assert _changes(BASE, BASE + " --quantization_config '{\"a\": 1}'") == [
+        '--quantization-config: (not set) -> {"a":1}'
+    ]
+    assert _changes(BASE, BASE + " --quantization-config.linear fp8_per_channel") == [
+        "--quantization-config: (not set) -> .linear fp8_per_channel"
+    ]
+    assert {change.split(":")[0] for change in _changes(BASE, BASE + " --quant fp8")} == {
+        "--quantization",
+        "--quantization-config",
+        "--quantization-param-path",
+        "--quantize-and-serve",
+    }
+
+
+def test_arbor_one_setting_under_two_spellings_is_one_setting() -> None:
+    root = BASE + " --quantization fp8"
+    assert _changes(root, BASE + " -q fp8 --quantization fp8") == []
+    assert _changes(root, BASE + " --quantization=fp8") == []
+
+
+def test_arbor_the_flags_toolbox_added_and_the_overrides() -> None:
+    assert _changes(BASE, BASE + " --revision abc123") == ["the checkpoint's revision: (not set) -> abc123"]
+    for flag in ("--modelopt-quant fp8", "--torchao-config int4wo-128", "--quantize-and-serve", "--config c.yaml"):
+        assert _changes(BASE, f"{BASE} {flag}"), flag
+    assert _changes(BASE, BASE + " --hf-overrides '{\"max_position_embeddings\": 65536}'") == []
+    assert _changes(BASE, BASE + ' --hf-overrides \'{"torch_dtype": "float16"}\'') == [
+        f'{HF}: (not set) -> torch_dtype="float16"'
+    ]
+    assert _changes(BASE, BASE + ' --json-model-override-args \'{"text_config": {"quantization_config": {}}}\'')
+    assert _changes(BASE, BASE + " --hf-overrides.torch_dtype float16")
+    assert _changes(BASE, BASE + " --hf-overrides.rope_scaling.factor 2") == []
