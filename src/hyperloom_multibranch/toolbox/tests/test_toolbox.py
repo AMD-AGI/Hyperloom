@@ -98,7 +98,7 @@ async def test_queued_tests_start_in_priority_order(tmp_path: Path) -> None:
     first = await rig.toolbox.submit_test(req("b1", server_args="--a"))
     explore = await rig.toolbox.submit_test(req("b2", server_args="--b"))
     profile = await rig.toolbox.submit_test(req("b3", purpose=Purpose.PROFILE, server_args="--c"))
-    integ = await rig.toolbox.submit_test(req("b4", purpose=Purpose.INTEGRATION, server_args="--d"))
+    integ = await rig.toolbox.submit_test(req("b4", purpose=Purpose.INTEGRATION, server_args="--x"))
     confirm = await rig.toolbox.submit_test(req("b5", purpose=Purpose.CONFIRM, retest_of=first, server_args="--e"))
     for _ in range(5):
         executor.gate.set()  # type: ignore[union-attr]
@@ -138,7 +138,7 @@ async def test_backpressure_refuses_the_submit_and_writes_nothing(tmp_path: Path
     await rig.toolbox.submit_test(req(server_args="--c"))
     written = len(rig.blackboard._state().requests)
     with pytest.raises(Backpressure) as refused:
-        await rig.toolbox.submit_test(req(server_args="--d"))
+        await rig.toolbox.submit_test(req(server_args="--x"))
     assert (refused.value.queued, refused.value.limit) == (2, 2)
     assert len(rig.blackboard._state().requests) == written
     await rig.toolbox.submit_test(req("b2", server_args="--e"))  # another branch is unaffected
