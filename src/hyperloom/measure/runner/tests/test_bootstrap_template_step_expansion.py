@@ -235,6 +235,7 @@ def test_the_step_returns_at_once_when_its_output_is_a_pipe(tmp_path: Path, boot
         try:
             os.killpg(step.pid, signal.SIGKILL)  # the runner the step left behind, and its sleep
         except ProcessLookupError:
+            # The group already exited on its own, so nothing is left to kill.
             pass
         step.communicate()
 
