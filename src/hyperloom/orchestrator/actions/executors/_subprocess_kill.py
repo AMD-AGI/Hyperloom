@@ -126,15 +126,9 @@ def kill_my_spawned_server(
         pass
 
 
-# Sentinel returned when the delegated MLPerf client fails its execution preflight.
-AGENTX_PREFLIGHT_RETURNCODE: int = -912
-
-#: The ``error_class`` that sentinel must carry, wherever it is classified. Named
-#: here beside the return code because three call sites decide on it -- the grid
-#: runner, the baseline executor and the writeback stop-reason gate -- and a
-#: string literal repeated across them can drift into a class nobody handles.
-#:
-#: A missing MLPerf dependency stops the run instead of opening a framework enablement round.
+#: The ``error_class`` of an AgentX attempt whose MLPerf client fails its preflight. The baseline
+#: executor writes it and the stop-reason gate decides on it; a missing MLPerf dependency stops the
+#: run instead of opening a framework enablement round.
 AGENTX_PREFLIGHT_ERROR_CLASS: str = "agentx_preflight"
 
 # -913 is ``_ray_serving._RAY_ACTOR_DIED_RC``.
@@ -501,7 +495,6 @@ __all__ = [
     "AGENTX_EARLY_STOP_ERROR_CLASS",
     "AGENTX_EARLY_STOP_RETURNCODE",
     "AGENTX_PREFLIGHT_ERROR_CLASS",
-    "AGENTX_PREFLIGHT_RETURNCODE",
     "BENCHMARK_SILENCE_TIMEOUT_ENV",
     "BENCHMARK_TIMEOUT_ENV",
     "AgentxCheckpointMissed",

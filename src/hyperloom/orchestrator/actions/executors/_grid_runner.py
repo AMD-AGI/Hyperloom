@@ -46,8 +46,6 @@ from ._agentx_checkpoint import AgentxCheckpoint, checkpoint_summary, read_check
 from ._subprocess_kill import (
     AGENTX_EARLY_STOP_ERROR_CLASS,
     AGENTX_EARLY_STOP_RETURNCODE,
-    AGENTX_PREFLIGHT_ERROR_CLASS,
-    AGENTX_PREFLIGHT_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     resolve_benchmark_timeouts,
@@ -483,16 +481,6 @@ def _invalid_measurement_error(
         death_excerpt or "benchmark_report missing valid throughput/completed requests",
         "benchmark_report_invalid_metric",
     )
-
-
-# A preflight abort is an environment fault: the AgentX client is missing for the whole grid, so every
-# variant after it is recorded as never started rather than dropped from the returned points.
-_AGENTX_PREFLIGHT_ABANDONED = StoppedByTheRun(
-    error_class=AGENTX_PREFLIGHT_ERROR_CLASS,
-    interrupted="AgentX preflight aborted the grid while this round was running",
-    never_started="AgentX preflight aborted the grid before this variant ran",
-    ends_the_batch=True,
-)
 
 
 def _multi_node_warmup_rounds(variant_expected_sec: Any) -> int:
@@ -1143,23 +1131,16 @@ def _abort_without_workspace(
 ) -> NoReturn:
     proc = round_.proc
     returncode = proc.returncode
-    preflight_abort = returncode == AGENTX_PREFLIGHT_RETURNCODE
     server_log = at.path / "server.log"
-    if preflight_abort:
-        found = _RoundError(
-            redact_secret_values((proc.stderr or "").strip()[-2000:]) or "AgentX preflight aborted the round",
-            AGENTX_PREFLIGHT_ERROR_CLASS,
-        )
-    else:
-        found = _RoundError(
-            death_excerpt(str(server_log))
-            or (
-                redact_secret_values((proc.stderr or proc.stdout)[-2000:])
-                if returncode != 0
-                else "no benchmark_* workspace produced"
-            ),
-            "no_benchmark_workspace",
-        )
+    found = _RoundError(
+        death_excerpt(str(server_log))
+        or (
+            redact_secret_values((proc.stderr or proc.stdout)[-2000:])
+            if returncode != 0
+            else "the round produced no run_dir"
+        ),
+        "no_benchmark_workspace",
+    )
     log.warning(
         "grid_runner: variant %s aborted: %s (rc=%s)",
         _variant_tag(run, at),
@@ -1167,21 +1148,9 @@ def _abort_without_workspace(
         returncode,
     )
     halt = _Halt.ON_FAILURE if returncode != 0 else _Halt.CONTINUE
-    abandoned: StoppedByTheRun | None = None
-    if preflight_abort:
-        halt, abandoned = _Halt.STOP, _AGENTX_PREFLIGHT_ABANDONED
-        # Environment, not variant.
-        log.error(
-            "grid_runner: variant %s aborted on the AgentX preflight; "
-            "abandoning the remaining %d point(s) -- the client is missing for the "
-            "whole grid, not for this variant: %s",
-            _variant_tag(run, at),
-            len(run.grid) - (at.idx + 1),
-            found.summary,
-        )
     _abort_variant(
         at,
-        _VariantFailure(found.error_class, found.summary, halt=halt, abandoned=abandoned),
+        _VariantFailure(found.error_class, found.summary, halt=halt),
         returncode=returncode,
         server_log_path=_existing_log_path(server_log),
         nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in artifacts],

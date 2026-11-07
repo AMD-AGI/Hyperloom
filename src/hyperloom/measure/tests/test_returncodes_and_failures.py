@@ -48,7 +48,6 @@ def test_the_literal_sentinels_in_failures_equal_their_definitions() -> None:
     kill = importlib.import_module("hyperloom.orchestrator.actions.executors._subprocess_kill")
     from hyperloom.measure import failures
 
-    assert failures._AGENTX_PREFLIGHT_RC == kill.AGENTX_PREFLIGHT_RETURNCODE
     assert failures._SESSION_TIME_EXHAUSTED_RC == kill.SESSION_TIME_EXHAUSTED_RETURNCODE
     assert failures._ORCHESTRATOR_CANCELLED_RC == kill.ORCHESTRATOR_CANCELLED_RETURNCODE
 
@@ -233,7 +232,6 @@ def test_an_error_class_nobody_handles_is_a_program_error_not_a_candidate_failur
         (returncodes.HOSTED_INFRA_FAILURE_RC, Disposition.FAILED, FailureClass.INFRA, "infra_failure"),
         (returncodes.HOSTED_SPEC_REJECTED_RC, Disposition.PROGRAM_ERROR, None, "spec_rejected"),
         (returncodes.HOSTED_RESULT_REJECTED_RC, Disposition.PROGRAM_ERROR, None, "result_rejected"),
-        (-912, Disposition.FAILED, FailureClass.INFRA, "agentx_preflight"),
         (-915, Disposition.STOPPED, None, "session_time_exhausted"),
         (-917, Disposition.STOPPED, None, "orchestrator_cancelled"),
     ],
