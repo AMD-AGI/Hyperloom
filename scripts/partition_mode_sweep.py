@@ -47,18 +47,22 @@ comparable to each other.
 Usage::
 
     # print the plan, touch nothing
-    python3 scripts/partition_mode_sweep.py --benchmark-config bench.yaml --dry-run
+    python3 scripts/partition_mode_sweep.py --suite-config round.yaml --dry-run
 
-    # sweep the modes the card reports it supports
+    # sweep the modes the card reports it supports, one inference_suite round per partition
     python3 scripts/partition_mode_sweep.py \\
-        --benchmark-config /path/to/benchmark.yaml \\
+        --suite-config /path/to/round.yaml \\
         --modes SPX,DPX,QPX,CPX \\
         --output-dir /shared/partition-sweep
 
-    # arbitrary workload; {device} and {output_dir} are substituted per partition
+    # own invocation; it must leave an inference_suite run_dir at {run_dir}
     python3 scripts/partition_mode_sweep.py \\
-        --benchmark-command 'my_bench --gpu {device} --out {output_dir}' \\
+        --benchmark-command 'my_bench --gpu {device} --run-dir {run_dir}' \\
         --per-stream-gib 20.7
+
+Each partition's round runs the ``--suite-config`` round on that partition's HIP device, on the config's port plus
+the partition index, with GPU telemetry off: ``amd-smi`` indices are not HIP indices, so a per-device sample would
+be attributed to the wrong silicon.
 
 Exit codes:
 
@@ -86,7 +90,7 @@ import subprocess  # nosec B404 - fixed argv, never a shell.
 import sys
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple, Sequence
 
@@ -95,7 +99,11 @@ _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import yaml  # noqa: E402
+
 from hyperloom_common.coerce import to_float  # noqa: E402
+from hyperloom_common.jsonio import read_json_strict  # noqa: E402
+from hyperloom.common.round_measurement import round_measurement  # noqa: E402
 from hyperloom.common.gpu_partition import (  # noqa: E402
     MODE_PARTITION_COUNTS,
     PARTITION_COUNT_ENV,
@@ -111,6 +119,8 @@ from hyperloom.common.gpu_partition import (  # noqa: E402
     partition_device_predicate,
     read_device_gib,
 )
+from inference_suite.contracts import LifecycleMode, Report, RunLayout, SuiteConfig  # noqa: E402
+from inference_suite.contracts.launch import Launch  # noqa: E402
 
 #: Read timeout for an ``amd-smi`` query. Generous because a card mid-transition
 #: answers slowly, and a spurious timeout here reads as a hardware fault.
@@ -146,12 +156,21 @@ _BUSY_MARKERS = ("amdsmi_status_busy", "device busy", "resident process", "try a
 _NO_PROCESS_MARKER = "no running processes"
 
 #: Throughput fields summed across partitions, in preference order for the
-#: headline figure. Named to match ``benchmark_result.extract_benchmark_measurement``.
+#: headline figure. Named to match ``hyperloom.common.round_measurement``.
 _THROUGHPUT_FIELDS = ("output_throughput", "total_token_throughput", "request_throughput")
 
-#: Per-request latency fields, in the same preference order the optimizer's
-#: latency budget uses.
-_LATENCY_FIELDS = ("e2el_mean_ms", "mean_e2el_ms", "e2el_ms")
+#: The per-request latency every round measurement carries.
+_LATENCY_FIELD = "e2el_mean_ms"
+
+#: Where a partition's round writes, under that partition's output dir.
+_ROUND_DIR = "round"
+
+#: The per-partition suite config the sweep writes beside the round.
+_PARTITION_CONFIG = "suite_config.yaml"
+
+#: Host GPU masks a round's server could inherit; any of them would stack on the
+#: per-partition HIP mask the round composes and move it onto other silicon.
+_GPU_MASK_ENVS = frozenset({"ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"})
 
 
 class SweepError(RuntimeError):
@@ -186,6 +205,11 @@ class PartitionRun:
     error: str = ""
 
     @property
+    def run_dir(self) -> Path:
+        """The inference_suite run_dir this partition's round writes."""
+        return self.output_dir / _ROUND_DIR
+
+    @property
     def ok(self) -> bool:
         return self.returncode == 0 and not self.error and bool(self.measurement)
 
@@ -215,12 +239,9 @@ class ModeResult:
 
     def worst_latency_ms(self) -> float | None:
         """The slowest partition's mean latency."""
-        for name in _LATENCY_FIELDS:
-            values = [to_float(run.measurement.get(name)) for run in self.runs]
-            present = [v for v in values if v is not None]
-            if present and len(present) == len(values):
-                return max(present)
-        return None
+        values = [to_float(run.measurement.get(_LATENCY_FIELD)) for run in self.runs]
+        present = [v for v in values if v is not None]
+        return max(present) if present and len(present) == len(values) else None
 
 
 # ------------------------------------------------------------------ amd-smi
@@ -553,6 +574,7 @@ def build_partition_command(
     values = {
         "device": str(device),
         "output_dir": str(output_dir),
+        "run_dir": str(output_dir / _ROUND_DIR),
         "mode": layout.mode,
         "partitions": str(layout.partitions),
         "partition_index": str(partition_index),
@@ -566,21 +588,50 @@ def build_partition_command(
     return out
 
 
-def magpie_command(benchmark_config: Path, python_exe: str = sys.executable) -> list[str]:
-    """The in-tree benchmark invocation, with placeholders for the fan-out."""
+def suite_command(python_exe: str = sys.executable) -> list[str]:
+    """The inference_suite round each partition runs, with placeholders for the fan-out."""
     return [
         python_exe,
         "-m",
-        "Magpie",
-        "-v",
-        "benchmark",
-        "--benchmark-config",
-        str(benchmark_config),
-        "--output-dir",
-        "{output_dir}",
-        "--run-mode",
-        "local",
+        "inference_suite",
+        "run",
+        "--config",
+        "{output_dir}/" + _PARTITION_CONFIG,
+        "--run-dir",
+        "{run_dir}",
     ]
+
+
+def read_suite_config(path: Path) -> SuiteConfig:
+    """The round every partition runs, refused unless one copy per partition can run side by side."""
+    try:
+        config = SuiteConfig.from_document(yaml.safe_load(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise SweepError(f"cannot read the suite config {path}: {exc}") from exc
+    if len(config.server.gpus) != 1:
+        raise SweepError(f"a partition is one device, but {path} serves on GPUs {list(config.server.gpus)}")
+    if config.lifecycle.mode is not LifecycleMode.OWN:
+        raise SweepError(
+            f"{path} has lifecycle {config.lifecycle.mode.value}; the sweep needs own, so every server is gone "
+            f"before the next mode is set"
+        )
+    if config.profile.enabled:
+        raise SweepError(f"{path} profiles its round, and a profiled round is never a measurement")
+    masks = sorted(_GPU_MASK_ENVS.intersection(config.server.env_inherit))
+    if masks:
+        raise SweepError(f"{path} lets the server inherit {', '.join(masks)}, which would move it off its partition")
+    return config
+
+
+def partition_config(config: SuiteConfig, run: PartitionRun) -> SuiteConfig:
+    """``config`` as ``run``'s partition runs it: its device, its own port, its run_dir, no GPU telemetry."""
+    server = replace(config.server, gpus=(run.hsa_device,), port=config.server.port + run.partition_index)
+    return replace(
+        config,
+        server=server,
+        telemetry=replace(config.telemetry, enabled=False),
+        paths=replace(config.paths, run_dir=str(run.run_dir)),
+    )
 
 
 def partition_env(
@@ -603,20 +654,35 @@ def partition_env(
     return env
 
 
-def read_measurement(output_dir: Path) -> dict[str, Any]:
-    """Parse one partition's benchmark report using the in-tree extractor."""
-    reports = sorted(output_dir.rglob("benchmark_report.json"))
-    if not reports:
+def read_measurement(run_dir: Path) -> dict[str, Any]:
+    """One partition's round measurement, or ``{}`` when it left no report.
+
+    Raises ``OSError`` or ``ValueError`` for a report or launch off its contract.
+    """
+    layout = RunLayout(run_dir)
+    if not layout.report.is_file():
         return {}
+    report = Report.from_document(read_json_strict(layout.report))
+    launch = Launch.from_document(read_json_strict(layout.launch)) if layout.launch.is_file() else None
+    return round_measurement(report, launch)
+
+
+def _measure(run: PartitionRun) -> None:
+    """Record ``run``'s measurement, or why it is not one."""
     try:
-        payload = json.loads(reports[-1].read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-
-    import hyperloom.orchestrator.actions.executors._grid_runner  # noqa: F401
-    from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
-
-    return extract_benchmark_measurement(payload if isinstance(payload, dict) else None, workspace=output_dir)
+        measurement = read_measurement(run.run_dir)
+    except (OSError, ValueError) as exc:
+        run.error = f"unreadable round under {run.run_dir}: {exc}"
+        return
+    if not measurement:
+        run.error = f"no round report under {run.run_dir}"
+    elif not measurement["valid_measurement"]:
+        run.error = (
+            f"round {measurement['run_status']} is not a valid measurement "
+            f"({measurement['failed_step']}: {measurement['failure_detail']})"
+        )
+    else:
+        run.measurement = measurement
 
 
 @dataclass(frozen=True)
@@ -627,6 +693,7 @@ class BenchmarkWorkload:
     output_root: Path
     streams_per_partition: int
     timeout_s: float
+    suite_config: SuiteConfig | None = None
 
 
 def run_mode(layout: PartitionLayout, devices: Sequence[int], *, workload: BenchmarkWorkload) -> list[PartitionRun]:
@@ -650,6 +717,9 @@ def run_mode(layout: PartitionLayout, devices: Sequence[int], *, workload: Bench
         env = partition_env(base, layout, device=device, streams_per_partition=workload.streams_per_partition)
         log = None
         try:
+            if workload.suite_config is not None:
+                document = partition_config(workload.suite_config, run).to_document()
+                (out_dir / _PARTITION_CONFIG).write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
             log = (out_dir / "benchmark.log").open("w", encoding="utf-8")
             proc = subprocess.Popen(  # nosec B603 - argv built from a template, no shell.
                 cmd,
@@ -686,9 +756,7 @@ def run_mode(layout: PartitionLayout, devices: Sequence[int], *, workload: Bench
         if run.returncode != 0:
             run.error = f"exited {run.returncode}; see {run.output_dir / 'benchmark.log'}"
             continue
-        run.measurement = read_measurement(run.output_dir)
-        if not run.measurement:
-            run.error = f"no benchmark_report.json under {run.output_dir}"
+        _measure(run)
     return runs
 
 
@@ -851,11 +919,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Comma-separated modes to try, in order. Default: every mode the card reports.",
     )
     source = ap.add_mutually_exclusive_group()
-    source.add_argument("--benchmark-config", type=Path, help="Run the in-tree Magpie benchmark with this config.")
+    source.add_argument(
+        "--suite-config",
+        type=Path,
+        help="inference_suite round config every partition runs, on its own device and port.",
+    )
     source.add_argument(
         "--benchmark-command",
-        help="Command to run per partition. {device} {output_dir} {mode} {partitions} "
-        "{partition_index} {cu} are substituted.",
+        help="Command to run per partition; it must leave an inference_suite run_dir at {run_dir}. "
+        "{device} {output_dir} {run_dir} {mode} {partitions} {partition_index} {cu} are substituted.",
     )
     ap.add_argument(
         "--output-dir",
@@ -1040,12 +1112,18 @@ def _write_report(sweep: _Sweep, *, entry_mode: str, gpu_id: int, output_root: P
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
 
+    suite_config: SuiteConfig | None = None
     if args.benchmark_command:
         template: list[str] = shlex.split(args.benchmark_command)
-    elif args.benchmark_config:
-        template = magpie_command(args.benchmark_config)
+    elif args.suite_config:
+        template = suite_command()
+        try:
+            suite_config = read_suite_config(args.suite_config)
+        except SweepError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
     else:
-        print("ERROR: one of --benchmark-config or --benchmark-command is required.", file=sys.stderr)
+        print("ERROR: one of --suite-config or --benchmark-command is required.", file=sys.stderr)
         return 2
     if args.streams_per_partition < 1:
         print("ERROR: --streams-per-partition must be at least 1.", file=sys.stderr)
@@ -1081,6 +1159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_root=output_root,
         streams_per_partition=args.streams_per_partition,
         timeout_s=args.timeout,
+        suite_config=suite_config,
     )
     sweep = _sweep_modes(args, card, workload=workload)
     unexpected = _write_report(sweep, entry_mode=card.entry_mode, gpu_id=args.gpu, output_root=output_root)
