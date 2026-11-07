@@ -118,3 +118,15 @@ def test_two_entries_naming_one_worktree_are_refused(tmp_path: Path) -> None:
 
     with pytest.raises(OSError, match="2 linked worktrees"):
         recorded_admin_dir(repo, worktree)
+
+
+def test_a_link_among_the_repositorys_worktrees_is_not_one_of_its_admin_dirs(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    worktree = _worktree(repo, tmp_path / "worktree")
+    admin = recorded_admin_dir(repo, worktree)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "gitdir").write_text((admin / "gitdir").read_text(encoding="utf-8"), encoding="utf-8")
+    (admin.parent / "linked").symlink_to(elsewhere)
+
+    assert recorded_admin_dir(repo, worktree) == admin
