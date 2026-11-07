@@ -38,8 +38,8 @@ from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
 from hyperloom.sandbox.confined import UNCONFINED_TESTS, local_test_isolation
 from hyperloom.sandbox.launcher import LAUNCHER_SOURCE
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate, ProcessUsers, RunnerPlan
-from hyperloom.sandbox.socket import SandboxDenied
-from hyperloom_common.bwrap import BwrapProbe
+from hyperloom.sandbox.socket import SandboxDenied, SandboxUnavailable
+from hyperloom_common.bwrap import BwrapProbe, BwrapSetupError
 
 FAKE_BWRAP = r"""#!{python} -I
 import json, os, sys
@@ -447,6 +447,62 @@ def test_a_bubblewrap_that_cannot_set_the_sandbox_up_is_the_runner_s_exit(
     _wait(lambda: sandbox.startup_exit_code() is not None)
     assert sandbox.startup_exit_code() == 1
     assert _log_says(sandbox, "bwrap: Can't bind mount"), "bubblewrap's own line is in the runner's log"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        BwrapSetupError("bwrap: Can't mount proc on /newroot/proc: Operation not permitted"),
+        TimeoutError("the holder neither started nor failed in time"),
+        ProcessLookupError(3, "the sandbox holder has ended"),
+    ],
+    ids=["setup", "timeout", "holder-gone"],
+)
+def test_a_command_whose_holder_cannot_be_had_is_refused_and_never_runs_unconfined(
+    area: Path, providers: list[LocalSandboxProvider], monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    fake = FakeBwrap(area)
+    monkeypatch.setattr(confined, "choose_test_isolation", _given(fake.isolation()))
+    provider = LocalSandboxProvider(
+        [LocalTemplate("dev", "dev")], base_dir=area / "sandboxes", users=ProcessUsers(plan=RunnerPlan())
+    )
+    providers.append(provider)
+    sandbox = provider.create("dev", role="dev", timeout_sec=60, metadata={})
+
+    def fails(*_args: object, **_kwargs: object) -> object:
+        raise failure
+
+    monkeypatch.setattr(confined.Holder, "start", fails)
+    with pytest.raises(SandboxUnavailable, match="bubblewrap cannot start the process"):
+        sandbox.run("touch ran")
+    with pytest.raises(SandboxUnavailable, match="bubblewrap cannot start the process"):
+        sandbox.run("touch ran-in-background", background=True)
+    assert sandbox.confined and fake.launches() == []
+    assert not (sandbox.fs / "work" / "ran").exists() and not (sandbox.fs / "work" / "ran-in-background").exists()
+
+
+def test_a_runner_whose_policy_bubblewrap_must_not_launch_is_refused_and_never_runs_unconfined(
+    area: Path, providers: list[LocalSandboxProvider], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeBwrap(area)
+    monkeypatch.setattr(confined, "choose_test_isolation", _given(fake.isolation()))
+    marker = area / "ran"
+    provider = LocalSandboxProvider(
+        [_runner(code=f"open({str(marker)!r}, 'w').close()")],
+        gpus=(0,),
+        base_dir=area / "sandboxes",
+        users=ProcessUsers(plan=RunnerPlan()),
+    )
+    providers.append(provider)
+
+    def refuses(*_args: object, **_kwargs: object) -> object:
+        raise IsolationRefused(["bubblewrap 0.9.0 cannot bind below a bound /tmp"])
+
+    monkeypatch.setattr(BwrapIsolation, "launch", refuses)
+    with pytest.raises(SandboxUnavailable, match="cannot bind below a bound /tmp"):
+        provider.create("runner", role="measurement", timeout_sec=60, metadata={})
+    assert not marker.exists() and fake.launches() == []
+    assert provider.pool.free_cards() == (0,), "the refused create gave its card back"
 
 
 def test_how_a_local_test_is_launched_is_named_with_why(monkeypatch: pytest.MonkeyPatch) -> None:
