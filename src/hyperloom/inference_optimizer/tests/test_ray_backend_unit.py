@@ -98,14 +98,10 @@ def test_worker_uses_invoking_policy_and_reanchors_session(monkeypatch):
         env={},
         cwd=None,
         timeout=7800,
-        silence_timeout_sec=600,
-        server_log_path="server.log",
-        server_already_ready=True,
         session_remaining_sec=42,
     ).run()
     assert result == (0, "out", "err")
     assert captured["timeout"] == 7800
-    assert captured["silence_timeout_sec"] == 600
     assert captured["session_deadline_sec"] == 5042
 
 
@@ -1025,9 +1021,6 @@ class TestTheSessionBudgetReachesTheRayWorker:
             env=None,
             cwd=None,
             timeout=60,
-            silence_timeout_sec=None,
-            server_log_path=None,
-            server_already_ready=False,
             session_remaining_sec=-1.0,
         ).run()
         assert rc == SESSION_TIME_EXHAUSTED_RETURNCODE
@@ -1039,9 +1032,6 @@ class TestTheSessionBudgetReachesTheRayWorker:
             env=None,
             cwd=None,
             timeout=60,
-            silence_timeout_sec=None,
-            server_log_path=None,
-            server_already_ready=False,
             session_remaining_sec=3600.0,
         ).run()
         assert rc == 0

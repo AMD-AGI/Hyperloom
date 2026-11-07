@@ -1,17 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Server-less (scriptable) benchmarks must leave the server-log watchdogs off."""
+"""Server-less (scriptable) benchmarks name no server log to watch."""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
-from inference_suite.server_log import LogCursor, LogScan
 from hyperloom.orchestrator.actions.executors.benchmark_run.records import (
     _config_framework,
     _watchdog_server_log_path,
@@ -35,44 +31,3 @@ def test_config_framework_reads_materialized_yaml(tmp_path):
     assert _config_framework(tmp_path / "missing.yaml") == ""
     cfg.write_text(yaml.safe_dump({"other": {"framework": "custom"}}), encoding="utf-8")
     assert _config_framework(cfg) == ""
-
-
-def _count_scans(monkeypatch) -> dict[str, int]:
-    calls = {"scan": 0}
-
-    def _scan(self, server_log_path):
-        calls["scan"] += 1
-        return LogScan(
-            saw_ready=False,
-            saw_progress=False,
-            saw_eval_start=False,
-            grew=False,
-            child_spoke=False,
-        )
-
-    monkeypatch.setattr(LogCursor, "advance", _scan)
-    return calls
-
-
-def test_no_server_log_leaves_both_watchdogs_disarmed(monkeypatch):
-    calls = _count_scans(monkeypatch)
-
-    proc = sk.run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(1.2)"],
-        watch=sk.RoundWatch(timeout=30, server_log_path=None),
-    )
-
-    assert proc.returncode == 0
-    assert calls == {"scan": 0}
-
-
-def test_server_log_is_scanned(monkeypatch, tmp_path: Path):
-    calls = _count_scans(monkeypatch)
-
-    proc = sk.run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(1.2)"],
-        watch=sk.RoundWatch(timeout=30, server_log_path=str(tmp_path / "server.log")),
-    )
-
-    assert proc.returncode == 0
-    assert calls["scan"] > 0

@@ -23,7 +23,7 @@ from inference_suite.contracts import SuiteConfig
 from . import _ray_runtime
 
 if TYPE_CHECKING:
-    from ._agentx_checkpoint import AgentxCheckpoint, SuiteRoundCheckpoint
+    from ._agentx_checkpoint import SuiteRoundCheckpoint
 
 log = logging.getLogger(__name__)
 
@@ -112,11 +112,8 @@ class SessionKillRound:
     env: dict[str, str] | None = None
     cwd: str | None = None
     timeout: int | float | None = None
-    silence_timeout_sec: float | None = None
-    server_log_path: str | None = None
-    server_already_ready: bool = False
     session_remaining_sec: float | None = None
-    checkpoint: AgentxCheckpoint | SuiteRoundCheckpoint | None = None
+    checkpoint: SuiteRoundCheckpoint | None = None
 
     def run(self) -> tuple[int, str, str]:
         """Ray worker body: run the subprocess under session-kill semantics."""
@@ -132,9 +129,6 @@ class SessionKillRound:
             cwd=self.cwd,
             watch=RoundWatch(
                 timeout=self.timeout,
-                silence_timeout_sec=self.silence_timeout_sec,
-                server_log_path=self.server_log_path,
-                server_already_ready=self.server_already_ready,
                 session_deadline_sec=session_remaining_to_deadline_sec(self.session_remaining_sec),
                 checkpoint=self.checkpoint,
             ),
@@ -173,9 +167,6 @@ class SuiteLeasedRound:
             env=self.env,
             timeout=self.timeout,
             session_remaining_sec=self.session_remaining_sec,
-            # The watchdog ticks its recorders only once it holds the server up; this round runs its own server and
-            # has no log for the watchdog to read that from.
-            server_already_ready=self.checkpoint is not None,
             checkpoint=self.checkpoint,
         ).run()
 

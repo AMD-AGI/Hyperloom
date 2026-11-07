@@ -4,7 +4,8 @@
 """A test whose server does not report ready within its boot limit ends there, as the candidate's failure.
 
 The rounds run a real child under the launcher's own watchdog (``run_with_session_kill``), so the cancellation the
-boot guard raises, the reaping and the ready stamp are the ones a sandbox sees; only ``run_grid`` is a stand-in.
+boot guard raises and the reaping are the ones a sandbox sees; ``run_grid`` is a stand-in whose server writes the ready
+stamp a round writes when its server reports ready.
 """
 
 from __future__ import annotations
@@ -45,13 +46,17 @@ TUNING_SERVER = (
     "log.write('[aiter] TunableOp: tuning gemm 17/4096 (M=64, N=5120, K=5120)\\n')\n"
     "time.sleep(300)\n"
 )
+#: The child's lines that report ready: the banner in its log and the round's ready stamp beside it.
+_REPORT_READY = (
+    "log.write('INFO:     Application startup complete.\\n')\n"
+    "open(sys.argv[1].rsplit('/', 1)[0] + '/server_ready_at', 'w').write(f'{time.time():.3f} {time.monotonic() - t0:.3f}\\n')\n"
+)
 #: A server that is ready after a moment and answers for a while.
 READY_SERVER = (
     "import sys, time\n"
+    "t0 = time.monotonic()\n"
     "log = open(sys.argv[1], 'a', buffering=1)\n"
-    "time.sleep(0.3)\n"
-    "log.write('INFO:     Application startup complete.\\n')\n"
-    "time.sleep(2.5)\n"
+    "time.sleep(0.3)\n" + _REPORT_READY + "time.sleep(2.5)\n"
 )
 
 
@@ -88,7 +93,7 @@ class _ServerGrid:
         proc = await asyncio.to_thread(
             run_with_session_kill,
             [sys.executable, "-c", self.script, str(log)],
-            watch=RoundWatch(timeout=30, server_log_path=str(log)),
+            watch=RoundWatch(timeout=30),
         )
         stopped = proc.returncode == ORCHESTRATOR_CANCELLED_RETURNCODE
         return [
@@ -230,12 +235,13 @@ def test_a_test_with_no_stamp_or_a_stamp_that_cannot_be_read_has_no_boot(tmp_pat
 #: between ``start build`` and ``finish build``, which for a CK-tile GEMM is longer than any other module's.
 BUILDING_SERVER = (
     "import sys, time\n"
+    "t0 = time.monotonic()\n"
     "log = open(sys.argv[1], 'a', buffering=1)\n"
     "log.write('[aiter] [pid=7 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under /j/build\\n')\n"
     "time.sleep(3.5)\n"
     "log.write('[aiter] finish build [module_gemm_a8w8_bpreshuffle_cktile], cost 3.5s\\n')\n"
-    "log.write('INFO:     Application startup complete.\\n')\n"
-    "time.sleep(2.5)\n"
+    + _REPORT_READY
+    + "time.sleep(2.5)\n"
 )
 #: A server whose aiter build never finishes.
 HUNG_BUILD_SERVER = (

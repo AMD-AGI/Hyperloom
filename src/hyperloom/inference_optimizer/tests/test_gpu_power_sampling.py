@@ -15,7 +15,6 @@ import pytest
 
 from hyperloom_common import gpu_telemetry
 from hyperloom_common.gpu_telemetry import GpuPowerRecorder, _read_node_power, parse_power_sample
-from hyperloom.orchestrator.actions.executors import _subprocess_kill
 from inference_suite.server_log import LogCursor
 from hyperloom.orchestrator.actions.executors._gpu_power import (
     GPU_POWER_ARTIFACT_NAME,
@@ -256,56 +255,6 @@ def test_visible_mask_limits_the_cards_considered(tmp_path):
     assert out["serving_gpus"] == [2, 3]
 
 
-def test_native_power_uses_client_boundaries_and_waits_for_responses(tmp_path, monkeypatch):
-    from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
-    from hyperloom.orchestrator.actions.executors import _gpu_power
-
-    config = tmp_path / "native.yaml"
-    config.write_text("benchmark:\n  agentx: true\n")
-    server = tmp_path / "server.log"
-    server.write_text("Application startup complete\n")
-    client = tmp_path / "aiperf_artifacts" / "logs" / "aiperf.log"
-    client.parent.mkdir(parents=True)
-    query = _Replay(_tp4_on_eight(800.0))
-    monkeypatch.setattr(_gpu_power, "gpu_power_sampling_unavailable", lambda: "")
-    monkeypatch.setattr(gpu_telemetry, "_query_amd_smi", lambda run, *metrics: query(*metrics))
-    monkeypatch.setattr(gpu_telemetry, "MIN_INTERVAL_SEC", 0.01)
-    monkeypatch.setenv("HYPERLOOM_GPU_POWER_INTERVAL_S", "0.01")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KV_METRICS", "0")
-    recorders = _subprocess_kill._build_round_recorders(str(server), {BENCHMARK_CONFIG_ENV: str(config)})
-    cursor = LogCursor()
-
-    def advance(line):
-        with client.open("a") as stream:
-            stream.write(line + "\n")
-        scan = cursor.advance(str(server))
-        if scan.saw_ready:
-            recorders.note_phase("ready", time.monotonic())
-        recorders.note_client_phases(scan, time.monotonic())
-
-    try:
-        advance("Phase warmup (warmup) started")
-        time.sleep(0.03)
-        assert query.calls == 0
-        advance("Phase profiling (profiling) started")
-        deadline = time.monotonic() + 2.0
-        while query.calls < 2 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert query.calls >= 2
-        advance("Phase profiling (profiling) sending complete")
-        before = query.calls
-        time.sleep(0.05)
-        assert query.calls > before, "outstanding responses still belong to the measured window"
-        advance("Phase profiling (profiling) complete")
-        time.sleep(0.03)
-        after = query.calls
-        time.sleep(0.03)
-        assert query.calls == after
-    finally:
-        recorders.close()
-    assert read_measured_gpu_power_by_gpu(tmp_path) == (True, {str(g): 800.0 for g in range(4)})
-
-
 def test_query_failures_leave_the_round_unmeasured_not_zero(tmp_path):
     query = _Replay(RuntimeError("amd-smi exited 1"))
     recorder = GpuPowerRecorder(output_path=str(tmp_path / GPU_POWER_ARTIFACT_NAME), query=query, interval_sec=0.5)
@@ -378,58 +327,6 @@ def test_builder_follows_amd_smi_and_the_switch(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "0")
     assert build_gpu_power_recorder(log_path, {}) is None
     assert build_gpu_power_recorder(None, {}) is None
-
-
-class _Recorder:
-    def __init__(self, *, fail: bool = False) -> None:
-        self.fail = fail
-        self.calls: list[str] = []
-
-    def note_phase(self, phase, mono):
-        self.calls.append(f"phase:{phase}")
-        if self.fail:
-            raise RuntimeError("boom")
-
-    def tick(self, mono):
-        self.calls.append("tick")
-
-    def close(self, *, aborted=False):
-        self.calls.append("close")
-        if self.fail:
-            raise RuntimeError("boom")
-
-
-def test_fanout_propagates_a_failing_recorder():
-    broken, healthy = _Recorder(fail=True), _Recorder()
-    fanout = _subprocess_kill._RecorderFanout([broken, healthy])
-    with pytest.raises(RuntimeError, match="^boom$"):
-        fanout.note_phase("measured", 0.0)
-    assert broken.calls == ["phase:measured"]
-    assert healthy.calls == []
-
-
-def test_fanout_closes_every_recorder_before_raising_the_first_failure():
-    broken, healthy = _Recorder(fail=True), _Recorder()
-    fanout = _subprocess_kill._RecorderFanout([broken, healthy])
-    with pytest.raises(RuntimeError, match="^boom$"):
-        fanout.close(aborted=False)
-    assert broken.calls == ["close"]
-    assert healthy.calls == ["close"]
-
-
-def test_round_recorders_combine_kv_and_power(monkeypatch, tmp_path):
-    kv, power = _Recorder(), _Recorder()
-    monkeypatch.setattr(_subprocess_kill, "_build_kv_recorder", lambda *a: kv)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._gpu_power.build_gpu_power_recorder", lambda *a: power
-    )
-    combined = _subprocess_kill._build_round_recorders(str(tmp_path / "server.log"), {})
-    combined.note_phase("measured", 0.0)
-    assert kv.calls == power.calls == ["phase:measured"]
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._gpu_power.build_gpu_power_recorder", lambda *a: None)
-    lone = _subprocess_kill._build_round_recorders(str(tmp_path / "server.log"), {})
-    lone.note_phase("measured", 0.0)
-    assert kv.calls == ["phase:measured", "phase:measured"]
 
 
 class _PhaseLog:
