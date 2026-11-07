@@ -151,6 +151,8 @@ def _stub_gpu(monkeypatch, session, *, effective):
 
     monkeypatch.setattr(explore, "run_grid", run_grid)
     monkeypatch.setattr(_integrate_bench, "run_grid", run_grid)
+    # One cold decision round per explore, so each captured launch is one candidate's.
+    monkeypatch.setattr(explore, "resolve_lifecycle_params", lambda _path: {"eligible": False})
     return observed
 
 
