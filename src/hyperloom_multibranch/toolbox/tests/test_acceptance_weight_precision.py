@@ -16,7 +16,11 @@ from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, Recipe, Recipe
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected
 from hyperloom_multibranch.toolbox.acceptance import DELTA_NOT_APPLICABLE_CODE, Acceptance, AcceptanceSetup
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, PARENT, FakePlanner, FakeRepo, build, req
-from hyperloom_multibranch.toolbox.weight_precision import ambiguous_words, weight_precision_changes
+from hyperloom_multibranch.toolbox.weight_precision import (
+    SPEED_ONLY_LOAD_FORMATS,
+    ambiguous_words,
+    weight_precision_changes,
+)
 
 ROOT = "r0"
 SAME_PRECISION = "the weight precision of the session cannot change"
@@ -89,6 +93,7 @@ SETTINGS = [
     ("--quantize-and-serve", "true", "false", "--quantize-and-serve"),
     ("--hf-config-path", "/cfg/a", "/cfg/b", "--hf-config-path"),
     ("--decrypted-config-file", "/cfg/a.json", "/cfg/b.json", "--decrypted-config-file"),
+    ("--load-format", "flash_rl", "bitsandbytes", "--load-format"),
 ]
 
 
@@ -1028,6 +1033,129 @@ def test_the_pairs_a_launch_adds_are_named_in_its_order() -> None:
 )
 def test_an_option_of_the_frameworks_is_read_as_itself(server_args: str) -> None:
     assert _changes("", server_args) == []
+
+
+# --- the load format: a change only among the speed-only ones is none -----------------------------------------------
+
+#: Load formats that load something other than the checkpoint's own tensors as stored, or nothing: SGLang's
+#: ``flash_rl`` serves a BF16 checkpoint in FP8, ``bitsandbytes`` in NF4, ``gguf`` reads GGUF's quantized blocks,
+#: ``dummy`` random weights; the rest read another file than the checkpoint, through another loader or a plugin.
+NOT_SPEED_ONLY = [
+    "flash_rl",
+    "bitsandbytes",
+    "gguf",
+    "dummy",
+    "tensorizer",
+    "sharded_state",
+    "presharded",
+    "mistral",
+    "layered",
+    "remote",
+    "remote_instance",
+    "jax",
+    "extensible",
+    "private",
+    "runai_streamer",
+    "runai_streamer_sharded",
+    "expert_pack",
+    "instanttensor",
+    "ipc_cache",
+    "modelexpress",
+    "hf",
+    "my_plugin_loader",
+]
+
+
+async def test_a_flash_rl_load_of_a_bf16_root_is_refused(tmp_path: Path) -> None:
+    repo = _repo("--model-path /models/bf16 --dtype bfloat16")
+    change = _delta("--load-format flash_rl")
+    await _refused_naming(tmp_path, repo, change, "--load-format: (not set) -> flash_rl")
+
+
+@pytest.mark.parametrize("load_format", NOT_SPEED_ONLY)
+@pytest.mark.parametrize("root_args", ["", "--load-format auto", "--load-format safetensors"])
+async def test_a_load_format_that_is_not_speed_only_is_refused(
+    tmp_path: Path, root_args: str, load_format: str
+) -> None:
+    await _refused_naming(tmp_path, _repo(root_args), _delta(f"--load-format {load_format}"), "--load-format: ")
+
+
+SPEED_ONLY_CHANGES = [
+    ("", "--load-format safetensors"),
+    ("", "--load-format auto"),
+    ("--load-format safetensors", "--load-format pt"),
+    ("--load-format pt", "--load-format auto"),
+    ("--load-format auto", "--load-format fastsafetensors"),
+    ("--load-format fastsafetensors", "--load-format safetensors"),
+    ("--load-format safetensors", "--load-format npcache"),
+    ("--load-format=pt", "--load_format SafeTensors"),
+    ("", "--load-form=FASTSAFETENSORS"),
+]
+
+
+@pytest.mark.parametrize(("root_args", "server_args"), SPEED_ONLY_CHANGES)
+async def test_a_change_only_among_speed_only_load_formats_is_accepted(
+    tmp_path: Path, root_args: str, server_args: str
+) -> None:
+    assert await _refusal(tmp_path, _repo(root_args), _delta(server_args)) is None
+
+
+@pytest.mark.parametrize(
+    "server_args", ["--load-format safetensors", "--load-format pt --load-format auto", "--max-num-seqs 64"]
+)
+def test_a_load_format_given_or_dropped_only_among_speed_only_ones_is_no_change(server_args: str) -> None:
+    for root_args in ("", "--load-format auto", "--load-format=fastsafetensors", "--load-format npcache"):
+        assert _changes(root_args, server_args) == [], (root_args, server_args)
+        assert _changes(server_args, root_args) == [], (server_args, root_args)
+
+
+async def test_a_root_that_loads_with_flash_rl_and_a_candidate_that_keeps_it_is_accepted(tmp_path: Path) -> None:
+    repo = _repo("--load-format flash_rl")
+    assert await _refusal(tmp_path, repo, _delta("--load-format flash_rl --max-num-seqs 64")) is None
+    assert await _refusal(tmp_path, repo, _delta("--max-num-seqs 64")) is None
+
+
+@pytest.mark.parametrize(
+    ("change", "shown"),
+    [
+        (_delta("--max-num-seqs 64", remove_args=("--load-format",)), "--load-format: flash_rl -> (not set)"),
+        (_delta("--load-format auto"), "--load-format: flash_rl -> auto"),
+        (_delta("--load-format=safetensors"), "--load-format: flash_rl -> safetensors"),
+    ],
+)
+async def test_a_candidate_that_drops_a_root_flash_rl_load_is_refused(
+    tmp_path: Path, change: RecipeDelta, shown: str
+) -> None:
+    await _refused_naming(tmp_path, _repo("--load-format flash_rl"), change, shown)
+
+
+def test_a_flash_rl_load_dropped_from_a_launch_is_a_change() -> None:
+    assert _changes("--load-format flash_rl", "") == ["--load-format: flash_rl -> (not set)"]
+    assert _changes("--load-format flash_rl", "--load-format auto") == ["--load-format: flash_rl -> auto"]
+
+
+@pytest.mark.parametrize(
+    ("server_args", "shown"),
+    [
+        ("--load-format flash_rl", "flash_rl"),
+        ("--load-format=flash_rl", "flash_rl"),
+        ("--load_format flash_rl", "flash_rl"),
+        ("--load-format FLASH_RL", "FLASH_RL"),
+        ("--load-form flash_rl", "flash_rl"),
+        ("--load-f=gguf", "gguf"),
+        ("--load-format.x safetensors", ".x safetensors"),
+        ("--load-format", "(on)"),
+        ("--load-format safetensors --load-format dummy", "dummy | safetensors (dummy in effect)"),
+        ("--load-format pt --max-num-seqs 64 --load_format=bitsandbytes", "bitsandbytes | pt (bitsandbytes in effect)"),
+    ],
+)
+def test_the_load_format_in_every_form_its_framework_reads(server_args: str, shown: str) -> None:
+    assert _changes("", server_args) == [f"--load-format: (not set) -> {shown}"]
+
+
+def test_the_speed_only_load_formats_are_the_default_loader_ones() -> None:
+    assert SPEED_ONLY_LOAD_FORMATS == {"auto", "pt", "safetensors", "npcache", "fastsafetensors"}
+    assert not SPEED_ONLY_LOAD_FORMATS & set(NOT_SPEED_ONLY)
 
 
 # --- Arbor's cases (arbor/tests/test_weight_precision.py) ------------------------------------------------------------

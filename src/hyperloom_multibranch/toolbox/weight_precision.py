@@ -9,9 +9,10 @@ the activations of weights the checkpoint already holds in FP8) may change, with
 passing.
 
 The flags read here set the weights' format, their quantization at load time, their dtype, the checkpoint itself or its
-revision, or name a file that can set any of them (a config file of flags, or the model's own config); and two flags
-with other uses, whose JSON value overrides the model's config, count in what they set under a dtype or quantization
-key. Only launch flags are read: a source patch that casts weights at load is not, nor what a file holds.
+revision, or name a file that can set any of them (a config file of flags, or the model's own config), or how the
+checkpoint is loaded (its load format, of which a change only among :data:`SPEED_ONLY_LOAD_FORMATS` is no change); and
+two flags with other uses, whose JSON value overrides the model's config, count in what they set under a dtype or
+quantization key. Only launch flags are read: a source patch that casts weights at load is not, nor what a file holds.
 
 A launch word is first read as the frameworks' argument parsers read it (:func:`_flag`): ``--flag=value`` is ``--flag
 value``; a long flag's name reads ``_`` as ``-`` and ends at its first ``.``, and ``--flag.key value`` is a value of
@@ -60,8 +61,8 @@ from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_
 #: and its revision, since another checkpoint may hold another precision, the files that can set any of them (none is
 #: read here: vLLM's and SGLang's ``--config`` of flags, and the model config vLLM's ``--hf-config-path`` and SGLang's
 #: ``--decrypted-config-file`` read instead of the checkpoint's), ModelOpt's and torchao's quantization, and SGLang's
-#: quantize-and-serve. A launch word counts as one of these spellings when the frameworks' parsers read it as that
-#: spelling: see :func:`_flag` and :func:`_names`.
+#: quantize-and-serve, and the load format (:data:`SPEED_ONLY_LOAD_FORMATS`). A launch word counts as one of these
+#: spellings when the frameworks' parsers read it as that spelling: see :func:`_flag` and :func:`_names`.
 WEIGHT_PRECISION_FLAGS: Mapping[str, tuple[str, ...]] = {
     "--quantization": ("--quantization", "-q"),
     "--quantization-config": ("--quantization-config",),
@@ -76,7 +77,18 @@ WEIGHT_PRECISION_FLAGS: Mapping[str, tuple[str, ...]] = {
     "--quantize-and-serve": ("--quantize-and-serve",),
     "--hf-config-path": ("--hf-config-path",),
     "--decrypted-config-file": ("--decrypted-config-file",),
+    "--load-format": ("--load-format",),
 }
+
+#: The values of vLLM's and SGLang's ``--load-format`` (lower-cased, as both read it; absent is ``auto``) among which a
+#: change is none: on both main branches of 2026-11-07 each is the default loader's, which copies the checkpoint's own
+#: tensors as stored and differs only in the files it picks (``*.safetensors`` else ``*.bin``, ``*.safetensors``,
+#: ``*.pt``, ``*.bin`` through numpy). Any other value may quantize what it loads (SGLang's ``flash_rl`` serves a BF16
+#: checkpoint in FP8) or load no checkpoint (``dummy``), so a change to, from or between them is a change;
+#: ``runai_streamer`` among them, since SGLang does not route it to ModelOpt's loader, which quantizes the weights.
+SPEED_ONLY_LOAD_FORMATS = frozenset({"auto", "pt", "safetensors", "npcache", "fastsafetensors"})
+
+_LOAD_FORMAT = "--load-format"
 
 #: The keys of a model's config that set its weights' dtype or quantization: vLLM and SGLang read
 #: ``compression_config`` (compressed-tensors' key) as the quantization config when ``quantization_config`` is absent.
@@ -138,8 +150,18 @@ def weight_precision_changes(before: LaunchConfig, after: LaunchConfig) -> list[
     return [
         f"{name}: {_shown(old.get(name))} -> {_shown(new.get(name))}"
         for name in sorted({*old, *new})
-        if old.get(name) != new.get(name)
+        if old.get(name) != new.get(name) and not (name == _LOAD_FORMAT and _speed_only(old, new))
     ]
+
+
+def _speed_only(*launches: Mapping[str, _Setting]) -> bool:
+    """Whether each of ``launches`` gives its load format only values of :data:`SPEED_ONLY_LOAD_FORMATS`, or none."""
+    return all(
+        len(value) == 1 and value[0].lower() in SPEED_ONLY_LOAD_FORMATS
+        for launch in launches
+        if _LOAD_FORMAT in launch
+        for value in launch[_LOAD_FORMAT].values
+    )
 
 
 def ambiguous_words(before: LaunchConfig, after: LaunchConfig) -> list[str]:
@@ -412,6 +434,7 @@ def _shown_value(value: tuple[str, ...]) -> str:
 
 
 __all__ = [
+    "SPEED_ONLY_LOAD_FORMATS",
     "WEIGHT_PRECISION_FLAGS",
     "WEIGHT_PRECISION_KEYS",
     "WEIGHT_PRECISION_OVERRIDE_FLAGS",
