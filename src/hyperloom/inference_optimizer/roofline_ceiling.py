@@ -256,9 +256,8 @@ def _collect_runtime_server_args(state: Any, *, arm: str | None = None) -> str:
     return base_args
 
 
-def _runtime_gpu_type(state: Any, point: BenchmarkPoint) -> str:
-    """Resolve real hardware for roofline; runner_type is only script routing."""
-    return str(getattr(state, "gpu_type", "") or os.environ.get("TARGET_GPU_TYPE", "") or point.runner_type)
+def _runtime_gpu_type(state: Any) -> str:
+    return str(getattr(state, "gpu_type", "") or os.environ.get("TARGET_GPU_TYPE", ""))
 
 
 def resolve_runtime_workload(
@@ -280,7 +279,7 @@ def resolve_runtime_workload(
 
     return RuntimeWorkload(
         model_path=str(point.model or getattr(state, "model_path", "") or ""),
-        gpu_type=_runtime_gpu_type(state, point),
+        gpu_type=_runtime_gpu_type(state),
         precision=str(point.precision or getattr(state, "precision", "") or ""),
         framework=str(point.framework or getattr(state, "framework", "") or ""),
         tp=_env_int(envs, "TP") or _state_int("tp"),

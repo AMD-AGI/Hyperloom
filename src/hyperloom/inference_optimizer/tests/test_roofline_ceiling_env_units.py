@@ -27,8 +27,7 @@ def test_a_malformed_baseline_point_falls_back_to_state(tmp_path: Path, text: st
 def test_the_baseline_point_wins_over_state(tmp_path: Path):
     cfg = tmp_path / "baseline.yaml"
     cfg.write_text(
-        "benchmark:\n  model: /point\n  framework: sglang\n  runner_type: mi355x\n"
-        "  envs: {TP: 8, CONC: 16, EXTRA_SGLANG_ARGS: --x}\n",
+        "benchmark:\n  model: /point\n  framework: sglang\n  envs: {TP: 8, CONC: 16, EXTRA_SGLANG_ARGS: --x}\n",
         encoding="utf-8",
     )
     state = SimpleNamespace(baseline_config_path=str(cfg), model_path="/state", framework="vllm", tp=2, conc=4)
