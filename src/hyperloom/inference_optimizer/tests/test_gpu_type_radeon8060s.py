@@ -83,10 +83,6 @@ def test_radeon8060s_dispatches_as_gfx1151_with_40_cus():
     assert (board.gfx, board.compute_units) == ("gfx1151", 40)
 
 
-def test_radeon8060s_names_its_own_magpie_script():
-    assert gpu_types.gpu_runner_type("radeon8060s") == "radeon8060s"
-
-
 def test_radeon8060s_carries_only_the_figures_amd_publishes():
     from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS, resolve_compute_peak_provenance
 

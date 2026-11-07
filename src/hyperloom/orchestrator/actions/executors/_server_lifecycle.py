@@ -23,7 +23,6 @@ from hyperloom.common.benchmark_config import BenchmarkPointError, read_benchmar
 from hyperloom.common.ports import pick_server_port
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom_common.proctree import TERM_GRACE_SEC, group_members, leader_exited, running, signal_group
-from hyperloom.inference_optimizer.gpu_types import magpie_reuse_scripts
 from inference_suite import stop
 from inference_suite.contracts.layout import SERVER_PID
 
@@ -55,9 +54,6 @@ _KILL_CONFIRM_SECONDS = 30.0
 #: How often a hand-off re-reads VRAM while it waits for the GPUs to drain.
 _GPU_FREE_POLL_SECONDS = 5.0
 
-
-# Magpie built-in benchmark scripts that support the server_lifecycle reuse protocol.
-MAGPIE_BUILTIN_SCRIPTS = magpie_reuse_scripts()
 
 # Default HTTP port for the persistent server when ``benchmark.envs.PORT`` is unset; pinned into the per-round YAML so
 # Magpie's reuse keying and our teardown agree.
