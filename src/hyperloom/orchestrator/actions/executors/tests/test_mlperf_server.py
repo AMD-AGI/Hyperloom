@@ -21,7 +21,8 @@ from hyperloom.common.agentx_workload import (
 )
 from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
-from hyperloom.orchestrator.actions.executors import _mlperf_server as ms
+from hyperloom.inference_optimizer.agentx import deploy, preflight
+from hyperloom.orchestrator.actions.executors import benchmark_config as ms
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 from inference_suite.contracts import GoldenUse, LifecycleMode, SuiteConfig, WorkloadKind
@@ -79,7 +80,7 @@ def env(tmp_path, monkeypatch) -> dict[str, str]:
 
 
 def test_the_server_config_boots_the_base_with_the_harness_model_name_and_no_load(session, env, tmp_path):
-    config = ms.server_config(_point(), tmp_path / "slot" / ms.MLPERF_SERVER_DIR, env)
+    config = ms.mlperf_server_config(_point(), tmp_path / "slot" / ms.MLPERF_SERVER_DIR, env)
 
     assert config.lifecycle.mode is LifecycleMode.BOOT
     assert config.lifecycle.pid_dir == str(tmp_path / "slot" / ms.MLPERF_SERVER_DIR / ms.SERVER_PID_DIR)
@@ -99,7 +100,7 @@ def test_the_server_config_boots_the_base_with_the_harness_model_name_and_no_loa
 
 
 def test_an_operator_keep_alive_is_kept(session, env, tmp_path):
-    config = ms.server_config(_point(SGLANG_TIMEOUT_KEEP_ALIVE="60"), tmp_path, env)
+    config = ms.mlperf_server_config(_point(SGLANG_TIMEOUT_KEEP_ALIVE="60"), tmp_path, env)
 
     assert config.server.user.env_set["SGLANG_TIMEOUT_KEEP_ALIVE"] == "60"
 
@@ -109,14 +110,14 @@ def test_a_session_that_froze_no_base_is_refused(tmp_path, env, monkeypatch):
     SharedState(session_id="old").save(tmp_path)
 
     with pytest.raises(ms.MlperfServerError, match="no base launch"):
-        ms.server_config(_point(), tmp_path, env)
+        ms.mlperf_server_config(_point(), tmp_path, env)
 
 
 def test_an_unset_tool_cache_is_refused(session, env, tmp_path):
     del env["INFERENCE_SUITE_TOOL_CACHE"]
 
     with pytest.raises(ms.MlperfServerError, match="install.sh"):
-        ms.server_config(_point(), tmp_path, env)
+        ms.mlperf_server_config(_point(), tmp_path, env)
 
 
 def test_a_tool_cache_the_staging_check_refuses_is_refused(session, env, tmp_path, monkeypatch):
@@ -124,14 +125,14 @@ def test_a_tool_cache_the_staging_check_refuses_is_refused(session, env, tmp_pat
     monkeypatch.setenv(ENV_CURRENT_SESSION_DIR, str(session))
 
     with pytest.raises(ms.MlperfServerError, match="staging_missing"):
-        ms.server_config(_point(), tmp_path, env)
+        ms.mlperf_server_config(_point(), tmp_path, env)
 
 
 @pytest.fixture
 def prepared(monkeypatch) -> list[str]:
     calls: list[str] = []
-    monkeypatch.setattr(ms, "deploy_agentx_assets", lambda benchmarks: calls.append(f"deploy {benchmarks}"))
-    monkeypatch.setattr(ms, "check_mlperf_harness", lambda env: calls.append("preflight"))
+    monkeypatch.setattr(deploy, "deploy_agentx_assets", lambda benchmarks: calls.append(f"deploy {benchmarks}"))
+    monkeypatch.setattr(preflight, "check_mlperf_harness", lambda env: calls.append("preflight"))
     return calls
 
 

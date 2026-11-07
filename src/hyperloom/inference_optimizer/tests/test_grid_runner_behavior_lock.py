@@ -22,7 +22,7 @@ import yaml
 
 from hyperloom_common.proctree import proc_identity
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-from hyperloom.orchestrator.actions.executors._mlperf_server import MLPERF_SERVER_DIR, SERVER_PID_DIR
+from hyperloom.orchestrator.actions.executors.benchmark_config import MLPERF_SERVER_DIR, SERVER_PID_DIR
 from inference_suite.contracts.layout import SERVER_PID
 from inference_suite.frameworks import Framework
 from inference_suite.runtime import server as suite_server

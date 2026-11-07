@@ -71,7 +71,7 @@ from hyperloom.inference_optimizer.grid_server_args import validate_server_args_
 from inference_suite.argv import compact_json_server_args, remove_server_args
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, session_server_base
+from hyperloom.orchestrator.state.base_launch import session_server_base
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
@@ -383,48 +383,6 @@ def apply_agentx_switch(
         pinned_by=("--served-model-name", "--served_model_name"),
     )
     bench["workload_spec"] = build_agentx_workload_spec(envs, env=_agentx_env, grading=grading)
-
-
-def prepare_agentx_runtime(
-    *,
-    env: dict[str, str] | None = None,
-    inferencex_path: str | None = None,
-    config_path: Path | str | None = None,
-    active: bool | None = None,
-) -> str | None:
-    """Deploy and preflight the MLPerf client, and write the config its server boots from."""
-    from hyperloom.common.agentx_workload import is_mlperf_backend
-
-    runtime_env = env or os.environ
-    if not is_mlperf_backend(runtime_env):
-        return None
-    if active is None:
-        active = agentx_enabled(runtime_env)
-        if not active and config_path:
-            try:
-                materialized = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-                benchmark = materialized.get("benchmark") if isinstance(materialized, dict) else {}
-                from hyperloom.common.agentx_workload import is_agentx_client_script
-
-                active = isinstance(benchmark, dict) and is_agentx_client_script(
-                    str(benchmark.get("benchmark_script") or "")
-                )
-            except (OSError, ValueError, TypeError):
-                active = False
-    if not active:
-        return None
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return None
-    try:
-        from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
-        from ._mlperf_server import prepare_mlperf_round
-
-        prepare_mlperf_round(Path(config_path or ""), runtime_env, str(inferencex_path or ""))
-    except AgentXPreflightError as exc:
-        return f"AgentX preflight failed: {exc}"
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError, BaseLaunchMismatch) as exc:
-        return f"AgentX runtime preparation failed: {type(exc).__name__}: {exc}"
-    return None
 
 
 def _scriptable_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
