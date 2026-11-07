@@ -3,7 +3,7 @@
 
 """Hyperloom's wiring of the measured-phase GPU recorder, and the readers of what it wrote.
 
-The benchmark report's ``gpu_monitor`` block from Magpie samples one card over the whole process, so it describes
+A benchmark report's ``gpu_monitor`` block samples one card over the whole process, so it describes
 neither the serving cards nor the load being measured; :class:`hyperloom_common.gpu_telemetry.GpuPowerRecorder` does.
 This module builds that recorder for a round (:func:`build_gpu_power_recorder`), names the same sampling for an
 inference_suite round, which runs the recorder itself (:func:`round_gpu_telemetry`), drives it from the server logs of a
