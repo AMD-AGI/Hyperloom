@@ -38,9 +38,10 @@ The **workspace root** is ``$USER_DATA_PATH`` (default
 
 ```text
 $USER_DATA_PATH/                          # workspace_root — set by operator / Claw / SaFE
-├── runtime/                              # workspace-shared (install.sh, kernel-agent.env.sh)
+├── runtime/                              # workspace-shared (install.sh, Magpie, kernel-agent.env.sh)
 │   ├── kernel-agent.env.sh
-│   └── source-mirrors/{TraceLens[,TraceLens-internal]}/
+│   ├── Magpie/
+│   └── source-mirrors/{InferenceX,TraceLens[,TraceLens-internal]}/
 │       # Open-source deps are installed by install.sh.
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
@@ -82,7 +83,7 @@ the generated `runtime/kernel-agent.env.sh` in-process.
 **Launcher rule:** do not hand-build, create, delete, or repair paths
 under ``$USER_DATA_PATH/runtime/`` (especially ``source-mirrors/``).
 Those are workspace-shared assets owned by `install.sh`, including
-GEAK, TraceLens mirrors, env files, and config; the InferenceSuite tool
+Magpie, InferenceX, GEAK, TraceLens mirrors, env files, and config; the InferenceSuite tool
 cache (`$INFERENCE_SUITE_TOOL_CACHE`) is `install.sh`'s too.
 Manual edits there can corrupt another run's checkout. If install state looks wrong,
 rerun `install.sh` or follow the Recovery section; do not clone or clean
@@ -147,7 +148,7 @@ that runs **before** `python -m hyperloom optimize` is even spawned.
 Before every `python -m hyperloom optimize` invocation (fresh start OR
 `--resume-from`), verify that every visible GPU on this pod has **zero
 foreign serving PIDs and VRAM usage below 1% of each card's total capacity**. A leftover
-`sglang.launch_server` / `vllm serve` / `atom.entrypoints` server from a previous
+`sglang.launch_server` / `vllm serve` / `atom.entrypoints` / `Magpie` from a previous
 run silently degrades the next `baseline` by 5–30 % (shares VRAM +
 schedules on the same XCD); `current_best` cannot detect this
 pollution after the fact.
@@ -216,7 +217,7 @@ echo "prior_session=${PRIOR_SESSION:-none}"
 # is still loading weights also holds no VRAM yet, so the VRAM check below does
 # not cover for a missed process match.
 pgrep -af 'hyperloom optimize' || true
-pgrep -af 'atom\.entrypoints|sglang\.launch_server|sglang::|vllm\.entrypoints|vllm serve|VLLM::' || true
+pgrep -af 'atom\.entrypoints|sglang\.launch_server|sglang::|vllm\.entrypoints|vllm serve|VLLM::|Magpie' || true
 
 # VRAM — stdlib-only rocm-smi parse (must run on docker host; no hyperloom import)
 python3 - <<'PY'
@@ -457,7 +458,8 @@ The phase exits when both arms are dry or when its budget is spent.
 
 ### IR-8 — `--framework atom` is single-node only
 
-`--framework atom` (`atom.entrypoints.openai_server`) reaches full parity with sglang/vllm
+`--framework atom` (`atom.entrypoints.openai_server`; profile rounds go through
+Magpie `atom_mi*x.sh`) reaches full parity with sglang/vllm
 EXCEPT multi-node: `_apply_atom_auto_tighten` in `cli.py` rejects
 `--nodes >= 2` with `SystemExit(2)` (atom upstream has no multi-node TP
 wiring). No other flag is auto-flipped — kernel-agent, framework-agent,
@@ -526,8 +528,8 @@ bash "$INSTALL_SH"
 ```
 
 `src/hyperloom/inference_optimizer/assets/install.sh` is the only install entrypoint for
-full inference optimization. It installs the optimizer and stages the InferenceSuite tools
-first, then the kernel optimization environment from the steps in
+full inference optimization. It installs the optimizer / Magpie / InferenceX and
+stages the InferenceSuite tools first, then the kernel optimization environment from the steps in
 `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh`.
 
 The install phase always initializes the full Hyperloom runtime. Even if the
@@ -541,6 +543,8 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | Component | Provided by |
 |---|---|
 | `inference_optimizer` pkg + `claude_agent_sdk` extras (`pip install -e .[test]`) | `ensure_inference_optimizer` |
+| **Magpie** (`pip install "$MAGPIE_PACKAGE_SPEC"`; default spec pins `magpie-eval` to `$MAGPIE_REF`; skipped when `HYPERLOOM_BENCHMARK_BACKEND=bypass`) | `ensure_magpie` |
+| `INFERENCEX_PATH` resolution (honours a pre-existing `$INFERENCEX_PATH`, else clones `$INFERENCEX_REPO` pinned to `$INFERENCEX_REF` into `$INFERENCEX_DEFAULT_DIR` = `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/InferenceX@<sha>`, reusing an existing checkout there on re-runs) | `ensure_inferencex` |
 | InferenceSuite tool cache: the InferenceX client at the commit `inference_suite.pins` pins, the GSM8K task and the AgentX harness, staged into `$INFERENCE_SUITE_TOOL_CACHE` (default `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/inference-suite-tools`). A round fetches nothing and refuses with `staging_missing` when the cache lacks a tool or holds one off its pin | `ensure_inference_suite_staging` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
@@ -558,7 +562,7 @@ of `src/hyperloom/inference_optimizer/assets/install.sh`):
 `$HYPERLOOM_RUNTIME_DIR`, else `$USER_DATA_PATH/runtime`; a `.env` written by `hyperloom setup`
 supplies the workspace in place of the shell's), is
 regenerated by `install.sh` and contains gateway URLs, auth aliases,
-and GEAK runtime variables. CLI preflight reads it; do not derive
+GEAK runtime variables, and InferenceX path. CLI preflight reads it; do not derive
 these by hand or source it in the launch shell. Generated env/config state is written to the pod-local runtime directory,
 not back into a shared WekaFS source checkout.
 
@@ -656,12 +660,13 @@ these.
 
 | Prompt field | Env name | Consumer |
 |---|---|---|
+| `INFERENCEX_PATH: <path>` | `$INFERENCEX_PATH` | `src/hyperloom/inference_optimizer/assets/install.sh:ensure_inferencex` |
 | `INFERENCE_SUITE_TOOL_CACHE: <path>` | `$INFERENCE_SUITE_TOOL_CACHE` | `src/hyperloom/inference_optimizer/assets/install.sh:ensure_inference_suite_staging` |
 | `TRACELENS_ROOT: <path>` | `$TRACELENS_ROOT` | `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh:ensure_tracelens` (public) |
 | `TRACELENS_INTERNAL_ROOT: <path>` (optional) | `$TRACELENS_INTERNAL_ROOT` | `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh:ensure_tracelens` (internal; only when set) |
 
 **Multi-node escape hatch**: if `$TRACELENS_ROOT` / `$TRACELENS_INTERNAL_ROOT` / `$GEAK_ROOT` /
-`$INFERENCE_SUITE_TOOL_CACHE` may move or differ across nodes,
+`$WORKSPACE_ROOT/Magpie` / `$INFERENCEX_PATH` / `$INFERENCE_SUITE_TOOL_CACHE` may move or differ across nodes,
 `rsync -a` them into `$SESSION_DIR/vendor/<name>/` and override the matching
 env vars BEFORE running `install.sh`. Single-node WekaFS-mount setups (the
 production default) need none of this — `ensure_tracelens`
@@ -867,7 +872,8 @@ submits tasks with `num_gpus>=1` — never restart Ray with `--num-gpus=0`.
 `_preflight()` runs every launch as the in-loop counterpart of IR-2 and
 **owns** the things the launcher must NOT do by hand: re-export auth
 aliases (LLM) from `OPENAI_API_KEY`,
-auto-`pip install` the SDKs / `ray`, ROCm hygiene, `--gpu-type` auto-detect, and it emits the
+auto-`pip install` the SDKs / `ray` / `Magpie` /
+`InferenceX`, ROCm hygiene, `--gpu-type` auto-detect, and it emits the
 canonical `Preflight diagnostics:` block (paste verbatim into status
 reports). Two checks **abort** the run on failure: the model gate
 (probed against `<OPENAI_BASE_URL>/models`; the allowlist
@@ -958,14 +964,22 @@ src/hyperloom/inference_optimizer/assets/configs/profile_sglang.yaml
 src/hyperloom/inference_optimizer/assets/configs/profile_vllm.yaml
 ```
 
-`benchmark.model` is **fallback only**: the optimizer overrides it at
-runtime with `--model` / `$MODEL_PATH`.
+Two fields in each YAML are **fallback only** — the optimizer overrides
+them at runtime:
 
-These YAMLs carry the workload, not the server launch. A fresh session
+- `benchmark.model` <- `--model` / `$MODEL_PATH`
+- `benchmark.runner_type` <- `--gpu-type` / `$GPU_TYPE` / rocm-smi auto-detect
+
+A round runs on one of two paths. A SGLang, vLLM or atom serving point runs
+through `inference_suite.run_round`. An AgentX point, a profile point, and a
+point of a framework that serves nothing (xdit, custom) stay on the benchmark
+backend: Magpie by default, or bypass with `HYPERLOOM_BENCHMARK_BACKEND=bypass`.
+
+For the `inference_suite` path the YAMLs carry the workload, not the server launch. A fresh session
 resolves its base launch once, before the first round: `--reference-script`,
 else InferenceX main, else the framework cookbook, else (fixed workloads only)
 the default table, with a warning. It is frozen as `<session>/base_launch.json`;
-resume reads that file and resolves nothing. Every round composes the base,
+resume reads that file and resolves nothing. Such a round composes the base,
 the operator's `--server-args` / `--extra-env`, and the candidate's change,
 then `inference_suite.run_round` runs it into its own run directory
 (`config.yaml`, `launch.json`, `report.json`, `server.log`, and the client,
@@ -974,15 +988,45 @@ framework's parser does not know (a candidate's flag fails that candidate as
 `serve_flag`; a base or operator flag stops the run) and a framework older
 than the recipe image's version.
 
+On the benchmark backend path, `benchmark.benchmark_script` is deliberately
+NOT set in the shipped YAMLs. At materialize time Hyperloom pins it to
+`{framework}_{runner_type}.sh` (e.g. `sglang_mi300x.sh` /
+`sglang_mi355x.sh`) so Magpie's resolver hits priority 1 (explicit
+user override) and uses the generic script — which respects
+`RESULT_DIR` and `EXTRA_*_ARGS`. Each shipped YAML has a commented
+`# benchmark_script: ...` template right under `framework:` for manual
+debug overrides; Orchestration can also route per-task via
+`params.benchmark_script` (sanitized).
+
 Before a new model run, verify these fields match the environment:
 
 - `benchmark.model`: model path.
 - `benchmark.envs.TP`: tensor parallel size.
 - `benchmark.envs.CONC`, `ISL`, `OSL`: workload.
 - `benchmark.envs.ROCR_VISIBLE_DEVICES`: GPU pinning.
+- `benchmark.envs.PATH`: must lead with the launcher Python's bin dir
+  (`$(dirname "$PYTHON")`) for a benchmark backend round.
 
-A baseline retry after a failure MUST change its launch
-(`params.extra_server_args` / `params.extra_envs`)
+### Magpie leak-path salvage (`INFERENCE_OPTIMIZER_RESCUE_PATHS`)
+
+In-loop, defense-in-depth — the launcher does not touch this. Magpie
+shell wrappers hardcode artifacts under `/workspace/`
+(`inferencex_result.json`, `server.log`, `gpu_metrics.csv`,
+`profile_*.trace.json.gz`). When a benchmark backend task's in-workspace search finds no
+usable measurement, the executors run an mtime-gated salvage pass over
+`$INFERENCE_OPTIMIZER_RESCUE_PATHS` (unset = no salvage) and copy
+fresh matches into the task workspace, tagged in `nonfatal_warnings`
+(`rescued_from_leaked_path:` / `harvested_leaked_artifact:`). Extend the
+scan roots via `$INFERENCE_OPTIMIZER_LEAK_ROOTS` if a script leaks
+elsewhere; the default `{framework}_{runner_type}.sh` already respects
+`$RESULT_DIR` so salvage normally never fires.
+
+Operators only interact through two `task.params` knobs on that path:
+`params.benchmark_script` (bare
+sanitized `*.sh` name; overrides the gpu_type auto-pick) and
+`params.result_dir` (forwarded as `$RESULT_DIR`). A baseline retry after a
+failure MUST change at least one of `params.benchmark_script` /
+`params.result_dir` / `params.extra_server_args` / `params.extra_envs`
 (prompt RULE F1 — LLM-side judgement, not a PolicyGate deny); a proposal
 repeating a recent failing params fingerprint is dropped as a duplicate.
 With enablement admitted (`--enablement all/launch/eval`), the first baseline
@@ -1014,7 +1058,7 @@ Operator server flags have one supported CLI entry point:
 profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
 wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
-Use `--conc-sweep-concs` to override the synthetic ladder SWEEP measures (`256,128,64,32,16,8,4,2`). Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for an AgentX workload YAML. Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
+Use `--conc-sweep-concs` to override the synthetic ladder SWEEP measures (`256,128,64,32,16,8,4,2`). Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for advanced Magpie settings (AgentX rounds run on Magpie). Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
 
 Native AgentX supports one node and SGLang/vLLM. It rejects `--enable-conc-sweep`,
 `--isl`, `--osl`, `--profile-osl`, `--max-model-len`, `--quantize` and
@@ -1026,7 +1070,7 @@ a server boot and an eval per round. `--no-agentx-accuracy` skips it and is
 recorded with the session.
 Do not pass `ISL`, `OSL`, `RANDOM_RANGE_RATIO`, `MAX_MODEL_LEN`, `EP_SIZE`, or
 `AIPERF_*` / `AGENTX_*` / `AGENTIC_*` controls through `--extra-env`; use `--ep`
-for expert parallelism and `--benchmark-config` for advanced workload settings.
+for expert parallelism and Magpie YAML for advanced workload settings.
 
 Operator server flags are the workload baseline, but they are not sacred. When
 the configuration arm has evidence or an operator hint that a pinned flag may
@@ -1153,8 +1197,8 @@ shell — set it when you resume a non-default session.
 
 **`--framework atom` specifics (IR-8):** single-node only
 (`--nodes>=2` fails fast). Shipped configs `baseline_atom.yaml` /
-`profile_atom.yaml`; a profile round passes atom
-`--torch-profiler-dir`, and TraceLens consumes the resulting
+`profile_atom.yaml`; profile rounds run on Magpie, whose atom wrapper bridges
+`PROFILE=1` to atom's `--torch-profiler-dir`, and TraceLens consumes the resulting
 `*.pt.trace.json.gz` unchanged. atom source roots (`/app/ATOM/atom/`)
 are in the kernel search roots + `_REUSABLE_SOURCE_ROOTS`, and the repo
 URL `https://github.com/ROCm/ATOM.git` is atom's `FrameworkSpec.repo_url` in `framework_registry`.
@@ -1185,7 +1229,9 @@ below describe the runtime behavior operators observe.
 - **Interpreter switch.** A from-source build records the venv interpreter it
   was compiled against (`runtime_python_exe`) and emits it as the
   `HYPERLOOM_FRAMEWORK_PYTHON` env into the per-variant YAML benchmark envs
-  (`benchmark.envs`).
+  (`benchmark.envs`). Both benchmark backends export that mapping to the server
+  env, and bypass additionally launches the server via `python -m` with that
+  interpreter. This guarantees the server loads the exact build.
 - **Build budget.** Each build runs under its component's fixed wall-clock
   budget.
 
@@ -1193,7 +1239,7 @@ See `docs/reference/environment-variables.md` "Targeted builds (Rung 5)" for the
 full env-var set, and `docs/reference/session-breakdown.md` for the emitted
 `enablement` / `build_attempts[]` fields.
 
-## GPU Type
+## GPU Type and Runner Type
 
 Pick the GPU explicitly with `--gpu-type` or `$GPU_TYPE`; without
 either, the optimizer auto-detects via `rocm-smi --showproductname`
@@ -1205,12 +1251,22 @@ GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 
 ```
 
 Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`,
-`radeon8060s`. The GPU type is the board the base launch is resolved for:
+`radeon8060s`. **`mi308x` and
+`mi325x` map to `runner_type=mi300x`** with a warning, since the GPUs share the
+same runner family and Magpie has not shipped `sglang_mi308x.sh` /
+`sglang_mi325x.sh` / `vllm_mi308x.sh` / `vllm_mi325x.sh` yet; `mi350x` maps to
+`runner_type=mi355x`. The runner type picks the Magpie script of a benchmark
+backend round. If you need a true MI308X/MI325X-specific script, uncomment the
+`benchmark_script:` template in the relevant YAML and point it at your script
+under `InferenceX/benchmarks/...`.
+
+For an `inference_suite` round, the GPU type is the board the base launch is resolved for:
 a recipe for another board is used only when both share the gfx target and
 HBM size (`mi350x` / `mi355x` do; `mi300x` / `mi325x` do not), and its point
 is chosen for `--nodes` × `--gpus-per-node` (default 8) GPUs.
 
-`r9700` (Radeon AI PRO R9700, gfx1201) runs with `--framework vllm` only:
+`r9700` (Radeon AI PRO R9700, gfx1201) maps to `runner_type=gfx12`, Magpie's
+`vllm_gfx12.sh`, and runs with `--framework vllm` only:
 pass `--framework vllm`, since another framework (including the default)
 exits with code 2 at launch.
 
@@ -1627,7 +1683,9 @@ Session `--max-hours` and cancellation remain effective independently of those
 limits. Session exhaustion is cooperative: it cannot guarantee termination of a
 frozen Coordinator. Busy logs are not proof of useful progress. Setting
 `PYTHONUNBUFFERED=1` only affects Python output; it does not force shell or native
-programs, or upstream subprocess capture, to stream output.
+programs, or upstream subprocess capture, to stream output. The Magpie streaming
+fix is local-only and unpublished; do not assume the installed pin includes it
+or that a run has been validated with it.
 
 Cold-start detection is diagnostic, not a separate benchmark timeout policy.
 Profile, KernelForge, GEAK, LLM-call, and framework-owned watchdog budgets retain
@@ -1705,11 +1763,11 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 
 ### Run-time signals
 
-- `No accelerator`: pin GPUs with `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
+- `No accelerator` (Magpie): subprocess `PATH` must lead with `$(dirname "$PYTHON")` (or set `MAGPIE_PYTHON`); use `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
 - Repeated `trace_analyze` with unchanged trace/config: bug — reuse `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
-- `policy_denied` streaks (not a stop reason — nothing in the runtime stops a run over them): repeated denial of the same (action, rule) pair is advisory only — there is no auto-prune at streak ≥5 and no stop at streak ≥10. Inspect `SharedState.policy_denial_history` via the `why_denied` tool or the `=== Recent policy denials ===` block, then change something substantive (a new `params.grid` variant or a sibling action family). Do not hand-edit `state.json`.
+- `policy_denied` streaks (not a stop reason — nothing in the runtime stops a run over them): repeated denial of the same (action, rule) pair is advisory only — there is no auto-prune at streak ≥5 and no stop at streak ≥10. Inspect `SharedState.policy_denial_history` via the `why_denied` tool or the `=== Recent policy denials ===` block, then change something substantive (a new `params.grid` variant, a different `benchmark_script`, or a sibling action family). Do not hand-edit `state.json`.
 - `stop_reason=time_exhausted`: resume same session (`--resume-from`); do not start fresh.
 
 ## Report Back To User
