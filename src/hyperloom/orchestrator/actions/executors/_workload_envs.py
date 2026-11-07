@@ -58,7 +58,7 @@ from hyperloom.common.workload_defaults import (
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS, GENERIC_FRAMEWORK_ROOT_ENV
-from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
+from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs, operator_benchmark_script
 from hyperloom.inference_optimizer.grid_server_args import (
     WorkloadTokenWindow,
     dedup_vllm_server_args,
@@ -521,27 +521,6 @@ def _apply_vllm_source_runtime(bench: dict[str, Any], envs: dict[str, Any]) -> N
     envs["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(entries))
 
 
-def _custom_script_path(runner_type: str) -> str:
-    """Locate the operator's entrypoint inside ``$HYPERLOOM_BYPASS_SCRIPTS_DIR``.
-
-    Prefers the ``custom_{runner_type}.sh`` convention, then a lone ``.sh`` in
-    the directory, which is what an operator who wrote one script for one
-    machine actually has. Returns ``""`` when neither applies, leaving the
-    resolution chain in ``bypass_scriptable`` to report the miss.
-    """
-    raw = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
-    if not raw:
-        return ""
-    scripts_dir = Path(raw)
-    if not scripts_dir.is_dir():
-        return ""
-    preferred = scripts_dir / f"custom_{runner_type}.sh"
-    if preferred.is_file():
-        return str(preferred)
-    candidates = sorted(p for p in scripts_dir.glob("*.sh") if p.is_file())
-    return str(candidates[0]) if len(candidates) == 1 else ""
-
-
 def _operator_extra_env() -> dict[str, str]:
     """Return the ``--extra-env`` pins the CLI serialized, or ``{}``."""
     from hyperloom.common.env_safety import operator_extra_env
@@ -575,7 +554,7 @@ def apply_scriptable_runtime_defaults(
     runner_type = _scriptable_runner_type(bench, gpu_type)
     bench["runner_type"] = runner_type
     if not explicit_benchmark_script:
-        script = _custom_script_path(runner_type)
+        script = operator_benchmark_script("custom", runner_type)
         if script:
             bench["benchmark_script"] = script
 
