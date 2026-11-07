@@ -88,6 +88,7 @@ log = logging.getLogger("hyperloom.inference_optimizer.cli")
 _ASSETS = Path(__file__).resolve().parent.parent / "assets"
 
 _CLONE_INFERENCEX_STEP = "clone_inferencex"
+_ENSURE_MAGPIE_STEP = "ensure_magpie"
 
 
 #: What a custom header may reference. Every child inherits the expanded header, so expanding any other name would
@@ -1025,9 +1026,19 @@ def _ensure_magpie(
     install_event: Any,
     *,
     magpie_python: str,
+    framework: str,
     pip_extra: list[str],
 ) -> None:
-    """Install Magpie and resolve MAGPIE_PATH."""
+    """Install Magpie and resolve MAGPIE_PATH, unless ``framework`` is scriptable: its rounds run on the bypass
+    runner."""
+    if framework_registry.is_scriptable(framework):
+        _record_install_step(
+            install_event,
+            InstallStep(_ENSURE_MAGPIE_STEP, "install", "skipped", skip_reason="scriptable_framework"),
+            target="magpie-eval",
+            interpreter=magpie_python,
+        )
+        return
     magpie_installed = False
     magpie_spec: str | None = None
     try:
@@ -1058,12 +1069,12 @@ def _ensure_magpie(
                 os.environ["MAGPIE_PATH"] = magpie_root
                 print(f"Preflight: MAGPIE_PATH resolved from installed package: {magpie_root}")
     except BaseException as exc:
-        _fail_install_step(install_event, step_id="ensure_magpie", category="install", exc=exc)
+        _fail_install_step(install_event, step_id=_ENSURE_MAGPIE_STEP, category="install", exc=exc)
         raise
     _record_install_step(
         install_event,
         InstallStep(
-            "ensure_magpie",
+            _ENSURE_MAGPIE_STEP,
             "install",
             "applied" if magpie_installed else "already_present",
             message=f"installed {magpie_spec}" if magpie_installed else None,
@@ -1400,6 +1411,7 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
     _ensure_magpie(
         install_event,
         magpie_python=magpie_python,
+        framework=_selected_framework(args),
         pip_extra=pip_extra,
     )
 

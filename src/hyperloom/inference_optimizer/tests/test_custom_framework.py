@@ -516,6 +516,31 @@ class TestResumeReappliesOperatorPaths:
 class TestCustomAdapterMeasurement:
     """Handoff probe: custom/native adapter emits nonzero throughput, no harness error."""
 
+    @pytest.mark.parametrize("framework", ["custom", "xdit"])
+    def test_a_scriptable_point_runs_on_the_bypass_runner_under_hyperloom_s_interpreter(self, tmp_path, framework):
+        """The operator's own benchmark and eval scripts run on the bypass runner, never on Magpie."""
+        import sys
+
+        from hyperloom.orchestrator.actions.executors.benchmark_backend import build_benchmark_command
+
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text(yaml.safe_dump({"benchmark": {"framework": framework}}), encoding="utf-8")
+
+        argv = build_benchmark_command(python_exe="/magpie/venv/python", config_path=cfg_path, output_dir=tmp_path)
+
+        assert argv == [
+            sys.executable,
+            "-m",
+            "hyperloom.orchestrator.actions.executors.bypass_runner",
+            "benchmark",
+            "--benchmark-config",
+            str(cfg_path),
+            "--output-dir",
+            str(tmp_path),
+            "--run-mode",
+            "local",
+        ]
+
     def test_custom_scriptable_run_emits_nonzero_throughput(self, tmp_path, monkeypatch):
         import yaml
         from hyperloom.orchestrator.actions.executors import bypass_runner

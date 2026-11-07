@@ -1,16 +1,21 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The command a Magpie round runs, and the InferenceX checkout it runs against."""
+"""The command a benchmark round runs, and the InferenceX checkout a Magpie round runs against.
+
+A scriptable framework's point (xdit, custom) runs the operator's benchmark and eval scripts on the bypass runner until
+inference_suite's scriptable round carries it; every other point runs on Magpie.
+"""
 
 from __future__ import annotations
 
 import logging
 import os
+import sys
 from pathlib import Path
 
 from hyperloom.common.benchmark_config import read_benchmark_point
-from hyperloom.inference_optimizer import inferencex_checkout
+from hyperloom.inference_optimizer import framework_registry, inferencex_checkout
 
 from ._accuracy_gate import materialized_run_eval_disabled
 from ._inferencex_patcher import (
@@ -44,20 +49,19 @@ def build_benchmark_command(
     config_path: Path,
     output_dir: Path,
 ) -> list[str]:
-    """Return the Magpie ... --run-mode local argv, run through :mod:`.magpie_confined` so that Magpie's leftover-server
-    sweep cannot kill another sandbox's server."""
-    return [
-        python_exe,
-        str(Path(__file__).with_name("magpie_confined.py")),
-        "-v",
-        "benchmark",
-        "--benchmark-config",
-        str(config_path),
-        "--output-dir",
-        str(output_dir),
-        "--run-mode",
-        "local",
-    ]
+    """Return the argv of one local round of the point at ``config_path``.
+
+    A scriptable framework's point runs the bypass runner under this interpreter, which imports Hyperloom, whatever
+    ``python_exe`` is; any other point runs Magpie under ``python_exe`` through :mod:`.magpie_confined`, so that
+    Magpie's leftover-server sweep cannot kill another sandbox's server.
+
+    Raises:
+        OSError, yaml.YAMLError, BenchmarkPointError: When ``config_path`` is not a readable point YAML.
+    """
+    flags = ["--benchmark-config", str(config_path), "--output-dir", str(output_dir), "--run-mode", "local"]
+    if framework_registry.is_scriptable(read_benchmark_point(config_path).framework):
+        return [sys.executable, "-m", "hyperloom.orchestrator.actions.executors.bypass_runner", "benchmark", *flags]
+    return [python_exe, str(Path(__file__).with_name("magpie_confined.py")), "-v", "benchmark", *flags]
 
 
 def _eval_probe_failure(config_path: Path, inferencex_path: str) -> PreparationFailure | None:
