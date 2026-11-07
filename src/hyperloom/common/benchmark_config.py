@@ -21,14 +21,14 @@ _AGENTX = "agentx"
 
 
 class BenchmarkPointError(ValueError):
-    """A point YAML whose ``benchmark`` block is missing or not shaped as Magpie reads it."""
+    """A point YAML whose ``benchmark`` block is missing or not shaped as a point is read."""
 
 
 @dataclass(frozen=True)
 class AgentxLaunch:
-    """``agentx.launch_overrides`` of a point: what Magpie launches an AgentX server with, beside the recipe's argv.
+    """``agentx.launch_overrides`` of a point: what an AgentX server is launched with, beside the recipe's argv.
 
-    ``unset_env`` names the inherited variables Magpie drops before applying ``env``. ``composed`` is whether the
+    ``unset_env`` names the inherited variables dropped before ``env`` applies. ``composed`` is whether the
     overrides carry ``append_args``, which every launch Hyperloom composes writes and a workload YAML never
     materialized does not.
     """
@@ -116,7 +116,7 @@ def read_benchmark_point(path: Path) -> BenchmarkPoint:
     Raises:
         OSError: ``path`` cannot be read.
         yaml.YAMLError: It is not YAML.
-        BenchmarkPointError: It holds no ``benchmark`` mapping, or a part of it is not shaped as Magpie reads it.
+        BenchmarkPointError: It holds no ``benchmark`` mapping, or a part of it is not shaped as a point is read.
     """
     return BenchmarkPoint.from_document(yaml.safe_load(path.read_text(encoding="utf-8")), source=str(path))
 
@@ -132,7 +132,7 @@ def _mapping(value: object, source: str) -> Mapping[str, Any]:
     if value is None:
         return MappingProxyType({})
     if not isinstance(value, Mapping):
-        raise BenchmarkPointError(f"{source} holds {value!r} where Magpie reads a mapping")
+        raise BenchmarkPointError(f"{source} holds {value!r} where a point holds a mapping")
     return MappingProxyType(dict(value))
 
 
@@ -140,7 +140,7 @@ def _strings(value: object, source: str) -> tuple[str, ...]:
     if value is None:
         return ()
     if not isinstance(value, (list, tuple)):
-        raise BenchmarkPointError(f"{source} holds {value!r} where Magpie reads a list")
+        raise BenchmarkPointError(f"{source} holds {value!r} where a point holds a list")
     return tuple(str(item) for item in value)
 
 
