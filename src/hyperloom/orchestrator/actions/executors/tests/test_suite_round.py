@@ -75,12 +75,38 @@ def test_a_session_without_a_frozen_base_stays_on_the_backend(session: Path, tmp
     assert suite_route(None, _write_point(tmp_path / "point.yaml")) is None
 
 
-def test_a_point_the_translation_does_not_carry_stays_on_the_backend(session: Path, tmp_path: Path) -> None:
+def _serving_points() -> dict[str, dict]:
+    def changed(**bench) -> dict:
+        document = _point("sglang", RUN_EVAL="false")
+        document["benchmark"].update(bench)
+        return document
+
+    profiler = {"torch_profiler": {"enabled": True}}
+    return {
+        "fixed": changed(),
+        "fixed profile": changed(profiler=profiler),
+        "agentx": changed(agentx={"enabled": True}),
+        "agentx string switch": changed(agentx="enable"),
+        "agentx profile": changed(agentx={"enabled": True}, profiler=profiler),
+        "vllm": _point("vllm"),
+        "atom profile": {"benchmark": {**_point("atom")["benchmark"], "profiler": profiler}},
+    }
+
+
+@pytest.mark.parametrize("name", sorted(_serving_points()))
+def test_every_serving_point_of_a_session_with_a_frozen_base_runs_on_the_suite(session, tmp_path, name) -> None:
     point = tmp_path / "point.yaml"
-    _write_point(point)
-    document = yaml.safe_load(point.read_text())
-    document["benchmark"]["profiler"]["torch_profiler"]["enabled"] = True
-    point.write_text(yaml.safe_dump(document))
+    point.write_text(yaml.safe_dump(_serving_points()[name]), encoding="utf-8")
+
+    assert suite_route(session, point) is not None
+
+
+@pytest.mark.parametrize("bench", [{"framework": "xdit"}, {"benchmark_script": "mlperf_agentic_client.sh"}])
+def test_a_point_that_serves_nothing_or_drives_its_own_server_stays_on_the_backend(session, tmp_path, bench) -> None:
+    document = _point("sglang")
+    document["benchmark"].update(bench)
+    point = tmp_path / "point.yaml"
+    point.write_text(yaml.safe_dump(document), encoding="utf-8")
 
     assert suite_route(session, point) is None
 

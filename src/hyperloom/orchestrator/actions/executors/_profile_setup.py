@@ -51,6 +51,8 @@ _SPECULATIVE_FALLBACK_TOKENS_PER_STEP = 8
 _DELAY_ITERATIONS = "delay_iterations"
 _MAX_ITERATIONS = "max_iterations"
 _DEFAULT_PROFILE_DELAY_ITERS = 8
+#: The ``PROFILE_EXTRA_BODY`` keys that bound SGLang's capture window, in engine forward steps: its delay and length.
+SGLANG_START_STEP, SGLANG_NUM_STEPS = "start_step", "num_steps"
 _VLLM_DELAY_FLAG = re.compile(r"(--profiler-config\.delay_iterations[=\s]+)\d+")
 
 # ``HYPERLOOM_PROFILE_DEGRADED_REASON`` value meaning the TraceLens runtime patch
@@ -337,9 +339,9 @@ def fit_capture_to_speculative(envs: dict[str, Any], framework_env: str) -> None
         return
     body = _profile_extra_body(envs)
     vllm_delay = _profiler_flag_value(server_args, _DELAY_ITERATIONS)
-    if isinstance(body.get("start_step"), int):
-        delay, steps = body["start_step"], int(body.get("num_steps") or 0)
-        body["start_step"] = delay // tokens
+    if isinstance(body.get(SGLANG_START_STEP), int):
+        delay, steps = body[SGLANG_START_STEP], int(body.get(SGLANG_NUM_STEPS) or 0)
+        body[SGLANG_START_STEP] = delay // tokens
         envs["PROFILE_EXTRA_BODY"] = json.dumps(body)
     elif vllm_delay is not None and vllm_delay.isdigit():
         delay, steps = int(vllm_delay), int(_profiler_flag_value(server_args, _MAX_ITERATIONS) or 0)
@@ -537,8 +539,8 @@ def _apply_sglang_profile(
 ) -> None:
     delay_iters, max_iters = capture_window
     extra_body = _profile_extra_body(envs)
-    extra_body["start_step"] = delay_iters
-    extra_body["num_steps"] = max_iters
+    extra_body[SGLANG_START_STEP] = delay_iters
+    extra_body[SGLANG_NUM_STEPS] = max_iters
     shape_discovery = shape_discovery_enabled(bench)
     if sitecustomize:
         apply_sglang_shape_tool(envs, shape_discovery=shape_discovery)
