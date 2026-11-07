@@ -81,6 +81,7 @@ PHASES = (_BOOT, "warmup", _COMPARABLE_PHASE, "finished", _EVAL)
 _MAX_STORED_ROWS = 5000
 #: Decimal places kept on recorded clock readings: millisecond resolution.
 _CLOCK_DIGITS = 3
+_CLOCK_STEPS_PER_SEC = 10**_CLOCK_DIGITS
 
 #: Floor between scrapes, enforced on the monotonic clock -- the loop this runs in iterates faster than its nominal
 #: period when a deadline bounds the slice, so counting passes would sample fastest exactly when the run is most loaded.
@@ -267,8 +268,8 @@ class KvMetricsRecorder:
         self._absorb(
             sample,
             timing={
-                "scrape_start_unix": math.floor(start_unix * 1000) / 1000,
-                "scrape_end_unix": math.ceil((start_unix + elapsed) * 1000) / 1000,
+                "scrape_start_unix": math.floor(start_unix * _CLOCK_STEPS_PER_SEC) / _CLOCK_STEPS_PER_SEC,
+                "scrape_end_unix": math.ceil((start_unix + elapsed) * _CLOCK_STEPS_PER_SEC) / _CLOCK_STEPS_PER_SEC,
                 "scrape_start_mono": round(start_mono, _CLOCK_DIGITS),
                 "scrape_end_mono": round(end_mono, _CLOCK_DIGITS),
                 "scrape_sec": round(elapsed, 4),
