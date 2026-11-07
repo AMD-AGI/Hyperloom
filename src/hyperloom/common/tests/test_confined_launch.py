@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 """A confinement derived from configuration, launched for real through :meth:`BwrapIsolation.launch`: the program
-runs, the home's logins do not exist inside, a credential inside a bound tree is masked at every path that shows it,
+runs, the home's logins do not exist inside, a credential inside a bound tree is absent at every path that shows it
+(made or replaced after the launch too),
 the mark is set inside only, and links an agent leaves in its tree reach nothing at the next launch."""
 
 from __future__ import annotations
@@ -110,7 +111,7 @@ def test_a_derived_confinement_runs_the_program_and_shows_no_login_of_the_home(t
     assert seen == {
         "auth": "ENOENT",
         "aws": "ENOENT",
-        "hf_token": "EACCES",
+        "hf_token": "ENOENT",
         "hf_model": "ok:weights",
         "tool": "tool ran",
         "write": "ok:written",
@@ -119,7 +120,7 @@ def test_a_derived_confinement_runs_the_program_and_shows_no_login_of_the_home(t
     assert (work / "out").read_text(encoding="ascii") == "from inside"
 
 
-def test_a_credential_reached_through_a_linked_directory_is_masked_at_both_paths(tmp_path):
+def test_a_credential_reached_through_a_linked_directory_is_absent_at_both_paths(tmp_path):
     isolation = BwrapIsolation(usable_bwrap())
     work = tmp_path / "work"
     work.mkdir()
@@ -138,8 +139,8 @@ def test_a_credential_reached_through_a_linked_directory_is_masked_at_both_paths
     )
 
     assert {name: seen[name] for name in paths} == {
-        "real_secret": "EACCES",
-        "link_secret": "EACCES",
+        "real_secret": "ENOENT",
+        "link_secret": "ENOENT",
         "link_visible": "ok:shown",
     }
 
@@ -189,10 +190,10 @@ def test_links_an_agent_leaves_in_its_tree_reach_nothing_at_the_next_launch(tmp_
 
 
 @pytest.mark.parametrize("through", ["writable", "given"])
-def test_a_credential_an_agent_links_to_from_its_tree_stays_masked_at_the_next_launch(tmp_path, through):
+def test_a_credential_an_agent_links_to_from_its_tree_stays_hidden_at_the_next_launch(tmp_path, through):
     """The first launch's agent turns its re-pointed config directory (a writable path below its tree) or the prompt
     it was handed (a given path) into a link to Hugging Face's token, in the model cache it reads; the next launch's
-    confinement, derived the same way, still masks the token, at its own path and through the link."""
+    confinement, derived the same way, still hides the token, at its own path and through the link."""
     isolation = BwrapIsolation(usable_bwrap())
     hf, work = tmp_path / "hf", tmp_path / "work"
     token = _write(hf / "token", "SECRET-HF")
@@ -211,7 +212,7 @@ def test_a_credential_an_agent_links_to_from_its_tree_stays_masked_at_the_next_l
     planted = work / ".claude" if through == "writable" else prompt
     paths = {"token": token, "via_link": planted, "model": model}
     assert {name: _run(isolation, confinement(), env, paths, work)[name] for name in paths} == {
-        "token": "EACCES",
+        "token": "ENOENT",
         "via_link": "EISDIR" if through == "writable" else "ok:the task",
         "model": "ok:weights",
     }
@@ -220,7 +221,7 @@ def test_a_credential_an_agent_links_to_from_its_tree_stays_masked_at_the_next_l
 
     seen = _run(isolation, confinement(), env, paths, work)
 
-    assert {name: seen[name] for name in paths} == {"token": "EACCES", "via_link": "EACCES", "model": "ok:weights"}
+    assert {name: seen[name] for name in paths} == {"token": "ENOENT", "via_link": "ENOENT", "model": "ok:weights"}
 
 
 @pytest.mark.parametrize("target", ["root", "parent", "link_holder"])
@@ -230,7 +231,7 @@ def test_a_writable_path_an_agent_re_points_through_another_never_takes_its_tree
     at ``via``, the directory holding the app's link to ``work``: each has ``work`` reached through it. It also turns
     the prompt it was handed into a link to Hugging Face's token, beside the ``python3`` it left on its ``PATH``. The
     next derivation still takes ``work`` for a tree the agent wrote: it runs no program of it, binds nothing the agent
-    chose, and the token stays masked. Pointed at ``via``, the two paths are reached through each other's trees, and
+    chose, and the token stays hidden. Pointed at ``via``, the two paths are reached through each other's trees, and
     neither is bound: the agent can withhold its own tree, never get another."""
     isolation = BwrapIsolation(usable_bwrap())
     hf, work, ran = tmp_path / "hf", tmp_path / "work", tmp_path / "ran"
@@ -265,7 +266,58 @@ def test_a_writable_path_an_agent_re_points_through_another_never_takes_its_tree
     seen = _run(isolation, after, env, {"token": token, "via_prompt": prompt, "model": model}, inside, {})
 
     assert {name: seen[name] for name in ("token", "via_prompt", "model")} == {
-        "token": "EACCES",
-        "via_prompt": "ENOENT" if target == "link_holder" else "EACCES",
+        "token": "ENOENT",
+        "via_prompt": "ENOENT",
         "model": "ok:weights",
     }
+
+
+#: Run inside: say ready, wait for the host's go, then read each named path and write the last argument (``ok:<text>``
+#: or the errno name).
+LATER = r"""
+import errno, json, sys
+print("ready", flush=True)
+sys.stdin.readline()
+def outcome(action):
+    try:
+        return "ok:" + action()
+    except OSError as exc:
+        return errno.errorcode.get(exc.errno, str(exc.errno))
+seen = {name: outcome(lambda path=path: open(path).read()) for name, path in json.loads(sys.argv[1]).items()}
+seen["write"] = outcome(lambda: str(open(sys.argv[2], "w").write("new")))
+print(json.dumps(seen))
+"""
+
+
+def test_a_login_the_host_replaces_or_makes_after_the_launch_is_not_shown(tmp_path):
+    """A tool replaces its login file by a rename (``~/.git-credentials`` through its lock file) and Hugging Face
+    writes its token at the first login: neither, done on the host while the sandbox runs, shows inside, while the
+    model beside them still reads; and the directory bound entry by entry stays read-only."""
+    isolation = BwrapIsolation(usable_bwrap())
+    hf, tools, work = tmp_path / "hf", tmp_path / "tools", tmp_path / "work"
+    work.mkdir()
+    model, kube = _write(hf / "hub/model.txt", "weights"), _write(tools / "kube/config", "SECRET-OLD")
+    visible = _write(tools / "kube/visible", "shown")
+    env = {"PATH": "/usr/bin:/bin", "HF_HOME": str(hf), "KUBECONFIG": str(kube)}
+    readable = (*toolchain_paths(env, sys.executable, writable=(work,)), tools)
+    masked = credential_paths(env, app_environ={}, allowed=(*readable, work), writable=(work,))
+    assert {kube, hf / "token"} <= set(masked)
+    policy = Confinement(writable=(work,), readable=readable, masked=masked).policy(chdir=work)
+    paths = {"kube": kube, "token": hf / "token", "model": model, "visible": visible}
+    argv = [sys.executable, "-I", "-S", "-c", LATER, _named(paths), str(hf / "new")]
+    command, child_env = isolation.launch(argv, policy, env)
+    with subprocess.Popen(
+        command, env=child_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    ) as child:
+        try:
+            assert child.stdout.readline().strip() == "ready", child.stderr.read()
+            _write(kube.with_name("config.lock"), "SECRET-NEW").replace(kube)
+            _write(hf / "token", "SECRET-HF")
+            out, err = child.communicate("go\n", timeout=60)
+        finally:
+            child.kill()
+    assert child.returncode == 0, err
+    assert "SECRET" not in out + err
+    seen = json.loads(out)
+    assert seen == {"kube": "ENOENT", "token": "ENOENT", "model": "ok:weights", "visible": "ok:shown", "write": "EROFS"}
+    assert not (hf / "new").exists()
