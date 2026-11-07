@@ -68,7 +68,7 @@ from ._round_folder import RoundFolder, is_round_folder
 from .benchmark_backend import build_benchmark_command
 from .benchmark_config import apply_benchmark_round_seed, composed_benchmark_timeout_sec, prepare_benchmark_runtime
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
-from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_speculative_change
+from ._spec_decode_pin import SpeculativeDecodingPinnedError, refuse_unpinned_speculative_change
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom_common.coerce import to_str_list
@@ -1755,7 +1755,7 @@ def _attach_grid_launch_evidence(
             failure_evidence.YAML_BUILD_ERROR,
             _BENCHMARK_CAP_ERROR,
             _WARMUP_YAML_BUILD_ERROR,
-            SPECULATIVE_DECODING_PINNED,
+            SpeculativeDecodingPinnedError.error_class,
             ServerArgvInvalidError.error_class,
         }:
             continue

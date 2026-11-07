@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a benchmarked candidate may change about a launch that simulates speculative-decoding acceptance."""
+"""What a benchmarked candidate may change about a launch that simulates speculative-decoding acceptance.
+
+The simulated acceptance is the golden layer of the launch (D10): a candidate that touches a key golden owns is a
+candidate ``serve_flag`` failure naming that key, as a flag the parser refuses is.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +19,7 @@ from inference_suite.golden import (
     golden_owned_settings,
 )
 
-SPECULATIVE_DECODING_PINNED = "speculative_decoding_pinned"
+from hyperloom.common.failure_signature import SERVE_FLAG
 
 _SIMULATED_LENGTH_ENV = "SGLANG_SIMULATE_ACC_LEN"
 _SYNTHETIC_REJECTION = f"--{SPECULATIVE_CONFIG_FLAG}.rejection_sample_method"
@@ -25,7 +29,7 @@ _SYNTHETIC_LENGTH = f"--{SPECULATIVE_CONFIG_FLAG}.synthetic_acceptance_length"
 class SpeculativeDecodingPinnedError(ValueError):
     """A candidate changes the draft or the simulated acceptance its base launch pins."""
 
-    error_class = SPECULATIVE_DECODING_PINNED
+    error_class = SERVE_FLAG
 
 
 def _canonical(value: Any) -> str:
@@ -76,27 +80,26 @@ def refuse_unpinned_speculative_change(
     """
     base = _speculative_identity(base_args, base_envs)
     candidate = _speculative_identity(candidate_args, candidate_envs)
+    changed = sorted(key for key in base.keys() | candidate.keys() if base.get(key) != candidate.get(key))
     if not _simulates_acceptance(base):
         if _configures_a_draft(base) and _simulates_acceptance(candidate):
             raise SpeculativeDecodingPinnedError(
-                f"{SPECULATIVE_DECODING_PINNED}: the base launch verifies a real draft, so its acceptance is measured; "
-                "this candidate switches to a simulated acceptance length, which is declared, so its gain would not be "
-                "comparable. Keep real draft verification and vary the draft or other knobs."
+                f"{SERVE_FLAG}: golden-owned {', '.join(changed)}: the base launch verifies a real draft, so its "
+                "acceptance is measured; this candidate switches to a simulated acceptance length, which is declared, "
+                "so its gain would not be comparable. Keep real draft verification and vary the draft or other knobs."
             )
         return
-    changed = sorted(key for key in base.keys() | candidate.keys() if base.get(key) != candidate.get(key))
     if changed:
         changes = ", ".join(f"{key} ({base.get(key)!r} -> {candidate.get(key)!r})" for key in changed)
         raise SpeculativeDecodingPinnedError(
-            f"{SPECULATIVE_DECODING_PINNED}: the base launch simulates speculative-decoding acceptance, which is "
-            f"only valid for the draft it was set for, so the draft and its simulated acceptance are pinned; this "
-            f"candidate changes {changes}. Keep them as the base sets them (a --{SPECULATIVE_CONFIG_FLAG} must restate "
-            "its pinned keys) and vary other knobs."
+            f"{SERVE_FLAG}: golden-owned {', '.join(changed)}: the base launch simulates speculative-decoding "
+            "acceptance, which is only valid for the draft it was set for, so the draft and its simulated acceptance "
+            f"are pinned; this candidate changes {changes}. Keep them as the base sets them "
+            f"(a --{SPECULATIVE_CONFIG_FLAG} must restate its pinned keys) and vary other knobs."
         )
 
 
 __all__ = [
-    "SPECULATIVE_DECODING_PINNED",
     "SpeculativeDecodingPinnedError",
     "refuse_unpinned_speculative_change",
 ]

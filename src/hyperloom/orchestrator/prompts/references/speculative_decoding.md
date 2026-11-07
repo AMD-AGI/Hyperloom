@@ -104,7 +104,7 @@ acceptance are pinned: a candidate that changes the draft length, top-k, block
 size, method or draft model, or adds, changes or unsets any
 `SGLANG_SIMULATE_ACC_*` env or synthetic-acceptance value, or drops
 `--speculative-config` (a replacing argument string that omits it included), is
-refused before it is benchmarked with `error_class: speculative_decoding_pinned`.
+refused before it is benchmarked as a `serve_flag` failure naming the golden-owned key.
 The lookup above then only confirms the base's own cell; spend variants on other
 knobs. A `--speculative-config` replaces the whole object, so a variant that
 changes a key that does not describe the draft (e.g. `attention_backend`) must
