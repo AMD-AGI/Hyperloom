@@ -3,9 +3,14 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -139,10 +144,46 @@ def test_a_staging_that_is_not_the_sheets_is_removed_and_refused(tmp_path, monke
 
     with pytest.raises(ToolError, match=f"not the sheet's {_STAGING}"):
         ensure_inference_suite(_STAGING, tmp_path / "ix", tmp_path / "runner-cache")
-    assert list((tmp_path / "runner-cache" / "inference-suite").iterdir()) == []
+    assert not (tmp_path / "runner-cache" / "inference-suite" / _STAGING).exists()
 
 
 def test_a_staging_that_is_not_a_manifest_sha256_is_refused_before_anything_is_staged(tmp_path):
     with pytest.raises(ToolError, match="not a staging manifest sha256"):
         ensure_inference_suite("sha256:" + _STAGING, tmp_path / "ix", tmp_path / "runner-cache")
     assert not (tmp_path / "runner-cache").exists()
+
+
+def test_two_runners_on_a_new_staging_stage_it_once_and_both_get_the_whole_tree(tmp_path, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    stage = _Stage()
+
+    def slow_stage(argv, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        return stage(argv, **kwargs)
+
+    monkeypatch.setattr(tools.subprocess, "run", slow_stage)
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(ensure_inference_suite, _STAGING, tmp_path / "ix", tmp_path / "runner-cache")
+        assert entered.wait(10)
+        second = pool.submit(ensure_inference_suite, _STAGING, tmp_path / "ix", tmp_path / "runner-cache")
+        time.sleep(0.2)
+        assert not second.done()
+        release.set()
+        staged = {first.result(10), second.result(10)}
+
+    assert staged == {tmp_path / "runner-cache" / "inference-suite" / _STAGING} and len(stage.argv) == 1
+    assert (
+        tmp_path / "runner-cache" / "inference-suite" / _STAGING / "staging_manifest.json"
+    ).read_bytes() == _MANIFEST
+
+
+def test_a_runner_cache_that_cannot_be_written_is_a_tool_error(tmp_path, monkeypatch):
+    def read_only(self, *args, **kwargs):
+        raise OSError(errno.EROFS, "Read-only file system", str(self))
+
+    monkeypatch.setattr(tools.subprocess, "run", _Stage())
+    monkeypatch.setattr(Path, "mkdir", read_only)
+
+    with pytest.raises(ToolError, match="cannot be staged into"):
+        ensure_inference_suite(_STAGING, tmp_path / "ix", tmp_path / "runner-cache")

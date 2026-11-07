@@ -12,6 +12,7 @@ sha256, so a directory whose manifest has that sha256 is the staging the sheet n
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import shutil
@@ -112,14 +113,28 @@ def ensure_inference_suite(staging: str, inferencex: Path, runner_cache: Path) -
 
     It is ``<runner_cache>/inference-suite/<staging>/``, staged there from the InferenceX checkout ``inferencex`` by
     ``python -m inference_suite stage`` when no manifest with that sha256 is there yet. Staging builds the AgentX
-    venv in place, so it runs in its final directory, and a staging whose manifest is not the one the sheet names is
-    removed and refused: the runner's pins are not the application's.
+    venv in place, so it runs in its final directory under a lock that runners sharing the cache take, and stage
+    writes the manifest last, so a matching manifest is a whole tree. A staging whose manifest is not the one the
+    sheet names is removed and refused: the runner's pins are not the application's.
     """
     if not _SHA256.fullmatch(staging):
         raise ToolError(f"inference_suite: {staging!r} is not a staging manifest sha256")
-    destination = runner_cache / INFERENCE_SUITE_DIR / staging
+    stagings = runner_cache / INFERENCE_SUITE_DIR
+    destination = stagings / staging
     if manifest_sha256(destination) == staging:
         return destination
+    try:
+        stagings.mkdir(parents=True, exist_ok=True)
+        with open(stagings / f".{staging}.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if manifest_sha256(destination) != staging:
+                _stage(staging, inferencex, destination)
+    except OSError as exc:
+        raise ToolError(f"inference_suite: the runner cache {stagings} cannot be staged into: {exc}") from exc
+    return destination
+
+
+def _stage(staging: str, inferencex: Path, destination: Path) -> None:
     _remove(destination)
     destination.mkdir(parents=True)
     argv = [sys.executable, "-m", "inference_suite", "stage", "--source", str(inferencex)]
@@ -137,4 +152,3 @@ def ensure_inference_suite(staging: str, inferencex: Path, runner_cache: Path) -
             f"inference_suite stage into {destination} exited {done.returncode} with manifest {staged}, not the "
             f"sheet's {staging}: {done.stderr.strip()[-300:]}"
         )
-    return destination
