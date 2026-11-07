@@ -96,10 +96,13 @@ class Spawned:
         return outcome
 
 
-def spawn(argv: Sequence[str], env: Mapping[str, str], stdout: Path, stderr: Path | None = None) -> Spawned:
+def spawn(
+    argv: Sequence[str], env: Mapping[str, str], stdout: Path, stderr: Path | None = None, cwd: Path | None = None
+) -> Spawned:
     """Start ``argv`` in its own session with exactly ``env`` and a fresh mark, appending its output to ``stdout``.
 
-    ``stderr`` defaults to the same file. Appending keeps what an earlier server wrote to a shared log.
+    ``stderr`` defaults to the same file. Appending keeps what an earlier server wrote to a shared log. ``cwd`` is where
+    the child starts, this process's own directory when ``None``.
     """
 
     mark = uuid.uuid4().hex
@@ -116,6 +119,7 @@ def spawn(argv: Sequence[str], env: Mapping[str, str], stdout: Path, stderr: Pat
             stdout=files[0],
             stderr=files[1] if len(files) > 1 else subprocess.STDOUT,
             start_new_session=True,
+            cwd=cwd,
         )
     return Spawned(proc, mark)
 
