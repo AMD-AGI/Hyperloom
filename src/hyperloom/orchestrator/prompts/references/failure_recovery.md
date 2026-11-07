@@ -68,29 +68,17 @@ measurement, NOT a failure — do not retry it.
   matches a recent failure; it will fail the same way. Changing a
   field OUTSIDE the seven does not count and does not get you a new
   attempt: the proposal is dropped as a duplicate and you have burned
-  a tick. Bump at least one of: `params.benchmark_script`
-  (a sanitized `*.sh` file name that MUST match THIS run's framework —
-  e.g. for a vllm run pin `vllm_mi300x.sh`, never `sglang_*`; a
-  cross-framework script boots the wrong engine and is rejected),
-  `params.result_dir`, `params.extra_server_args`, or
+  a tick. Change the launch: `params.extra_server_args` or
   `params.extra_envs`.
-* **RULE F2 — `error_class='no_report'` + no `rescued_from_leaked_path:*`
-  warning ⇒ leak salvage missed.** (PRELUDE only.) The script wrote results
-  outside the workspace and outside the configured leak destinations.
-  Override `params.benchmark_script` to a script that respects
-  `$RESULT_DIR` (Coordinator already exports `RESULT_DIR=<workspace>` by
-  default).
-* **RULE F3 — repeated `error_class='subprocess_nonzero'`, `'client_failed'` or
-  `'magpie_nonzero_invalid_measurement'` on `baseline` ⇒ stop retrying
-  baseline.** Each class means the benchmark exited nonzero for a cause
-  Hyperloom did not recognise — `client_failed` names the benchmark client as
-  the process that exited, and `magpie_nonzero_invalid_measurement` additionally
-  means the run served every request it asked for, so the exit came from the
-  harness around the benchmark and another identical attempt buys nothing.
+* **RULE F2 — repeated `error_class='subprocess_nonzero'` or `'client_failed'`
+  on `baseline` ⇒ stop retrying baseline.** Each class means the benchmark
+  exited nonzero for a cause Hyperloom did not recognise — `client_failed`
+  names the benchmark client as the process that exited, so another identical
+  attempt buys nothing.
   `send_message` with `body_md='blocked: subprocess repeatedly nonzero
   baseline'`, quoting the failure excerpt rather than a diagnosis. Explore
   variants may be re-proposed; read the failure log first.
-* **RULE F4 — `policy_denial_streak` is a pure fact, not a lock.** The
+* **RULE F3 — `policy_denial_streak` is a pure fact, not a lock.** The
   `mcp__inference_optimizer_context__why_denied` context tool (and the
   `Recent policy denials` block in the state projection) shows repeated
   (action, rule) collisions. The system no longer reacts to the streak —
@@ -98,14 +86,13 @@ measurement, NOT a failure — do not retry it.
   streak≥10; the run continues until the wall-clock deadline or another
   stop_reason fires. So the streak is purely a signal for YOU: the same
   params keep colliding with the same invariant, so change something
-  substantive — a new `params.grid` variant, a different
-  `benchmark_script`, or a sibling action family.
+  substantive — a new `params.grid` variant or a sibling action family.
   Re-emitting the identical denied intent just wastes a tick.
 
-## Example (PRELUDE — baseline failed twice with `error_class='no_report'`)
+## Example (PRELUDE — baseline failed twice with `error_class='server_init_dead'`)
 
     propose_action{action_name='baseline',
-        params={result_dir: '<session_dir>/runs/baseline/<task>/leak'},
+        params={extra_server_args: '--mem-fraction-static 0.8'},
         predicted_gain_pct: 0,
-        notes: 'recover from no_report streak by redirecting RESULT_DIR
-                to the observed leak location'}
+        notes: 'server_log_path shows an OOM during KV-cache allocation;
+                lower the static memory fraction'}

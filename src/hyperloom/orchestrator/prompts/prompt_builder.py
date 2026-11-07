@@ -657,7 +657,7 @@ def _section_decision_framework(*, phase: str = "", transport: str = "") -> list
 def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
     """Build the FAILURE RECOVERY block.
 
-    Always-on trigger and F3/F4 rules are inlined; the detailed diagnostic
+    Always-on trigger and F2/F3 rules are inlined; the detailed diagnostic
     surfaces, fingerprint semantics, and worked examples live in the
     ``failure_recovery`` reference document, which only a transport with the
     ``read_reference`` tool can pull.
@@ -696,18 +696,16 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
         lines.extend(
             [
                 "* **RULE F1** (PRELUDE) — same baseline fingerprint twice failed →"
-                " change at least one of the seven fingerprint fields.",
-                "* **RULE F2** (PRELUDE) — `error_class='no_report'` + no"
-                " `rescued_from_leaked_path:*` → redirect RESULT_DIR.",
+                " change its launch (`params.extra_server_args` / `params.extra_envs`).",
             ]
         )
     lines.extend(
         [
-            "* **RULE F3** — repeated `error_class='subprocess_nonzero'`, `'client_failed'` or"
-            " `'magpie_nonzero_invalid_measurement'` on `baseline` → stop retrying baseline;"
+            "* **RULE F2** — repeated `error_class='subprocess_nonzero'` or `'client_failed'`"
+            " on `baseline` → stop retrying baseline;"
             " send observation 'blocked: …' quoting the failure excerpt."
             " Explore variants may be re-proposed; read the failure log first.",
-            "* **RULE F4** — `policy_denial_streak` is information only."
+            "* **RULE F3** — `policy_denial_streak` is information only."
             " Change something substantive; re-emitting the identical intent wastes a tick.",
         ]
     )
