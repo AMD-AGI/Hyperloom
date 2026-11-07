@@ -374,8 +374,6 @@ ignore_imports =
     hyperloom_multibranch.**.tests.** -> **
     # The round gate's KV recorder until run_round owns telemetry and unit 5.05a deletes _build_kv_recorder.
     hyperloom.orchestrator.actions.executors._subprocess_kill -> inference_suite.telemetry.kv_poll
-    # The MLPerf client's deployed mapper until the client runs as an inference_suite load and deploy.py goes.
-    hyperloom.inference_optimizer.agentx.deploy -> inference_suite.load.mlperf_report
     hyperloom.orchestrator.actions.executors._subprocess_kill -> inference_suite.telemetry.kv_record
 unmatched_ignore_imports_alerting = none
 

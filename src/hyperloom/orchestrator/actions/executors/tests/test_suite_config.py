@@ -431,6 +431,12 @@ def test_an_mlperf_point_runs_the_harness_against_a_server_serving_the_name_it_r
     assert launch.argv[launch.argv.index("--served-model-name") + 1] == "kimi-k3"
 
 
+def test_an_operator_keep_alive_is_kept() -> None:
+    config = suite_config(_mlperf_point(SGLANG_TIMEOUT_KEEP_ALIVE="60"), _base("sglang"), _settings())
+
+    assert config.server.user.env_set["SGLANG_TIMEOUT_KEEP_ALIVE"] == "60"
+
+
 def test_an_mlperf_server_phase_point_boots_the_server_and_runs_no_harness() -> None:
     config = suite_config(_mlperf_point(MAGPIE_RUN_PHASE="server"), _base("sglang"), _settings(LifecycleMode.BOOT))
 

@@ -21,14 +21,10 @@ from typing import Any, Mapping
 
 from hyperloom.common.outside_facts import ENV_CONC
 
+#: The ``benchmark_script`` that marks an MLPerf point; inference_suite runs the MLPerf harness for it, and no script by
+#: this name ships.
 MLPERF_CLIENT_SCRIPT = "mlperf_agentic_client.sh"
 AGENTX_CLIENT_SCRIPTS = frozenset({MLPERF_CLIENT_SCRIPT})
-
-# The MLPerf client boots its server from the inference_suite config the first names, records its pid in the pid_dir
-# the second names, and runs inference_suite under the interpreter the third names.
-MLPERF_SERVER_CONFIG_ENV = "MLPERF_SERVER_CONFIG"
-MLPERF_SERVER_PID_DIR_ENV = "MLPERF_SERVER_PID_DIR"
-MLPERF_SUITE_PYTHON_ENV = "MLPERF_SUITE_PYTHON"
 
 BACKEND_ENV = "HYPERLOOM_AGENTIC_BACKEND"
 
@@ -126,7 +122,7 @@ def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:
 
 
 def agentx_client_script(env: Mapping[str, str] | None = None) -> str:
-    """The Magpie ``benchmark_script`` this AgentX backend pins."""
+    """The ``benchmark_script`` an MLPerf point names."""
     if not is_mlperf_backend(env):
         raise ValueError("AgentX serving and replay are managed by Magpie; no Hyperloom client script exists")
     return MLPERF_CLIENT_SCRIPT
