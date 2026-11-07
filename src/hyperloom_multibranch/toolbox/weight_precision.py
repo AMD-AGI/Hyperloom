@@ -10,9 +10,11 @@ passing.
 
 The flags read here set the weights' format, their quantization at load time, their dtype, the checkpoint itself or its
 revision, or name a file that can set any of them (a config file of flags, or the model's own config), or how the
-checkpoint is loaded (its load format, of which a change only among :data:`SPEED_ONLY_LOAD_FORMATS` is no change); and
-two flags with other uses, whose JSON value overrides the model's config, count in what they set under a dtype or
-quantization key. Only launch flags are read: a source patch that casts weights at load is not, nor what a file holds.
+checkpoint is loaded (its load format, of which a change only among :data:`SPEED_ONLY_LOAD_FORMATS` is no change, and
+the loader's extra config, whose change is none where both launches load in one of them), or ModelOpt's checkpoint
+paths; and two flags with other uses, whose JSON value overrides the model's config, count in what they set under a
+dtype or quantization key. Only launch flags are read: a source patch that casts weights at load is not, nor what a
+file holds.
 
 A launch word is first read as the frameworks' argument parsers read it (:func:`_flag`): ``--flag=value`` is ``--flag
 value``; a long flag's name reads ``_`` as ``-`` and ends at its first ``.``, and ``--flag.key value`` is a value of
@@ -61,8 +63,10 @@ from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_
 #: and its revision, since another checkpoint may hold another precision, the files that can set any of them (none is
 #: read here: vLLM's and SGLang's ``--config`` of flags, and the model config vLLM's ``--hf-config-path`` and SGLang's
 #: ``--decrypted-config-file`` read instead of the checkpoint's), ModelOpt's and torchao's quantization, and SGLang's
-#: quantize-and-serve, and the load format (:data:`SPEED_ONLY_LOAD_FORMATS`). A launch word counts as one of these
-#: spellings when the frameworks' parsers read it as that spelling: see :func:`_flag` and :func:`_names`.
+#: quantize-and-serve, ModelOpt's checkpoint paths (a restore takes the quantizer state from its file, and any of them
+#: sends SGLang's online ``modelopt_fp4`` to ModelOpt's calibrating loader), and the load format and its loader's extra
+#: config (:data:`SPEED_ONLY_LOAD_FORMATS`). A launch word counts as one of these spellings when the frameworks'
+#: parsers read it as that spelling: see :func:`_flag` and :func:`_names`.
 WEIGHT_PRECISION_FLAGS: Mapping[str, tuple[str, ...]] = {
     "--quantization": ("--quantization", "-q"),
     "--quantization-config": ("--quantization-config",),
@@ -77,7 +81,11 @@ WEIGHT_PRECISION_FLAGS: Mapping[str, tuple[str, ...]] = {
     "--quantize-and-serve": ("--quantize-and-serve",),
     "--hf-config-path": ("--hf-config-path",),
     "--decrypted-config-file": ("--decrypted-config-file",),
+    "--modelopt-checkpoint-restore-path": ("--modelopt-checkpoint-restore-path",),
+    "--modelopt-checkpoint-save-path": ("--modelopt-checkpoint-save-path",),
+    "--modelopt-export-path": ("--modelopt-export-path",),
     "--load-format": ("--load-format",),
+    "--model-loader-extra-config": ("--model-loader-extra-config",),
 }
 
 #: The values of vLLM's and SGLang's ``--load-format`` (lower-cased, as both read it; absent is ``auto``) among which a
@@ -85,10 +93,16 @@ WEIGHT_PRECISION_FLAGS: Mapping[str, tuple[str, ...]] = {
 #: tensors as stored and differs only in the files it picks (``*.safetensors`` else ``*.bin``, ``*.safetensors``,
 #: ``*.pt``, ``*.bin`` through numpy). Any other value may quantize what it loads (SGLang's ``flash_rl`` serves a BF16
 #: checkpoint in FP8) or load no checkpoint (``dummy``), so a change to, from or between them is a change;
-#: ``runai_streamer`` among them, since SGLang does not route it to ModelOpt's loader, which quantizes the weights.
+#: ``runai_streamer`` among them, since SGLang does not route it to ModelOpt's loader, which quantizes the weights. The
+#: default loaders refuse an extra config with keys other than their threading ones, so where both launches load in one
+#: of these formats a change of ``--model-loader-extra-config`` is none; under any other format a key can set what is
+#: quantized (SGLang's ``bitsandbytes`` reads ``qlora_adapter_name_or_path``), and a change of it is a change.
 SPEED_ONLY_LOAD_FORMATS = frozenset({"auto", "pt", "safetensors", "npcache", "fastsafetensors"})
 
 _LOAD_FORMAT = "--load-format"
+
+#: The settings whose change is none when both launches load in :data:`SPEED_ONLY_LOAD_FORMATS`.
+_SPEED_ONLY_WHERE_LOADED_SO = frozenset({_LOAD_FORMAT, "--model-loader-extra-config"})
 
 #: The keys of a model's config that set its weights' dtype or quantization: vLLM and SGLang read
 #: ``compression_config`` (compressed-tensors' key) as the quantization config when ``quantization_config`` is absent.
@@ -150,7 +164,7 @@ def weight_precision_changes(before: LaunchConfig, after: LaunchConfig) -> list[
     return [
         f"{name}: {_shown(old.get(name))} -> {_shown(new.get(name))}"
         for name in sorted({*old, *new})
-        if old.get(name) != new.get(name) and not (name == _LOAD_FORMAT and _speed_only(old, new))
+        if old.get(name) != new.get(name) and not (name in _SPEED_ONLY_WHERE_LOADED_SO and _speed_only(old, new))
     ]
 
 

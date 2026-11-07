@@ -75,6 +75,8 @@ def test_the_refusal_code_is_a_documented_rejection_code() -> None:
 
 # --- each setting: added, changed, removed ---------------------------------------------------------------------------
 
+MODELOPT_PATHS = ("checkpoint-restore-path", "checkpoint-save-path", "export-path")
+
 #: One spelling of each setting with two values, and the name a change of it is reported under.
 SETTINGS = [
     ("--quantization", "fp8", "fp8_per_channel", "--quantization"),
@@ -94,6 +96,9 @@ SETTINGS = [
     ("--hf-config-path", "/cfg/a", "/cfg/b", "--hf-config-path"),
     ("--decrypted-config-file", "/cfg/a.json", "/cfg/b.json", "--decrypted-config-file"),
     ("--load-format", "flash_rl", "bitsandbytes", "--load-format"),
+    ("--modelopt-checkpoint-restore-path", "/ckpt/a", "/ckpt/b", "--modelopt-checkpoint-restore-path"),
+    ("--modelopt-checkpoint-save-path", "/ckpt/a", "/ckpt/b", "--modelopt-checkpoint-save-path"),
+    ("--modelopt-export-path", "/export/a", "/export/b", "--modelopt-export-path"),
 ]
 
 
@@ -340,7 +345,15 @@ def _changes(before: str, after: str) -> list[str]:
             "--quantization- x",
             ["--quantization-config: (not set) -> x", "--quantization-param-path: (not set) -> x"],
         ),
-        ("", "--mod /m", ["--modelopt-quant: (not set) -> /m", "the checkpoint: (not set) -> /m"]),
+        (
+            "",
+            "--mod /m",
+            [
+                *(f"--modelopt-{name}: (not set) -> /m" for name in MODELOPT_PATHS),
+                "--modelopt-quant: (not set) -> /m",
+                "the checkpoint: (not set) -> /m",
+            ],
+        ),
         ("", "-- --max-num-seqs 8", []),
     ],
 )
@@ -1022,9 +1035,6 @@ def test_the_pairs_a_launch_adds_are_named_in_its_order() -> None:
         "--model-checksum x",
         "--model-config-parser x",
         "--modelexpress-config x",
-        "--modelopt-checkpoint-restore-path /c",
-        "--modelopt-checkpoint-save-path /c",
-        "--modelopt-export-path /c",
         "--hf-chat-template-name x",
         "--torch-compile-max-bs 8",
         # SGLang's diffusion server takes ``--mode`` for its ``--performance-mode``, though it begins ``--model``.
@@ -1151,6 +1161,65 @@ def test_a_flash_rl_load_dropped_from_a_launch_is_a_change() -> None:
 )
 def test_the_load_format_in_every_form_its_framework_reads(server_args: str, shown: str) -> None:
     assert _changes("", server_args) == [f"--load-format: (not set) -> {shown}"]
+
+
+#: A launch refuses a bare positional word, but takes a number after a flag as one of its values.
+@pytest.mark.parametrize(
+    "server_args", ["--load-format auto -1", "--load-format safetensors -0.5", "--load-format pt 1"]
+)
+async def test_a_load_format_of_several_words_is_refused(tmp_path: Path, server_args: str) -> None:
+    await _refused_naming(tmp_path, _repo(), _delta(server_args), "--load-format: (not set) -> ")
+
+
+@pytest.mark.parametrize(
+    "root_args",
+    ["--quantization modelopt_fp8", "--modelopt-quant fp8", "--quantization modelopt_fp4 --model-path /models/bf16"],
+)
+@pytest.mark.parametrize("flag", [f"--modelopt-{name}" for name in MODELOPT_PATHS])
+async def test_a_modelopt_checkpoint_path_added_to_a_modelopt_root_is_refused(
+    tmp_path: Path, root_args: str, flag: str
+) -> None:
+    await _refused_naming(tmp_path, _repo(root_args), _delta(f"{flag} /ckpt"), f"{flag}: (not set) -> /ckpt")
+
+
+QLORA = """'{"qlora_adapter_name_or_path": "/adapter"}'"""
+
+
+@pytest.mark.parametrize(
+    ("root_args", "server_args"),
+    [
+        ("--load-format bitsandbytes", f"--model-loader-extra-config {QLORA}"),
+        ("--load-format bitsandbytes", "--model-loader-extra-config '{\"num_threads\": 8}'"),
+        ("--load-format bitsandbytes --model-loader-extra-config {}", "--model-loader-extra-config '{\"a\": 1}'"),
+        ("--load-format flash_rl", "--model_loader_extra_config='{\"num_threads\": 8}'"),
+        ("--load-format tensorizer", "--model-loader-extra.tensorizer_uri /t"),
+        ("", f"--load-format bitsandbytes --model-loader-extra-config {QLORA}"),
+    ],
+)
+async def test_a_loader_extra_config_change_under_a_loader_that_is_not_speed_only_is_refused(
+    tmp_path: Path, root_args: str, server_args: str
+) -> None:
+    await _refused_naming(tmp_path, _repo(root_args), _delta(server_args), "--model-loader-extra-config: ")
+
+
+@pytest.mark.parametrize(
+    ("root_args", "server_args"),
+    [
+        ("", "--model-loader-extra-config '{\"num_threads\": 8}'"),
+        ("--load-format safetensors", "--load-format pt --model-loader-extra-config '{\"num_threads\": 2}'"),
+        ("--model-loader-extra-config '{\"num_threads\": 4}'", "--model-loader-extra-config '{\"num_threads\": 8}'"),
+        ("--load-format fastsafetensors", "--model-loader-extra-config '{\"enable_gds\": true}'"),
+    ],
+)
+async def test_a_loader_extra_config_change_under_speed_only_loaders_is_accepted(
+    tmp_path: Path, root_args: str, server_args: str
+) -> None:
+    assert await _refusal(tmp_path, _repo(root_args), _delta(server_args)) is None
+
+
+def test_a_root_extra_config_kept_under_a_loader_that_is_not_speed_only_is_no_change() -> None:
+    root_args = f"--load-format bitsandbytes --model-loader-extra-config {QLORA}"
+    assert _changes(root_args, root_args + " --max-num-seqs 64") == []
 
 
 def test_the_speed_only_load_formats_are_the_default_loader_ones() -> None:
