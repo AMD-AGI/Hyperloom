@@ -19,14 +19,17 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors import _agentx_checkpoint, _ray_serving, _suite_config
 from hyperloom.orchestrator.actions.executors._agentx_checkpoint import (
+    CHECKPOINT_ARTIFACT_NAME,
     AgentxCheckpoint,
     SuiteRoundCheckpoint,
     read_checkpoint,
 )
+from hyperloom.orchestrator.actions.executors._grid_base import run_grid_suite_round
 from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 from hyperloom.orchestrator.actions.executors._ray_backend import SessionKillRound, SuiteLeasedRound
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    AGENTX_EARLY_STOP_ERROR_CLASS,
     AGENTX_EARLY_STOP_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -44,8 +47,10 @@ from hyperloom.orchestrator.actions.executors.tests.test_baseline_suite_round im
 from hyperloom.orchestrator.actions.executors.tests.test_baseline_suite_round import _play as baseline_play
 from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import _play as grid_play
 from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import suite as grid_suite  # noqa: F401
-from hyperloom.orchestrator.actions.executors.tests.test_suite_round import _rounds, _write_point, session  # noqa: F401
-from hyperloom.orchestrator.rehearsal import READY, LaunchAttempt
+from hyperloom.orchestrator.actions.executors.tests.test_suite_round import _grid_round, _rounds, _write_point
+from hyperloom.orchestrator.actions.executors.tests.test_suite_round import session  # noqa: F401
+from hyperloom.orchestrator.rehearsal import DIED_SILENTLY, READY, LaunchAttempt, LaunchScenario, ScriptedRounds
+from hyperloom.orchestrator.rehearsal import VirtualClock
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
 from inference_suite import EXIT_REFUSED
 from inference_suite.contracts import FailedStep, LifecycleMode, RunStatus, SuiteConfig
@@ -104,6 +109,7 @@ def test_a_leased_round_runs_in_the_lease_and_its_report_is_read_back(session, t
         (_Lease(exit_code=EXIT_REFUSED), failed_step_error_class(FailedStep.CONFIG_INVALID)),
         (_Lease(exit_code=ORCHESTRATOR_CANCELLED_RETURNCODE), ORCHESTRATOR_CANCELLED_CLASS),
         (_Lease(exit_code=SESSION_TIME_EXHAUSTED_RETURNCODE), SESSION_TIME_EXHAUSTED_CLASS),
+        (_Lease(exit_code=AGENTX_EARLY_STOP_RETURNCODE), AGENTX_EARLY_STOP_ERROR_CLASS),
         (_Lease(exit_code=1), RAY_ROUND_UNPLACED_CLASS),
         (_Lease(raised=subprocess.TimeoutExpired(["round"], 60)), RAY_ROUND_UNPLACED_CLASS),
     ],
@@ -278,3 +284,34 @@ def test_a_leased_round_carries_its_checkpoint_to_the_actor(session, tmp_path, m
     (leased,) = lease.leased
     assert leased.checkpoint is not None and leased.checkpoint.slot == point.parent
     assert leased.checkpoint.run_dir == Path(leased.run_dir)
+
+
+class _StoppedLease(_Lease):
+    """Plays an actor whose checkpoint stopped the round and whose CLI still wrote a report, at a step of its own."""
+
+    def run_session_kill(self, leased: SuiteLeasedRound) -> tuple[int, str, str]:
+        super().run_session_kill(leased)
+        (leased.checkpoint.slot / CHECKPOINT_ARTIFACT_NAME).write_text('{"stopped": true}', encoding="utf-8")
+        return AGENTX_EARLY_STOP_RETURNCODE, "", ""
+
+
+def _died() -> ScriptedRounds:
+    attempts = (LaunchAttempt(outcome=DIED_SILENTLY, duration_sec=10.0),)
+    return ScriptedRounds(scenario=LaunchScenario(attempts=attempts), clock=VirtualClock())
+
+
+@pytest.mark.parametrize("lease", [_Lease(exit_code=AGENTX_EARLY_STOP_RETURNCODE), _StoppedLease(_died())])
+def test_a_leased_round_its_checkpoint_stopped_ends_as_an_early_stop_with_or_without_a_report(
+    session, tmp_path, lease
+) -> None:
+    point = _write_point(tmp_path / "slot" / "point.yaml")
+
+    ended = run_grid_suite_round(
+        suite_route(session, point),
+        _grid_round(point, AgentxCheckpoint(100.0, enforce=True)),
+        env_drop=frozenset(),
+        serving_lease=lease,
+        on_poll=lambda: None,
+    )
+
+    assert ended.returncode == AGENTX_EARLY_STOP_RETURNCODE
