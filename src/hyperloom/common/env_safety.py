@@ -262,8 +262,6 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         # KernelForge's writable-state root.
         "KERNELFORGE_PROJECT_ROOT",
         "KERNEL_OPT_BACKEND_ORDER",
-        "MAGPIE_PATH",
-        "MAGPIE_PYTHON",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         # install.sh never writes the OpenAI side itself, but the URL and key are already accepted from an

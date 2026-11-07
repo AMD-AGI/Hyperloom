@@ -21,7 +21,6 @@ from .conftest import silent_backends
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
 
     return make_session_dir()
 
