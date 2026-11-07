@@ -11,7 +11,6 @@
 # the concurrency; preflight checks the harness, dataset and tokenizer. The
 # server is inference_suite's: this boots it from the config
 # MLPERF_SERVER_CONFIG names and reaps it through MLPERF_SERVER_PID_DIR on exit.
-# Without MLPERF_SERVER_CONFIG the server is off this node and already up.
 set -euo pipefail
 
 BENCH_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -26,6 +25,9 @@ log() { echo "[mlperf_agentic_client] $*"; }
 : "${AGENTIC_DATASET_PATH:?AGENTIC_DATASET_PATH required}"
 : "${MLPERF_TOKENIZER_DIR:?MLPERF_TOKENIZER_DIR required}"
 : "${MLPERF_ENDPOINTS_DIR:?MLPERF_ENDPOINTS_DIR required}"
+: "${MLPERF_SERVER_CONFIG:?MLPERF_SERVER_CONFIG required}"
+: "${MLPERF_SERVER_PID_DIR:?MLPERF_SERVER_PID_DIR required}"
+: "${MLPERF_SUITE_PYTHON:?MLPERF_SUITE_PYTHON required}"
 MODEL_KEY="$MLPERF_AGENTIC_MODEL"
 
 RESULT_DIR="${RESULT_DIR:-$(pwd)}"
@@ -34,27 +36,21 @@ ART="${RESULT_DIR}/mlperf_artifacts"
 rm -rf "$ART"
 mkdir -p "$RESULT_DIR" "$ART"
 
-if [ -n "${MLPERF_SERVER_CONFIG:-}" ]; then
-  : "${MLPERF_SERVER_PID_DIR:?MLPERF_SERVER_PID_DIR required with MLPERF_SERVER_CONFIG}"
-  : "${MLPERF_SUITE_PYTHON:?MLPERF_SUITE_PYTHON required with MLPERF_SERVER_CONFIG}"
-  SERVER_RUN_DIR="${RESULT_DIR}/mlperf_server_round"
-  stop_server() {
-    if ! "$MLPERF_SUITE_PYTHON" -m inference_suite stop --pid-dir "$MLPERF_SERVER_PID_DIR"; then
-      log "WARN: a server process outlived SIGKILL; ${MLPERF_SERVER_PID_DIR}/server.pid stays for the next reap"
-    fi
-  }
-  trap stop_server EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  # A run_dir is written once; an earlier round's server under this RESULT_DIR was reaped on its exit.
-  rm -rf "$SERVER_RUN_DIR"
-  log "booting the server through inference_suite (run_dir ${SERVER_RUN_DIR})"
-  if ! "$MLPERF_SUITE_PYTHON" -m inference_suite run --config "$MLPERF_SERVER_CONFIG" --run-dir "$SERVER_RUN_DIR"; then
-    log "ERROR: the server did not boot; see ${SERVER_RUN_DIR}/report.json"
-    exit 3
+SERVER_RUN_DIR="${RESULT_DIR}/mlperf_server_round"
+stop_server() {
+  if ! "$MLPERF_SUITE_PYTHON" -m inference_suite stop --pid-dir "$MLPERF_SERVER_PID_DIR"; then
+    log "WARN: a server process outlived SIGKILL; ${MLPERF_SERVER_PID_DIR}/server.pid stays for the next reap"
   fi
-else
-  log "no server config: driving the server already up on port ${PORT}"
+}
+trap stop_server EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# A run_dir is written once; an earlier round's server under this RESULT_DIR was reaped on its exit.
+rm -rf "$SERVER_RUN_DIR"
+log "booting the server through inference_suite (run_dir ${SERVER_RUN_DIR})"
+if ! "$MLPERF_SUITE_PYTHON" -m inference_suite run --config "$MLPERF_SERVER_CONFIG" --run-dir "$SERVER_RUN_DIR"; then
+  log "ERROR: the server did not boot; see ${SERVER_RUN_DIR}/report.json"
+  exit 3
 fi
 
 HARDWARE="${MLPERF_AGENTIC_HARDWARE:-mi355x}"

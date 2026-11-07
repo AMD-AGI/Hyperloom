@@ -7,8 +7,7 @@ An MLPerf AgentX round's server is inference_suite's. Its client script runs onl
 round deploys the script, preflights the harness and writes the config of an inference_suite ``boot`` round on the
 session's base beside the round's point YAML, naming that config, the pid_dir and the interpreter that runs
 inference_suite in the point's environment. The script boots the server with ``python -m inference_suite run`` and
-reaps it with ``stop`` on exit. A point served off this node boots nothing: the script drives the server it is pointed
-at.
+reaps it with ``stop`` on exit.
 """
 
 from __future__ import annotations
@@ -60,8 +59,6 @@ _NOMINAL_RUN_DIR = "run"
 #: Where install.sh stages the pinned tools every inference_suite round verifies.
 TOOL_CACHE_ENV = "INFERENCE_SUITE_TOOL_CACHE"
 _STAGING_MODULE = "inference_suite.staging"
-#: A point carrying this serves off this node; Hyperloom sets it for a multi-node client-only session.
-_REMOTE_SERVER_ENV = "BENCHMARK_BASE_URL"
 #: The point marks a boot-only round with this, which :func:`suite_config` reads.
 _RUN_PHASE_ENV = "MAGPIE_RUN_PHASE"
 _SERVER_ONLY_PHASE = "server"
@@ -170,14 +167,13 @@ def prepare_mlperf_round(config_path: Path, env: Mapping[str, str], inferencex_p
     envs = bench.setdefault("envs", {})
     for name in (MLPERF_SERVER_CONFIG_ENV, MLPERF_SERVER_PID_DIR_ENV, MLPERF_SUITE_PYTHON_ENV):
         envs.pop(name, None)
-    if not str(envs.get(_REMOTE_SERVER_ENV) or "").strip():
-        root = config_path.parent / MLPERF_SERVER_DIR
-        config = mlperf_server_config(document, root, env)
-        root.mkdir(parents=True, exist_ok=True)
-        (root / SERVER_CONFIG_FILE).write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding=_UTF8)
-        envs[MLPERF_SERVER_CONFIG_ENV] = str(root / SERVER_CONFIG_FILE)
-        envs[MLPERF_SERVER_PID_DIR_ENV] = str(config.lifecycle.pid_dir)
-        envs[MLPERF_SUITE_PYTHON_ENV] = sys.executable
+    root = config_path.parent / MLPERF_SERVER_DIR
+    config = mlperf_server_config(document, root, env)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / SERVER_CONFIG_FILE).write_text(yaml.safe_dump(config.to_document(), sort_keys=False), encoding=_UTF8)
+    envs[MLPERF_SERVER_CONFIG_ENV] = str(root / SERVER_CONFIG_FILE)
+    envs[MLPERF_SERVER_PID_DIR_ENV] = str(config.lifecycle.pid_dir)
+    envs[MLPERF_SUITE_PYTHON_ENV] = sys.executable
     config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding=_UTF8)
 
 

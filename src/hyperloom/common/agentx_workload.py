@@ -25,8 +25,7 @@ MLPERF_CLIENT_SCRIPT = "mlperf_agentic_client.sh"
 AGENTX_CLIENT_SCRIPTS = frozenset({MLPERF_CLIENT_SCRIPT})
 
 # The MLPerf client boots its server from the inference_suite config the first names, records its pid in the pid_dir
-# the second names, and runs inference_suite under the interpreter the third names; all three are unset when the
-# server is off this node.
+# the second names, and runs inference_suite under the interpreter the third names.
 MLPERF_SERVER_CONFIG_ENV = "MLPERF_SERVER_CONFIG"
 MLPERF_SERVER_PID_DIR_ENV = "MLPERF_SERVER_PID_DIR"
 MLPERF_SUITE_PYTHON_ENV = "MLPERF_SUITE_PYTHON"
