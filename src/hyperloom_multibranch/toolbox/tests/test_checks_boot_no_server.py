@@ -47,7 +47,7 @@ class _Booting:
         workspace.mkdir(parents=True, exist_ok=True)
         return [VariantResult(name, "", {}, "succeeded", returncode=0, workspace=str(workspace))]
 
-    def teardown(self, slot: Any, lifecycle: Any) -> list[int]:
+    def teardown(self, slot: Any) -> list[int]:
         self.teardowns += 1
         if self._live is not None:
             self._live.__exit__(None, None, None)

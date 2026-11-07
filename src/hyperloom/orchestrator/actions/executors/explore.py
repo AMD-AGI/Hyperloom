@@ -785,8 +785,7 @@ class _ExploreRound:
         return self._result()
 
     def _reap_variant_server(self, slot: Path) -> None:
-        lifecycle = {"framework": self.lifecycle_framework, "port": self.lifecycle_port}
-        if survivors := teardown_variant_server(slot, lifecycle):
+        if survivors := teardown_variant_server(slot):
             log.error("explore: pids %s outlived SIGKILL; %s keeps their record", survivors, slot)
 
     # ----- the stack the round accumulates ---------------------------------
@@ -955,7 +954,6 @@ class _ExploreRound:
         # cold decision round instead of one that re-attaches to the warmup's server).
         lifecycle = resolve_lifecycle_params(self.config_path)
         self.lifecycle_eligible = bool(lifecycle.get("eligible"))
-        self.lifecycle_framework = str(lifecycle.get("framework") or "")
         self.lifecycle_port = to_int(lifecycle.get("port"), 0) or 0
         self.use_warm_decision = self.lifecycle_eligible and double_run_requested(self.params)
         # Stop testing further variants once the session wall-clock budget runs out; untested variants stay out of

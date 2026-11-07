@@ -611,7 +611,6 @@ def test_run_conc_sweep_targets_the_session_board(
 def test_conc_sweep_preserves_baseline_script_through_variant_materialization(session_dir, baseline_yaml, monkeypatch):
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
     from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
 
     baseline_yaml.write_text(
@@ -622,7 +621,6 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
     state.gpu_type = "MI355X"
     state.baseline_benchmark_script = "sglang_custom.sh"
     monkeypatch.setenv("GPU_TYPE", "mi355x")
-    monkeypatch.setattr(_server_lifecycle, "teardown_lifecycle_server", lambda **_kwargs: None)
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
     )
@@ -2155,11 +2153,12 @@ def _patch_lifecycle_eligible(monkeypatch: pytest.MonkeyPatch, teardown_log: lis
     def _fake_resolve(_cfg_path):
         return {"eligible": True, "framework": "vllm", "port": 8888, "reason": ""}
 
-    def _fake_teardown(*, pid_dir, framework, port):
-        teardown_log.append((str(pid_dir), framework, port))
+    def _fake_teardown(pid_dir):
+        teardown_log.append(str(pid_dir))
+        return []
 
     monkeypatch.setattr(_sl, "resolve_lifecycle_params", _fake_resolve)
-    monkeypatch.setattr(_sl, "teardown_lifecycle_server", _fake_teardown)
+    monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.teardown_variant_server", _fake_teardown)
 
 
 def test_single_server_boots_on_the_first_rung_and_reuses(

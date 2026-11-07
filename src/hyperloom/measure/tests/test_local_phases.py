@@ -40,7 +40,7 @@ def clock(monkeypatch) -> FakeClock:
     monkeypatch.setattr(
         local, "resolve_lifecycle_params", lambda path: {"eligible": True, "port": 8123, "framework": "sglang"}
     )
-    monkeypatch.setattr(local, "teardown_variant_server", lambda slot, lifecycle: clock.advance(3.0) or [])
+    monkeypatch.setattr(local, "teardown_variant_server", lambda slot: clock.advance(3.0) or [])
     return clock
 
 

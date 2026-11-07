@@ -73,7 +73,7 @@ def _graded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **plan: Any) -> tup
     monkeypatch.setattr(
         local, "resolve_lifecycle_params", lambda path: {"eligible": True, "port": 8123, "framework": "sglang"}
     )
-    monkeypatch.setattr(local, "teardown_variant_server", lambda slot, lifecycle: [])
+    monkeypatch.setattr(local, "teardown_variant_server", lambda slot: [])
     point = tmp_path / "point.yaml"
     envs = {"TP": 1, "CONC": 4, "RUN_EVAL": "true"}
     point.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": envs}}), encoding="utf-8")

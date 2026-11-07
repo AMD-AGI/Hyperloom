@@ -53,7 +53,7 @@ class _Servers:
             "resolve_lifecycle_params",
             lambda path: {"eligible": eligible, "port": self.port, "framework": framework, "reason": "not eligible"},
         )
-        monkeypatch.setattr(local, "teardown_variant_server", lambda slot, lifecycle: self.stop() or [])
+        monkeypatch.setattr(local, "teardown_variant_server", lambda slot: self.stop() or [])
 
         self.flushes = 0
 

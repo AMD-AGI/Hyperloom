@@ -133,7 +133,7 @@ def rounds(monkeypatch, tmp_path) -> _Rounds:
         "resolve_lifecycle_params",
         lambda path: {"eligible": True, "port": PORT, "framework": "sglang", "reason": ""},
     )
-    monkeypatch.setattr(local, "teardown_variant_server", lambda slot, lifecycle: [])
+    monkeypatch.setattr(local, "teardown_variant_server", lambda slot: [])
     return fake
 
 

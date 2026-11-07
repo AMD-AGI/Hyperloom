@@ -792,7 +792,7 @@ class _Lifecycle:
 
     def teardown(self) -> None:
         self._phases.begin(TEARDOWN)
-        survivors = teardown_variant_server(self.pid_dir, {"framework": self.framework, "port": self.port})
+        survivors = teardown_variant_server(self.pid_dir)
         if survivors:
             self._notes.append(f"server pids {survivors} outlived SIGKILL; {self.pid_dir} keeps their record")
         self._phases.begin(OTHER)

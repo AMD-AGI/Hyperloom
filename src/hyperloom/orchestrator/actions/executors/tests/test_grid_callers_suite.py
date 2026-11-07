@@ -36,21 +36,14 @@ _PORT = 30123
 
 
 @pytest.fixture
-def eligible(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
-    """Make every point lifecycle-eligible on ``_PORT``; return the pid_dirs the Magpie teardown was asked to reap."""
-    magpie_teardowns: list[Path] = []
+def eligible(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every point lifecycle-eligible on ``_PORT``."""
     monkeypatch.setattr(
         _server_lifecycle,
         "resolve_lifecycle_params",
         lambda _path: {"eligible": True, "framework": "sglang", "port": _PORT, "reason": ""},
     )
-    monkeypatch.setattr(
-        _server_lifecycle,
-        "teardown_lifecycle_server",
-        lambda *, pid_dir, framework, port: magpie_teardowns.append(Path(pid_dir)),
-    )
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_k: None)
-    return magpie_teardowns
 
 
 def _rounds(monkeypatch: pytest.MonkeyPatch, count: int) -> ScriptedRounds:
@@ -139,7 +132,7 @@ def test_an_explore_variants_server_is_reaped_through_its_slot(monkeypatch, suit
         asyncio.run(run)
 
     slot = tmp_path / "explore" / "v00_v0"
-    assert suite.stopped == eligible == [slot]
+    assert suite.stopped == [slot]
 
 
 def test_a_specialist_rebench_runs_one_round_that_owns_its_server_on_the_port_it_reports(monkeypatch, suite, tmp_path):
