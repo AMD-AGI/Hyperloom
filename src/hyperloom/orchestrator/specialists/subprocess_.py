@@ -76,10 +76,10 @@ from .launch_env import (
     SpecialistLaunch,
     agent_pid,
     apply_gpu_env,
+    claude_login_isolation,
     codex_sandbox_off,
     compose_launch_env,
     prepare_launch,
-    require_claude_login,
     resolve_launch_isolation,
     stage_mcp_config,
 )
@@ -510,6 +510,8 @@ class SpecialistSubprocessDispatcher:
         )
         try:
             backend = self._agent_backend()
+            if backend == AGENT_BACKEND_CLAUDE:
+                isolation = claude_login_isolation(isolation, env)
             cmd = self._build_launch(backend, request, env, isolation)
             apply_gpu_env(env, request.workspace, request.gpu_ids, request.gpu_lease)
             prepared = await asyncio.to_thread(prepare_launch, isolation, place, cmd, env)
@@ -740,7 +742,6 @@ class SpecialistSubprocessDispatcher:
             worktree=request.worktree,
             disallowed_tools=frozenset(request.disallowed_tools),
         )
-        require_claude_login(isolation, env)
         stage_mcp_config(isolation, request.workspace, cmd)
         return cmd
 

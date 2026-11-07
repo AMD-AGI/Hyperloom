@@ -23,6 +23,7 @@ import pytest
 
 from hyperloom_common.bwrap import BwrapProbe
 from hyperloom_common.git_safety import recorded_admin_dir, trusted_admin_dir
+from hyperloom.common import agent_isolation
 from hyperloom.common.agent_isolation import (
     AccountIsolation,
     BwrapIsolation,
@@ -30,24 +31,30 @@ from hyperloom.common.agent_isolation import (
     NoIsolation,
     session_isolation_lines,
 )
+from hyperloom.common.deadline import Deadline
 from hyperloom.common.env_safety import RunAs
 from hyperloom.common.proctree import REAP_MARK_ENV, running
 from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.agent_cli_config import SpecialistAgentUnavailableError
+from hyperloom.orchestrator.specialists.agent_runner import AgentConfigError
 from hyperloom.orchestrator.specialists.launch_env import (
+    CLAUDE_LOGIN_REFUSAL,
+    CLAUDE_LOGIN_UNCONFINED,
+    CLAUDE_TOKEN_VARIABLES,
     CODEX_BYPASS_FLAG,
     LaunchPlace,
     LaunchStatus,
     PreparedLaunch,
     SandboxedProcess,
     bedrock_files,
+    claude_login_isolation,
     prepare_launch,
-    require_claude_login,
     specialist_confinement,
     stage_mcp_config,
     without_codex_sandbox,
 )
+from hyperloom.orchestrator.specialists.tests._agent_fixtures import make_runner, make_spec, wait_finished
 
 FAKE_BWRAP = "/opt/fake/bwrap"
 
@@ -461,18 +468,147 @@ def test_a_stdio_mcp_servers_program_is_bound_and_named_once(tmp_path, caplog):
         ({"CLAUDE_CODE_USE_BEDROCK": "0", "AWS_ACCESS_KEY_ID": "a", "AWS_SECRET_ACCESS_KEY": "s"}, True),
     ],
 )
-def test_a_sandboxed_claude_needs_a_login_it_can_read_there(tmp_path, env, refused):
+def test_a_claude_cli_with_no_login_a_sandbox_can_show_runs_unconfined_unless_it_must_be_isolated(
+    tmp_path, monkeypatch, env, refused
+):
     aws_config = tmp_path / "aws-config"
     aws_config.write_text("[default]\n", encoding="utf-8")
     env = {name: str(aws_config) if value == "FILE" else value for name, value in env.items()}
+    sandbox = _bwrap()
 
-    for isolation in (NoIsolation(("why",)), AccountIsolation(RunAs("u", 1, 1, (1,), "/h"))):
-        require_claude_login(isolation, env)
-    if refused:
-        with pytest.raises(SpecialistAgentUnavailableError, match="claude setup-token"):
-            require_claude_login(_bwrap(), env)
-    else:
-        require_claude_login(_bwrap(), env)
+    kept = [NoIsolation(("why",)), AccountIsolation(RunAs("u", 1, 1, (1,), "/h")), *([] if refused else [sandbox])]
+    for isolation in kept:
+        assert claude_login_isolation(isolation, env) is isolation
+    if not refused:
+        return
+    assert claude_login_isolation(sandbox, env) == NoIsolation((CLAUDE_LOGIN_UNCONFINED,))
+    for must in ({"HYPERLOOM_SPECIALIST_USER": "specialist"}, {"hosted": True}):
+        with monkeypatch.context() as patched:
+            if "hosted" in must:
+                patched.setattr(agent_isolation._STATE, "hosted", True)
+            else:
+                patched.setenv("HYPERLOOM_SPECIALIST_USER", must["HYPERLOOM_SPECIALIST_USER"])
+            with pytest.raises(SpecialistAgentUnavailableError) as refusal:
+                claude_login_isolation(sandbox, env)
+        assert str(refusal.value) == CLAUDE_LOGIN_REFUSAL
+
+
+def test_the_claude_login_reasons_say_why_and_how_to_run_it_confined():
+    for text in (CLAUDE_LOGIN_UNCONFINED, CLAUDE_LOGIN_REFUSAL):
+        assert "login file" in text and "without showing that file to the agent" in text
+        assert "CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token` prints one)" in text
+    assert CLAUDE_LOGIN_UNCONFINED.startswith("a claude CLI with no login in its environment runs unconfined")
+    assert CLAUDE_LOGIN_UNCONFINED.endswith("to run it confined")
+    assert "must be isolated" in CLAUDE_LOGIN_REFUSAL
+
+
+#: The session report's line once two such launches ran unconfined.
+TWO_UNCONFINED_LOGINS = f"agent isolation: 2 agent launches ran unconfined: {CLAUDE_LOGIN_UNCONFINED}"
+#: A claude CLI whose one login is the file under the app's home: it notes whether it could read that file.
+_LOGIN_FILE_ONLY = """#!/bin/sh
+cat > /dev/null
+{{ cat {login} > /dev/null 2>&1 && echo read || echo unreadable; }} > login_seen
+echo '{{"summary": "ran", "proposal_set": []}}' > specialist_done.json
+"""
+
+
+@pytest.fixture
+def login_file_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The stand-in claude CLI of :data:`_LOGIN_FILE_ONLY`, launched where bubblewrap is chosen (a stand-in one: a
+    launch that tried to sandbox it would fail) and with no login in the environment."""
+    login = tmp_path / "home" / ".claude" / ".credentials.json"
+    login.parent.mkdir(parents=True)
+    login.write_text('{"claudeAiOauth": {}}', encoding="utf-8")
+    monkeypatch.setenv("HOME", str(login.parent.parent))
+    for name in (*CLAUDE_TOKEN_VARIABLES, "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CONFIG_DIR", "HYPERLOOM_SPECIALIST_USER"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(launch_env, "choose_agent_isolation", lambda **_kwargs: _bwrap())
+    cli = tmp_path / "cli" / "bin" / "claude"
+    cli.parent.mkdir(parents=True)
+    cli.write_text(_LOGIN_FILE_ONLY.format(login=login), encoding="utf-8")
+    cli.chmod(0o755)
+    return cli
+
+
+def _login_dispatcher(cli: Path) -> ss.SpecialistSubprocessDispatcher:
+    return ss.SpecialistSubprocessDispatcher(
+        ss.SpecialistSubprocessConfig(agent_backend="claude", claude_executable=str(cli), poll_interval_seconds=0.05)
+    )
+
+
+def _login_spawn(workspace: Path) -> ss.SpecialistSpawn:
+    return ss.SpecialistSpawn(
+        task_id=workspace.name,
+        workspace=workspace,
+        worktree=None,
+        worktree_base=None,
+        system_prompt="system",
+        user_prompt="the task",
+        deadline=Deadline.after(60.0),
+    )
+
+
+def _unconfined_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+
+
+async def test_the_dispatcher_runs_a_claude_cli_with_only_its_login_file_unconfined_and_says_so_once(
+    tmp_path, login_file_only, caplog
+):
+    with caplog.at_level(logging.WARNING):
+        results = [await _login_dispatcher(login_file_only).run(_login_spawn(tmp_path / f"ws{n}")) for n in range(2)]
+
+    ran = [(result.error, result.exit_code, (result.done_payload or {}).get("summary")) for result in results]
+    assert ran == [("", 0, "ran")] * 2
+    assert [(tmp_path / f"ws{n}" / "login_seen").read_text(encoding="utf-8") for n in range(2)] == ["read\n"] * 2
+    warnings = _unconfined_warnings(caplog)
+    assert len(warnings) == 1 and warnings[0].endswith(f"({CLAUDE_LOGIN_UNCONFINED})"), warnings
+    assert session_isolation_lines() == (TWO_UNCONFINED_LOGINS,)
+
+
+async def test_the_dispatcher_refuses_a_claude_cli_with_only_its_login_file_where_it_must_be_isolated(
+    tmp_path, login_file_only, monkeypatch
+):
+    monkeypatch.setattr(agent_isolation._STATE, "hosted", True)
+
+    result = await _login_dispatcher(login_file_only).run(_login_spawn(workspace := tmp_path / "ws"))
+
+    assert result.exit_code is None
+    assert result.error == f"specialist agent runtime unavailable (backend=claude): {CLAUDE_LOGIN_REFUSAL}"
+    assert not (workspace / "login_seen").exists() and session_isolation_lines() == ()
+
+
+async def test_the_agent_runner_runs_a_claude_cli_with_only_its_login_file_unconfined_and_says_so_once(
+    tmp_path, login_file_only, caplog
+):
+    runner = make_runner(tmp_path / "session")
+    statuses, procs = [], []
+    with caplog.at_level(logging.WARNING):
+        for n in range(2):
+            handle = await runner.launch(make_spec(tmp_path / f"w{n}", task_id=f"t{n}", argv=(str(login_file_only),)))
+            statuses.append(await wait_finished(runner, handle))
+            await runner.collect(handle)
+            procs.append(handle.session.proc)
+
+    assert [(status.returncode, status.error) for status in statuses] == [(0, "")] * 2
+    assert not any(isinstance(proc, SandboxedProcess) for proc in procs)
+    assert [(tmp_path / f"w{n}" / "login_seen").read_text(encoding="utf-8") for n in range(2)] == ["read\n"] * 2
+    warnings = _unconfined_warnings(caplog)
+    assert len(warnings) == 1 and warnings[0].endswith(f"({CLAUDE_LOGIN_UNCONFINED})"), warnings
+    assert session_isolation_lines() == (TWO_UNCONFINED_LOGINS,)
+
+
+async def test_the_agent_runner_refuses_a_claude_cli_with_only_its_login_file_where_it_must_be_isolated(
+    tmp_path, login_file_only, monkeypatch
+):
+    monkeypatch.setattr(agent_isolation._STATE, "hosted", True)
+    runner = make_runner(tmp_path / "session")
+
+    with pytest.raises(AgentConfigError) as refused:
+        await runner.launch(make_spec(workspace := tmp_path / "w", argv=(str(login_file_only),)))
+
+    assert str(refused.value) == CLAUDE_LOGIN_REFUSAL
+    assert not (workspace / "login_seen").exists() and session_isolation_lines() == ()
 
 
 @pytest.mark.parametrize(

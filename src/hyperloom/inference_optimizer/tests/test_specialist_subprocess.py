@@ -1701,15 +1701,36 @@ async def test_a_sandbox_shows_the_model_and_gives_a_gpu_task_its_devices(tmp_pa
     assert prepared.scratch is None  # released once the launch ended
 
 
-async def test_a_sandboxed_claude_without_a_login_it_can_read_fails_the_task_without_spawning(tmp_path, monkeypatch):
+@pytest.mark.parametrize("required", [False, True])
+async def test_a_claude_without_a_login_a_sandbox_can_show_runs_unconfined_unless_it_must_be_isolated(
+    tmp_path, monkeypatch, required
+):
     for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(subprocess_, "resolve_launch_isolation", lambda lease: _tier("bwrap"))
+    monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process(hosted=required))
+    launched: list[tuple[object, list[str]]] = []
+    real_local = launch_env.PreparedLaunch.local
+    monkeypatch.setattr(
+        launch_env.PreparedLaunch,
+        "local",
+        lambda self, cmd, env: launched.append((self.isolation, list(cmd))) or real_local(self, cmd, env),
+    )
 
     result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch)
 
-    assert popen_kwargs == []
-    assert "specialist agent runtime unavailable" in result.error and "claude setup-token" in result.error
+    if required:
+        assert popen_kwargs == [] and launched == []
+        assert (
+            result.error == f"specialist agent runtime unavailable (backend=claude): {launch_env.CLAUDE_LOGIN_REFUSAL}"
+        )
+        return
+    [(isolation, cli)] = launched
+    assert isolation == NoIsolation((launch_env.CLAUDE_LOGIN_UNCONFINED,)) and cli[0] == "claude"
+    assert "spawn refused by test" in (result.error or "")
+    assert agent_isolation.session_isolation_lines() == (
+        f"agent isolation: 1 agent launch ran unconfined: {launch_env.CLAUDE_LOGIN_UNCONFINED}",
+    )
 
 
 async def test_specialist_user_unset_spawns_exactly_as_before(tmp_path, monkeypatch):
