@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Materialize and prepare the workload through its owning benchmark contract.
 
 An MLPerf AgentX round runs on inference_suite, which serves the session's frozen base and runs the MLPerf harness as
