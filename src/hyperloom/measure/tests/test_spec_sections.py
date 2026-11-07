@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import replace
 
@@ -14,6 +15,7 @@ from hyperloom.measure.hosted_spec import SpecRefused, build_spec
 from hyperloom.measure.socket import SessionFacts
 from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
 from hyperloom.measure.tests.hosted_fixtures import make_call, point_yaml, spec_context
+from inference_suite.contracts import Redacted
 
 OTHER_STAGING = "d" * 64
 
@@ -52,6 +54,34 @@ def test_a_base_launch_over_64_kib_is_refused_when_the_sheet_is_written(tmp_path
 
     with pytest.raises(SpecRefused, match=r"sheet_invalid: .*base_launch too large \(\d+ bytes > 65536\)"):
         _tools(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=big))
+
+
+_HF_TOKEN = "hf_" + "q" * 34
+
+
+@pytest.mark.parametrize(
+    ("unredacted", "named"),
+    [
+        (lambda base: replace(base, env={**base.env, "HF_TOKEN": _HF_TOKEN}), "env HF_TOKEN"),
+        (lambda base: replace(base, env={**base.env, "SGLANG_EXTRA": "Bearer " + "q" * 20}), "env SGLANG_EXTRA"),
+        (lambda base: replace(base, args=(*base.args, "--api-key=sk-" + "q" * 20)), "credential in arg "),
+        (lambda base: replace(base, client=replace(base.client, env={"OPENAI_API_KEY": "x"})), "client env"),
+    ],
+    ids=["secret-named env", "credential-shaped env value", "credential-shaped arg", "secret-named client env"],
+)
+def test_a_base_carrying_an_unredacted_credential_is_refused_naming_where_never_the_value(tmp_path, unredacted, named):
+    with pytest.raises(SpecRefused, match="base_launch_secret") as refused:
+        _tools(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=unredacted(base_launch())))
+
+    assert named in str(refused.value) and "qqqqqq" not in str(refused.value)
+
+
+def test_a_base_whose_secret_named_env_is_redacted_is_carried(tmp_path):
+    base = replace(base_launch(), env={**base_launch().env, "HF_TOKEN": Redacted(hashlib.sha256(b"t").hexdigest())})
+
+    procedure = _procedure(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=base))
+
+    assert procedure.base_launch == base
 
 
 def _procedure(tmp_path, **overrides):
