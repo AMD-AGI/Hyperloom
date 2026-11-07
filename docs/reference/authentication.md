@@ -110,19 +110,24 @@ so export the credentials in the shell that runs `install.sh` there; to rotate a
 key, export the new one and re-run `install.sh`.
 
 Nor does such a `.env` lend anything that would let that account run code as you
-or see your traffic. `install.sh` and the CLI preflight take from it only the
-keys the preflight allow list names, less those that route traffic or pick what
-runs: `LD_PRELOAD`, `LD_LIBRARY_PATH`, `PYTHONPATH`, `NODE_OPTIONS`,
-`NODE_EXTRA_CA_CERTS`, `BASH_ENV`, `ENV`, `PROMPT_COMMAND`, the `GIT_*` program
-hooks and any other name outside the list are skipped, and so are `HTTP_PROXY`,
-`HTTPS_PROXY`, `NO_PROXY`, `HF_ENDPOINT`, `PYTHON`, `VIRTUAL_ENV`,
-`INFERENCE_OPTIMIZER_FORCE_PYTHON`, `VLLM_PYTHON`, `VLLM_VENV_ROOT`, `ROCM_PATH`,
-`HIP_PATH`, `SGLANG_ROCM_INDEX_URL`, `HYPERLOOM_WHEEL_REPO`,
-`HYPERLOOM_RUNTIME_DIR`, `KERNEL_AGENT_ENV` and the `GEAK_*` program paths. Each
-skipped key is named in a warning, never its value; export any you need in the
-shell. The installers do not write such keys there either: `install.sh` keeps
-them in `kernel-agent.env.sh`, and `install_baremetal.sh` names each one it
-leaves out. A `.env` only you can write is read as before. `install_baremetal.sh`
+or see your traffic. `install.sh` and the CLI preflight take from it only a few
+choices among values Hyperloom ships, each with one of its listed values:
+`FRAMEWORK` (`atom`, `custom`, `sglang`, `vllm`, `xdit`), `HF_HUB_OFFLINE` and
+`HF_DATASETS_OFFLINE` (`0`, `1`), `HYPERLOOM_RUN_MODE` (`baremetal`, `docker`),
+`HYPERLOOM_LLM_MODE` (`anthropic`, `deepseek`, `openai`),
+`HYPERLOOM_FRAMEWORK_ENV` (`isolated`, `shared`), `HYPERLOOM_BENCHMARK_BACKEND`
+(`bypass`, `magpie`) and `HYPERLOOM_DOTENV_CREDENTIALS` (`kernel-agent-env`).
+Every other line is skipped: the loader and interpreter variables (`LD_PRELOAD`,
+`PYTHONPATH`, `NODE_OPTIONS`, `BASH_ENV`, ...), the proxies, what an install
+fetches or runs (`GEAK_REPO`, `GEAK_REF`, `VLLM_ROCM_INDEX`, the `*_REPO` names,
+the interpreter and `*_ROOT` paths), where your key goes (`OPENAI_BASE_URL`,
+`OPENAI_CUSTOM_HEADERS`, `GEAK_BASE_URL`), the model names, the tuning knobs
+and `USER_DATA_PATH`. Each skipped key is named in a warning, never its value;
+export any you need in the shell. Such a `.env` never selects the workspace
+either, even with a `HYPERLOOM_RUN_MODE` line: the `USER_DATA_PATH` you export
+stands. The installers do not write skipped keys there: `install.sh` keeps them
+in `kernel-agent.env.sh`, and `install_baremetal.sh` names each one it leaves
+out. A `.env` only you can write is read as before. `install_baremetal.sh`
 follows the same rules: on such a checkout it reads none of those keys, and
 none of the credentials, from `.env`, and writes the Anthropic-side credentials
 to `kernel-agent.env.sh` alone; an OpenAI key it does not write anywhere.
