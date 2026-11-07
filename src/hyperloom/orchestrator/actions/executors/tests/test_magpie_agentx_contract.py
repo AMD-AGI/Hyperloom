@@ -306,6 +306,12 @@ def test_public_metrics_and_identity_reach_keep_guards(report):
     assert constraint_veto_reason(extract_benchmark_measurement(changed), state) == "agentx_workload_mismatch"
 
 
+def test_the_report_verdict_reaches_the_measurement_only_as_valid_measurement(report):
+    measured = extract_benchmark_measurement(report)
+    assert measured["valid_measurement"] is True
+    assert "benchmark_valid" not in measured
+
+
 @pytest.mark.parametrize("key", ["success", "benchmark_valid", "publishable"])
 def test_rejected_report_cannot_be_salvaged(report, key, tmp_path):
     report[key] = False
