@@ -89,7 +89,7 @@ def _rigs(tmp_path: Path, command: tuple[str, ...]):
         r = make_rig(
             tmp_path,
             templates=[template],
-            spec={"inferencex_commit": commit, "benchmark_backend": "bypass", **spec},
+            spec={"inferencex_commit": commit, **spec},
             poll_interval_sec=0.1,
             **(config or {}),
         )

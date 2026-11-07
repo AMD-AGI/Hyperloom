@@ -39,7 +39,7 @@ from hyperloom.measure.failures import (
 )
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.magpie_launchers import install_launchers
-from hyperloom.measure.manifest import encode_manifest, manifest_notes, ManifestFile, RESULT_SCHEMA_V1
+from hyperloom.measure.manifest import encode_manifest, manifest_notes, ManifestFile, RESULT_SCHEMA, RESULT_SCHEMA_V1
 from hyperloom.measure.phases import (
     BOOTSTRAP,
     ENV_REBUILD,
@@ -89,7 +89,7 @@ from hyperloom.measure.runner.service import Progress, RunnerFailure, join_notes
 from hyperloom.measure.runner.snapshot import SnapshotError, check_snapshot
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex, ensure_magpie
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
-from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
+from hyperloom.measure.spec import SPEC_SCHEMA_V1, MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 from hyperloom.orchestrator.actions.executors import harvest_leaked_artifacts
@@ -389,7 +389,6 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         rounds = RoundPlan(warmup_rounds=p.warmup_rounds, measure_rounds=p.measure_rounds)
     except ValueError as exc:
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
-    ctx.environ["HYPERLOOM_BENCHMARK_BACKEND"] = p.benchmark_backend
     ctx.files.mkdir(parents=True, exist_ok=True)
     return TestCall(
         points=tuple(points),
@@ -407,7 +406,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         on_output=progress.touch,
         env_overrides=dict(spec.process_env),
         unset_envs=spec.unset_envs,
-        session_facts=SessionFacts((), str(inferencex), spec.tools.magpie),
+        session_facts=SessionFacts((), str(inferencex), spec.tools.staging, p.base_launch),
         attachments=_case_attachments(spec),
         phases=ctx.phases,
         short_prompts=p.short_prompts,
@@ -504,6 +503,14 @@ class _Findings:
     jit_cache: dict | None = None
 
 
+def _tool_facts(spec: MeasurementSpec) -> dict[str, str | None]:
+    """What the manifest says the test ran: the staging a v2 sheet names, or the Magpie commit of a v1 sheet, which
+    this runner still measures through Magpie."""
+    if spec.schema == SPEC_SCHEMA_V1:
+        return {"magpie_commit": spec.tools.magpie}
+    return {"inference_suite_staging": spec.tools.staging}
+
+
 def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Findings) -> None:
     spec, raw, key = signed.spec, signed.raw, signed.key
     files, facts, changed, timing, visible = found.files, found.facts, found.changed, found.timing, found.visible
@@ -513,7 +520,7 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
     document: dict = {"outcome": outcome}
     document.update(
         {
-            "schema": RESULT_SCHEMA_V1,
+            "schema": RESULT_SCHEMA_V1 if spec.schema == SPEC_SCHEMA_V1 else RESULT_SCHEMA,
             "request_id": spec.request_id,
             "spec_fingerprint": fingerprint(spec, hyperloom_version=_version()),
             "spec_sha256": spec_sha256(raw),
@@ -527,7 +534,7 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
                 "power_cap_w": first.power_cap_w if first else None,
                 "partition_mode": first.partition_mode if first else None,
                 "hyperloom_version": _version(),
-                "magpie_commit": spec.tools.magpie,
+                **_tool_facts(spec),
                 "inferencex_commit": spec.tools.inferencex,
                 "gpu_ids": visible,
                 "rule_pack": rule_pack_identity(),

@@ -12,9 +12,10 @@ import pytest
 
 from hyperloom.measure.hosted_spec import SpecRefused, build_spec
 from hyperloom.measure.socket import SessionFacts
+from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
 from hyperloom.measure.tests.hosted_fixtures import make_call, point_yaml, spec_context
 
-OTHER_COMMIT = "b" * 40
+OTHER_STAGING = "d" * 64
 
 
 def _tools(tmp_path, **overrides):
@@ -23,18 +24,34 @@ def _tools(tmp_path, **overrides):
     return ctx, build_spec(call, request_id="req-1", ctx=ctx, deadline_unix=time.time() + 60).tools
 
 
-def test_the_sheet_names_the_magpie_commit_of_the_session_facts_over_the_contexts(tmp_path):
-    ctx, tools = _tools(tmp_path, session_facts=SessionFacts(magpie_commit=OTHER_COMMIT))
+def test_the_sheet_names_the_staging_of_the_session_facts_and_the_contexts_inferencex_commit(tmp_path):
+    ctx, tools = _tools(tmp_path, session_facts=SessionFacts(staging=OTHER_STAGING, base_launch=base_launch()))
 
-    assert (tools.magpie, tools.inferencex) == (OTHER_COMMIT, ctx.inferencex_commit)
-    assert OTHER_COMMIT != ctx.magpie_commit
+    assert (tools.staging, tools.inferencex, tools.magpie) == (OTHER_STAGING, ctx.inferencex_commit, None)
 
 
-def test_the_sheet_names_the_contexts_magpie_commit_when_the_session_facts_name_none(tmp_path):
-    ctx, without_facts = _tools(tmp_path)
-    _, facts_without_commit = _tools(tmp_path, session_facts=SessionFacts())
+@pytest.mark.parametrize("facts", [None, SessionFacts(), SessionFacts(staging="sha256:" + "d" * 64)])
+def test_a_call_whose_facts_name_no_staging_is_refused_not_sent_with_a_guess(tmp_path, facts):
+    with pytest.raises(SpecRefused, match="tools_unknown"):
+        _tools(tmp_path, session_facts=facts and replace(facts, base_launch=base_launch()))
 
-    assert without_facts.magpie == facts_without_commit.magpie == ctx.magpie_commit
+
+def test_a_call_whose_facts_carry_no_frozen_base_is_refused_naming_the_sheet_version(tmp_path):
+    with pytest.raises(SpecRefused, match="base_launch_missing: a hyperloom.measurement-spec/v2 sheet"):
+        _tools(tmp_path, session_facts=SessionFacts(staging=STAGING))
+
+
+def test_the_sheet_carries_the_frozen_base_whole(tmp_path):
+    procedure = _procedure(tmp_path)
+
+    assert procedure.base_launch == base_launch() and procedure.benchmark_backend is None
+
+
+def test_a_base_launch_over_64_kib_is_refused_when_the_sheet_is_written(tmp_path):
+    big = replace(base_launch(), warnings=("w" * 70_000,))
+
+    with pytest.raises(SpecRefused, match=r"sheet_invalid: .*base_launch too large \(\d+ bytes > 65536\)"):
+        _tools(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=big))
 
 
 def _procedure(tmp_path, **overrides):
