@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 
 # The fixed-workload launch a framework gets on an architecture when no recipe serves the query.
-# The values are Magpie's generic launchers' at 06b7cf6; each row names the lines it was read from.
 # Left out on purpose: TP and EP (the query's), the context length and the dual-chunk attention
 # backend (the host computes them from the model), the MoE runner (a Hyperloom guard), and the
 # runner's own environment (HSA_*, HIP renumbering, PYTORCH_ROCM_ARCH).
@@ -12,12 +11,10 @@ rows:
     gfx: [gfx942]
     args: [--trust-remote-code, --mem-fraction-static, "0.8", --disable-radix-cache]
     env: {SGLANG_USE_AITER: "1", SGLANG_AITER_MLA_PERSIST: "1"}
-    origin: Magpie scripts/benchmark/sglang_mi300x.sh:62-63,77,94
   - framework: sglang
     gfx: [gfx950]
     args: [--trust-remote-code, --mem-fraction-static, "0.8", --disable-radix-cache]
     env: {SGLANG_USE_AITER: "1"}
-    origin: Magpie scripts/benchmark/sglang_mi355x.sh:60,73,90
   - framework: sglang
     gfx: [gfx1151]
     args:
@@ -29,24 +26,19 @@ rows:
       - triton
       - --disable-cuda-graph
     env: {SGLANG_USE_AITER: "0"}
-    origin: Magpie scripts/benchmark/sglang_radeon8060s.sh:76-77,91,109
   - framework: vllm
     gfx: [gfx942, gfx950]
     args: [--trust-remote-code, --gpu-memory-utilization, "0.95"]
     env: {VLLM_ROCM_USE_AITER: "1"}
-    origin: Magpie scripts/benchmark/vllm_mi300x.sh:73,96,98 and vllm_mi355x.sh:46,70,93,95
   - framework: vllm
     gfx: [gfx1201]
     args: [--trust-remote-code, --gpu-memory-utilization, "0.9"]
     env: {VLLM_ROCM_USE_AITER: "0", FLASH_ATTENTION_TRITON_AMD_ENABLE: "TRUE"}
-    origin: Magpie scripts/benchmark/vllm_gfx12.sh:54,74-75,102,104
   - framework: vllm
     gfx: [gfx1151]
     args: [--trust-remote-code, --gpu-memory-utilization, "0.95"]
     env: {VLLM_ROCM_USE_AITER: "0", VLLM_ROCM_USE_AITER_MHA: "0", VLLM_ROCM_USE_AITER_RMSNORM: "0"}
-    origin: Magpie scripts/benchmark/vllm_radeon8060s.sh:46,88-90,118,120
   - framework: atom
     gfx: [gfx942, gfx950]
     args: [--trust-remote-code]
     env: {}
-    origin: Hyperloom assets/configs/baseline_atom.yaml:23 (EXTRA_ATOM_ARGS); Magpie atom_mi3*.sh export no server env

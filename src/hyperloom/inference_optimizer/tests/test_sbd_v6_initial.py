@@ -285,8 +285,6 @@ def test_install_event_stays_pending_until_session_creation(tmp_path):
         args=args,
         runtime=preflight.PreflightRuntime(
             benchmark_python="python",
-            magpie_python="python",
-            inferencex_path="/opt/InferenceX",
             resolved_urls=("", "https://api.openai.com/v1"),
         ),
     )
@@ -727,10 +725,6 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.cli import preflight
     from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
 
-    inferencex = tmp_path / "InferenceX"
-    inferencex.mkdir()
-    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
-    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "Magpie"))
     monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda *_args, **_kwargs: "python")
     monkeypatch.setattr(
         preflight.subprocess, "run", lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, b"", b"")
@@ -751,9 +745,6 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight, "_ensure_ray", lambda *_args: None)
     monkeypatch.setattr(preflight, "_ensure_bench_serving_deps", lambda *_args: None)
     monkeypatch.setattr(preflight, "_check_serving_framework", lambda *_args: None)
-    monkeypatch.setattr(preflight.inferencex_checkout, "checkout_ok", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(preflight.inferencex_checkout, "head_sha", lambda *_args: "abc123")
-    monkeypatch.setattr(preflight, "_report_inferencex_patch_anchors", lambda *_args: True)
     monkeypatch.setattr(preflight, "_check_agent_cli", lambda: None)
     monkeypatch.setattr(preflight.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
@@ -798,9 +789,6 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "ensure_ray",
         "ensure_bench_serving_deps",
         "check_serving_framework",
-        "ensure_magpie",
-        "clone_inferencex",
-        "check_inferencex_patch_anchors",
         "check_kernel_tuning_clis",
         "check_tracelens_cli",
         "check_tracelens_root",
@@ -810,7 +798,6 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     steps = {step["step_id"]: step for step in event["ext"]["steps"]}
     assert steps["check_kernel_tuning_clis"]["status"] == "skipped"
     assert steps["check_kernel_tuning_clis"]["skip_reason"] == "no_kernel"
-    assert steps["ensure_magpie"]["status"] == "already_present"
 
 
 def test_preflight_propagates_install_event_finalize_failure(tmp_path, monkeypatch):

@@ -691,7 +691,7 @@ facts:
     project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX)
     reason: >-
       InferenceX carries the client as the git submodule named utils/aiperf (at utils/aiperf at the commit Hyperloom pins,
-      at inferencex-e2e/utils/aiperf at later commits Magpie pins; the patch finds it by name), and its benchmark
+      at inferencex-e2e/utils/aiperf at later commits; the patch finds it by name), and its benchmark
       library installs it editable into an environment made for each job, so the source of that submodule is what a round
       runs. The released client keeps only the input token count of a reply it converts to an error record
       (inference_result_parser.py, the branch of a parsed record that is invalid), and computes only the metrics flagged
@@ -719,19 +719,6 @@ facts:
                 [submodule "inferencex-e2e/utils/srt-slurm"]
                     path = inferencex-e2e/utils/srt-slurm
                     url = https://github.com/NVIDIA/srt-slurm.git
-
-  magpie_agentx_client_log:
-    kind: names
-    project: Magpie (native AgentX runtime at the commit Hyperloom pins)
-    reason: >-
-      A native AgentX round boots its server and then runs the InferenceX replay client with its output written to this
-      file in the round's workspace, beside server.log (agentx_runtime.py, _execute_local). The client's own failures (a
-      Hugging Face download refused, say) are only in this file: Magpie records the client's exit code as the round's
-      error and keeps the client's words out of benchmark_stderr.log.
-    names:
-      file: agentx_client.log
-    examples:
-      - "hyperloom.measure.local: a failed round's client log is read from this file beside its server.log, for the infrastructure causes the client states"
 
   hub_rate_limited:
     kind: log_regex

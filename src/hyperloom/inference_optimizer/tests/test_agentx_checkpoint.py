@@ -25,6 +25,7 @@ from hyperloom.orchestrator.actions.executors._agentx_checkpoint import (
     round_checkpoint,
     workspace_checkpoint_p50,
 )
+from hyperloom.orchestrator.actions.executors._grid_base import SuiteRoundExit
 from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, GridStop, GridVariant, run_grid
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     AGENTX_EARLY_STOP_ERROR_CLASS,
@@ -207,16 +208,17 @@ async def test_grid_records_a_stopped_round_and_moves_on(tmp_path, monkeypatch):
     checkpoint = AgentxCheckpoint(25.0, enforce=True)
     seen: list[AgentxCheckpoint | None] = []
 
-    def _stopped_at_checkpoint(bench_round, **_kwargs):
+    def _stopped_at_checkpoint(_route, bench_round, **_kwargs):
         seen.append(bench_round.checkpoint)
         _write_export(bench_round.output_dir, [*_IN_WINDOW, _AFTER_WINDOW])
         judge = CheckpointJudge(checkpoint, bench_round.output_dir)
         judge.note_phase("measured", 0.0)
         with pytest.raises(AgentxCheckpointMissed):
             judge.tick(1_800.0)
-        return AGENTX_EARLY_STOP_RETURNCODE, "", ""
+        return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE)
 
-    monkeypatch.setattr(gr, "_run_magpie", _stopped_at_checkpoint)
+    monkeypatch.setattr(gr, "suite_route", lambda session_dir: object())
+    monkeypatch.setattr(gr, "run_grid_suite_round", _stopped_at_checkpoint)
     results = await run_grid(
         grid=[GridVariant("vA"), GridVariant("vB")],
         output_root=tmp_path / "out",

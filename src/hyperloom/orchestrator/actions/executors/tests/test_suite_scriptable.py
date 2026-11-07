@@ -101,7 +101,7 @@ def test_a_scriptable_profile_point_captures_the_script_run() -> None:
 @pytest.mark.parametrize(
     ("envs", "settings", "message"),
     [
-        ({"MAGPIE_RUN_PHASE": "server"}, _settings(), "neither boots one nor reuses one"),
+        ({"HYPERLOOM_RUN_PHASE": "server"}, _settings(), "neither boots one nor reuses one"),
         ({}, _settings(LifecycleMode.REUSE), "neither boots one nor reuses one"),
         ({"BENCHMARK_BASE_URL": "http://head:8888"}, _settings(), "not the external server at http://head:8888"),
         ({}, replace(_settings(), server_url="http://head:8888"), "not the external server at http://head:8888"),
@@ -130,7 +130,7 @@ def _session_point(framework: Framework, tmp_path: Path) -> tuple[dict, BaseLaun
 
 
 @pytest.mark.parametrize("framework", list(Framework))
-def test_a_point_of_every_framework_runs_on_its_frozen_base_and_none_reaches_the_bypass_runner(framework, tmp_path):
+def test_a_point_of_every_framework_runs_on_its_frozen_base(framework, tmp_path):
     point, base = _session_point(framework, tmp_path)
 
     config = suite_config(point, base, replace(_settings(), lifecycle=Lifecycle(LifecycleMode.OWN)))

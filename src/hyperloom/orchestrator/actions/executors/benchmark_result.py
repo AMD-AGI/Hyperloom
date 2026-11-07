@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Benchmark result parsing shared by Magpie-backed executors, plus post-run artifact harvesting and salvage helpers."""
+"""Benchmark result parsing shared by the round executors, plus post-run artifact harvesting and salvage helpers."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def _rescue_candidate_paths(
     *,
     subprocess_started_unix: float | None = None,
 ) -> list[Path]:
-    """Return absolute paths to known Magpie leak destinations."""
+    """Return absolute paths to known benchmark-client leak destinations."""
     candidates: list[Path] = []
     seen: set[Path] = set()
 
@@ -170,7 +170,7 @@ def _resolve_leak_roots(leak_root: Path | None = None) -> tuple[Path, ...]:
 
 
 def _run_workspaces(root: Path) -> list[Path]:
-    """The workspaces rounds left in ``root``: Magpie's ``benchmark_*`` directories and inference_suite run_dirs."""
+    """The workspaces rounds left in ``root``: ``benchmark_*`` directories and inference_suite run_dirs."""
     if not root.is_dir():
         return []
     return [p for p in root.iterdir() if p.is_dir() and (p.name.startswith("benchmark_") or is_round_folder(p))]
@@ -247,7 +247,7 @@ def harvest_leaked_artifacts(
     subprocess_started_unix: float | None = None,
     leak_root: Path | None = None,
 ) -> list[tuple[Path, Path]]:
-    """Copy known Magpie/InferenceX leak artifacts into ``destination``; a measurement runner names its own work
+    """Copy known InferenceX leak artifacts into ``destination``; a measurement runner names its own work
     directory as ``leak_root`` so that nothing another test left elsewhere is copied into its signed output."""
     harvested: list[tuple[Path, Path]] = []
     leak_roots = _resolve_leak_roots(leak_root)
@@ -288,7 +288,7 @@ def harvest_leaked_artifacts(
         harvest_mn_gpu_metrics(destination, subprocess_started_unix=subprocess_started_unix)
     except (OSError, ValueError, csv.Error) as exc:
         log.warning("benchmark_result.harvest: MN GPU-metrics harvest failed: %s", exc)
-    # Whatever wrote the round's ``gpu_monitor`` block -- Magpie on one node, the harvest above on several -- normalise
+    # Whatever wrote the round's ``gpu_monitor`` block -- the single-node monitor, or the harvest above on several -- normalise
     # it into an artifact of its own now, while the round's own workspace is the subject. Aggregating it per session
     # instead averaged baseline, explore and roofline rounds together and described none of them.
     # Best effort, and only that: the report may still be settling, in which case there is nothing to read yet and the
@@ -511,7 +511,7 @@ def harvest_mn_gpu_metrics(
     subprocess_started_unix: float | None = None,
 ) -> dict[str, Any]:
     """Fold pod-side GPU sampler CSVs into ``destination`` (multi-node only)."""
-    # Multi-node only: single-node uses Magpie's own client-side GPUMonitor, so never touch its result path.
+    # Multi-node only: a single-node round samples its own GPUs, so never touch its result path.
     # is_multi_node() is the authoritative gate (state nodes>=2 or $INFERENCE_OPTIMIZER_NODES>=2).
     from ._multi_node_env import is_multi_node, pd_topology_from_state
 
@@ -657,16 +657,16 @@ def extract_benchmark_measurement(
     subprocess_started_unix: float | None = None,
     config_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Extract a normalized measurement from an inference_suite run_dir, or from Magpie and InferenceX outputs.
+    """Extract a normalized measurement from an inference_suite run_dir, or from a benchmark report and InferenceX outputs.
 
     A ``workspace`` that is an inference_suite run_dir is measured from its own report alone; ``report`` is unused.
 
     ``subprocess_started_unix`` enables an opt-in salvage pass over the
-    Magpie leak destinations (see :func:`_rescue_candidate_paths`) when the
+    benchmark-client leak destinations (see :func:`_rescue_candidate_paths`) when the
     in-workspace search fails; only leaks written after this run are adopted.
 
     Args:
-        report: The Magpie ``benchmark_report.json`` mapping, or ``None``.
+        report: The ``benchmark_report.json`` mapping, or ``None``.
         workspace: Optional task workspace scanned for raw InferenceX results
             and (as a fallback) salvageable leaks.
         subprocess_started_unix: Optional launch time enabling the mtime-gated
@@ -746,7 +746,7 @@ def _add_agentx_timeline_fields(measurement: dict[str, Any], workspace: Path | N
 def _measurement_from_report(
     report: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
 ) -> dict[str, Any]:
-    """The normalized fields a Magpie ``benchmark_report.json`` supplies on its own."""
+    """The normalized fields a ``benchmark_report.json`` supplies on its own."""
     throughput = report.get("throughput") or {}
     latency = report.get("latency") or {}
     ttft = latency.get("ttft") or {}
@@ -795,7 +795,7 @@ def _salvage_from_leaked_results(
     workspace: Path,
     subprocess_started_unix: float | None,
 ) -> None:
-    """Adopt a Magpie leak written after launch as the measurement, when the in-workspace search found none."""
+    """Adopt a benchmark-client leak written after launch as the measurement, when the in-workspace search found none."""
     warnings = measurement["nonfatal_warnings"]
     for rescue_path in _rescue_candidate_paths(workspace, subprocess_started_unix=subprocess_started_unix):
         raw = read_json(rescue_path, default=None, require_dict=True)
@@ -899,8 +899,8 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
 def round_succeeded(measurement: dict[str, Any]) -> bool:
     """Whether a round ran to the verdict its kind accepts.
 
-    A native AgentX round that Magpie marks diagnostic (a profile) is never a valid measurement: the trace it leaves is
-    what it is run for, so Magpie's own ``round_succeeded`` decides it. Any other round succeeds when it is valid.
+    A native AgentX round marked diagnostic (a profile) is never a valid measurement: the trace it leaves is what it is
+    run for, so the round's own ``round_succeeded`` decides it. Any other round succeeds when it is valid.
     """
     return measurement.get("round_succeeded", measurement.get("valid_measurement")) is True
 

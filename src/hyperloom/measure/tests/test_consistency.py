@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -29,6 +28,7 @@ from hyperloom.measure.consistency import (
 from hyperloom.measure.runner.inventory import FARM_INVENTORY_FILE, farm_inventory
 from hyperloom.measure.socket import RoundOutcome, SessionFacts, TestCall, TestOutcome
 from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
+from hyperloom.measure.tests.run_dirs import write_run_dir
 from hyperloom.measure.tests.hosted_fixtures import (
     FAKE_RUNNER,
     Rig,
@@ -39,7 +39,7 @@ from hyperloom.measure.tests.hosted_fixtures import (
 )
 from hyperloom.contracts.measurement import SandboxFacts
 
-REPORT = "benchmark_local_20000101_000000"
+REPORT = "suite_run_0"
 
 
 class FakeLocal:
@@ -63,21 +63,13 @@ class FakeLocal:
             return TestOutcome(1, "", "boom", (), sandbox, call.task_id, "candidate", "import_error")
         if self.throughputs:
             config["local_throughput"] = self.throughputs.pop(0)
-        workspace = Path(call.output_dir) / REPORT
-        workspace.mkdir(parents=True)
-        report = {
-            "success": True,
-            "throughput": {
-                "output_throughput": float(config.get("local_throughput", config.get("fake_throughput", 5000.0))),
-                "completed_requests": int(config.get("local_completed", config.get("fake_completed", 64))),
-                **(
-                    {}
-                    if config.get("local_no_counts")
-                    else {"num_prompts": int(config.get("local_requested", config.get("fake_requested", 64)))}
-                ),
-            },
+        fixed = {
+            "output_throughput": float(config.get("local_throughput", config.get("fake_throughput", 5000.0))),
+            "completed_requests": int(config.get("local_completed", config.get("fake_completed", 64))),
         }
-        (workspace / "benchmark_report.json").write_text(json.dumps(report))
+        if not config.get("local_no_counts"):
+            fixed["requested_requests"] = int(config.get("local_requested", config.get("fake_requested", 64)))
+        workspace = write_run_dir(Path(call.output_dir) / REPORT, fixed)
         return TestOutcome(0, "", "", (RoundOutcome(0, "measure", workspace, 0),), sandbox, call.task_id)
 
 
@@ -90,7 +82,6 @@ def _item(tmp: Path, name: str, patched: dict[str, RootExpectation] | None = Non
             output_dir=output_dir,
             timeout_sec=60,
             cwd=str(tmp),
-            magpie_python=sys.executable,
             task_id=task_id,
             session_facts=SessionFacts(staging=STAGING, base_launch=base_launch()),
         )
@@ -321,7 +312,6 @@ def _item_per_rep(tmp: Path, name: str, by_rep: dict[int, dict], patched=None, r
             output_dir=output_dir,
             timeout_sec=60,
             cwd=str(tmp),
-            magpie_python=sys.executable,
             session_facts=SessionFacts(staging=STAGING, base_launch=base_launch()),
             task_id=task_id,
         )

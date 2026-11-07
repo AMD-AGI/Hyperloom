@@ -6,8 +6,7 @@
 Each test submits a ``TestRequest`` to a toolbox built by ``build_local_toolbox`` whose planner is the real
 ``HostedPlanner`` (compile, points, surface check), and reads the result back from the blackboard. Needs SGLang, a model
 directory and an InferenceX checkout; set ``HL_GPU_MODEL``, ``HL_GPU_INFERENCEX`` and ``HL_GPU_OUT`` (an empty
-directory), and optionally ``HL_GPU_CARDS`` (default ``6,7``) and ``HL_GPU_BACKEND`` (``bypass``, the default, or
-``magpie``, which needs the pinned Magpie importable by the GPU venv's python). Anywhere else the module is skipped.
+directory), and optionally ``HL_GPU_CARDS`` (default ``6,7``). Anywhere else the module is skipped.
 The profile test also needs a TraceLens checkout (``TRACELENS_ROOT``), the agent runtime credentials the TraceLens
 skill route runs on, and ``HL_GPU_CARDS`` to be exactly two cards. ``HL_GPU_OUT`` must be on a filesystem that accepts
 ``:`` in file names.
@@ -61,12 +60,6 @@ MODEL = os.environ.get("HL_GPU_MODEL", "")
 INFERENCEX = os.environ.get("HL_GPU_INFERENCEX", "")
 OUT = os.environ.get("HL_GPU_OUT", "")
 CARDS = [int(card) for card in os.environ.get("HL_GPU_CARDS", "6,7").split(",")]
-BACKEND = os.environ.get("HL_GPU_BACKEND", "bypass")
-#: A baseline test always evaluates accuracy. On Magpie that is InferenceX's lm-eval step, which pip-installs a pinned
-#: lm-eval with ``--break-system-packages``, an option the GPU venv's pip refuses: the Magpie sweep is a health test.
-SWEEP_PURPOSE = Purpose.HEALTH if BACKEND == "magpie" else Purpose.BASELINE
-#: Magpie holds a server across rounds only for its own benchmark scripts, which a point names through its GPU type.
-CANONICAL_OPTIONS = {"gpu_type": "mi355x"} if BACKEND == "magpie" else {}
 USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("sglang") is None or not Path(MODEL).is_dir() or not Path(INFERENCEX, ".git").exists(),
@@ -120,7 +113,6 @@ def _toolbox(
         primary_concurrency=primary,
         config_path=config_path or default_baseline_config(),
         model_path=MODEL,
-        **CANONICAL_OPTIONS,
         **materialize,
     )
     blackboard = LocalBlackboard(root / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
@@ -199,7 +191,7 @@ async def test_a_concurrency_sweep_is_one_server_and_one_round_per_level() -> No
     root = _run_root("sweep")
     toolbox, blackboard, *_ = _toolbox(root, "kinds-sweep")
     try:
-        request = req(purpose=SWEEP_PURPOSE, change=RecipeDelta(), concurrency=LEVELS)
+        request = req(purpose=Purpose.BASELINE, change=RecipeDelta(), concurrency=LEVELS)
         request_id, result, landed = await _submit(toolbox, blackboard, request, root)
         measured = [r for r in result.rounds if r.phase == "measure"]
         logs = sorted(landed.rglob("server*.log"))

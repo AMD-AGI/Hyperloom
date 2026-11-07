@@ -53,7 +53,6 @@ template's values to the paths inside the sandbox.
 | `HYPERLOOM_SOURCE_SHA`, `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256` | set by the hosted multi-branch entry | The hosted multi-branch entry passes both on every create; the template must list them in its accepted create environment. |
 | `HYPERLOOM_FRAMEWORK_SNAPSHOT`, `HYPERLOOM_FRAMEWORK_SESSION_SHA256` | set by the hosted multi-branch entry | When the app host has the image's aiter tables, the hosted multi-branch entry snapshots them below `<session_dir>/framework` and passes both on every create; the template must list them in its accepted create environment, and the sandbox must see the session directory at the same path. Without the snapshot, a test that adds tuned rows to a default table is refused as `spec_rejected`. |
 | `INFERENCEX_REPO` | no | Where the runner fetches InferenceX (default: upstream on GitHub). A sandbox without egress needs a mirror it can read, for example a bare repository on the shared storage. |
-| `MAGPIE_REPO` | no | Where the runner fetches Magpie (default: upstream on GitHub). Same as `INFERENCEX_REPO`. |
 | `HYPERLOOM_JIT_CACHE` | no | A read-only directory of compiled kernels shared between tests. Unset: every test builds its kernels cold, which is slower but measures the same. A test that patches aiter's `csrc` or `hsa` is refused without it, because it needs its own JIT directory. |
 
 The sandbox serves the model at the path the campaign spec names, so the template must mount the model storage at
@@ -73,8 +72,8 @@ installs only those copies (`pip --no-index`), then runs the runner from the unp
 needs room for the unpacked source and the wheels. Nothing the runner or pip runs comes from the cache unchecked. A
 profile test later copies the staged ruppell tree (`<cache>/tools/ruppell-<commit>/`) and builds the copy only when it
 has the pinned digest. The prompt sets a test reads (`<cache>/evalsets/<key>/`) are data, and they are read from the
-cache again after their check. The start-up makes no network access; the runner still fetches InferenceX and Magpie
-(`INFERENCEX_REPO` and `MAGPIE_REPO` above).
+cache again after their check. The start-up makes no network access; the runner still fetches InferenceX
+(`INFERENCEX_REPO` above).
 
 With the checked step, a sandbox that does not find the entry, finds one that does not match the pin, or has no pin
 fails its start with `runner_start_failed`. An entry built before entries had `source.tar` is refused where it is built:
@@ -111,7 +110,6 @@ HYPERLOOM_RSI_ARCHIVE=/mnt/shared/hyperloom/rsi-archive/
 # Measurement template
 HYPERLOOM_RUNNER_CACHE=/mnt/shared/hyperloom/runner-cache
 INFERENCEX_REPO=/mnt/shared/hyperloom/mirrors/InferenceX.git
-MAGPIE_REPO=/mnt/shared/hyperloom/mirrors/Magpie.git
 ```
 
 For a measurement image on CPython 3.14 (the current `rocm/vllm` tags), set

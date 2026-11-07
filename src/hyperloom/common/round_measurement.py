@@ -4,7 +4,7 @@
 """Hyperloom's measurement of one inference_suite round, mapped from its report and launch.
 
 This is the one place a round report is judged (D2): which round is a valid measurement, which is diagnostic only,
-and which step a failed round stopped at. The measurement carries the keys a Magpie benchmark report normalises to,
+and which step a failed round stopped at. The measurement carries the keys a benchmark report normalises to,
 plus every fixed metric key, so a reader does not need to know which runner measured the round.
 """
 
@@ -82,7 +82,7 @@ _SUBMISSION_VALID = "submission_valid"
 def _agentx_error_rate_pct(counts: Mapping[str, int]) -> float | None:
     """The AgentX error rate under ``inferencex-agentx/1``, in percent, or ``None`` when no request was profiled.
 
-    Warmup drops are not errors: (dropped - warmup) / (successful + errors), Magpie's definition, which InferenceX's
+    Warmup drops are not errors: (dropped - warmup) / (successful + errors), the definition InferenceX's
     acceptance threshold was set on.
     """
     profiled = counts["successful"] + counts["error_dropped"]

@@ -1485,7 +1485,7 @@ class TestKernelE2EMeasurementPromotion:
 
     @pytest.fixture
     def paired_handler(self, monkeypatch):
-        from hyperloom.orchestrator.actions.executors import _multi_node_env, benchmark_backend
+        from hyperloom.orchestrator.actions.executors import _multi_node_env
 
         def unexpected(*args, **kwargs):
             raise AssertionError("Paired measurements must not resolve, apply, or grade a patch")
@@ -1499,7 +1499,6 @@ class TestKernelE2EMeasurementPromotion:
         monkeypatch.setattr(integrate_accuracy, "grade_integrate_accuracy", unexpected)
         monkeypatch.setattr(integrate_outcomes, "_maybe_finalize_kernel_patch", unexpected)
         monkeypatch.setattr(integrate_rebaseline, "_sweep_integrate_aiter_locks", lambda **kwargs: {})
-        monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: "/usr/bin/python3")
         monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
         return krh_mod.integrate_handler
 

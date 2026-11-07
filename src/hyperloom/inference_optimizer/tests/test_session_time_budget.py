@@ -1730,35 +1730,29 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
         session that ended while a benchmark server was up left it holding its
         GPUs until some later session booted in the same directory.
         """
-        import subprocess
+        import os
         from datetime import datetime, timedelta, timezone
-        from pathlib import Path
 
-        marker = "vllm serve"
-        proc = subprocess.Popen(
-            [sys.executable, "-c", f"import time; _={marker!r}; time.sleep(120)"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        # /proc/<pid>/cmdline stays empty until the child execs, and the reaper
-        # matches on it.
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            try:
-                if marker.encode() in Path(f"/proc/{proc.pid}/cmdline").read_bytes():
-                    break
-            except OSError:
-                pass
-            time.sleep(0.02)
-        else:
-            proc.kill()
-            pytest.skip("child never exposed a matching cmdline")
+        from hyperloom_common.proctree import proc_identity
+        from inference_suite.frameworks import Framework
+        from inference_suite.runtime.process import ServerPidfile, spawn
 
         run_dir = coord.session_dir / "runs" / "roofline" / "post_opt"
         run_dir.mkdir(parents=True, exist_ok=True)
-        pidfile = run_dir / "vllm_8000.pid"
-        pidfile.write_text(str(proc.pid), encoding="utf-8")
+        spawned = spawn(
+            (sys.executable, "-c", "import time; time.sleep(120)"), dict(os.environ), run_dir / "server.log"
+        )
+        proc = spawned.proc
+        pidfile = run_dir / "server.pid"
+        ServerPidfile(
+            pid=proc.pid,
+            pgid=proc.pid,
+            start_time=proc_identity(proc.pid)[1],
+            run_mark=spawned.mark,
+            port=8000,
+            framework=Framework.VLLM,
+            launch_digest="sha256:" + "a" * 64,
+        ).write(pidfile)
 
         start = datetime.now(timezone.utc) - timedelta(hours=3)
         coord.shared_state.start_ts = start.isoformat()

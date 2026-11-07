@@ -13,9 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
-from inference_suite.contracts import FailedStep
 
-from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom_common.timeutil import now_iso
@@ -28,17 +26,9 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ....measurement.integrate_performance import assess_integrate_performance
-from ....state.failure_evidence import (
-    MAGPIE_NONZERO_INVALID_MEASUREMENT,
-    SUBPROCESS_NONZERO,
-    nonzero_output_signature,
-)
 from ...stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
 from .. import _server_lifecycle as _lifecycle
-from .._failed_step import failed_step_error_class
-from .._round_folder import round_report_path
-from ..benchmark_result import served_complete_protocol
-from .bringup import _classify_subprocess_error, _disable_cuda_graph_flag, _with_cuda_graph_disabled
+from .bringup import _disable_cuda_graph_flag, _with_cuda_graph_disabled
 from .records import (
     _ACCURACY_ROUND_DIR,
     _BENCHMARK_MODE_ATTR,
@@ -46,7 +36,6 @@ from .records import (
     _WARMUP_ROUND_DIR,
     BenchmarkAttempt,
     _BenchmarkRound,
-    _BenchProcess,
     _cold_anchor_from_warmup,
     _requested_framework,
     _unlaunched_round_result,
@@ -585,24 +574,6 @@ class _BenchmarkRoundsMixin:
             yaml.safe_dump(cfg, f, sort_keys=False)
         return out
 
-    async def _pre_start_cleanup(
-        self,
-        *,
-        pid_dir: Path,
-        framework: str,
-        port: int,
-    ) -> None:
-        """Remove the pid/json files a previous round left for this framework and port."""
-        for p in (
-            _lifecycle.lifecycle_pid_file(pid_dir, framework, port),
-            _lifecycle.lifecycle_meta_file(pid_dir, framework, port),
-        ):
-            try:
-                if p.exists():
-                    p.unlink()
-            except OSError:
-                pass
-
     async def _run_reported_round(
         self,
         attempt: BenchmarkAttempt,
@@ -647,133 +618,6 @@ class _BenchmarkRoundsMixin:
         _record(result)
         return result
 
-    def _no_workspace_failure(
-        self,
-        round_: _BenchmarkRound,
-        finished: _BenchProcess,
-        boot: tuple[str, str] | None,
-        harvested: Any,
-    ) -> dict[str, Any]:
-        failure_extras = {
-            "output_dir": str(round_.output_dir),
-            "harvested_artifacts": [str(dst) for _, dst in harvested],
-            **round_.capture_meta,
-        }
-        # Magpie never created a benchmark_* workspace, so the wrapper never wrote server.log.
-        captured = redact_secret_values(finished.stderr + finished.stdout)
-        if captured.strip():
-            try:
-                log_file = round_.output_dir / "baseline_stderr.log"
-                log_file.write_text(captured, encoding="utf-8")
-                failure_extras["stderr_log_path"] = str(log_file)
-            except OSError as exc:
-                log.warning("baseline_executor: failed to persist stderr log: %s", exc)
-        if boot is not None:
-            error_class, error = boot
-            return {
-                "status": "failed",
-                "error_class": error_class,
-                "returncode": finished.returncode,
-                "error": redact_secret_values(error),
-                **failure_extras,
-            }
-        if finished.returncode != 0:
-            tail = redact_secret_values((finished.stderr or finished.stdout)[-2000:])
-            err_class = _classify_subprocess_error(finished.runtime_sec, tail)
-            return {
-                "status": "failed",
-                "error_class": err_class,
-                "returncode": finished.returncode,
-                "subprocess_runtime_sec": round(finished.runtime_sec, 2),
-                "error": tail,
-                "output_signature": nonzero_output_signature(err_class, finished.stdout, finished.stderr),
-                **failure_extras,
-            }
-        return {
-            "status": "failed",
-            "error_class": "no_workspace",
-            "error": "Magpie completed but produced no benchmark_* workspace",
-            **failure_extras,
-        }
-
-    def _unmeasured_round_failure(
-        self,
-        finished: _BenchProcess,
-        boot: tuple[str, str] | None,
-        measurement: dict[str, Any],
-        report_path: Path,
-        tail: str,
-    ) -> tuple[str, str]:
-        """Name a round that left no usable measurement, from the strongest evidence it has."""
-        if boot is not None:
-            return boot
-        if step := measurement.get("failed_step"):
-            return failed_step_error_class(FailedStep(step)), measurement.get("failure_detail") or tail
-        if finished.returncode != 0:
-            error_class = _classify_subprocess_error(finished.runtime_sec, tail)
-            if error_class == SUBPROCESS_NONZERO and served_complete_protocol(measurement):
-                # The run's own artifact records every requested request as served, so the exit
-                # happened after the workload rather than during it. That is what the exit code
-                # cannot say on its own, and it is the difference between a harness that refused
-                # the result and a process that died mid-round.
-                error_class = MAGPIE_NONZERO_INVALID_MEASUREMENT
-            return error_class, tail
-        if not report_path.exists():
-            return "no_report", f"{report_path.name} missing under {report_path.parent}"
-        return "invalid_measurement", "benchmark report did not contain positive throughput and completed requests"
-
-    def _failed_round_result(
-        self,
-        round_: _BenchmarkRound,
-        finished: _BenchProcess,
-        boot: tuple[str, str] | None,
-        measurement: dict[str, Any],
-        warnings: list[str],
-    ) -> dict[str, Any] | None:
-        workspace = round_.output_dir if finished.workspace is None else finished.workspace
-        report_path = round_report_path(workspace)
-        tail = (finished.stderr or finished.stdout)[-2000:]
-        failed = {
-            "status": "failed",
-            "returncode": finished.returncode,
-            "output_dir": str(round_.output_dir),
-            "workspace": str(workspace),
-            "report_path": str(report_path) if report_path.exists() else None,
-            "reported_success": measurement.get("reported_success"),
-            "subprocess_runtime_sec": round(finished.runtime_sec, 2),
-            "nonfatal_warnings": warnings,
-            **round_.capture_meta,
-        }
-        if not self._measurement_succeeded(measurement):
-            error_class, error = self._unmeasured_round_failure(finished, boot, measurement, report_path, tail)
-            return {
-                **failed,
-                "error_class": error_class,
-                "error": redact_secret_values(error),
-                "output_signature": nonzero_output_signature(error_class, finished.stdout, finished.stderr),
-            }
-        if finished.returncode == 0:
-            return None
-        nonzero_error = redact_secret_values(tail)
-        if not served_complete_protocol(measurement):
-            return {
-                **failed,
-                "error_class": "magpie_nonzero_after_valid_measurement",
-                "error": nonzero_error,
-            }
-        # The round served every request the client recorded as requested, so the exit code is not evidence against
-        # the measurement. The cause stays on the result rather than only in the log.
-        warnings.append(f"nonzero_rc_after_complete_protocol:{finished.returncode}")
-        log.warning(
-            "baseline_executor: magpie exited %d after serving its whole protocol (%s of %s requests); "
-            "keeping the measurement: %s",
-            finished.returncode,
-            measurement.get("completed_requests"),
-            measurement.get("requested_requests"),
-            nonzero_error,
-        )
-        return None
-
     def _stamp_round_quality(
         self,
         round_: _BenchmarkRound,
@@ -802,7 +646,7 @@ class _BenchmarkRoundsMixin:
             )
         else:
             # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh moving/cleaning
-            # ``$EVAL_RESULT_DIR`` and scriptable quality gates still resolve from Magpie's benchmark reports.
+            # ``$EVAL_RESULT_DIR`` and scriptable quality gates still resolve from the round reports.
             eval_data = parse_eval_results(round_.result_dir, framework=eval_framework, benchmark_mode=benchmark_mode)
             if record_eval_score(result, eval_data):
                 log.info("baseline_executor: accuracy=%.4f (%s)", result["accuracy"], result["accuracy_task"])

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reliable subprocess-tree teardown for Magpie-launched servers."""
+"""Run a subprocess in its own session under stop gates, and reap its whole tree on every exit path."""
 
 from __future__ import annotations
 
@@ -10,21 +10,16 @@ import io
 import logging
 import math
 import os
-import re
 from collections.abc import Mapping
 import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from hyperloom_common.env import env_flag
 from hyperloom_common.proctree import REAP_MARK_ENV, TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 
-from inference_suite.contracts.layout import ReadyStamp, RunLayout
-from inference_suite.server_log import LogCursor, LogScan, round_start_offsets
 
 from ..cancel_channel import CancelScope, cancel_scope_listener
 
@@ -131,29 +126,12 @@ def kill_my_spawned_server(
         pass
 
 
-# Sentinel ``returncode`` when the detokenizer-stall watchdog reaps a child that came up healthy but then produced no
-# generation progress (hung engine / detokenizer wedge).
-DETOKENIZER_STALL_RETURNCODE: int = -911
-
-# Sentinel returned when the delegated MLPerf client fails its execution preflight.
-AGENTX_PREFLIGHT_RETURNCODE: int = -912
-
-#: The ``error_class`` that sentinel must carry, wherever it is classified. Named
-#: here beside the return code because three call sites decide on it -- the grid
-#: runner, the baseline executor and the writeback stop-reason gate -- and a
-#: string literal repeated across them can drift into a class nobody handles.
-#:
-#: A missing MLPerf dependency stops the run instead of opening a framework enablement round.
+#: The ``error_class`` of an AgentX attempt whose MLPerf client fails its preflight. The baseline
+#: executor writes it and the stop-reason gate decides on it; a missing MLPerf dependency stops the
+#: run instead of opening a framework enablement round.
 AGENTX_PREFLIGHT_ERROR_CLASS: str = "agentx_preflight"
 
 # -913 is ``_ray_serving._RAY_ACTOR_DIED_RC``.
-
-# Sentinel ``returncode`` returned by the _run_magpie eval hook when the generation bounds / pathology probe cannot be
-# installed even though the target file is present and this variant runs eval.
-EVAL_PROBE_UNPATCHABLE_RETURNCODE: int = -914
-
-# Sentinel ``returncode`` when the InferenceX checkout a round would run from is not one, so no server could start.
-INFERENCEX_CHECKOUT_INVALID_RETURNCODE: int = -918
 
 # Sentinel ``returncode`` when the session wall-clock budget ran out mid-round and the tree was reaped.
 SESSION_TIME_EXHAUSTED_RETURNCODE: int = -915
@@ -167,31 +145,6 @@ ORCHESTRATOR_CANCELLED_RETURNCODE: int = -917
 # Sentinel ``returncode`` and ``error_class`` of an AgentX round its checkpoint stopped for trailing the reference.
 AGENTX_EARLY_STOP_RETURNCODE: int = -919
 AGENTX_EARLY_STOP_ERROR_CLASS: str = "agentx_early_stop"
-
-_READY_PHASE = "ready"
-
-#: aiter's line as it starts building a JIT module (``[aiter] [pid=.. pname=..] start build [<module>] under ...``). It
-#: writes nothing more until the module is built, and a server whose first request after ready reaches a module it lacks
-#: builds it inside that request: a CK-tile GEMM builds slowest when several tests build at once, past the
-#: silence window. So a log whose last line is such a line is active, each build for at most as long as a module of its
-#: kind may take; a build that hangs goes silent from there.
-_AITER_BUILD_START = re.compile(r"\[aiter\] (?:\[[^\]]*\] )*start build (?:\[([A-Za-z0-9_.-]+)\])?")
-#: How long one quiet build counts as activity: ``MODULE_BUILD_LIMIT_SEC`` and ``CKTILE_MODULE_BUILD_LIMIT_SEC`` of
-#: ``hyperloom.measure.jit.modules``, which this layer does not import (a test holds them equal).
-_AITER_BUILD_LIMIT_SEC = 600.0
-_AITER_CKTILE_BUILD_LIMIT_SEC = 2700.0
-
-
-def _aiter_build_limit_sec(module: str) -> float:
-    """How long a quiet build of the aiter module ``module`` counts as the server's activity."""
-    return _AITER_CKTILE_BUILD_LIMIT_SEC if "cktile" in module else _AITER_BUILD_LIMIT_SEC
-
-
-# How long a round may go without any resolvable server log before it is treated as re-attached to a server an earlier
-# round booted. Such a round owns no log and no ready marker will ever appear in its scan set, so KV collection has to
-# start on some other signal or it never starts at all.
-_WARM_REUSE_PROBE_AFTER_SEC: float = 30.0
-
 
 # The operator's two grants. They are the operator's to set, read from the process env and
 # validated there once by preflight, so nothing re-reads them from an env a variant composed.
@@ -347,50 +300,6 @@ class _StreamCapture:
             pass  # a closed or broken mirror stream must not stop the capture
 
 
-def _round_layout(server_log_path: str) -> RunLayout:
-    return RunLayout(Path(server_log_path).parent)
-
-
-def stamp_server_ready(server_log_path: str, boot_sec: float) -> None:
-    """Record, beside ``server_log_path``, that the server just reported ready.
-
-    Two numbers, because they answer two questions and one clock cannot answer
-    both. ``boot_sec`` is how long the round took to come up, measured from spawn
-    to this moment on one ``time.monotonic()`` reading in the process that
-    spawned the child. The wall-clock instant beside it only ever says *which
-    round* the stamp belongs to.
-
-    Keeping the boot a duration is what makes it safe to read across a process
-    boundary. On the Ray path the round runs inside an actor, possibly on another
-    host; subtracting the actor's wall-clock from the driver's would charge the
-    boot for whatever the two clocks disagree by, and a positive disagreement
-    inflates the boot and makes the budget gates refuse rounds that fit. A
-    duration crosses the boundary meaning the same thing on both sides -- the
-    same reason ``session_remaining_sec`` is passed to the actor as a duration
-    rather than as a deadline.
-
-    A file is used because it crosses that boundary without widening the round's
-    return value, and the round's output directory is already how post-mortem
-    evidence gets back (the caller reads the same directory's ``server.log`` to
-    classify server deaths).
-
-    Best effort: a round whose stamp cannot be written loses a measurement, which
-    callers already have to handle, and must not lose the round.
-
-    Args:
-        server_log_path: The ``<output_dir>/server.log`` path from the caller.
-        boot_sec: Seconds from spawn to this moment, on the spawning process's
-            monotonic clock. Required rather than defaulted: a caller that
-            omitted it would write a well-formed stamp claiming the round booted
-            instantly, which reads as a whole round of benchmark and is the one
-            wrong answer the two-field format exists to make impossible.
-    """
-    try:
-        _round_layout(server_log_path).write_ready_stamp(ReadyStamp(time.time(), max(0.0, float(boot_sec))))
-    except OSError as exc:
-        log.warning("_subprocess_kill: could not stamp server-ready time (%s)", exc)
-
-
 def session_deadline_to_remaining_sec(session_deadline_sec: float | None) -> float | None:
     """Convert an in-process session deadline into seconds still left on it."""
     if session_deadline_sec is None:
@@ -405,144 +314,26 @@ def session_remaining_to_deadline_sec(session_remaining_sec: float | None) -> fl
     return time.monotonic() + float(session_remaining_sec)
 
 
-# Escape hatch for a round that must not pay even the cost of one HTTP GET every couple of seconds.
-_KV_METRICS_ENV = "INFERENCE_OPTIMIZER_KV_METRICS"
+class RoundJudge(Protocol):
+    """Rules on a running round at each tick, raising :class:`AgentxCheckpointMissed` to stop it."""
 
+    def tick(self, mono: float) -> None: ...
 
-def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) -> Any:
-    """Build the KV-metrics recorder for this round, or ``None`` when it is off."""
-    if not server_log_path:
-        return None
-    if not env_flag(_KV_METRICS_ENV, default=True):
-        return None
-    from inference_suite.telemetry.kv_poll import AiperfProgressPoller, KvMetricsPoller
-    from inference_suite.telemetry.kv_record import KV_ARTIFACT_NAME, KvMetricsRecorder, KvRound
-
-    workspace = Path(server_log_path).parent
-    return KvMetricsRecorder(
-        # The workspace is where the port actually lives: it is pinned in the round's materialized
-        # ``benchmark.envs.PORT``, which is never exported into the subprocess environment.
-        poller=KvMetricsPoller(config_envs=dict(env or {}), workspace=workspace),
-        # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
-        # publishes a progress address and the poller then never resolves a URL.
-        progress=AiperfProgressPoller(workspace),
-        kv_round=KvRound(
-            output_path=str(workspace / KV_ARTIFACT_NAME),
-            scope={
-                "server_log_path": str(server_log_path),
-                "workspace": workspace.name,
-                "run_path": _run_relative_path(workspace),
-                "session": os.path.basename(
-                    os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
-                ),
-            },
-        ),
-    )
-
-
-class _RecorderFanout:
-    """Drives this round's recorders from the watchdog's single ``note_phase`` / ``tick`` / ``close`` calls.
-
-    Each recorder absorbs its own scrape and write failures; anything else it raises fails the round.
-    """
-
-    def __init__(self, recorders: list[Any], *, ready_phase: str = "measured") -> None:
-        self._recorders = recorders
-        self._ready_phase = ready_phase
-
-    def _each(self, method: str, *args: Any, **kwargs: Any) -> None:
-        for recorder in self._recorders:
-            getattr(recorder, method)(*args, **kwargs)
-
-    def note_phase(self, phase: str, mono: float) -> None:
-        self._each("note_phase", self._ready_phase if phase == _READY_PHASE else phase, mono)
-
-    def note_client_phases(self, scan: LogScan, mono: float) -> None:
-        for seen, phase in (
-            (scan.saw_eval_start, "eval"),
-            (scan.saw_measured_end, "finished"),
-            (scan.saw_measured_begin, "measured"),
-            (scan.saw_warmup_begin, "warmup"),
-        ):
-            if seen:
-                self.note_phase(phase, mono)
-                return
-
-    def tick(self, mono: float) -> None:
-        self._each("tick", mono)
-
-    def close(self, *, aborted: bool = False) -> None:
-        """Close every recorder, then raise the first error one of them raised."""
-        first_error: Exception | None = None
-        for recorder in self._recorders:
-            try:
-                recorder.close(aborted=aborted)
-            except Exception as exc:  # noqa: BLE001 - re-raised once every recorder is closed
-                if first_error is None:
-                    first_error = exc
-        if first_error is not None:
-            raise first_error
+    def close(self, *, aborted: bool = False) -> None: ...
 
 
 class RoundCheckpoint(Protocol):
-    """A ruling made while the round runs, by a recorder it builds for the round's slot."""
+    """A ruling made while the round runs, by the judge it builds when the round starts."""
 
-    def judge(self, slot: Path | None) -> Any:
-        """The recorder that rules for the round writing into ``slot`` (the server log's directory, when it has one)."""
-
-
-def _build_checkpoint_judge(server_log_path: str | None, checkpoint: RoundCheckpoint | None) -> Any:
-    """The AgentX checkpoint judge for this round, or ``None`` when the round has no checkpoint."""
-    if checkpoint is None:
-        return None
-    return checkpoint.judge(Path(server_log_path).parent if server_log_path else None)
-
-
-def _build_round_recorders(
-    server_log_path: str | None, env: dict[str, str] | None, checkpoint: RoundCheckpoint | None = None
-) -> _RecorderFanout:
-    """KV metrics, measured-phase GPU power and the AgentX checkpoint for this round, behind one recorder surface."""
-    from ._gpu_power import build_gpu_power_recorder
-    from hyperloom.common.benchmark_config import configured_benchmark, is_agentx
-
-    return _RecorderFanout(
-        [
-            recorder
-            for recorder in (
-                _build_kv_recorder(server_log_path, env),
-                build_gpu_power_recorder(server_log_path, env),
-                _build_checkpoint_judge(server_log_path, checkpoint),
-            )
-            if recorder is not None
-        ],
-        ready_phase="boot" if is_agentx(configured_benchmark(env)) else "measured",
-    )
-
-
-def _run_relative_path(workspace: Path) -> str:
-    """Path of this round's workspace below ``runs/``, which is what the session breakdown keys rows by."""
-    parts = workspace.parts
-    if "runs" in parts:
-        return "/".join(parts[parts.index("runs") + 1 :])
-    return workspace.name
-
-
-@dataclass(frozen=True)
-class PreparationFailure:
-    """A workload dependency that must be fixed before spawning the benchmark, with the returncode its round reports."""
-
-    returncode: int
-    error: str
+    def judge(self) -> RoundJudge:
+        """The judge that rules on this round."""
 
 
 @dataclass(frozen=True)
 class RoundWatch:
-    """The stop gates the watchdog enforces on one round and the server log it watches."""
+    """The stop gates the watchdog enforces on one round."""
 
     timeout: int | float | None = None
-    server_log_path: str | None = None
-    silence_timeout_sec: float | None = None
-    server_already_ready: bool = False
     session_deadline_sec: float | None = None
     checkpoint: RoundCheckpoint | None = None
 
@@ -558,9 +349,6 @@ def run_with_session_kill(
     """Run a subprocess in its own session and reap descendants, and what carries ``REAP_MARK_ENV``, on every exit path."""
     child_env = dict(os.environ if env is None else env)
     mark = child_env.get(REAP_MARK_ENV, "")
-    if watch.silence_timeout_sec is not None:
-        child_env["PYTHONUNBUFFERED"] = "1"
-    scan_offsets = round_start_offsets(watch.server_log_path) if watch.server_log_path else {}
     proc: subprocess.Popen | None = None
     try:
         with cancel_scope_listener() as cancel_scope:
@@ -579,10 +367,9 @@ def run_with_session_kill(
             try:
                 stdout, stderr = _communicate_with_watchdog(
                     proc,
-                    _WatchedRound(watch, started_at=started_at, scan_offsets=scan_offsets),
+                    _WatchedRound(watch, started_at=started_at),
                     capture=capture,
                     cancel_scope=cancel_scope,
-                    recorders=_build_round_recorders(watch.server_log_path, child_env, watch.checkpoint),
                 )
             except subprocess.TimeoutExpired as exc:
                 kill_my_spawned_server(proc, mark=mark)
@@ -646,35 +433,12 @@ class AgentxCheckpointMissed(_ReapedByWatchdog):
     log_level = logging.INFO
 
 
-class _ServerStalledDetected(_ReapedByWatchdog):
-    """Internal sentinel: the detokenizer-stall watchdog saw the server report ready and then produce no generation progress for the grace window."""
-
-    returncode = DETOKENIZER_STALL_RETURNCODE
-
-    def __init__(
-        self,
-        *,
-        grace_sec: float,
-        elapsed_sec: float,
-    ) -> None:
-        """Build the error message describing the ready-but-no-progress stall."""
-        super().__init__(
-            f"benchmark reported ready but emitted no pipe or log bytes for "
-            f"{grace_sec:.1f}s (silence timeout; "
-            f"elapsed={elapsed_sec:.1f}s)"
-        )
-
-
 @dataclass(frozen=True)
 class _WatchedRound:
-    """One round's watch and the log baseline it scans from.
-
-    ``started_at`` defaults to the moment the watch begins and ``scan_offsets`` to reading every log from its start.
-    """
+    """One round's watch; ``started_at`` defaults to the moment the watch begins."""
 
     watch: RoundWatch
     started_at: float | None = None
-    scan_offsets: dict[str, int] | None = None
 
     def enforce_stop_gates(self, proc: subprocess.Popen, scope: CancelScope | None, now: float, elapsed: float) -> None:
         """Raise as soon as the session budget, an orchestrator cancellation or the round cap is spent."""
@@ -685,87 +449,24 @@ class _WatchedRound:
         if self.watch.timeout is not None and elapsed >= self.watch.timeout:
             raise subprocess.TimeoutExpired(proc.args, self.watch.timeout)
 
-    def poll_slice_sec(self, now: float, elapsed: float, silence_remaining: float | None) -> float:
+    def poll_slice_sec(self, now: float, elapsed: float) -> float:
         """How long to wait on the child before the nearest armed gate has to be re-checked."""
         hard = None if self.watch.timeout is None else self.watch.timeout - elapsed
         session = None if self.watch.session_deadline_sec is None else self.watch.session_deadline_sec - now
-        return min(sec for sec in (STOP_GATE_POLL_SECONDS, hard, session, silence_remaining) if sec is not None)
-
-
-@dataclass
-class _RoundActivity:
-    """Where a watched round's log scan stopped, when its server reported ready, and when output last arrived."""
-
-    started_at: float
-    cursor: LogCursor
-    last_activity_at: float
-    ready: bool = False
-    #: The aiter module the server log's last line says is being built, and since when; ``None`` while none is.
-    building: str | None = None
-    build_since: float = 0.0
-
-    def note_log_progress(
-        self, server_log_path: str | None, recorders: _RecorderFanout, capture: _StreamCapture, now: float
-    ) -> None:
-        """Advance the ready and last-output marks from the bytes the watched logs gained since the previous poll."""
-        if server_log_path:
-            scan = self.cursor.advance(server_log_path)
-            if scan.saw_ready and not self.ready:
-                self.ready, self.last_activity_at = True, now
-                stamp_server_ready(server_log_path, now - self.started_at)
-                recorders.note_phase(_READY_PHASE, now)
-            if scan.grew:
-                self.last_activity_at = now
-            if scan.server_line is not None:
-                self._note_build(scan.server_line, now)
-            recorders.note_client_phases(scan, now)
-            if scan.saw_progress or scan.child_spoke:
-                capture.note_output()
-        if self.building is not None:
-            until = self.build_since + _aiter_build_limit_sec(self.building)
-            self.last_activity_at = max(self.last_activity_at, min(now, until))
-        if capture.last_activity_at is not None:
-            self.last_activity_at = max(self.last_activity_at, capture.last_activity_at)
-
-    def _note_build(self, line: str, now: float) -> None:
-        """Follow the build the server log's newest line says aiter started, or that none is under way."""
-        found = _AITER_BUILD_START.search(line)
-        module = None if found is None else (found.group(1) or "")
-        if module is not None and module != self.building:
-            self.build_since = now
-        self.building = module
-
-    def reusing_warm_server(self, server_log_path: str | None, elapsed: float) -> bool:
-        """Whether a round found no log baseline and has since run long enough to be reusing a warm server."""
-        # Telemetry only: this guess never arms the silence gate.
-        return bool(server_log_path) and not self.cursor.offsets and elapsed >= _WARM_REUSE_PROBE_AFTER_SEC
-
-    def silence_remaining_sec(self, silence_timeout_sec: float | None, now: float) -> float | None:
-        """Seconds left in the post-ready silence window, or ``None`` while that gate is unarmed."""
-        if not self.ready or silence_timeout_sec is None:
-            return None
-        return silence_timeout_sec - (now - self.last_activity_at)
+        return min(sec for sec in (STOP_GATE_POLL_SECONDS, hard, session) if sec is not None)
 
 
 def _communicate_with_watchdog(
     proc: subprocess.Popen,
     watched: _WatchedRound,
     *,
-    recorders: _RecorderFanout,
     capture: _StreamCapture,
     cancel_scope: CancelScope | None = None,
 ) -> tuple[str, str]:
-    """Wait for exit, enforcing cancellation, session budget and explicit round caps."""
-    server_log_path = watched.watch.server_log_path
-    silence_timeout_sec = watched.watch.silence_timeout_sec
+    """Wait for exit, enforcing cancellation, session budget, explicit round caps and the round's checkpoint."""
     start = time.monotonic() if watched.started_at is None else watched.started_at
-    cursor = LogCursor(watched.scan_offsets if watched.scan_offsets is not None else {})
-    activity = _RoundActivity(started_at=start, cursor=cursor, last_activity_at=start)
+    judge = None if watched.watch.checkpoint is None else watched.watch.checkpoint.judge()
     completed = False
-    if watched.watch.server_already_ready:
-        recorders.note_phase(_READY_PHASE, start)
-        if server_log_path:
-            stamp_server_ready(server_log_path, 0.0)
     try:
         while True:
             # An exit already observed belongs to the child, not to an expired gate.
@@ -776,40 +477,31 @@ def _communicate_with_watchdog(
             now = time.monotonic()
             elapsed = now - start
             watched.enforce_stop_gates(proc, cancel_scope, now, elapsed)
-            activity.note_log_progress(server_log_path, recorders, capture, now)
-            server_is_live = activity.ready or watched.watch.server_already_ready
-            if server_is_live or activity.reusing_warm_server(server_log_path, elapsed):
-                recorders.tick(now)
-            silence_remaining = activity.silence_remaining_sec(silence_timeout_sec, now)
-            if silence_remaining is not None and silence_remaining <= 0:
-                raise _ServerStalledDetected(grace_sec=watched.watch.silence_timeout_sec, elapsed_sec=elapsed)
-            slice_sec = watched.poll_slice_sec(now, elapsed, silence_remaining)
+            if judge is not None:
+                judge.tick(now)
             try:
-                proc.wait(timeout=max(0.0, slice_sec))
+                proc.wait(timeout=max(0.0, watched.poll_slice_sec(now, elapsed)))
                 result = capture.finish()
                 completed = True
                 return result
             except subprocess.TimeoutExpired:
                 continue
     finally:
-        recorders.close(aborted=not completed)
+        if judge is not None:
+            judge.close(aborted=not completed)
 
 
 __all__ = [
     "AGENTX_EARLY_STOP_ERROR_CLASS",
     "AGENTX_EARLY_STOP_RETURNCODE",
     "AGENTX_PREFLIGHT_ERROR_CLASS",
-    "AGENTX_PREFLIGHT_RETURNCODE",
     "BENCHMARK_SILENCE_TIMEOUT_ENV",
     "BENCHMARK_TIMEOUT_ENV",
     "AgentxCheckpointMissed",
     "COOPERATIVE_REAP_BUDGET_SEC",
-    "DETOKENIZER_STALL_RETURNCODE",
-    "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
-    "INFERENCEX_CHECKOUT_INVALID_RETURNCODE",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
-    "PreparationFailure",
     "RoundCheckpoint",
+    "RoundJudge",
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "STOP_GATE_POLL_SECONDS",
@@ -819,6 +511,5 @@ __all__ = [
     "run_with_session_kill",
     "session_deadline_to_remaining_sec",
     "session_remaining_to_deadline_sec",
-    "stamp_server_ready",
     "sync_agentx_phase_wait",
 ]

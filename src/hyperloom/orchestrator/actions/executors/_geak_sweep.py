@@ -199,7 +199,7 @@ def _replay_protocol_env(result: Mapping[str, Any], flags: str) -> dict[str, str
     env = {dst: str(protocol[src]) for src, dst in fields if protocol.get(src) is not None}
     # Mirror the server's --trust-remote-code onto the bench client so its tokenizer load doesn't raise.
     if "trust-remote-code" in flags or "trust_remote_code" in flags:
-        for key in ("BENCH_TRUST_REMOTE_CODE", "HF_HUB_TRUST_REMOTE_CODE", "MAGPIE_TRUST_REMOTE_CODE"):
+        for key in ("BENCH_TRUST_REMOTE_CODE", "HF_HUB_TRUST_REMOTE_CODE"):
             env.setdefault(key, "1")
     return env
 

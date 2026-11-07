@@ -10,7 +10,6 @@ engine died.
 
 from __future__ import annotations
 
-import glob
 import os
 import re
 from collections import deque
@@ -69,12 +68,9 @@ READY_MARKERS: tuple[str, ...] = (
 
 # Accuracy-eval start markers: their appearance means the benchmark phase of the run is over and the accuracy eval has
 # begun.
-_EVAL_START_MARKERS: tuple[str, ...] = (
-    "HYPERLOOM_EVAL_START",
-    "[magpie_bench_remote_compat] lm_eval cmd:",
-)
+_EVAL_START_MARKERS: tuple[str, ...] = ("HYPERLOOM_EVAL_START",)
 
-# The benchmark body's own stderr: Magpie redirects it here rather than into ``server.log`` or the parent's pipe, so
+# The benchmark body's own stderr, beside ``server.log`` rather than in it or the parent's pipe, so
 # it is both where the eval-start marker lands and the one resolved log whose growth is output of the very child this
 # round is waiting on.
 _EVAL_LOG_NAME: str = "benchmark_stderr.log"
@@ -117,28 +113,10 @@ def throughput_samples(text: str) -> list[float]:
 
 
 _SERVER_LOG_NAME: str = "server.log"
-# Glob (relative to the watched path's directory) for nested per-run server logs Magpie writes when its wrapper
-# ignores ``$SERVER_LOG`` and emits to a ``benchmark_<framework>_<timestamp>/server.log`` subdir instead.
-_NESTED_SERVER_LOG_GLOB: str = f"benchmark_*/{_SERVER_LOG_NAME}"
 
 
 def death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
-    """Return a short ``server.log`` excerpt around the first terminal engine/worker-init marker, or ``None`` when no fatal marker is present."""
-    candidates = [path]
-    try:
-        base_dir = os.path.dirname(path) or "."
-        candidates.extend(p for p in glob.glob(os.path.join(base_dir, _NESTED_SERVER_LOG_GLOB)) if p != path)
-    except OSError:
-        pass
-    for candidate in candidates:
-        excerpt = _first_marker_excerpt(candidate, max_chars=max_chars)
-        if excerpt is not None:
-            return excerpt
-    return None
-
-
-def _first_marker_excerpt(path: str, *, max_chars: int) -> str | None:
-    """Return the excerpt around the first terminal marker in ``path``.
+    """Return a short excerpt of ``path`` around its first terminal engine/worker-init marker.
 
     The whole file is streamed a line at a time rather than sampled from its
     head or tail. An engine that dies while serving logs one downstream error
@@ -218,29 +196,10 @@ def _cause_first_excerpt(head: str, window: list[str], *, max_chars: int) -> str
 
 
 def _resolve_scan_logs(server_log_path: str) -> list[str]:
-    """Return the log files to scan for markers, newest-nesting first."""
+    """Return the log files to scan for markers: the server log, the benchmark body's stderr and the AgentX log."""
     primary = Path(server_log_path)
-    out: list[str] = []
-    candidates = [primary]
-    try:
-        candidates.extend(sorted(primary.parent.glob(_NESTED_SERVER_LOG_GLOB)))
-    except OSError:
-        pass
-    for log in candidates:
-        for name in (log, log.with_name(_EVAL_LOG_NAME), log.parent / _AGENTX_LOG_RELPATH):
-            text = str(name)
-            if text not in out and name.exists():
-                out.append(text)
-    # Magpie writes its stderr into the run directory it creates under the round's (``benchmark_*/``), which is where
-    # the eval-start marker lands. Reached only through a nested ``server.log``, that stderr went unread whenever the
-    # engine logged to the round's own ``server.log`` (``SERVER_LOG``), and the accuracy eval was folded into the
-    # measured phase.
-    try:
-        nested_stderr = sorted(primary.parent.glob(f"benchmark_*/{_EVAL_LOG_NAME}"))
-    except OSError:
-        nested_stderr = []
-    out.extend(text for text in map(str, nested_stderr) if text not in out)
-    return out
+    names = (primary, primary.with_name(_EVAL_LOG_NAME), primary.parent / _AGENTX_LOG_RELPATH)
+    return [str(name) for name in names if name.exists()]
 
 
 class LogScan(NamedTuple):

@@ -3,7 +3,7 @@
 
 """An AgentX point runs the agentx-harness replay on its launch over the session base, golden layer applied.
 
-Every key the Magpie AgentX path read from the point is either carried into the config or refused by name.
+Every key an AgentX point carries is either carried into the config or refused by name.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from hyperloom.orchestrator.actions.executors._suite_config import (
     suite_config,
     suite_route,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import LaunchChanges
+from hyperloom.orchestrator.actions.executors.agentx_point import LaunchChanges
 from hyperloom.orchestrator.actions.executors.tests.test_suite_accuracy_round import _agentx_base, _agentx_point
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _settings
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
@@ -185,7 +185,7 @@ def test_a_discarded_warmup_replay_draws_its_trajectories_with_the_warmup_seed(
 
 
 def test_a_server_phase_point_boots_the_launch_and_replays_nothing() -> None:
-    point = _point(envs={"MAGPIE_RUN_PHASE": "server"})
+    point = _point(envs={"HYPERLOOM_RUN_PHASE": "server"})
     config = suite_config(point, _base(), _settings(LifecycleMode.BOOT))
 
     assert (config.workload, config.agentx, config.profile.enabled) == (WorkloadKind.NONE, None, False)
@@ -210,7 +210,7 @@ def test_an_agentx_setting_no_round_carries_is_refused(changes: dict, message: s
         suite_config(_point(**changes), _base(), _settings())
 
 
-def test_a_launch_override_magpie_did_not_define_is_refused() -> None:
+def test_a_launch_override_the_point_contract_does_not_define_is_refused() -> None:
     point = _point()
     point["benchmark"]["agentx"]["launch_overrides"]["prepend_args"] = ["--x"]
 

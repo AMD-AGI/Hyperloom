@@ -61,7 +61,7 @@ def _baseline(
     monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    executor = BaselineExecutor(magpie_python="python3", session_dir=tmp_path, shared_state=None)
+    executor = BaselineExecutor(session_dir=tmp_path, shared_state=None)
 
     async def run_pass(ctx, **kwargs):
         return dict(result)
@@ -133,7 +133,7 @@ def test_only_a_baseline_that_owed_an_accuracy_round_stops_without_a_score(tmp_p
     monkeypatch.delenv("HYPERLOOM_AGENTIC_BACKEND", raising=False)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     state = SharedState(agentx_accuracy=switch, benchmark_mode="agentx", enablement_mode="off")
-    executor = BaselineExecutor(magpie_python="python3", session_dir=tmp_path, shared_state=None)
+    executor = BaselineExecutor(session_dir=tmp_path, shared_state=None)
     monkeypatch.setattr(executor, "_salvage_sibling_baseline_accuracy", lambda result, framework: None)
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", kind="baseline", params={}), extra={"shared_state": state})
 

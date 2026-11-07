@@ -60,7 +60,7 @@ class FailedStep(str, Enum):
     FRAMEWORK_VERSION_UNKNOWN = "framework_version_unknown"
     REUSE_NOT_OWNED = "reuse_not_owned"
     EVAL_CONTEXT_TOO_SHORT = "eval_context_too_short"
-    #: -912, -918, ``git_fetch_timeout``.
+    #: -918, ``git_fetch_timeout``.
     STAGING_MISSING = "staging_missing"
     SOURCE_FILES_CHANGED = "source_files_changed"
     #: ``serve_flag``.
@@ -83,7 +83,6 @@ class FailedStep(str, Enum):
     CLIENT_OUTPUT_MISSING = "client_output_missing"
     #: ``eval_returncode``, ``lm_eval_http_400``.
     EVAL_FAILED = "eval_failed"
-    #: ``magpie_timeout``.
     ROUND_TIMEOUT = "round_timeout"
     #: -915.
     DEADLINE_EXHAUSTED = "deadline_exhausted"

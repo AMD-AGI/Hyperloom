@@ -124,7 +124,7 @@ READY_PATH, SPEC_PATH = "/in/READY", "/in/spec.json"
 STATUS_PATH, PROGRESS_PATH = "/out/status.json", "/out/progress.json"
 MANIFEST_PATH, SIGNATURE_PATH, FILES_ROOT = "/out/manifest.json", "/out/manifest.sig", "/out/files"
 _LOSS_POLLS = 3
-#: The report a measuring round leaves in a landed bundle: an inference_suite run_dir's, or Magpie's.
+#: The report a measuring round leaves in a landed bundle: an inference_suite run_dir's, or an archived v1 Magpie round's.
 _ROUND_REPORTS = frozenset({REPORT_FILE, "benchmark_report.json"})
 #: The steps of a landing, marked on the attempt's timeline when each ends. The journal line of the attempt's end says how
 #: long each took (``landing_sec``): all of them are file system work below the session directory, and a slow landing
@@ -1070,7 +1070,7 @@ def _failure_of(out: Any) -> FailureClassification:
 def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ...]:
     """The rounds of a landed result: from ``rounds.json`` when the runner listed it, else from the report layout.
 
-    The layout alone only says which reports there are, an inference_suite run_dir's or Magpie's; a report in the
+    The layout alone only says which reports there are, an inference_suite run_dir's or an archived v1 Magpie round's; a report in the
     warm-up directory is not a measuring round.
     """
     listed = {entry.path for entry in verified.result.files}

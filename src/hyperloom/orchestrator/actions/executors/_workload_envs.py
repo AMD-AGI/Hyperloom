@@ -3,7 +3,7 @@
 
 """Shared workload-env materialization (single source of truth).
 
-This module is the single source of truth for rendering a Magpie YAML with the
+This module is the single source of truth for rendering a point YAML with the
 user's actual process-env workload contract, so the baseline and grid-runner
 paths render identical YAML:
 
@@ -723,12 +723,12 @@ def _coerce_workload_int_env(env_key: str, raw: str) -> int:
 
 
 def default_baseline_config() -> Path:
-    """Resolve the shipped Magpie YAML for ``$FRAMEWORK``, or for the default framework when it is unset.
+    """Resolve the shipped point YAML for ``$FRAMEWORK``, or for the default framework when it is unset.
 
     Resolved at call time so ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` is honoured.
 
     Returns:
-        Path: The shipped Magpie YAML config path for the resolved framework.
+        Path: The shipped point YAML config path for the resolved framework.
     """
     from hyperloom.common.benchmark_config import benchmark_config_path
 
@@ -794,7 +794,7 @@ def _finalize_framework_server_args(
         bench.get("framework"),
     )
     # 6. JSON-valued flags (--speculative-config / --compilation-config /
-    #    --hf-overrides ...): Magpie expands $EXTRA_VLLM_ARGS unquoted, so
+    #    --hf-overrides ...): $EXTRA_VLLM_ARGS travels unquoted, so
     #    compact each JSON blob to be space-free so it survives as one shell
     #    word. No-op for arg strings with no JSON.
     resolved_server_args = compact_json_server_args(resolved_server_args)
@@ -830,7 +830,7 @@ def _pin_benchmark_target(bench: dict[str, Any], target: BenchmarkTarget) -> Non
         bench["benchmark_script"] = str(target.benchmark_script)
     effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if effective_inferencex_path:
-        # Persist the resolved InferenceX checkout so Magpie's runtime checkout
+        # Persist the resolved InferenceX checkout so the round's checkout
         # matches Hyperloom's patch target.
         bench["inferencex_path"] = effective_inferencex_path
 
@@ -1024,7 +1024,7 @@ def _merge_caller_overrides(
                 # than relying on duplicate last-wins flags.
                 existing = remove_moe_runner_backend_arg(existing)
             envs[framework_env] = merge_server_args(existing, server_args)
-    # Magpie forwards only ``benchmark.envs``, so ``--extra-env`` lands there for
+    # Only ``benchmark.envs`` reaches the round, so ``--extra-env`` lands there for
     # every framework: vLLM Ray workers see MTP pins only this way.
     combined_extra: dict[str, Any] = dict(_operator_extra_env())
     from hyperloom.common.agentx_workload import is_agentx_client_script
@@ -1085,7 +1085,7 @@ def _settle_merged_server_args(bench: dict[str, Any], framework_env: str) -> Non
 
 def _publish_scriptable_wiring(bench: dict[str, Any], window: _RequestWindow, establish_quality_ref: bool) -> None:
     envs = bench["envs"]
-    # Magpie forwards only ``benchmark.envs`` to the wrapper subprocess, so
+    # Only ``benchmark.envs`` reaches the round's processes, so
     # re-inject the quality reference here (the single scriptable choke point)
     # or the shipped empty YAML default silently skips the gate. What the
     # reference holds is the workload's business — an xDiT image, an operator's
@@ -1161,7 +1161,7 @@ def _pin_model_launch_workarounds(bench: dict[str, Any], model_path: str | None)
         # vLLM registers this checkpoint under MiMoV2FlashForCausalLM but the HF
         # config declares MiMoV2ForCausalLM, which the pod-local vLLM build
         # rejects at boot. Remap the arch via --hf-overrides. vLLM-only; JSON
-        # kept space-free so it survives Magpie's unquoted splice.
+        # kept space-free so it survives the unquoted splice.
         if _mimo_is_vllm:
             add_server_arg_unless_pinned(
                 envs,
@@ -1173,8 +1173,8 @@ def _pin_model_launch_workarounds(bench: dict[str, Any], model_path: str | None)
     # Models like MiniMax-M3 (MSA) place the main K/V and the indexer side-cache
     # in one KV-cache group whose sparse backends only accept the model's
     # sparse_attention_config.sparse_block_size (e.g. 128). vLLM's default
-    # --block-size 16 (and the value Magpie bakes in when EXTRA_VLLM_ARGS is
-    # empty) has no common block size with it, so KV-cache init aborts with
+    # --block-size 16 (and the generic launcher's default when EXTRA_VLLM_ARGS
+    # is empty) has no common block size with it, so KV-cache init aborts with
     # "No common block size for 16" -- baseline, roofline, and every
     # explore variant crash at startup. Read the required size from the
     # model config and pin --block-size at this shared choke point so it rides
@@ -1204,8 +1204,7 @@ def _pin_client_model_access(bench: dict[str, Any], model_path: str | None, mode
     # same remote code or transformers raises mid-warmup. Mirror it onto every
     # client-trust env. setdefault never overrides an operator opt-out.
     for _trust_key in (
-        "MAGPIE_TRUST_REMOTE_CODE",  # Magpie sglang remote-direct client
-        "BENCH_TRUST_REMOTE_CODE",  # GEAK bench_e2e.sh inferencex client
+        "BENCH_TRUST_REMOTE_CODE",  # the benchmark client
         "HF_HUB_TRUST_REMOTE_CODE",  # transformers / HF hub tokenizer auto-load
     ):
         envs.setdefault(_trust_key, "1")
@@ -1423,11 +1422,10 @@ def materialize_benchmark_config(
     import yaml
 
     from hyperloom_common.coerce import to_str_list
-    from .magpie_agentx import (
+    from .agentx_point import (
         LaunchChanges,
         apply_launch_changes,
         materialize_agentx,
-        recipe_base_launch,
         seed_session_base,
     )
 
@@ -1436,9 +1434,8 @@ def materialize_benchmark_config(
         return materialize_config_with_envs(config_path, output_dir, launch=launch, target=target, options=options)
     replacing = launch.args_mode == "replace"
     inherited = "" if replacing else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
-    recipe = recipe_base_launch(config_path)
-    seed_session_base(config["benchmark"], session_server_base(), recipe=recipe)
-    apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), recipe=recipe, accepted=True)
+    seed_session_base(config["benchmark"], session_server_base())
+    apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), accepted=True)
     from hyperloom_common.env import is_truthy
 
     unset_envs = to_str_list(launch.unset_envs)
@@ -1456,7 +1453,7 @@ def materialize_benchmark_config(
         log.warning("Dropping extra_envs key %s before AgentX materialization", key)
     server_env.update(launch.extra_envs or {})
     if is_truthy(server_env.pop("RUN_EVAL", False)):
-        raise ValueError("AgentX uses Magpie's replay validity; RUN_EVAL cannot enable GSM8K for this workload")
+        raise ValueError("AgentX uses the replay's validity; RUN_EVAL cannot enable GSM8K for this workload")
     changes = LaunchChanges(
         launch.extra_server_args,
         server_env,
@@ -1464,7 +1461,7 @@ def materialize_benchmark_config(
         unset_envs,
         replacing,
     )
-    apply_launch_changes(config["benchmark"], changes, recipe=recipe, accepted=True)
+    apply_launch_changes(config["benchmark"], changes, accepted=True)
     return materialize_agentx(
         config,
         output_dir / options.out_name,
@@ -1480,7 +1477,7 @@ def materialize_config_with_envs(
     target: BenchmarkTarget = BenchmarkTarget(),
     options: MaterializeOptions = MaterializeOptions(),
 ) -> Path:
-    """Render a per-run Magpie YAML with caller-provided overrides.
+    """Render a per-run point YAML with caller-provided overrides.
 
     The process env wins over the YAML defaults, and the body is the order the phases run
     in: what the run launches, the request shape it serves, the server arguments composed

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Bind a native Magpie workload to one optimization session."""
+"""Bind a native AgentX workload to one optimization session."""
 
 from __future__ import annotations
 
@@ -144,7 +144,7 @@ def _validate_agentx_benchmark(benchmark: dict) -> None:
         raise ValueError("AgentX YAML requires explicit positive envs.TP and envs.CONC for resource accounting")
     legacy = [key for key in envs if key.startswith(("AIPERF_", "AGENTX_", "AGENTIC_"))]
     if legacy:
-        raise ValueError("Use Magpie agentx configuration instead of legacy client controls: " + ", ".join(legacy))
+        raise ValueError("Use the agentx configuration block instead of legacy client controls: " + ", ".join(legacy))
 
 
 @dataclass(frozen=True)
@@ -166,7 +166,7 @@ class AgentXWorkload:
 
 
 def write_agentx_benchmark(target: Path, workload: AgentXWorkload) -> None:
-    """Write ``workload`` to ``target`` in Magpie's public AgentX schema."""
+    """Write ``workload`` to ``target`` in the public AgentX workload schema."""
     benchmark: dict[str, Any] = {
         "framework": workload.framework,
         "model": workload.model,
@@ -211,7 +211,7 @@ def bind_benchmark(session_dir: Path, args: argparse.Namespace) -> None:
 def add_benchmark_argument(parser: argparse.ArgumentParser) -> None:
     """Register the native workload's optional YAML, image and accuracy-round inputs."""
     parser.add_argument(
-        "--benchmark-config", type=Path, help="Optional Magpie AgentX YAML instead of Hyperloom workload flags."
+        "--benchmark-config", type=Path, help="Optional AgentX workload YAML instead of Hyperloom workload flags."
     )
     parser.add_argument(
         "--docker-image", help="AgentX serving image identity (run Hyperloom inside it); required for custom models."

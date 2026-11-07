@@ -37,7 +37,6 @@ def test_grid_readers_of_a_point(tmp_path: Path) -> None:
     path = _point(tmp_path, {"benchmark": {"framework": "xdit", "envs": {"TP": 4}}})
 
     assert _grid_runner._num_gpus_for_config(path) == 4.0
-    assert _grid_runner._benchmark_server_log(path, tmp_path) is None
     assert _grid_runner._num_gpus_for_config(_point(tmp_path, _NO_BLOCK)) == 1.0
 
 

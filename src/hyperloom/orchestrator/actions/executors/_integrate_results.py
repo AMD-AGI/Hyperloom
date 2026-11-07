@@ -365,7 +365,7 @@ def _kept_launch(controls: dict[str, Any], bench_result: dict[str, Any]) -> dict
     """The round's own launch controls, and the args its bench handed the launcher where the KEEP persists them.
 
     Those are Hyperloom's own composition, the recipe's inherited args included, as an explore KEEP records it; a
-    native launch's resolved argv is not, since it spells the options Magpie protects.
+    native launch's resolved argv is not, since it spells the options the recipe protects.
     """
     if not controls:
         return {}

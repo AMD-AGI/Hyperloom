@@ -8,7 +8,7 @@ pinned not to import it, and that path still has to recognise a client script
 and size the benchmark cap.
 
 Both backends size that cap from the work the run was composed to do: an MLPerf
-run from its trajectory count, a canonical (Magpie/aiperf) run from the
+run from its trajectory count, a canonical (aiperf) run from the
 concurrency it measures, because its warmup phase is one set of requests per
 lane.
 """
@@ -55,11 +55,10 @@ AGENTX_BOOT_ALLOWANCE_SEC = 1800
 # 15 req/min against 48 once warm), so the cap is sized for the cold case.
 MLPERF_TIMEOUT_SAFETY_FACTOR = 2.0
 
-# The canonical phases below are Magpie's, not ours: Hyperloom composes only
-# ``envs.CONC``, and the shape of the round that answers it belongs to Magpie at
-# the commit preflight installs (``MAGPIE_DEFAULT_REF``, which ``MAGPIE_REF``
-# overrides). Every CANON_ number here describes that commit and has to be
-# re-measured when it moves.
+# The canonical phases below are the replay client's, not ours: Hyperloom composes
+# only ``envs.CONC``, and the shape of the round that answers it belongs to the
+# client at the commit inference_suite pins. Every CANON_ number here describes
+# that commit and has to be re-measured when it moves.
 
 # Canonical replay warms up this many requests per lane, plus one probe, before
 # it opens the profiling window: a sweep measured 155, 221 and 309 warmup
@@ -120,7 +119,7 @@ def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:
 def agentx_client_script(env: Mapping[str, str] | None = None) -> str:
     """The ``benchmark_script`` an MLPerf point names."""
     if not is_mlperf_backend(env):
-        raise ValueError("AgentX serving and replay are managed by Magpie; no Hyperloom client script exists")
+        raise ValueError("AgentX serving and replay are run by inference_suite; no Hyperloom client script exists")
     return MLPERF_CLIENT_SCRIPT
 
 
@@ -149,7 +148,7 @@ def mlperf_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> float:
 
 
 def is_canonical_agentx(env: Mapping[str, str] | None = None) -> bool:
-    """True for an AgentX run Magpie replays itself, rather than the MLPerf client."""
+    """True for an AgentX run the canonical replay drives, rather than the MLPerf client."""
     from hyperloom_common.env import env_bool
 
     runtime = os.environ if env is None else env

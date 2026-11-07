@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -15,7 +14,6 @@ import pytest
 
 import inference_suite
 from hyperloom.common.bringup import LadderStage
-from hyperloom.orchestrator.actions.executors._subprocess_kill import SESSION_TIME_EXHAUSTED_RETURNCODE, RoundWatch
 from hyperloom.orchestrator.bringup import observe_bringup
 from hyperloom.orchestrator.rehearsal import (
     DIED_SILENTLY,
@@ -26,7 +24,6 @@ from hyperloom.orchestrator.rehearsal import (
     LaunchScenario,
     ScenarioError,
     ScenarioExhausted,
-    ScriptedLaunchBackend,
     ScriptedRounds,
     VirtualClock,
     installed_clock,
@@ -76,46 +73,54 @@ def _verdict(result: inference_suite.RoundResult):
     return observe_bringup(server_log=log, wrapper_stderr=result.report.failure_detail or "").observation
 
 
-def _played_on_the_launch_backend(attempt: LaunchAttempt, slot: Path):
-    backend = ScriptedLaunchBackend(scenario=LaunchScenario(attempts=(attempt,)), clock=VirtualClock())
-    log = slot / "server.log"
-    try:
-        done = backend.run(["magpie"], watch=RoundWatch(server_log_path=str(log), timeout=_HARD_TIMEOUT))
-    except subprocess.TimeoutExpired:
-        return None, backend.clock.elapsed
-    text = log.read_text(encoding="utf-8") if log.exists() else ""
-    observed = observe_bringup(server_log=text, wrapper_stderr=done.stderr).observation
-    return (done.returncode == 0, observed.stage_failed), backend.clock.elapsed
-
-
 @pytest.mark.parametrize(
-    "attempt",
+    ("attempt", "served", "stage_failed", "elapsed"),
     [
-        LaunchAttempt(outcome=READY, duration_sec=120.0),
-        LaunchAttempt(outcome=STAGE_FAILED, stage="argv_parse", duration_sec=45.0),
-        LaunchAttempt(outcome=STAGE_FAILED, stage="import"),
-        LaunchAttempt(outcome=STAGE_FAILED, stage="config_validate", duration_sec=180.0),
-        LaunchAttempt(outcome=STAGE_FAILED, stage="weights_loading"),
-        LaunchAttempt(outcome=STAGE_FAILED, stage="engine_init"),
-        LaunchAttempt(outcome=DIED_SILENTLY, returncode=139),
-        LaunchAttempt(outcome=HANG, duration_sec=10.0),
+        (LaunchAttempt(outcome=READY, duration_sec=120.0), True, None, 120.0),
+        (
+            LaunchAttempt(outcome=STAGE_FAILED, stage="argv_parse", duration_sec=45.0),
+            False,
+            LadderStage.ARGV_PARSE,
+            45.0,
+        ),
+        (LaunchAttempt(outcome=STAGE_FAILED, stage="import"), False, LadderStage.IMPORT, 30.0),
+        (
+            LaunchAttempt(outcome=STAGE_FAILED, stage="config_validate", duration_sec=180.0),
+            False,
+            LadderStage.CONFIG_VALIDATE,
+            180.0,
+        ),
+        (LaunchAttempt(outcome=STAGE_FAILED, stage="weights_loading"), False, LadderStage.WEIGHTS_LOADING, 30.0),
+        (LaunchAttempt(outcome=STAGE_FAILED, stage="engine_init"), False, LadderStage.ENGINE_INIT, 30.0),
+        (LaunchAttempt(outcome=DIED_SILENTLY, returncode=139), False, None, 30.0),
     ],
-    ids=lambda attempt: f"{attempt.outcome}-{attempt.stage}",
+    ids=lambda value: f"{value.outcome}-{value.stage}" if isinstance(value, LaunchAttempt) else None,
 )
-def test_an_existing_scenario_plays_to_the_same_result_on_the_round_double(tmp_path, attempt):
-    """The classification, the time charged and whether the round served all match the launch double's."""
-    launched, launch_elapsed = _played_on_the_launch_backend(attempt, tmp_path / "launch")
-
+def test_a_scenario_attempt_plays_to_its_classification_and_charges_its_duration(
+    tmp_path, attempt, served, stage_failed, elapsed
+):
     rounds = _rounds(attempt)
     result = rounds.run_round(_fixed_config(tmp_path / "round"))
 
-    assert rounds.clock.elapsed == pytest.approx(launch_elapsed)
-    if launched is None:
-        assert result.report.failed_step is FailedStep.ROUND_TIMEOUT
-        return
-    served, stage_failed = launched
+    assert rounds.clock.elapsed == pytest.approx(elapsed)
     assert (result.report.run_status is RunStatus.COMPLETED) == served
     assert _verdict(result).stage_failed == stage_failed
+
+
+def test_a_hang_is_stopped_on_the_round_timeout_and_charges_it_to_the_clock(tmp_path):
+    rounds = _rounds(LaunchAttempt(outcome=HANG, duration_sec=10.0))
+
+    result = rounds.run_round(_fixed_config(tmp_path / "round"))
+
+    assert result.report.failed_step is FailedStep.ROUND_TIMEOUT
+    assert rounds.clock.elapsed == pytest.approx(_HARD_TIMEOUT)
+
+
+def test_a_process_that_dies_without_a_log_leaves_nothing_to_classify(tmp_path):
+    result = _rounds(LaunchAttempt(outcome=DIED_SILENTLY, returncode=139)).run_round(_fixed_config(tmp_path / "run"))
+
+    assert result.report.run_status is not RunStatus.COMPLETED
+    assert not result.layout.server_log.exists() or not result.layout.server_log.read_text(encoding="utf-8")
 
 
 def test_a_blocker_stack_peels_one_wall_per_round_and_then_serves(tmp_path):
@@ -253,22 +258,18 @@ def test_a_hang_is_stopped_by_the_first_gate_that_trips(tmp_path, attempt, deadl
     assert rounds.clock.elapsed == pytest.approx(elapsed)
 
 
-def test_the_session_deadline_cuts_a_round_short_as_the_launch_double_does(tmp_path):
+def test_the_session_deadline_cuts_a_round_short(tmp_path):
     rounds = _rounds(LaunchAttempt(outcome=READY, duration_sec=600.0, metrics=_METRICS))
-    launch = ScriptedLaunchBackend(LaunchScenario(attempts=(LaunchAttempt(outcome=READY, duration_sec=600.0),)))
 
     with installed_clock(rounds.clock):
         deadline = int(rounds.clock.wall()) + 60
         result = rounds.run_round(
             _fixed_config(tmp_path / "run", deadlines=replace(_deadlines(), deadline_unix=deadline))
         )
-    with installed_clock(launch.clock):
-        done = launch.run(["magpie"], watch=RoundWatch(session_deadline_sec=launch.clock.monotonic() + 60.0))
 
-    assert done.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
     assert result.report.failed_step is FailedStep.DEADLINE_EXHAUSTED
     assert result.report.fixed is None
-    assert rounds.clock.elapsed == pytest.approx(launch.clock.elapsed) == pytest.approx(60.0)
+    assert rounds.clock.elapsed == pytest.approx(60.0)
 
 
 def _deadlines() -> Deadlines:

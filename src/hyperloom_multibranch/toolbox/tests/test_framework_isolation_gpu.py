@@ -155,7 +155,6 @@ def _aiter_test(root: Path, name: str, table: Path) -> Path:
         output_dir=root / "out" / name,
         timeout_sec=900,
         cwd=str(root),
-        magpie_python="",
         task_id=name,
     )
     LocalMeasurementBackend().run_test(call)

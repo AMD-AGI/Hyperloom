@@ -197,7 +197,7 @@ def test_agentic_backend_names_inferencex_unless_mlperf_is_asked_for():
     from hyperloom.common.agentx_workload import agentic_backend
 
     assert agentic_backend({}) == "inferencex"
-    assert agentic_backend({"HYPERLOOM_AGENTIC_BACKEND": "magpie"}) == "inferencex"
+    assert agentic_backend({"HYPERLOOM_AGENTIC_BACKEND": "other"}) == "inferencex"
     assert agentic_backend({"HYPERLOOM_AGENTIC_BACKEND": "MLPerf"}) == "mlperf"
 
 

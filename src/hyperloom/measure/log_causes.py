@@ -74,7 +74,7 @@ _MISSING_KERNEL = re.compile(
 #: library print them.
 _DISK_FULL = re.compile(r"\[Errno (?:28|122)\]|No space left on device|Disk quota exceeded", re.IGNORECASE)
 _WATCHDOG_TIMEOUT = re.compile(r"watchdog timeout", re.IGNORECASE)
-#: A ``git`` command the benchmark client ran to fetch its own dependencies (Magpie's per-test ``submodule update`` of
+#: A ``git`` command the benchmark client ran to fetch its own dependencies (a per-test ``submodule update`` of
 #: the replay client) that timed out: ``subprocess.TimeoutExpired: Command ['git', ...] timed out after N seconds``.
 _GIT_FETCH_TIMEOUT = re.compile(r"TimeoutExpired: Command \[['\"]git['\"],.*\] timed out after")
 _HUB_RATE_LIMITED = re.compile(HUB_RATE_LIMITED)

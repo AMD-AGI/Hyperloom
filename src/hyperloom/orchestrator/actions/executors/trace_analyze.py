@@ -177,7 +177,7 @@ def _split_server_args(raw: str) -> list[str]:
 
 
 def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
-    """Extract runtime workload context from a materialized Magpie YAML config.
+    """Extract runtime workload context from a materialized point YAML.
 
     Reads the config's ``benchmark`` block and derives the per-framework
     server-args env name, the allowed candidate env vars, and a normalized

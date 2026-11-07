@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLI workloads and explicit YAML converge on one native Magpie contract."""
+"""CLI workloads and explicit YAML converge on one native AgentX point contract."""
 
 from pathlib import Path
 
@@ -24,7 +24,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     LaunchLayer,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
+from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
 
 
 def load_benchmark(path: Path) -> dict:

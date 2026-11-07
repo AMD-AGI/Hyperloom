@@ -87,10 +87,6 @@ class AgentxCheckpoint:
     def gain_pct(self, candidate_p50: float) -> float:
         return (candidate_p50 / self.reference_p50 - 1.0) * 100.0
 
-    def judge(self, slot: Path | None) -> CheckpointJudge | None:
-        """The recorder that rules on this checkpoint for the round writing into ``slot``; none without a slot."""
-        return None if slot is None else CheckpointJudge(self, slot)
-
 
 @dataclass(frozen=True)
 class SuiteRoundCheckpoint:
@@ -104,8 +100,8 @@ class SuiteRoundCheckpoint:
     slot: Path
     run_dir: Path
 
-    def judge(self, slot: Path | None = None) -> CheckpointJudge:
-        """The recorder for this round; ``slot`` is ignored, the round's own slot is fixed when the round is set up."""
+    def judge(self) -> CheckpointJudge:
+        """The judge for this round, counting from now."""
         judge = CheckpointJudge(self.checkpoint, self.slot, export_root=self.run_dir)
         judge.note_phase("measured", time.monotonic())
         return judge

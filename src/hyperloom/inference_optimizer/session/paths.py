@@ -67,7 +67,7 @@ _WORKSPACE_SKELETON: tuple[str, ...] = (
     "logs",  # launcher stdout (workspace-shared)
 )
 
-# Filename-safety regex for model_basename (ROCm/Magpie/Claude CLI choke on ``:`` / ``/`` / whitespace).
+# Filename-safety regex for model_basename (ROCm/Claude CLI choke on ``:`` / ``/`` / whitespace).
 _MODEL_BASENAME_SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -266,15 +266,6 @@ def resolve_dep_dir(name: str, env_var: str | None = None) -> Path:
     return root / name
 
 
-#: The Magpie commit preflight installs while the Magpie backend is active; a non-empty ``MAGPIE_REF`` overrides it.
-MAGPIE_DEFAULT_REF = "06b7cf6e185fdd49483a512e350cb3964ba3bf68"
-
-
-def magpie_dir() -> Path:
-    """Magpie checkout root, via :func:`resolve_dep_dir` (``$MAGPIE_PATH`` else newest ``Magpie@<sha>`` else bare — Magpie is pip-installed, so bare is the common case)."""
-    return resolve_dep_dir("Magpie", "MAGPIE_PATH")
-
-
 def tracelens_root() -> Path:
     """TraceLens checkout root, via :func:`resolve_dep_dir` (``$TRACELENS_ROOT`` else newest ``TraceLens@<sha>`` else bare)."""
     return resolve_dep_dir("TraceLens", "TRACELENS_ROOT")
@@ -304,7 +295,6 @@ __all__ = [
     "ENV_CURRENT_SESSION_DIR",
     "ENV_OVERRIDE_ASSET_ROOT",
     "ENV_USER_DATA_PATH",
-    "MAGPIE_DEFAULT_REF",
     "PACKAGE_ROOT",
     "PRIVATE_SESSION_SUBDIRS",
     "SESSION_FILES",
@@ -317,7 +307,6 @@ __all__ = [
     "ensure_session_skeleton",
     "hosted_session_dir",
     "is_path_within",
-    "magpie_dir",
     "make_session_dir",
     "mn_profile_trace_root",
     "deps_cache_root",

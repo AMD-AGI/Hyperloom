@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -29,17 +28,6 @@ from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
 
 def _variant(name: str, args: str = "", envs: dict | None = None) -> gr.GridVariant:
     return gr.GridVariant(name=name, extra_server_args=args, extra_envs=envs or {})
-
-
-def test_validate_magpie_python_override_requires_python(tmp_path):
-    py = tmp_path / "python3"
-    py.write_text("", encoding="utf-8")
-    bash = tmp_path / "bash"
-    bash.write_text("", encoding="utf-8")
-    assert gr._validate_magpie_python_override(str(py)) == str(py)
-    with pytest.raises(ValueError, match="Python interpreter"):
-        gr._validate_magpie_python_override(str(bash))
-    assert gr._validate_magpie_python_override(sys.executable).endswith(Path(sys.executable).name)
 
 
 # -- apply_compatibility_filter -------------------------------------------
@@ -240,28 +228,21 @@ def test_probe_swallows_subprocess_error(monkeypatch) -> None:
 
 
 # -- _resolve_probe_python / probe interpreter selection ------------------
-def test_resolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
-    # The harness interpreter is used directly; no vllm-exe resolution is tried.
-    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda _env=None: "/srv/venv/bin/python")
-    monkeypatch.setattr(
-        bi.shutil, "which", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("which() should not be called"))
-    )
-    assert bi._resolve_probe_python() == "/srv/venv/bin/python"
-
-
-def test_resolve_probe_python_falls_back_to_vllm_venv(monkeypatch) -> None:
-    # magpie_python is the canonical default -> pin the venv that backs ``vllm serve``.
-    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python")
+def test_resolve_probe_python_takes_the_venv_that_backs_vllm_serve(monkeypatch) -> None:
+    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     monkeypatch.setattr(bi.shutil, "which", lambda name, **_k: "/other/venv/bin/vllm" if name == "vllm" else None)
     monkeypatch.setattr(bi.os.path, "exists", lambda p: p == "/other/venv/bin/python")
     assert bi._resolve_probe_python() == "/other/venv/bin/python"
 
 
-def test_resolve_probe_python_no_bare_python3_fallback(monkeypatch) -> None:
-    # With no resolvable vllm exe, fall back to the canonical magpie default — never a bare "python3".
-    monkeypatch.setattr(bi, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python")
-    monkeypatch.setattr(bi.shutil, "which", lambda *_a, **_k: None)
-    assert bi._resolve_probe_python() == "/opt/venv/bin/python"
+@pytest.mark.parametrize(("image", "expected"), [(True, "/opt/venv/bin/python"), (False, "/usr/bin/python3")])
+def test_resolve_probe_python_without_vllm_takes_the_images_interpreter_else_python3(
+    monkeypatch, image, expected
+) -> None:
+    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
+    monkeypatch.setattr(bi.shutil, "which", lambda name, **_k: "/usr/bin/python3" if name == "python3" else None)
+    monkeypatch.setattr(bi.Path, "is_file", lambda self: image and str(self) == "/opt/venv/bin/python")
+    assert bi._resolve_probe_python("sglang") == expected
 
 
 def test_probe_invokes_resolved_interpreter(monkeypatch) -> None:

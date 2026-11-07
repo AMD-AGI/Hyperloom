@@ -26,10 +26,6 @@ Hyperloom compatibility matrix
 
    <a href="https://github.com/AMD-AGI/AgentKernelArena"><i class="fab fa-github"></i></a>
 
-.. |magpie-github| raw:: html
-
-   <a href="https://github.com/AMD-AGI/Magpie"><i class="fab fa-github"></i></a>
-
 This topic lists the hardware, inference frameworks, and container images that
 Hyperloom is validated against.
 
@@ -85,15 +81,12 @@ The following table lists the validated Hyperloom version and component combinat
 |                   | `IntelliKit 0.1.1`_       | MI300X, MI325X, MI355X | 7.2.x, 10.0.0                      | 22.04, 24.04  | >= 3.10     | |intellikit-github|         |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 |                   | `AgentKernelArena 0.2.0`_ | MI300X, MI325X, MI355X | 7.2.x, 10.0.0                      | 22.04, 24.04  | >= 3.10     | |agent-kernel-arena-github| |
-+                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
-|                   | `Magpie 0.3.0`_           | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x, 10.0.0        | 22.04, 24.04  | >= 3.10     | |magpie-github|             |
 +-------------------+---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 
 .. _TraceLens 1.0.0: https://rocm.docs.amd.com/projects/tracelens/en/docs-1.0.0/
 .. _GEAK 4.0.0: https://rocm.docs.amd.com/projects/geak/en/docs-4.0.0/
 .. _IntelliKit 0.1.1: https://rocm.docs.amd.com/projects/intellikit/en/docs-0.1.1/
 .. _AgentKernelArena 0.2.0: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/docs-0.2.0/
-.. _Magpie 0.3.0: https://rocm.docs.amd.com/projects/magpie/en/latest/
 
 .. note::
 

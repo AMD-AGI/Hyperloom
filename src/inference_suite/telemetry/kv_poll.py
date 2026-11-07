@@ -690,7 +690,7 @@ def port_from_workspace(workspace: Any) -> int | None:
     """Read ``benchmark.envs.PORT`` out of the round's materialized config.
 
     This is the only place the port is reliably written. The subprocess environment does not carry it -- the port is
-    pinned in the YAML that Magpie reads, not exported to the parent -- so resolving from the environment alone lands
+    pinned in the round's YAML, not exported to the parent -- so resolving from the environment alone lands
     on the default and scrapes a port nothing is listening on. Observed on a real session: two of three rounds bound an
     ephemeral 34407 while collection sat on 8888 and recorded the engine as unavailable, and the one round that worked
     did so only because it happened to bind the default.

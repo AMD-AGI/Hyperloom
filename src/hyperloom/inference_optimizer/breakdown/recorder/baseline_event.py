@@ -526,7 +526,7 @@ class BaselineInvocation:
 
 @dataclass(frozen=True)
 class BaselineRound:
-    """One Magpie benchmark round as the executor timed it."""
+    """One benchmark round as the executor timed it."""
 
     label: str
     started_at: str
@@ -677,7 +677,7 @@ class BaselineEventRecorder:
         self._record_action({"invocation": block})
 
     def record_round(self, *, run_index: int, round_: BaselineRound) -> None:
-        """Record one Magpie benchmark round."""
+        """Record one benchmark round."""
         label = round_.label
         payload = _as_dict(round_.result)
         self._rounds += 1

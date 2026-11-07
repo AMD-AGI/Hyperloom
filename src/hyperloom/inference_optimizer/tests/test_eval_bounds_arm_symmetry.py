@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import yaml
@@ -16,20 +14,6 @@ from hyperloom.orchestrator.actions.executors import _accuracy_gate
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     materialized_run_eval_disabled,
 )
-from hyperloom.orchestrator.actions.executors._grid_runner import (
-    GridVariant,
-    _run_magpie,
-    run_grid,
-    GridRound,
-    GridLaunch,
-    GridRecipe,
-)
-from hyperloom.orchestrator.actions.executors._subprocess_kill import (
-    EVAL_PROBE_UNPATCHABLE_RETURNCODE,
-)
-
-_PATCHER = "hyperloom.orchestrator.actions.executors._grid_runner"
-_EVAL_PATCHER = "hyperloom.orchestrator.actions.executors.benchmark_backend"
 
 
 def _write_config(path: Path, **envs) -> Path:
@@ -92,145 +76,6 @@ def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
 # Grid arm: assert the bounds landed, on the same terms as the baseline arm
 
 
-def test_the_grid_arm_asserts_bounds_even_when_inferencex_path_is_unset(tmp_path, monkeypatch):
-    """The install must be attempted via env discovery, as the baseline arm does."""
-    monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    calls: list[object] = []
-
-    def recording_ensure(root=None):
-        calls.append(root)
-        return True
-
-    with (
-        patch(f"{_EVAL_PATCHER}.ensure_eval_probe_patched", side_effect=recording_ensure),
-        patch(
-            f"{_PATCHER}.run_with_session_kill",
-            side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
-        ),
-    ):
-        rc, _out, _err = _run_magpie(
-            GridRound(
-                magpie_python="/opt/venv/bin/python",
-                config_path=_write_config(tmp_path / "config.yaml"),
-                output_dir=tmp_path / "slot",
-                timeout_sec=5,
-                cwd=str(tmp_path),
-            )
-        )
-
-    assert calls == [None], "bounds install must be attempted with env discovery"
-    assert rc == 0
-
-
-def test_a_variant_fails_when_the_bounds_target_is_present_but_unpatchable(tmp_path, monkeypatch):
-    """Present-and-unpatchable is a broken contract, so nothing may be benched."""
-    monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
-    launched: list[object] = []
-
-    with (
-        patch(f"{_EVAL_PATCHER}.ensure_eval_probe_patched", return_value=False),
-        patch(f"{_EVAL_PATCHER}.eval_probe_targets_exist", return_value=True),
-        patch(
-            f"{_PATCHER}.run_with_session_kill",
-            side_effect=lambda cmd, *a, **k: launched.append(cmd) or subprocess.CompletedProcess(cmd, 0, "ok", ""),
-        ),
-    ):
-        rc, _out, err = _run_magpie(
-            GridRound(
-                magpie_python="/opt/venv/bin/python",
-                config_path=_write_config(tmp_path / "config.yaml"),
-                output_dir=tmp_path / "slot",
-                timeout_sec=5,
-                cwd=str(tmp_path),
-            )
-        )
-
-    assert rc == EVAL_PROBE_UNPATCHABLE_RETURNCODE
-    assert launched == [], "no benchmark may run without the bounds it will be graded under"
-    assert "bounds" in err
-
-
-def test_a_variant_still_runs_when_no_bounds_target_exists(tmp_path, monkeypatch):
-    """Target absent is an unrecognized layout, not a broken contract."""
-    monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
-
-    with (
-        patch(f"{_EVAL_PATCHER}.ensure_eval_probe_patched", return_value=False),
-        patch(f"{_EVAL_PATCHER}.eval_probe_targets_exist", return_value=False),
-        patch(
-            f"{_PATCHER}.run_with_session_kill",
-            side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
-        ),
-    ):
-        rc, _out, _err = _run_magpie(
-            GridRound(
-                magpie_python="/opt/venv/bin/python",
-                config_path=_write_config(tmp_path / "config.yaml"),
-                output_dir=tmp_path / "slot",
-                timeout_sec=5,
-                cwd=str(tmp_path),
-            )
-        )
-
-    assert rc == 0
-
-
-def test_a_variant_that_runs_no_eval_is_not_failed_by_the_bounds_check(tmp_path, monkeypatch):
-    """No eval this round means no eval contract to keep symmetric."""
-    monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
-
-    with (
-        patch(f"{_EVAL_PATCHER}.ensure_eval_probe_patched", return_value=False),
-        patch(f"{_EVAL_PATCHER}.eval_probe_targets_exist", return_value=True),
-        patch(
-            f"{_PATCHER}.run_with_session_kill",
-            side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
-        ),
-    ):
-        rc, _out, _err = _run_magpie(
-            GridRound(
-                magpie_python="/opt/venv/bin/python",
-                config_path=_write_config(tmp_path / "config.yaml", RUN_EVAL="false"),
-                output_dir=tmp_path / "slot",
-                timeout_sec=5,
-                cwd=str(tmp_path),
-            )
-        )
-
-    assert rc == 0
-
-
-@pytest.mark.asyncio
-async def test_run_grid_labels_the_bounds_gap_instead_of_a_missing_workspace(tmp_path, monkeypatch):
-    """The ledger must name the cause under the shared benchmark timeout policy."""
-    base = _write_config(tmp_path / "base.yaml")
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
-
-    with (
-        patch(f"{_EVAL_PATCHER}.ensure_eval_probe_patched", return_value=False),
-        patch(f"{_EVAL_PATCHER}.eval_probe_targets_exist", return_value=True),
-        patch(f"{_PATCHER}._run_magpie", wraps=_run_magpie) as run_magpie,
-        patch(f"{_PATCHER}.run_with_session_kill") as launch,
-    ):
-        results = await run_grid(
-            grid=[GridVariant("vA")],
-            output_root=tmp_path / "out",
-            recipe=GridRecipe(base_yaml_path=base),
-            launch=GridLaunch(warmup_before_measure=False),
-        )
-
-    run_magpie.assert_called_once()
-    assert run_magpie.call_args.args[0].timeout_sec == 7800
-    assert run_magpie.call_args.args[0].silence_timeout_sec == 600
-    launch.assert_not_called()
-    assert len(results) == 1
-    assert results[0].status == "failed"
-    assert results[0].error_class == "eval_probe_unpatchable"
-    assert results[0].returncode == EVAL_PROBE_UNPATCHABLE_RETURNCODE
-
-
 # The shared RUN_EVAL reader both arms now key off
 
 
@@ -275,7 +120,6 @@ def test_the_shared_reader_lives_in_a_module_every_arm_can_import():
         frontier = {module for name in frontier for module in siblings(name)} - reached
     assert "_accuracy_gate" not in reached, f"_accuracy_gate is imported back through {sorted(reached)}"
 
-    from hyperloom.orchestrator.actions.executors import benchmark_backend, baseline
+    from hyperloom.orchestrator.actions.executors import baseline
 
-    for arm in (benchmark_backend, baseline):
-        assert arm.materialized_run_eval_disabled is materialized_run_eval_disabled, arm.__name__
+    assert baseline.materialized_run_eval_disabled is materialized_run_eval_disabled

@@ -1,26 +1,23 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A sweep arm's rounds share one persistent server: what Magpie's reuse check compares must not differ between them.
+"""The rounds of a sweep arm and of a graded test, as the local backend asks ``run_grid`` for them.
 
-Magpie records the environment of the round that booted the server (every ``benchmark.envs`` variable except its
-client-only ones) and refuses each later round whose own environment differs ("Reuse metadata mismatch"). These tests
-run a real sweep arm through ``LocalMeasurementBackend`` with the points the toolbox renders and ``run_grid``'s own
-``_build_variant_yaml``, and compare the rounds the way Magpie does.
+These tests run a real sweep arm through ``LocalMeasurementBackend`` with the points the toolbox renders and
+``run_grid``'s own ``_build_variant_yaml``: one small boot, the levels from the highest down on the server it booted, one
+evaluation last, and a put kernel table that every round names by the same path.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import yaml
 
-from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta
+from hyperloom.contracts.recipe import KernelArtifact, KernelKind, RecipeDelta
 from hyperloom.measure import local
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore, PackageBase, compile_environment
 from hyperloom.measure.framework.base import framework_envs
@@ -35,24 +32,6 @@ from hyperloom.orchestrator.actions.executors._workload_envs import default_base
 
 LEVELS = (4, 16, 64)
 PORT = 8123
-
-#: Magpie's ``CLIENT_ONLY_REUSE_ENV_KEYS`` and the prefixes its ``_desired_reuse_server_meta`` leaves out of the
-#: ``server_env`` it stores and compares (pinned Magpie ``modes/benchmark/benchmarker.py``). Replicated here because
-#: Magpie is not a dependency of the test environment; ``test_the_copy_of_magpies_filter_is_magpies`` holds the copy to
-#: Magpie's own function wherever Magpie is importable.
-MAGPIE_CLIENT_ONLY = frozenset({"CONC", "ISL", "OSL", "NUM_PROMPTS", "RANDOM_RANGE_RATIO", "REQUEST_RATE", "RUN_EVAL"})
-MAGPIE_GPU_KEYS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER")
-MAGPIE_LEFT_OUT_PREFIXES = ("EVAL_", "MAGPIE_EVAL_", "RESULT_")
-
-
-def magpie_server_env(envs: dict[str, Any]) -> dict[str, str]:
-    """What Magpie stores for, and compares of, a round: its ``benchmark.envs`` without the keys the reuse check skips."""
-    upper = {str(key).upper(): str(value) for key, value in envs.items()}
-    return {
-        key: value
-        for key, value in upper.items()
-        if key not in MAGPIE_CLIENT_ONLY and key not in MAGPIE_GPU_KEYS and not key.startswith(MAGPIE_LEFT_OUT_PREFIXES)
-    }
 
 
 @pytest.fixture(autouse=True)
@@ -89,8 +68,6 @@ class _Rounds:
     def __init__(self, tmp_path: Path) -> None:
         self.tmp_path = tmp_path
         self.rounds: list[dict[str, Any]] = []
-        #: (Magpie's launcher directory, the InferenceX ``benchmarks`` directory it copies them into when a round starts)
-        self.copies_launchers: tuple[Path, Path] | None = None
 
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
         variant = kwargs["grid"][0]
@@ -101,9 +78,6 @@ class _Rounds:
             server_lifecycle=kwargs["launch"].server_lifecycle,
         )
         envs = yaml.safe_load(candidate.read_text())["benchmark"]["envs"]
-        if self.copies_launchers is not None:
-            for script in self.copies_launchers[0].glob("*.sh"):
-                shutil.copyfile(script, self.copies_launchers[1] / script.name)
         tables = [
             part for key, value in envs.items() if key.startswith("AITER_CONFIG_") for part in value.split(os.pathsep)
         ]
@@ -139,7 +113,7 @@ def rounds(monkeypatch, tmp_path) -> _Rounds:
         "resolve_lifecycle_params",
         lambda path: {"eligible": True, "port": PORT, "framework": "sglang", "reason": ""},
     )
-    monkeypatch.setattr(local, "teardown_variant_server", lambda slot, lifecycle: [])
+    monkeypatch.setattr(local, "teardown_variant_server", lambda slot: [])
     return fake
 
 
@@ -180,7 +154,6 @@ def _sweep(
         output_dir=tmp_path / "out",
         timeout_sec=900,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id="t-1",
         prep="conc_sweep",
         accuracy=accuracy,
@@ -188,7 +161,7 @@ def _sweep(
 
 
 @pytest.mark.parametrize("accuracy", [False, True])
-def test_on_magpie_the_boot_and_the_rounds_that_measure_have_one_server_identity(
+def test_a_sweep_boots_small_then_measures_every_level_on_that_server_and_evaluates_once_last(
     rounds, tmp_path, monkeypatch, accuracy
 ):
 
@@ -198,18 +171,13 @@ def test_on_magpie_the_boot_and_the_rounds_that_measure_have_one_server_identity
     evaluation = ["eval"] if accuracy else []
     assert boot["boot"] and [r["name"] for r in measured] == ["c64", "c16", "c4", *evaluation]
     assert not any(r["boot"] for r in measured)
-    stored = magpie_server_env(boot["envs"])
-    for round_ in measured:
-        assert magpie_server_env(round_["envs"]) == stored, f"the round at {round_['name']}"
-    assert "MAGPIE_RUN_PHASE" not in boot["envs"], (
-        "the phase is outside Magpie's reuse check, and Magpie sets it itself"
-    )
+    assert not any("HYPERLOOM_RUN_PHASE" in r["envs"] for r in rounds.rounds), "no round names a server-only phase"
     assert (boot["envs"]["RUN_EVAL"], boot["envs"]["NUM_PROMPTS"]) == ("false", "1"), "a boot is still small"
     assert [r["envs"]["RUN_EVAL"] for r in measured] == ["false"] * 3 + ["true"] * accuracy, "one evaluation, last"
     assert [r["envs"].get("EVAL_ONLY") for r in measured] == [None] * 3 + ["true"] * accuracy, "and no bench in it"
 
 
-def test_on_magpie_the_warmup_the_measured_and_the_evaluation_round_of_a_graded_test_have_one_server_identity(
+def test_a_graded_test_warms_up_measures_and_evaluates_last_on_the_server_its_warmup_booted(
     rounds, tmp_path, monkeypatch
 ):
     (point,) = _points(tmp_path, accuracy=True)[:1]
@@ -218,7 +186,6 @@ def test_on_magpie_the_warmup_the_measured_and_the_evaluation_round_of_a_graded_
         output_dir=tmp_path / "out",
         timeout_sec=900,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id="t-1",
         kind="accuracy",
         accuracy=True,
@@ -227,13 +194,11 @@ def test_on_magpie_the_warmup_the_measured_and_the_evaluation_round_of_a_graded_
 
     LocalMeasurementBackend().run_test(call)
 
-    warmup, measured, evaluation = rounds.rounds
+    warmup, measured, _ = rounds.rounds
     assert [r["name"] for r in rounds.rounds] == ["warmup", "test", "eval"]
     assert [r["ready"] for r in rounds.rounds] == [False, True, True], "the later rounds reuse the server it booted"
     assert [r["envs"]["RUN_EVAL"] for r in rounds.rounds] == ["false", "false", "true"], "one evaluation, last"
     assert [r["envs"].get("EVAL_ONLY") for r in rounds.rounds] == [None, None, "true"], "and no bench in it"
-    for round_ in (measured, evaluation):
-        assert magpie_server_env(round_["envs"]) == magpie_server_env(warmup["envs"]), "Magpie's reuse check passes"
     assert warmup["envs"]["NUM_PROMPTS"] == measured["envs"]["NUM_PROMPTS"], "both benches are full rounds"
 
 
@@ -257,8 +222,8 @@ def test_a_put_kernel_table_has_one_path_in_every_round_of_a_sweep_arm(
     """The private copy of a table is named by what the table is, not by the point that names it first.
 
     The boot round runs on the highest level and the rounds that measure on the levels below it, each from a point of
-    its own that names the same table; a path that counted the points ("2-k-..." at the boot, "1-k-..." next) made
-    Magpie's reuse check refuse every level after the boot.
+    its own that names the same table; a path that counted the points ("2-k-...", then "1-k-...") would give the server
+    the later rounds reuse another table path than the one it booted with.
     """
     LocalBlobStore(tmp_path / "blobs").put(TABLE)
     table = KernelArtifact(
@@ -270,67 +235,6 @@ def test_a_put_kernel_table_has_one_path_in_every_round_of_a_sweep_arm(
 
     boot, *measured = rounds.rounds
     assert boot["boot"] and [r["name"] for r in measured] == ["c64", "c16", "c4"]
-    for round_ in measured:
-        assert magpie_server_env(round_["envs"]) == magpie_server_env(boot["envs"]), f"the round at {round_['name']}"
     for round_ in rounds.rounds:
         assert round_["tables_present"] == [TABLE.decode()], f"the table {round_['name']} names is a private copy"
         assert round_["envs"][TABLE_ENV] == boot["envs"][TABLE_ENV]
-
-
-def test_a_variable_the_launcher_exports_is_kept_or_dropped_alike_in_every_round_of_a_sweep_arm(
-    rounds, tmp_path, monkeypatch
-):
-    """Magpie puts its launcher in the InferenceX checkout when the first round starts, and ``run_grid`` drops from a
-    round's environment what that launcher exports unconditionally: a checkout the runner has just made clean had no
-    launcher while the boot round's configuration was built, so the boot kept ``SGLANG_USE_AITER`` and every round after
-    it dropped it, and Magpie's reuse check refused them.
-    """
-    checkout, launchers = tmp_path / "inferencex", tmp_path / "magpie" / "Magpie" / "scripts" / "benchmark"
-    for path in (checkout / "benchmarks", launchers):
-        path.mkdir(parents=True)
-    (checkout / "benchmarks" / "benchmark_lib.sh").write_text("")
-    (launchers / "sglang_mi355x.sh").write_text("export SGLANG_USE_AITER=1\n")
-    delta = RecipeDelta(config=ConfigDelta(envs={"SGLANG_USE_AITER": "1", "AITER_LOG_TUNED_CONFIG": "1"}))
-    call = _sweep(tmp_path, environment=_environment(tmp_path, delta), gpu_type="mi355x")
-    monkeypatch.setenv("INFERENCEX_PATH", str(checkout))
-    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "magpie"))
-    rounds.copies_launchers = (launchers, checkout / "benchmarks")
-
-    LocalMeasurementBackend().run_test(call)
-
-    boot, *measured = rounds.rounds
-    assert boot["boot"] and [r["name"] for r in measured] == ["c64", "c16", "c4"]
-    assert "AITER_LOG_TUNED_CONFIG" in boot["envs"], "a variable the launcher does not export stays"
-    for round_ in measured:
-        assert magpie_server_env(round_["envs"]) == magpie_server_env(boot["envs"]), f"the round at {round_['name']}"
-
-
-def test_on_bypass_the_boot_round_is_the_same_one_request_round_with_no_evaluation(rounds, tmp_path, monkeypatch):
-    """No backend names a server-only phase: a bypass boot runs its server and one request, as a Magpie boot does."""
-
-    LocalMeasurementBackend().run_test(_sweep(tmp_path))
-
-    boot, *measured = rounds.rounds
-    assert "MAGPIE_RUN_PHASE" not in boot["envs"]
-    assert (boot["envs"]["RUN_EVAL"], boot["envs"]["NUM_PROMPTS"]) == ("false", "1")
-    assert not any("MAGPIE_RUN_PHASE" in r["envs"] for r in measured)
-
-
-def test_the_copy_of_magpies_filter_is_magpies(tmp_path):
-    benchmarker = pytest.importorskip("Magpie.modes.benchmark.benchmarker")
-    envs = {
-        **dict.fromkeys(sorted(MAGPIE_CLIENT_ONLY), "1"),
-        "TP": "1",
-        "NUM_WARMUPS": "4",
-        "EVAL_X": "1",
-        "RESULT_DIR": "x",
-    }
-    envs.update(
-        {"HYPERLOOM_EVAL_LIMIT": "5", "ROCR_VISIBLE_DEVICES": "0", "MAGPIE_RUN_PHASE": "server", "PORT": "8123"}
-    )
-    config = SimpleNamespace(envs=envs, inferencex_path=str(tmp_path), framework="sglang", model="m", run_mode="local")
-
-    desired = benchmarker.BenchmarkMode._desired_reuse_server_meta(SimpleNamespace(config=config), PORT)
-
-    assert desired["server_env"] == magpie_server_env(envs)
-    assert set(MAGPIE_CLIENT_ONLY) == set(benchmarker.CLIENT_ONLY_REUSE_ENV_KEYS)

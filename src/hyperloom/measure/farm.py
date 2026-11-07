@@ -57,7 +57,7 @@ from hyperloom.orchestrator.actions.executors import (
     is_patched_copy,
     lay_tracelens_patch,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
+from hyperloom.orchestrator.actions.executors.agentx_point import apply_native_runtime
 
 __all__ = [
     "BuiltRoot",
@@ -407,7 +407,7 @@ def _server_envs(point: BenchmarkPoint) -> Mapping[str, Any]:
 def server_environment(config: Mapping[str, Any]) -> Mapping[str, Any]:
     """The variables the framework server of ``config`` is launched with, read-only (:func:`launch_environment` writes).
 
-    Magpie launches an AgentX server from ``agentx.launch_overrides.env`` and never reads ``benchmark.envs`` for it;
+    An AgentX server is launched from ``agentx.launch_overrides.env``, never from ``benchmark.envs``;
     any other server gets ``benchmark.envs``.
     """
     return _server_envs(BenchmarkPoint.from_document(config))
@@ -426,7 +426,7 @@ def named_python(config: Mapping[str, Any]) -> str:
 def server_python(config: Mapping[str, Any], *, default: str) -> str:
     """The interpreter the server of ``config`` runs with: the one it names, else its launcher's default.
 
-    Magpie starts an AgentX server with ``python3`` unless the launch names an executable; any other server uses
+    An AgentX server starts with ``python3`` unless the launch names an executable; any other server uses
     ``default``.
     """
     agentx = BenchmarkPoint.from_document(config).agentx
