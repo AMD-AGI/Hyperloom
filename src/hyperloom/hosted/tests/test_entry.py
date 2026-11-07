@@ -122,6 +122,7 @@ def _session_json(run):
 
 # -- a fresh run -------------------------------------------------------------------------------------------------
 def test_a_fresh_run_gets_its_session_dir_the_plug_profile_and_a_group_shared_archive(run, monkeypatch):
+    run.work.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     fake = FakeOptimize(monkeypatch, stop_reason="target_reached")
     assert entry.main(["run"]) == 0
     (argv,) = fake.calls
