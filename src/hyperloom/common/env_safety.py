@@ -194,7 +194,6 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "HF_TOKEN",
         "HTTP_PROXY",
         "HTTPS_PROXY",
-        "HYPERLOOM_BENCHMARK_BACKEND",
         "HYPERLOOM_DOCKER_TARGET_HOST",
         "HYPERLOOM_FRAMEWORK_ENV",
         "HYPERLOOM_LLM_MODE",
