@@ -249,6 +249,49 @@ def test_the_operator_file_is_the_base_and_its_credentials_stay_out_of_the_froze
     assert base.env["SGLANG_USE_AITER"] == "1"
 
 
+_PROBE_ENV = (
+    "AWS_ACCESS_KEY_ID",
+    "LLM_GATEWAY_KEY",
+    "HYPERLOOM_SANDBOX_KEY_MEASUREMENT",
+    "DB_PASSWD",
+    "SSH_PRIVATE_KEY",
+    "GPG_PASSPHRASE",
+    "HF_AUTH",
+    "MODELSCOPE_ACCESS_KEY",
+)
+
+
+def test_every_credential_named_env_of_the_operator_file_is_frozen_as_its_sha256(tmp_path, fetched):
+    script = tmp_path / "launch.sh"
+    exports = "".join(f"export {name}=leaked{index}\n" for index, name in enumerate(_PROBE_ENV))
+    script.write_text(exports + "python3 -m sglang.launch_server --model-path /models/r1 --tp 4\n")
+    session = tmp_path / "session"
+    session.mkdir()
+
+    base = _resolve(session, _args(operator_tp=4, reference_script=str(script)))
+
+    assert base is not None and all(isinstance(base.env[name], Redacted) for name in _PROBE_ENV)
+    assert "leaked" not in (session / BASE_LAUNCH_FILE).read_text()
+
+
+@pytest.mark.parametrize(
+    "credential",
+    ["--api-key X", "--api-key=X", "--hf-token=hf_" + "q" * 34, "--hf-token hf_" + "q" * 34],
+)
+def test_an_operator_file_passing_a_credential_as_an_arg_exits_2_naming_where_never_the_value(
+    tmp_path, fetched, capsys, credential
+):
+    script = tmp_path / "launch.sh"
+    script.write_text(f"python3 -m sglang.launch_server --model-path /models/r1 --tp 4 {credential}\n")
+    session = tmp_path / "session"
+    session.mkdir()
+
+    err = _refused(session, _args(operator_tp=4, reference_script=str(script)), capsys)
+
+    assert "holds a credential in arg" in err and "through the environment" in err
+    assert " X" not in err and "qqqq" not in err
+
+
 @pytest.mark.parametrize(
     ("script", "tp", "reason"),
     [

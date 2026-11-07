@@ -400,19 +400,47 @@ SENSITIVE_ENV_NAME_MARKERS: tuple[str, ...] = (
 
 # As a substring TOKEN also hits tuning knobs (``MAX_NUM_BATCHED_TOKENS``, ``TOKENIZERS_PARALLELISM``), so a record of
 # launch knobs treats it as a credential only as a whole name segment (``HF_TOKEN``, ``HF_TOKEN_2``,
-# ``GITHUB_TOKEN_BACKUP``), and never in ``PER_TOKEN`` (``SGLANG_USE_AITER_FP8_PER_TOKEN``).
+# ``GITHUB_TOKEN_BACKUP``), and never in the knob phrases SGLang names (``SGLANG_USE_AITER_FP8_PER_TOKEN``,
+# ``SGLANG_SIMULATE_ACC_TOKEN_MODE``, ``SGLANG_CHAT_SEGMENT_TOKEN_CACHE``, ``SGLANG_TOKEN_REUSE``).
 _SUBSTRING_MARKERS_EXCEPT_TOKEN: tuple[str, ...] = tuple(m for m in SENSITIVE_ENV_NAME_MARKERS if m != "TOKEN")
 _TOKEN_SEGMENT_RE = re.compile(r"(?:^|_)TOKEN(?=_|$)")
-_PER_TOKEN_SEGMENT_RE = re.compile(r"(?:^|_)PER_TOKEN(?=_|$)")
+_TOKEN_KNOB_SEGMENT_RE = re.compile(r"(?:^|_)(?:PER_TOKEN|TOKEN_(?:MODE|CACHE|REUSE))(?=_|$)")
 
 
-def _is_credential_env_name(key: object) -> bool:
+def is_credential_env_name(key: object) -> bool:
+    """True when a variable's name says its value is a credential: a listed secret or a sensitive-name marker."""
     upper = str(key or "").strip().upper()
     if upper in BENCHMARK_SECRET_ENV_NAMES:
         return True
     if any(marker in upper for marker in _SUBSTRING_MARKERS_EXCEPT_TOKEN):
         return True
-    return bool(_TOKEN_SEGMENT_RE.search(_PER_TOKEN_SEGMENT_RE.sub("", upper)))
+    return bool(_TOKEN_SEGMENT_RE.search(_TOKEN_KNOB_SEGMENT_RE.sub("", upper)))
+
+
+# A flag whose last word names a credential carries one as its value (``--api-key``, ``--hf-token``, ``--db-password``),
+# and so does one naming a key pair's secret half anywhere in it (``--aws-secret-access-key-id``). ``--ssl-keyfile`` and
+# ``--max-num-batched-tokens`` name a path and a count.
+_CREDENTIAL_FLAG_RE = re.compile(
+    r"--?(?:[a-z0-9]+[-_])*(?:key|apikey|token|password|passwd|passphrase|secret|credentials?)"
+    r"|--?(?:[a-z0-9]+[-_])*(?:api|access|private|secret)[-_]key(?:[-_][a-z0-9]+)*",
+    re.IGNORECASE,
+)
+
+
+def credential_arg_indices(argv: Sequence[str]) -> list[int]:
+    """The indices of the words of ``argv`` that hold a credential.
+
+    A credential-named flag's value counts in both its ``--flag=value`` and ``--flag value`` forms, and so does any word
+    :func:`redact_secret_values` would change.
+    """
+    found = []
+    for index, word in enumerate(argv):
+        flag, joined, _ = word.partition("=")
+        if (joined and _CREDENTIAL_FLAG_RE.fullmatch(flag)) or redact_secret_values(word) != word:
+            found.append(index)
+        elif index and _CREDENTIAL_FLAG_RE.fullmatch(argv[index - 1]) and not word.startswith("-"):
+            found.append(index)
+    return found
 
 
 def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, object]:
@@ -422,7 +450,7 @@ def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, obje
     """
     return {
         key: "[REDACTED]"
-        if _is_credential_env_name(key)
+        if is_credential_env_name(key)
         else (redact_secret_values(value) if isinstance(value, str) and value else value)
         for key, value in (env or {}).items()
     }
@@ -869,12 +897,14 @@ __all__ = [
     "OPERATOR_EXTRA_ENV_VAR",
     "SENSITIVE_ENV_NAME_MARKERS",
     "build_benchmark_env",
+    "credential_arg_indices",
     "env_file_list_elements",
     "filter_untrusted_env_mapping",
     "is_allowed_dotenv_key",
     "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",
     "is_allowed_variant_env_key",
+    "is_credential_env_name",
     "is_file_referencing_env_name",
     "is_launch_provided_env_name",
     "is_python_package_root",

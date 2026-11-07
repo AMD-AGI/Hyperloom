@@ -74,11 +74,28 @@ _HF_TOKEN = "hf_" + "q" * 34
         (lambda base: replace(base, env={**base.env, "SGLANG_EXTRA": "Bearer " + "q" * 20}), "env SGLANG_EXTRA"),
         (lambda base: replace(base, args=(*base.args, "--api-key=sk-" + "q" * 20)), "credential in arg "),
         (lambda base: replace(base, client=replace(base.client, env={"OPENAI_API_KEY": "x"})), "client env"),
+        (lambda base: replace(base, env={**base.env, "LLM_GATEWAY_KEY": "x"}), "env LLM_GATEWAY_KEY"),
+        (lambda base: replace(base, env={**base.env, "DB_PASSWD": "x"}), "env DB_PASSWD"),
+        (lambda base: replace(base, args=(*base.args, "--api-key", "qqqqqqqq")), "credential in arg "),
+        (lambda base: replace(base, args=(*base.args, "--hf-token=" + _HF_TOKEN)), "credential in arg "),
+        (lambda base: replace(base, client=replace(base.client, args=("--api-key=qqqqqqqq",))), "client arg "),
+        (lambda base: replace(base, entrypoint=(*base.entrypoint, "--api-key=qqqqqqqq")), "entrypoint word"),
     ],
-    ids=["secret-named env", "credential-shaped env value", "credential-shaped arg", "secret-named client env"],
+    ids=[
+        "secret-named env",
+        "credential-shaped env value",
+        "credential-shaped arg",
+        "secret-named client env",
+        "gateway key env",
+        "passwd env",
+        "api-key next word",
+        "hf-token joined",
+        "client api-key",
+        "entrypoint api-key",
+    ],
 )
 def test_a_base_carrying_an_unredacted_credential_is_refused_naming_where_never_the_value(tmp_path, unredacted, named):
-    with pytest.raises(SpecRefused, match="base_launch_secret") as refused:
+    with pytest.raises(SpecRefused, match="sheet_invalid: .*unredacted credential") as refused:
         _tools(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=unredacted(base_launch())))
 
     assert named in str(refused.value) and "qqqqqq" not in str(refused.value)
@@ -130,3 +147,4 @@ def test_a_first_point_the_sheet_cannot_read_its_gpus_from_is_refused(tmp_path, 
         _build(tmp_path, point)
 
     assert refused.value.reason == "point_unreadable"
+
