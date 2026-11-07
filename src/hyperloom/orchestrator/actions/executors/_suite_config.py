@@ -4,10 +4,10 @@
 """Turn a materialized point YAML into the inference_suite round it runs as, and run that round.
 
 The point YAML stays Hyperloom's internal format; this module is the one place it becomes a suite config, and
-inference_suite never reads it. The translation reproduces what the generic launcher would serve for the same point
-(the defaults ``inference_suite/recipe/defaults/table.yaml`` records): its knobs (``TP``, ``CONC`` ...) become config fields instead of server environment, ``EXTRA_<FW>_ARGS`` and
-every other variable become the user layer on the frozen base, and the launcher's own server rules (vLLM's and
-ATOM's ``--max-model-len`` default, sglang's radix-cache conflict) are applied to that layer. What the YAML does
+inference_suite never reads it. The point's knobs (``TP``, ``CONC`` ...) become config fields instead of server
+environment, ``EXTRA_<FW>_ARGS`` and every other variable become the user layer on the frozen base, and the server
+rules a launch needs (vLLM's and ATOM's ``--max-model-len`` default, sglang's radix-cache conflict) are applied to
+that layer. What the YAML does
 not hold -- where the round writes, its interpreter, lifecycle and telemetry -- comes in :class:`RoundSettings`.
 
 An AgentX point runs the agentx-harness replay on the launch its ``agentx.launch_overrides`` composed on the session
@@ -15,9 +15,9 @@ base, above the base's golden layer; a profile point turns the torch profiler on
 point (``benchmark_script`` names the MLPerf agentic client) runs the MLPerf harness against the round's own server,
 which serves under the model name the harness requests.
 
-A scriptable point (xDiT, or an operator's own script) runs its session base's script once, with the point's
-environment as the scriptable runner handed it before (:func:`scriptable_workload`); the quality gate the script
-writes is its eval, so it runs no GSM8K.
+A scriptable point (xDiT, or a custom session's own benchmark and eval scripts) runs its session base's script once
+with the point's environment (:func:`scriptable_workload`); the quality gate the script writes is its eval, so it
+runs no GSM8K.
 
 Every point of a session that froze a base launch runs on inference_suite (:func:`suite_route`). A client-only round --
 multi-node, or one whose session or point names a ``BENCHMARK_BASE_URL`` -- holds its server as ``external``: it
