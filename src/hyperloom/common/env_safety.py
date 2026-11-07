@@ -240,16 +240,13 @@ DOTENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "VLLM_",
 )
 
-# What a checkout's ``.env`` another account can write (a checkout on shared storage) lends, as each name and the values
-# it may carry: that account chooses everything in such a file, so only a choice among values this account ships, none
-# of which names a program, a package, a path, a host or a model, and no credential. Every other name of the allow
-# lists picks what an install or a run executes or fetches (GEAK_REPO, VLLM_ROCM_INDEX, *_ROOT, *_BIN), where this
-# account's traffic or its key goes (the proxies, OPENAI_BASE_URL, OPENAI_CUSTOM_HEADERS, GEAK_BASE_URL) or text
-# written unescaped into a file this account sources (the model names), so it is lent only from a private ``.env``;
-# and a lent name with any other value is not lent either (FRAMEWORK names a script path). Each value is compared whole,
-# as the loaders read it. The shell loader's copy is RUNTIME_ENV_DOTENV_NOT_PRIVATE_LENT in
-# assets/runtime_env.sh; test_dotenv_allow_list.py holds the two equal, and FRAMEWORK's values to the framework
-# registry.
+# What a ``.env`` another account can write (a checkout on shared storage) lends: each name with the values it may carry,
+# choices among what this account ships, none naming a program, package, path, host, model or credential. Every other
+# allowed name picks what an install fetches or runs (GEAK_REPO, VLLM_ROCM_INDEX, *_ROOT), where this account's traffic
+# or key goes (the proxies, OPENAI_BASE_URL, GEAK_BASE_URL) or is written unquoted into a file this account sources
+# (model names), so only a private ``.env`` lends it. A listed name with an unlisted value is refused too (FRAMEWORK
+# names a script path); each value is compared whole. The shell's copy is RUNTIME_ENV_DOTENV_NOT_PRIVATE_LENT in
+# assets/runtime_env.sh; test_dotenv_allow_list.py holds the two equal and FRAMEWORK's values to the registry.
 DOTENV_NOT_PRIVATE_LENT_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "FRAMEWORK": frozenset({"atom", "custom", "sglang", "vllm", "xdit"}),
