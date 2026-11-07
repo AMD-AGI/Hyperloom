@@ -13,6 +13,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite.contracts import (
     BaseLaunch,
     ClientLaunch,
+    GoldenAcceptance,
     ImageFacts,
     LaunchModel,
     LaunchPoint,
@@ -26,7 +27,11 @@ from inference_suite.contracts import (
 )
 
 
-def session_base(args: Sequence[str] = (), env: Mapping[str, str | Redacted] | None = None) -> BaseLaunch:
+def session_base(
+    args: Sequence[str] = (),
+    env: Mapping[str, str | Redacted] | None = None,
+    golden: GoldenAcceptance | None = None,
+) -> BaseLaunch:
     return BaseLaunch(
         query=LaunchQuery(
             model_id="org/model",
@@ -48,14 +53,18 @@ def session_base(args: Sequence[str] = (), env: Mapping[str, str | Redacted] | N
         env=dict(env or {}),
         client=ClientLaunch(tool="aiperf", commit="d" * 40),
         resolved_unix=1_700_000_000,
+        golden_al=golden,
     )
 
 
 def freeze_session_base(
-    session_dir: Path, args: Sequence[str] = (), env: Mapping[str, str | Redacted] | None = None
+    session_dir: Path,
+    args: Sequence[str] = (),
+    env: Mapping[str, str | Redacted] | None = None,
+    golden: GoldenAcceptance | None = None,
 ) -> BaseLaunch:
     """Write ``base_launch.json`` into ``session_dir`` and record its digest in the session's state."""
-    base = session_base(args, env)
+    base = session_base(args, env, golden)
     write_base_launch(session_dir, base)
     state = SharedState.load_or_init(session_dir)
     state.base_launch_digest = base.digest()

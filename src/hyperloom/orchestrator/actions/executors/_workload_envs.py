@@ -1516,7 +1516,13 @@ def materialize_benchmark_config(
 
     from hyperloom.common.benchmark_config import is_magpie_agentx
     from hyperloom_common.coerce import to_str_list
-    from .magpie_agentx import LaunchChanges, apply_launch_changes, materialize_agentx, recipe_base_launch
+    from .magpie_agentx import (
+        LaunchChanges,
+        apply_launch_changes,
+        materialize_agentx,
+        recipe_base_launch,
+        seed_session_base,
+    )
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not is_magpie_agentx(config["benchmark"]):
@@ -1524,6 +1530,7 @@ def materialize_benchmark_config(
     replacing = launch.args_mode == "replace"
     inherited = "" if replacing else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
     recipe = recipe_base_launch(config_path)
+    seed_session_base(config["benchmark"], session_server_base(), recipe=recipe)
     apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), recipe=recipe, accepted=True)
     from hyperloom_common.env import is_truthy
 

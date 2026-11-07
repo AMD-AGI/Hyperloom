@@ -5,7 +5,7 @@
 
 Every round's server starts from the base: its argv sits below the round's own args (last wins) and its environment
 below the round's envs. The base comes from ``base_launch.json`` and must be the one ``SharedState`` recorded by digest;
-a session that froze no base (a scriptable or AgentX workload) starts from nothing.
+a session that froze no base (a scriptable or MLPerf AgentX workload) starts from nothing.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class BaseLaunchMismatch(RuntimeError):
 
 @dataclass(frozen=True)
 class ServerBase:
-    """The server half of the base: argv as one string and the environment a launch may set.
+    """The server half of the base, its golden layer last: argv as one string and the environment a launch may set.
 
     Redacted values and keys a launch may not set from outside stay in ``base_launch.json`` and never reach a server.
     """
@@ -38,10 +38,13 @@ class ServerBase:
 
 
 def _server_base(base: BaseLaunch) -> ServerBase:
+    golden = base.golden_al
+    args = (*base.args, *golden.args) if golden is not None else base.args
+    layers = {**base.env, **golden.env} if golden is not None else base.env
     env = {
-        name: value for name, value in base.env.items() if isinstance(value, str) and is_allowed_external_env_key(name)
+        name: value for name, value in layers.items() if isinstance(value, str) and is_allowed_external_env_key(name)
     }
-    return ServerBase(args=" ".join(base.args), env=MappingProxyType(env))
+    return ServerBase(args=" ".join(args), env=MappingProxyType(env))
 
 
 def session_server_base() -> ServerBase:
