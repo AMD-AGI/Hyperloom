@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import time
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 import yaml
@@ -65,6 +67,17 @@ def _no_node_power_management(monkeypatch):
         raise gpu_power_settings.GpuPowerSettingsError("amd-smi node --power-management: no node command (test)")
 
     monkeypatch.setattr(gpu_power_settings, "read_node_power_settings", _absent)
+
+
+@pytest.fixture
+def process_environ():
+    """Restore ``os.environ`` after a test that drives the optimize CLI.
+
+    The CLI hands the launch shape (TP, EP, CONC, ...) to its subprocesses through ``os.environ``, so a test reaching
+    that export leaves it for every later test on the worker.
+    """
+    with mock.patch.dict(os.environ):
+        yield
 
 
 def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
