@@ -32,9 +32,12 @@ other; a host where neither an account nor that bubblewrap can isolate a special
 and every later launch through the chooser is isolated or refused. A probe that gave no answer in time ends the leg
 without ``exit.json``, so the host starts it again. The entry also registers the state directory, whose variable it
 removes from the environment, among the paths no agent sandbox shows
-(:data:`~hyperloom.common.confinement.PRIVATE_PATHS`). Agents started outside the chooser are not isolated by it: the
-TraceLens skill runner's, GEAK's and kernelforge's forge loops' agents, which can run shell commands, run as the
-application. A ``multibranch`` flow is handed to its command before this check.
+(:data:`~hyperloom.common.confinement.PRIVATE_PATHS`). Agents started outside the chooser are not isolated by it and
+run as the application, reading what it can: the orchestration role on Codex (the backend an OpenAI-only credential
+picks; its sandbox limits writes, not reads) or on the DeepSeek Harness, and on Claude its unconfined ``Read``; the
+TraceLens skill runner's agent (Claude with ``Bash``, Codex or DeepSeek); GEAK's agents; and kernelforge's
+(``kernel-rewrite-controller``'s forge loops, ``forge-fuse``'s author and ``gemm-tune``'s generated-tuner author). The
+reference's isolation section names the launch sites. A ``multibranch`` flow is handed to its command before this check.
 """
 
 from __future__ import annotations
