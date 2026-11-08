@@ -5,6 +5,10 @@
 
 The root is ``HYPERLOOM_SESSION_PACKAGE_DEST``, ``/workspace`` when unset, so the Claw sandbox sync picks the zip up.  A
 hosted run (``hyperloom hosted run``) sets it to ``<session dir>/archive``, on the shared storage, whatever the host passed.
+
+A root with the setgid bit (the hosted archive, ``2770``) is one the accounts of one group write in turn: the directories
+made below it get its mode, and every file is a new one renamed into place with that mode less the execute bits, so the
+next account replaces it, never opens it (:mod:`hyperloom_common.shared_storage`).
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 import zipfile
 from contextlib import suppress
@@ -25,6 +30,7 @@ from pathlib import Path
 from typing import Iterable
 
 from hyperloom_common.env import env_flag
+from hyperloom_common.shared_storage import copy_shared_file, make_shared_dirs, write_shared_bytes
 from hyperloom.common.env_safety import redact_secret_env_values
 from inference_suite.contracts.layout import (
     AGENTX_TIMELINE,
@@ -182,24 +188,52 @@ def _exported_state_bytes(path: Path) -> bytes:
     return json.dumps(state, indent=2).encode("utf-8")
 
 
+def _group_mode(root: Path) -> int | None:
+    """The mode of a destination root the accounts of one group share (it has the setgid bit, as the hosted archive
+    does), which the directories made below it get; ``None`` for a root of one account's."""
+    try:
+        info = os.stat(root)
+    except OSError:
+        return None
+    return stat.S_IMODE(info.st_mode) if info.st_mode & stat.S_ISGID else None
+
+
+def _make_dirs(path: Path, shared: int | None) -> None:
+    if shared is None:
+        path.mkdir(parents=True, exist_ok=True)
+    else:
+        make_shared_dirs(path, mode=shared)
+
+
+def _file_mode(shared: int) -> int:
+    return shared & 0o666
+
+
 def _copy_loose_tree(
     included: list[tuple[Path, str, int]],
     loose_dir: Path,
+    shared: int | None = None,
 ) -> tuple[list[tuple[str, int]], list[str]]:
-    """Copy each included file into ``loose_dir`` preserving its relative tree."""
-    loose_dir.mkdir(parents=True, exist_ok=True)
+    """Copy each included file into ``loose_dir`` preserving its relative tree; below a root the group shares
+    (``shared``, :func:`_group_mode`) each one replaces what is there by rename."""
+    _make_dirs(loose_dir, shared)
     copied: list[tuple[str, int]] = []
     failed: list[str] = []
     for src, rel, sz in included:
         dst = loose_dir / rel
         try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
+            _make_dirs(dst.parent, shared)
             if rel == _STATE_JSON_REL:
                 data = _exported_state_bytes(src)
-                dst.write_bytes(data)
+                if shared is None:
+                    dst.write_bytes(data)
+                else:
+                    write_shared_bytes(dst, data, mode=_file_mode(shared))
                 sz = len(data)
-            else:
+            elif shared is None:
                 shutil.copy2(src, dst)
+            else:
+                copy_shared_file(src, dst, mode=_file_mode(shared))
             copied.append((rel, sz))
         except OSError:
             failed.append(rel)
@@ -207,17 +241,17 @@ def _copy_loose_tree(
     return copied, failed
 
 
-def _write_loose_manifest(loose_dir: Path, manifest: dict) -> None:
+def _write_loose_manifest(loose_dir: Path, manifest: dict, shared: int | None = None) -> None:
     """Write the manifest pair describing the loose tree."""
     try:
-        (loose_dir / MANIFEST_JSON_NAME).write_text(
-            json.dumps(manifest, indent=2),
-            encoding="utf-8",
-        )
-        (loose_dir / MANIFEST_TXT_NAME).write_text(
-            _manifest_text(manifest),
-            encoding="utf-8",
-        )
+        for name, text in (
+            (MANIFEST_JSON_NAME, json.dumps(manifest, indent=2)),
+            (MANIFEST_TXT_NAME, _manifest_text(manifest)),
+        ):
+            if shared is None:
+                (loose_dir / name).write_text(text, encoding="utf-8")
+            else:
+                write_shared_bytes(loose_dir / name, text.encode("utf-8"), mode=_file_mode(shared))
     except OSError:
         log.warning("session package: failed to write loose manifest")
 
@@ -612,16 +646,18 @@ def package_session_artifacts(
     )
 
     root = _dest_root()
+    shared = _group_mode(root)
     out_dir = root / PACKAGE_SUBDIR
-    out_dir.mkdir(parents=True, exist_ok=True)
+    _make_dirs(out_dir, shared)
     target = out_dir / f"{sid}.zip"
 
-    # Atomic write: build into a temp zip in the same dir, then replace.
+    # Atomic write: build into a temp zip in the same dir, through the descriptor that made it, then replace.
     fd, tmp = tempfile.mkstemp(prefix=f".{sid}.", suffix=".zip.tmp", dir=str(out_dir))
-    os.close(fd)
     tmp_path = Path(tmp)
     try:
-        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        with os.fdopen(fd, "w+b") as handle, zipfile.ZipFile(handle, "w", zipfile.ZIP_DEFLATED) as zf:
+            if shared is not None:
+                os.fchmod(handle.fileno(), _file_mode(shared))
             written, write_failures = _write_zip_members(zf, selected)
             # Built here so it describes the members that exist, not the ones that were selected.
             manifest = _build_manifest(plan, written, write_failures)
@@ -645,8 +681,8 @@ def package_session_artifacts(
     # can grab one file without unzip.
     if _loose_enabled():
         try:
-            copied, loose_failures = _copy_loose_tree(selected, root)
-            _write_loose_manifest(root, _build_manifest(plan, copied, loose_failures))
+            copied, loose_failures = _copy_loose_tree(selected, root, shared)
+            _write_loose_manifest(root, _build_manifest(plan, copied, loose_failures), shared)
             log.info(
                 "session package: copied %d loose files into %s",
                 len(copied),

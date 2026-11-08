@@ -9,7 +9,8 @@ myst:
 `hyperloom-multibranch` (also `python -m hyperloom_multibranch`) is installed with Hyperloom. `run` starts one
 session: PRELUDE, EXPLORE, FINAL and CLOSE. The other subcommands are `review` (see
 [Review the agent map](multibranch-review-gate.md)), `final-only SESSION_DIR` (emergency FINAL and CLOSE over a
-session that ended before FINAL) and `hosted run` (a session a host injects; see
+session that ended before FINAL) and `hosted run` (a session a host injects, measured in the grant's sandboxes or, when
+its spec says `placement.measurement: local`, on the app container's own cards; see
 [Run hosted multi-branch on a new cluster](hosted-multibranch-new-cluster.md)).
 
 ```bash

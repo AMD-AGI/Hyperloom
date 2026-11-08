@@ -1,24 +1,36 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""One local sandbox: a private directory tree plus the processes started in it."""
+"""One local sandbox: a private directory tree plus the processes started in it.
+
+A sandbox its provider confines (:mod:`hyperloom.sandbox.confined`) starts every process in bubblewrap, its launcher
+inside; the reap, the tag sweep and the card guard find its processes as before.
+"""
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import logging
 import os
 import posixpath
 import shutil
+import stat
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
+from hyperloom_common.bwrap import BwrapSetupError
+
+from hyperloom.common.agent_isolation import IsolationRefused
+from hyperloom.sandbox.confined import SandboxConfinement, SandboxConfiner, SandboxShape
 from hyperloom.sandbox.launcher import StatusPipe, launcher_argv
 from hyperloom.sandbox.reaper import Leftovers, kill_launchers, reap_sandbox_processes, wait_exited
+from hyperloom.sandbox.rooted import open_rooted
 from hyperloom.sandbox.socket import (
     CommandResult,
     OutputSinks,
@@ -63,11 +75,13 @@ class SandboxPlan:
 
 @dataclass(frozen=True)
 class SandboxRuntime:
-    """How a sandbox's processes run: the end callback, the launcher's python and the account they run as."""
+    """How a sandbox's processes run: the end callback, the launcher's python, the account they run as, and what
+    confines them where no account is named (:class:`~hyperloom.sandbox.confined.SandboxConfiner`)."""
 
     on_end: Callable[[LocalSandbox, bool], None]
     launcher_python: str
     user: tuple[int, int] | None = None
+    confiner: SandboxConfiner | None = None
 
 
 class LocalSandbox:
@@ -76,6 +90,9 @@ class LocalSandbox:
     Layout under the sandbox directory: ``fs/`` is the root callers see
     (``/in``, ``/out``, ``/work``), ``private/`` holds the signing key and process logs
     and is not reachable through the file API.
+
+    Raises:
+        SandboxDenied: Its runtime must confine it (a hosted run's) and cannot.
     """
 
     def __init__(self, plan: SandboxPlan, runtime: SandboxRuntime) -> None:
@@ -90,6 +107,12 @@ class LocalSandbox:
         self._on_end = runtime.on_end
         self._launcher_python = runtime.launcher_python
         self._user = runtime.user
+        self._confined: SandboxConfinement | None = None
+        if runtime.confiner is not None:
+            shape = SandboxShape(
+                self.directory, self._base_env, self.template.command, self.template.gpus > 0, self.template.sealed
+            )
+            self._confined = runtime.confiner.confine(shape)
         self._lock = threading.RLock()
         self._ended = False
         self._procs: list[subprocess.Popen[bytes]] = []
@@ -101,6 +124,11 @@ class LocalSandbox:
         # launcher was waited, so ``kill()`` looks for these by name and keeps the cards leased while any of them runs.
         self._leftovers = Leftovers()
         self.set_timeout(plan.timeout_sec)
+
+    @property
+    def confined(self) -> bool:
+        """bool: Whether its processes run in bubblewrap."""
+        return self._confined is not None
 
     def _build_base_env(self, create_envs: Mapping[str, str], platform_envs: Mapping[str, str]) -> dict[str, str]:
         env = {k: os.environ[k] for k in _INHERITED_ENV if k in os.environ}
@@ -176,6 +204,10 @@ class LocalSandbox:
             if self._startup is not None:
                 self._startup[1].close()
             reaped_now = reap_sandbox_processes(self._procs, self.sandbox_id)
+            if self._confined is not None:
+                # Ends the holder, and with it what of the sandbox left the launchers' trees.
+                self._confined.release()
+                reaped_now = wait_exited(reaped_now)
             # Looked at only now that the last reap is done: what a command timeout's reap named may have died since.
             self._leftovers = wait_exited(self._leftovers) | reaped_now
             reaped = self._leftovers.clean
@@ -201,7 +233,8 @@ class LocalSandbox:
             raise SandboxDenied(f"path {virt!r} resolves outside the sandbox")
         return real
 
-    def _gate(self, path: str, *, write: bool) -> Path:
+    def _gate(self, path: str, *, write: bool) -> str:
+        """The virtual path ``path`` names, once the sealed policy allows it; opened by :meth:`_open` alone."""
         self._require_alive()
         virt = self._virtual(path)
         if self.template.sealed:
@@ -209,41 +242,67 @@ class LocalSandbox:
             if not allowed:
                 verb = "write" if write else "read"
                 raise SandboxDenied(f"sealed sandbox: cannot {verb} {virt!r} (write /in/, read /out/ only)")
-        return self._real(virt)
+        return virt
+
+    def _open(self, virt: str, flags: int, *, make_parents: bool = False) -> int:
+        """``virt`` opened below the root by one walk no link leads out of (:func:`~hyperloom.sandbox.rooted.open_rooted`):
+        the sandbox's processes write the tree, so a path is never checked and then opened again by name."""
+        return open_rooted(self.fs, virt, flags, make_parents=make_parents)
+
+    def _file(self, path: str, *, write: bool) -> IO[bytes]:
+        """The regular file ``path`` names, open to read, or to write from its start (made if missing, with its
+        parents); never a pipe or device a sandbox's process put there, which could block the app.
+
+        Raises:
+            SandboxDenied: By the sealed policy, for a path that escapes the root, or for what is not a regular file.
+            IsADirectoryError: For a directory.
+        """
+        virt = self._gate(path, write=write)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC if write else os.O_RDONLY
+        fd = self._open(virt, flags | os.O_NONBLOCK, make_parents=write)
+        try:
+            mode = os.fstat(fd).st_mode
+            if stat.S_ISDIR(mode):
+                raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), virt)
+            if not stat.S_ISREG(mode):
+                raise SandboxDenied(f"path {virt!r} is not a regular file")
+            os.set_blocking(fd, True)
+            return os.fdopen(fd, "wb" if write else "rb")
+        except BaseException:
+            os.close(fd)
+            raise
 
     def write_file(self, path: str, data: bytes) -> None:
         """Write a file; a sealed sandbox only accepts paths under ``/in/``.
 
         Raises:
-            SandboxDenied: By the sealed policy, or for a path that escapes the root.
+            SandboxDenied: By the sealed policy, for a path that escapes the root, or for what is not a regular file.
             SandboxGone: When the sandbox has ended.
         """
-        target = self._gate(path, write=True)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target = self._gate(path, write=True)  # re-check after the parents exist
-        target.write_bytes(data)
+        with self._file(path, write=True) as target:
+            target.write(data)
 
     def read_file(self, path: str) -> bytes:
         """Read a file; a sealed sandbox only serves ``/out/``.
 
         Raises:
-            SandboxDenied: By the sealed policy, or for a path that escapes the root.
+            SandboxDenied: By the sealed policy, for a path that escapes the root, or for what is not a regular file.
             SandboxGone: When the sandbox has ended.
             FileNotFoundError: When there is no such file.
         """
-        return self._gate(path, write=False).read_bytes()
+        with self._file(path, write=False) as source:
+            return source.read()
 
     def copy_out(self, path: str, dest: Path) -> int:
         """Stream a file to ``dest`` in chunks and return the byte count.
 
         Raises:
-            SandboxDenied: By the sealed policy, or for a path that escapes the root.
+            SandboxDenied: By the sealed policy, for a path that escapes the root, or for what is not a regular file.
             SandboxGone: When the sandbox has ended.
             FileNotFoundError: When there is no such file.
         """
-        source = self._gate(path, write=False)
         total = 0
-        with source.open("rb") as src, dest.open("wb") as out:
+        with self._file(path, write=False) as src, dest.open("wb") as out:
             while chunk := src.read(_CHUNK):
                 out.write(chunk)
                 total += len(chunk)
@@ -257,7 +316,11 @@ class LocalSandbox:
             SandboxGone: When the sandbox has ended.
             FileNotFoundError: When there is no such directory.
         """
-        return sorted(entry.name for entry in self._gate(path, write=False).iterdir())
+        fd = self._open(self._gate(path, write=False), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            return sorted(os.listdir(fd))
+        finally:
+            os.close(fd)
 
     # -- processes ---------------------------------------------------------
 
@@ -286,17 +349,19 @@ class LocalSandbox:
                 extra: dict[str, object] = {}
                 if self._user is not None:
                     extra = {"user": self._user[0], "group": self._user[1], "extra_groups": []}
-                proc = subprocess.Popen(
-                    launcher_argv(self._launcher_python, write_fd, argv),
-                    env={**self._base_env, **env},
-                    cwd=cwd,
-                    stdin=subprocess.DEVNULL,
-                    stdout=stdout,
-                    stderr=stderr,
-                    start_new_session=True,
-                    pass_fds=(write_fd,),
-                    **extra,
-                )
+                launcher = launcher_argv(self._launcher_python, write_fd, argv)
+                with self._launched(launcher, {**self._base_env, **env}, cwd) as (command, command_env, fds):
+                    proc = subprocess.Popen(
+                        command,
+                        env=command_env,
+                        cwd=cwd,
+                        stdin=subprocess.DEVNULL,
+                        stdout=stdout,
+                        stderr=stderr,
+                        start_new_session=True,
+                        pass_fds=(write_fd, *fds),
+                        **extra,
+                    )
                 self._procs.append(proc)
         except BaseException:
             os.close(read_fd)
@@ -304,6 +369,28 @@ class LocalSandbox:
         finally:
             os.close(write_fd)
         return proc, read_fd
+
+    @contextlib.contextmanager
+    def _launched(
+        self, argv: Sequence[str], env: Mapping[str, str], cwd: Path
+    ) -> Iterator[tuple[list[str], dict[str, str], tuple[int, ...]]]:
+        """``argv`` with ``env`` in ``cwd`` as this sandbox starts it: in bubblewrap when it is confined, its launcher
+        inside; the command line, its environment and the descriptors to pass besides the status pipe.
+
+        Raises:
+            SandboxUnavailable: bubblewrap could not set the sandbox's holder up, or must not launch its policy.
+        """
+        if self._confined is None:
+            yield list(argv), dict(env), ()
+            return
+        with contextlib.ExitStack() as stack:
+            try:
+                launch = stack.enter_context(self._confined.launched(argv, env, cwd))
+            except (BwrapSetupError, IsolationRefused, ProcessLookupError, TimeoutError) as exc:
+                raise SandboxUnavailable(
+                    f"sandbox {self.sandbox_id}: bubblewrap cannot start the process: {exc}"
+                ) from exc
+            yield launch
 
     def spawn(
         self, argv: list[str], *, env: Mapping[str, str], cwd: Path, stdout: _Sink, stderr: _Sink
@@ -337,7 +424,9 @@ class LocalSandbox:
 
     def startup_exit_code(self) -> int | None:
         """The exit code of the template's startup command once it has exited; ``None`` while it runs, when the template
-        has none, or when its launcher died without reporting one."""
+        has none, or when its launcher died without reporting one (in a confined sandbox, bubblewrap's exit code once
+        its own process ended: ``1`` when it could not set the sandbox up, ``128 + n`` for a launcher killed by
+        signal ``n``)."""
         with self._lock:
             if self._startup is not None and self._startup_exit is None and not self._ended:
                 proc, status = self._startup
@@ -345,6 +434,11 @@ class LocalSandbox:
                     self._startup_exit = status.wait_exit(proc, 0)
                 except TimeoutError:
                     pass
+                else:
+                    if self._startup_exit is None and self._confined is not None:
+                        # No launcher reported, so bubblewrap's own process may have ended (one that could not set
+                        # the sandbox up exits 1, its line in the log): its code is the runner's.
+                        self._startup_exit = proc.poll()
             return self._startup_exit
 
     def _check_run_args(self, envs: Mapping[str, str] | None) -> dict[str, str]:

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import zipfile
 from pathlib import Path
 
@@ -750,3 +751,52 @@ def test_an_inference_suite_run_dir_ships_its_report_launch_config_and_phase_mar
     run = layout.root.relative_to(sd).as_posix()
     shipped = {name for name in _zip_names(out) if name.startswith(f"{run}/")}
     assert shipped == {f"{run}/{name}" for name in (REPORT_FILE, LAUNCH_FILE, CONFIG_FILE, PHASE_MARKS)}
+
+
+# -- a destination the accounts of one group share ----------------------------------------------------------------
+def _group_dest(dest: Path) -> Path:
+    dest.mkdir()
+    dest.chmod(0o2770)
+    if not dest.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    return dest
+
+
+def test_below_a_setgid_root_each_directory_takes_its_mode_and_each_file_is_a_new_one_renamed_into_place(
+    tmp_path: Path, dest: Path
+) -> None:
+    """The hosted archive: the next leg may be another account of the group, which replaces what this one left."""
+    _group_dest(dest)
+    sd = tmp_path / "session"
+    _build_session(sd)
+    package_session_artifacts(sd, session_id="s")
+    loose = dest / "reports" / "final.md"
+    (tmp_path / "earlier-inode").hardlink_to(loose)
+    outside = tmp_path / "outside"
+    outside.write_text("kept")
+    planted = dest / "reports" / "final.json"
+    planted.unlink()
+    planted.symlink_to(outside)  # what a member of the group may put where a file goes
+
+    _write(sd / "reports" / "final.md", "# again")
+    out = package_session_artifacts(sd, session_id="s")
+
+    assert out is not None and stat.S_IMODE(out.stat().st_mode) == 0o660
+    assert outside.read_text() == "kept" and not planted.is_symlink()
+    assert (tmp_path / "earlier-inode").read_text() == "# final" and loose.read_text() == "# again"
+    made = [path for path in dest.rglob("*") if path.is_dir()]
+    assert made and {stat.S_IMODE(path.stat().st_mode) for path in made} == {0o2770}
+    files = [path for path in dest.rglob("*") if path.is_file()]
+    assert {stat.S_IMODE(path.stat().st_mode) for path in files} == {0o660}
+    assert not list(dest.rglob(".*.tmp"))
+
+
+def test_below_a_root_of_one_account_the_package_is_written_as_before(tmp_path: Path, dest: Path) -> None:
+    dest.mkdir()
+    dest.chmod(0o755)
+    sd = tmp_path / "session"
+    _build_session(sd)
+    (sd / "reports" / "final.md").chmod(0o640)
+    package_session_artifacts(sd, session_id="s")
+    assert stat.S_IMODE((dest / "reports").stat().st_mode) & stat.S_ISGID == 0
+    assert stat.S_IMODE((dest / "reports" / "final.md").stat().st_mode) == 0o640, "the source's mode, as copy2 keeps it"

@@ -71,8 +71,18 @@ def test_a_durable_json_write_publishes_one_stable_layout(tmp_path):
     assert [p.name for p in target.parent.iterdir()] == ["state.json"]
 
 
-@pytest.mark.parametrize("options", [WriteOptions(fsync=True), WriteOptions(fsync_dir=True)], ids=["file", "directory"])
-def test_a_failed_fsync_fails_the_write_it_was_asked_to_make_durable(tmp_path, monkeypatch, options):
+@pytest.mark.parametrize(
+    ("options", "left"),
+    [
+        (WriteOptions(fsync=True), "old"),
+        (WriteOptions(fsync_dir=True), "new"),
+        (WriteOptions(fsync=True, shared=True), "old"),
+        (WriteOptions(fsync_dir=True, shared=True), "new"),
+    ],
+    ids=["file", "directory", "shared file", "shared directory"],
+)
+def test_a_failed_fsync_fails_the_write_it_was_asked_to_make_durable(tmp_path, monkeypatch, options, left):
+    """The file is flushed before the rename, which a failure there leaves undone; the directory after it."""
     target = tmp_path / "state.json"
     target.write_text("old")
 
@@ -83,6 +93,7 @@ def test_a_failed_fsync_fails_the_write_it_was_asked_to_make_durable(tmp_path, m
     with pytest.raises(OSError, match="fsync failed"):
         atomic_write_text(target, "new", options=options)
     assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
+    assert target.read_text() == left
 
 
 def test_fsync_tree_visits_every_file_and_directory(tmp_path):

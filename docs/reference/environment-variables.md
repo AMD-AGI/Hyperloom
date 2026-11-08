@@ -858,10 +858,37 @@ defaults, its own writable tree, where the image's prebuilt JIT modules and FlyD
 bubblewrap cannot bind safely (before 0.12, nothing may be bound below the shared `/tmp`, so a session directory under
 `/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run refuses it.
 
+A multi-branch session measured on this host's cards runs each test's runner, and the server it starts with the
+branch's patches, in a local sandbox (`hyperloom.sandbox.confined`) under the same rule: where its provider names no
+account for it (`ProcessUsers`), bubblewrap where `choose_test_isolation()` gives it, else as before with one WARNING
+(`tests run unconfined on this host, as before: they can read this account's files and credentials (<reasons>)`); a
+hosted run refuses to build the toolbox instead. Each sandbox writes its own `fs/` (`/in`, `/out`, `/work`), a private
+`/tmp` and a full-size `/dev/shm`, and a sealed one its own `private/`, where the runner reads its signing key and
+removes it; it reads its toolchain, its interpreter, the model and what its entries link to (each link's target
+itself, never the directory it is in; a hub snapshot's repository `blobs`), the Hugging Face hub cache, and the trees
+its template names (the framework snapshot, the staged rule pack, the compiled-code store, the runner cache, the native
+build store and trust file, a local InferenceX or Magpie repository); the app's credential locations those show are
+masked, and a sandbox one of whose read paths is itself a credential location (a home, a login file) runs as before
+with a WARNING, refused in a hosted run. So does one whose model links to or below a credential location, or into a
+hidden entry of a home (`~/.ssh`, `~/.claude`, `~/.config`, `~/.aws`, `~/.netrc`), where no mask could hide the logins;
+a link to anything else in the home (`~/tokdir`, `~/config.json`), outside it, or into the hub cache binds as before,
+except into a credential location the hub cache holds (one set to the home's parent), whose mask the link would open.
+Nothing else of the host is there: not the session's other files, another sandbox's directory or key, the app's state,
+nor any process of the app's (its own pid namespace; a sandbox that runs several commands shares one holder's, as an
+agent sandbox does). A sandbox with cards gets `/dev/kfd` and `/dev/dri`, `/sys`
+is read-only, the network is the app's (its server listens on loopback for the benchmark client). The sandbox's id
+(`E2B_SANDBOX_ID`) is set inside only, so the reap, the card guard and the tag sweep find its processes and never
+bubblewrap's own, and a reap's SIGTERM reaches them with their grace. Before bubblewrap 0.12 a sealed runner whose
+session directory is below `/tmp` gets a fresh `/tmp` of its own instead of the bound one. A probe that gives no answer
+in time leaves only that launch's test unconfined: the next sandbox is chosen for again. The app opens a sandbox's files
+(the runner's output and logs) by one walk below its `fs/` that follows no link out of it, so a process of the sandbox
+cannot swap a link to the app's files in between a check and the open.
+
 A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
-framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom hosted run` names `bin/bwrap` in
-the directory `HYPERLOOM_HOST_LAYER` names (whitespace around it ignored), which the layer's `start.sh` sets to its
-own; with the variable unset, blank or relative, no launch of the run uses bubblewrap. It checks before its installer or `optimize` runs: where neither tier
+framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom hosted run` and
+`hyperloom-multibranch hosted run` name `bin/bwrap` in the directory `HYPERLOOM_HOST_LAYER` names (whitespace around it
+ignored), which the layer's `start.sh` sets to its own; with the variable unset, blank or relative, no launch of the run
+uses bubblewrap. `hyperloom hosted run` checks before its installer or `optimize` runs: where neither tier
 works, the run ends with a final `exit.json` (return code 2) whose `error` names both reasons; a probe that gave no
 answer in time ends the leg without one, so the host starts it again. Where the account is chosen, it probes the layer's
 bubblewrap too: the Ray GPU actor path never starts a specialist as an account, so where that bubblewrap cannot confine
@@ -893,6 +920,18 @@ bound tree holds them (that tree is bound entry by entry without them); its envi
 entry is `uid+netns`, `uid` or `bwrap+netns`. Where neither tier works, the toolbox refuses at start
 (`build_preflight`) and each build fails as the machine's, naming both reasons; a bubblewrap whose probe gives no
 answer in time is not refused but logged, and each build asks again.
+
+A multi-branch session records in its manifest and `MB-report.json` (`agent_isolation`) how the paths that launch its
+agents and tests start them (`hyperloom_multibranch.scheduling.launch_isolation`): its specialists as the agent runner's
+chooser gives them now (`account`, `bwrap`, else `none` with the reasons, or `refused` where they must be isolated and
+no tier can); its agent and dev sandboxes and its tests on this host as their choosers give them now (`bwrap`, else
+`none` with the reasons, or `refused` in a hosted run whose layer bubblewrap cannot sandbox them), or `hosted` when the
+grant's sandboxes run them. A sandbox whose own paths bubblewrap cannot bind safely runs as before even where the record
+says `bwrap`, which its own WARNING says. `MB-report.md` has the same as one line (`agent isolation: specialists <...>,
+sandboxes <...>, tests <...>: <reasons>`), and the session logs one WARNING at its start naming what runs unconfined. A
+multi-branch `hosted run` starts only when nothing it launches in the app container would run unconfined or be refused:
+with the layer's bubblewrap its specialists, and with `placement.measurement: local` its sandboxes and tests too, run
+under it; a spec measured there ends before anything starts while one of them would not.
 
 The tests that launch real sandboxes (marker `agent_isolation`) skip on a host without bubblewrap or a user namespace
 for it; with `HYPERLOOM_REQUIRE_ISOLATION_TESTS=1`, which CI sets after allowing unprivileged user namespaces, they
@@ -1233,7 +1272,10 @@ values), so a bad input stops the run before it starts. Which variables are requ
 and input variables are always required except for a session started by hand on a grant handed to it
 (`hyperloom-multibranch run --measurement hosted`), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,
 `HYPERLOOM_GRANT_LIMITS`, `HYPERLOOM_RUN_CREATED_AT` and the source pair. A variable that is set is checked even when it is not
-required.
+required. A multi-branch `hosted run` whose spec says `placement.measurement: local` measures on the app container's own cards:
+it needs no sandbox variable, key or source pair, and `HYPERLOOM_GRANT_LIMITS` is optional (its `max_runtime_sec`, when given,
+bounds the session together with the spec's `budget.max_hours`; see
+[Run hosted multi-branch on a new cluster](../how-to/hosted-multibranch-new-cluster.md)).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -1266,16 +1308,16 @@ stay, because other code reads them. The sandbox keys, the MCP token and the arc
 `HYPERLOOM_INPUT_FILE` (`hyperloom.campaign-spec/v1`, schema `src/hyperloom/contracts/campaign_spec.v1.schema.json`), runs the
 packaged `src/hyperloom/inference_optimizer/assets/install.sh` (no flags; the installer of the legacy launchers, from the same
 wheel as the running code; it provisions TraceLens, GEAK, ray and the container-local `kernel-agent.env.sh`, see `KERNEL_AGENT_ENV`) on every leg, fresh or resumed, into the interpreter that runs the entry (`PYTHON`, `VIRTUAL_ENV` and `INFERENCE_OPTIMIZER_FORCE_PYTHON=1` are set for it, and that interpreter's `bin` directory leads `PATH` for the installer and `optimize`), with its
-output in `$HYPERLOOM_STATE_DIR/install.log`, then runs `optimize` in the same process. An installer that exits non-zero ends the run
+output in `$HYPERLOOM_STATE_DIR/install.log` (a new file of each leg's, mode 0664, renamed over the previous leg's before the script starts: never opened in place), then runs `optimize` in the same process. An installer that exits non-zero ends the run
 with `{"final": true, "returncode": 2, "error": ...}` naming `install.sh` and the log. Before the installer, the entry checks that
 the run's specialists can be isolated, and ends the run the same way, naming why, where they cannot (see [Agent isolation](#agent-isolation)). The session directory is
 `$USER_DATA_PATH/<model directory name>/<HYPERLOOM_RUN_CREATED_AT as YYYYMMDDTHHMMSSZ>-<first 8 hex of sha256(HYPERLOOM_RUN_ID)>`; a
 restart finds the same directory and resumes it when it holds `manifest.json` and `state.json`. The entry writes two files in
-`$HYPERLOOM_STATE_DIR`: `session.json` (`{"session_dir": ...}`, as soon as the directory exists) and `exit.json`
+`$HYPERLOOM_STATE_DIR`, each a new file of mode 0664 renamed over the one before: `session.json` (`{"session_dir": ...}`, as soon as the directory exists) and `exit.json`
 (`{"final": true, "returncode": N, "stop_reason": ...}` when `optimize` ends for any reason, and `{"final": true, "returncode": 2,
 "error": ...}` when the request is refused). A host restarts the run only when `exit.json` is missing or its `final` is false.
 `HYPERLOOM_IMAGE` is set from the spec's `framework.image`, and the entry needs `USER_DATA_PATH` set to an absolute path. The result
-archive directory of the run is `<session dir>/archive/`, mode 2770 (the run's accounts share it, no one else can read it); one an earlier leg made is taken as it is, whoever made it, when this account can create a file in it, and refused when it is a link, not a directory, or writable by any account. The entry sets `HYPERLOOM_SESSION_PACKAGE_DEST` to it (whatever the host passed), so the session artifact package and its loose copies are written to `archive/hyperloom-session-packages/` on the shared storage, not to the container's `/workspace`.
+archive directory of the run is `<session dir>/archive/`, mode 2770 (the run's accounts share it, no one else can read it); one an earlier leg made is taken as it is, whoever made it, when this account can create a file in it, and refused when it is a link, not a directory, or open in any way to accounts outside its group (any of the others' permission bits). The packager makes the directories below it with its mode and each file new with mode 0660, renamed over the one an earlier leg left. The entry sets `HYPERLOOM_SESSION_PACKAGE_DEST` to it (whatever the host passed), so the session artifact package and its loose copies are written to `archive/hyperloom-session-packages/` on the shared storage, not to the container's `/workspace`.
 
 Each leg of a run may be another host account than the one before it, the accounts of the run sharing one group. Set up `HYPERLOOM_STATE_DIR` and `USER_DATA_PATH` as directories of that group with the setgid bit (`chmod 2775`), so that what is made below them takes the group; the entry warns on stderr, naming each, when one is not setgid. Before anything else, `app_bootstrap.sh` and then the entry check that this account can create and remove a file in each of them, and the entry then in the session directory; one it cannot ends the run with `{"final": true, "returncode": 2, "error": ...}` naming the directory, the errno and the directory's owner and mode, except that a `HYPERLOOM_STATE_DIR` this account cannot write is said on stderr only, since `exit.json` cannot be written there. The session directory, its parent and the directories of its skeleton are made mode 2775 whatever the umask, and an existing one is never chmodded. A hosted leg sets `HYPERLOOM_RUNTIME_DIR`, unless the host sets it, to a new mode-0700 directory below the container's temporary directory: the installer writes files there that later steps source and run, which must not be where another account of the group can replace them.
 
@@ -1315,7 +1357,10 @@ current one would pass 4 MiB. The directory and the run id (`source` is `hyperlo
 environment, so a child process started by the run has no events directory and never emits.
 
 * `id` is a decimal string that strictly increases within the run. After a restart it continues from the last complete line of the
-  last segment; a half-written last line is cut off first.
+  last segment; a half-written last line is cut off first, by replacing the segment with a copy of its complete lines.
+* Each start of the writer (each leg of a run) begins a new segment, numbered after the last one, made new with mode 0664: the next
+  leg may be another account of the directory's group, which reads the earlier segments and never writes into one. Set up
+  `HYPERLOOM_EVENTS_DIR`, when the host names one outside `$HYPERLOOM_STATE_DIR`, like that directory (the run's group, setgid).
 * Every line ends with a newline and is written whole, so a line without one is an unfinished write, not an event. A reader that
   tails by byte offset takes only complete lines.
 * One event is at most 16 KiB; a larger one is sent with `data` replaced by `{"oversized": true, "bytes": N, "keys": [...]}` and a

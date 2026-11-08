@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -18,8 +19,10 @@ import pytest
 from hyperloom.hosted import events as hosted_events
 from hyperloom.hosted.events import EVENT_MAX_BYTES, SEGMENT_MAX_BYTES, HostedProgressEvents, segment_name
 from hyperloom.hosted.host_info import Var, take_host_info
+from hyperloom_common.tests.shared_accounts import theirs
 from hyperloom.plugs import ManifestSources, PlugContext, PlugHost, builtin_registry, resolve_manifest
 
+_SRC = str(Path(hosted_events.__file__).parents[2])
 _REQUIRED = ("specversion", "id", "source", "type", "time", "datacontenttype", "data")
 
 
@@ -87,7 +90,7 @@ def test_ids_continue_across_a_restart_and_a_half_written_last_line_is_dropped(t
     assert _events(tmp_path)[-1]["data"]["message"] == "after"
 
 
-def test_a_restart_continues_from_the_previous_segment_when_the_last_one_is_empty(tmp_path):
+def test_a_restart_begins_a_new_segment_after_the_last_and_continues_its_ids_when_the_last_one_is_empty(tmp_path):
     first = HostedProgressEvents(tmp_path, "r")
     first.emit("hyperloom.warning", {"code": "c", "message": "m"})
     first.close()
@@ -97,8 +100,114 @@ def test_a_restart_continues_from_the_previous_segment_when_the_last_one_is_empt
     second.emit("hyperloom.warning", {"code": "c", "message": "m"})
     second.close()
 
-    assert (tmp_path / segment_name(2)).read_bytes().count(b"\n") == 1
+    assert (tmp_path / segment_name(2)).read_bytes() == b"", "an earlier start's segment is never written into"
+    assert (tmp_path / segment_name(3)).read_bytes().count(b"\n") == 1
     assert _ids(tmp_path) == [1, 2]
+
+
+def test_each_segment_is_made_new_with_mode_664_and_an_earlier_one_is_never_opened_for_writing(tmp_path):
+    """The next leg may be another account of the group: it reads the earlier segments, writes only its own, and a
+    half-written tail is dropped by replacing the segment, never by cutting it in place."""
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
+    _here(
+        "from pathlib import Path\nfrom hyperloom.hosted.events import HostedProgressEvents\n"
+        f"sink = HostedProgressEvents(Path({str(tmp_path / 'events')!r}), 'r')\n"
+        "sink.emit('hyperloom.warning', {'code': 'c', 'message': 'leg 1'})\nsink.close()\n",
+        umask=0o077,
+    )
+    events = tmp_path / "events"
+    first = events / segment_name(1)
+    assert stat.S_IMODE(events.stat().st_mode) == 0o2775 and stat.S_IMODE(first.stat().st_mode) == 0o664
+    with open(first, "ab") as handle:  # a crash in the middle of event 2
+        handle.write(b'{"specversion":"1.0","id":"2","sour')
+    (tmp_path / "leg-1-inode").hardlink_to(first)
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"kept\n")
+    (events / segment_name(2)).symlink_to(outside)  # planted where the next segment would go
+
+    second = HostedProgressEvents(events, "r")
+    second.emit("hyperloom.warning", {"code": "c", "message": "leg 2"})
+    second.close()
+
+    assert outside.read_bytes() == b"kept\n", "a link at a segment's name is never written through"
+    assert (tmp_path / "leg-1-inode").read_bytes().endswith(b'"sour'), "the earlier segment is replaced, not cut"
+    assert first.read_bytes().endswith(b"\n") and stat.S_IMODE(first.stat().st_mode) == 0o664
+    third = events / segment_name(3)
+    assert stat.S_IMODE(third.stat().st_mode) == 0o664
+    assert [json.loads(line)["id"] for line in third.read_bytes().splitlines()] == ["2"]
+
+
+def _one_leg(events: Path, message: str) -> None:
+    sink = HostedProgressEvents(events, "r")
+    sink.emit("hyperloom.warning", {"code": "c", "message": message})
+    sink.close()
+
+
+def _new_ids(events: Path, number: int) -> list[str]:
+    return [json.loads(line)["id"] for line in (events / segment_name(number)).read_bytes().splitlines()]
+
+
+@pytest.mark.parametrize("planted", ["directory", "pipe", "link"])
+def test_what_is_no_regular_file_at_the_newest_segments_name_is_passed_over_and_the_ids_go_on(tmp_path, planted):
+    events = tmp_path / "events"
+    _one_leg(events, "leg 1")
+    with open(events / segment_name(1), "ab") as handle:  # leg 1 died in the middle of event 2
+        handle.write(b'{"specversion":"1.0","id":"2","sour')
+    newest = events / segment_name(2)
+    if planted == "directory":
+        newest.mkdir()
+    elif planted == "pipe":
+        os.mkfifo(newest)
+    else:
+        newest.symlink_to(events / segment_name(1))
+
+    _one_leg(events, "leg 2")
+
+    assert _new_ids(events, 3) == ["2"], "no segment's ids: nothing holds any"
+    assert _new_ids(events, 1) == ["1"], "the newest segment is the one whose unfinished tail is cut"
+    assert (newest.is_dir() and not newest.is_symlink()) == (planted == "directory")
+
+
+def test_a_newest_segment_this_account_cannot_read_is_passed_over_and_no_id_it_may_hold_is_used_again(
+    tmp_path, monkeypatch
+):
+    """A segment only its owner may read: one a writer from before segments were the group's to read left."""
+    events = tmp_path / "events"
+    _one_leg(events, "leg 1")
+    _one_leg(events, "leg 2")
+    real_open = os.open
+
+    def owner_only(path, flags, *args, **kwargs):
+        if path == segment_name(2):
+            raise PermissionError(13, "Permission denied", path)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(hosted_events.os, "open", owner_only)
+    _one_leg(events, "leg 3")
+
+    assert _new_ids(events, 3) == [str(1 + hosted_events._MAX_EVENTS_PER_SEGMENT + 1)]
+    shortest = HostedProgressEvents(tmp_path / "other", "")._line(1, "", {})
+    assert len(shortest) >= hosted_events._MIN_EVENT_BYTES, "a bound on what a segment holds, not a guess"
+
+
+def test_a_link_another_account_put_where_the_events_directory_goes_is_never_followed(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir()
+    state.chmod(0o2775)
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    (state / "events").symlink_to(private)
+    theirs(state / "events", monkeypatch)
+    with pytest.raises(OSError, match="not followed"):
+        HostedProgressEvents(state / "events", "r")
+    assert list(private.iterdir()) == []
+
+
+def _here(code: str, *, umask: int) -> None:
+    """Run ``code`` in a process of its own under ``umask`` (this process's is never changed)."""
+    preamble = f"import os, sys\nos.umask({umask:#o})\nsys.path.insert(0, {_SRC!r})\n"
+    done = subprocess.run([sys.executable, "-I", "-c", preamble + code], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
 
 
 def test_a_segment_rolls_before_it_passes_four_mib(tmp_path):
@@ -290,6 +399,7 @@ def test_the_hosted_implementation_refuses_to_start_without_host_inputs():
 
 
 def test_the_events_directory_and_each_segment_are_the_group_s_for_the_run_s_next_leg(tmp_path):
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     events = tmp_path / "events"
     sink = HostedProgressEvents(events, "r", segment_max_bytes=1)
     sink.emit("hyperloom.warning", {"code": "c", "message": "one"})

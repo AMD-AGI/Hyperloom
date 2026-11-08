@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.sandbox.socket import Sandbox, SandboxError
-from hyperloom_common.shared_storage import make_shared_dirs, open_shared_append
+from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs, open_shared_append, shared_mode
 
 __all__ = [
     "FAILURE_DETAIL_CHARS",
@@ -105,6 +105,7 @@ class MeasurementJournal:
         self._path = self._dir / "measurements.jsonl"
         self._specs = self._dir / "specs"
         self._lock = threading.Lock()
+        self._mode = shared_mode(self._path, SHARED_FILE_MODE)  # judged before the directories are made
         make_shared_dirs(self._specs)
 
     @property
@@ -115,7 +116,7 @@ class MeasurementJournal:
         """Add a line and force it to disk before returning."""
         line = (record.to_line() + "\n").encode("utf-8")
         with self._lock:
-            fd = open_shared_append(self._path)
+            fd = open_shared_append(self._path, mode=self._mode)
             try:
                 os.write(fd, line)
                 os.fsync(fd)

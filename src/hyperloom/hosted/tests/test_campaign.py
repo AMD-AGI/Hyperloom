@@ -59,6 +59,8 @@ def _with(base, path, value):
 
 
 _DELETE = object()
+#: A multibranch spec measured on the application container's own cards.
+LOCAL_MULTIBRANCH = _with(_with(MINIMAL, "flow", "multibranch"), "placement.measurement", "local")
 
 # (document, the message the refusal must carry)
 REFUSALS = [
@@ -98,8 +100,9 @@ REFUSALS = [
     (_with(MINIMAL, "placement.max_parallel_tests", 0), "placement.max_parallel_tests must be an integer >= 1"),
     (_with(MINIMAL, "flow", "mesh"), "flow must be one of 'single', 'multibranch'"),
     (
-        _with(_with(MINIMAL, "flow", "multibranch"), "placement.measurement", "local"),
-        "must be 'hosted' for flow 'multibranch'",
+        _with(LOCAL_MULTIBRANCH, "placement.profile", "hosted-cpu"),
+        "placement.measurement 'local' measures on the application container's own cards for flow 'multibranch':"
+        " placement.profile must be 'hosted-gpu', got 'hosted-cpu'",
     ),
     (_with(MINIMAL, "source", {"kind": "bot"}), "source.kind must be one of 'user', 'ci'"),
     (
@@ -165,6 +168,19 @@ def test_defaults_follow_the_flow():
     assert (parse_campaign(MINIMAL).flow, parse_campaign(MINIMAL).measurement) == ("single", "local")
     multibranch = parse_campaign({**MINIMAL, "flow": "multibranch"})
     assert (multibranch.measurement, multibranch.max_parallel_tests) == ("hosted", 8)
+
+
+def test_a_multibranch_spec_measures_on_the_application_containers_own_cards_when_it_has_them():
+    spec = parse_campaign(LOCAL_MULTIBRANCH)
+
+    assert (spec.flow, spec.measurement, spec.profile) == ("multibranch", "local", "hosted-gpu")
+
+
+def test_a_multibranch_spec_without_a_profile_is_refused_once_for_the_profile():
+    with pytest.raises(CampaignError) as refused:
+        parse_campaign(_with(LOCAL_MULTIBRANCH, "placement.profile", _DELETE))
+
+    assert refused.value.problems == ("placement.profile is required",)
 
 
 def test_an_integer_written_as_a_float_is_an_integer():
@@ -279,6 +295,8 @@ def test_the_table_and_the_schema_name_the_same_fields_with_the_same_bounds():
         MINIMAL,
         *(doc for doc, _ in REFUSALS[1:]),
         {**MINIMAL, "flow": "multibranch", "placement": {"profile": "hosted-gpu", "measurement": "hosted"}},
+        {**MINIMAL, "flow": "multibranch", "placement": {"profile": "hosted-gpu", "measurement": "local"}},
+        {**MINIMAL, "flow": "multibranch", "placement": {"profile": "hosted-cpu", "measurement": "local"}},
     ],
 )
 def test_the_schema_and_the_validator_agree_on_accepting_and_refusing(doc):
@@ -288,7 +306,7 @@ def test_the_schema_and_the_validator_agree_on_accepting_and_refusing(doc):
         validator_says = True
     except CampaignError:
         validator_says = False
-    # The cross-field rule (flow against measurement) is not expressible in the schema; it is the one allowed gap.
+    # The cross-field rules (flow against measurement and profile) are not expressed in the schema; the one allowed gap.
     cross_field = (
         isinstance(doc, dict)
         and doc.get("flow") in ("single", "multibranch", None)
