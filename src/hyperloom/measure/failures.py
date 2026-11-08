@@ -9,7 +9,7 @@ wherever it is read. The classes drive different follow-ups in the tool layer:
 * ``infra``: nothing about the candidate was learned; retry in a fresh sandbox, write no negative result;
 * ``candidate``: the log carries a known failure signature, the server refused its own command line, or it did not
   become ready within its boot limit; record a negative result;
-* ``unclear``: non-zero with no known signature, or a timeout; rerun once in a fresh sandbox. The reason still names
+* ``unclear``: non-zero with no known signature, a stalled server, or a timeout; rerun once in a fresh sandbox. The reason still names
   what the log says (a refused evaluation request, a Python exception) when it says anything.
 
 A refused instruction sheet or a rejected result bundle is none of these. It is a program error (or a tampered result),
@@ -24,6 +24,8 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
+
+from inference_suite.contracts import FailedStep
 
 from hyperloom.common.failure_signature import (
     EVAL_RUNTIME_FAILURE,
@@ -124,6 +126,20 @@ TEST_TIMEOUT_REASON = "timeout"
 PORT_IN_USE_REASON = "port_in_use"
 #: The server did not report ready within the boot limit (``hyperloom.measure.boot_watch``).
 SERVER_BOOT_TIMEOUT_REASON = "server_boot_timeout"
+#: A requested GPU was not visible, or another process held it, when the suite checked before boot.
+HOST_GPUS_UNAVAILABLE_REASON = "host_gpus_unavailable"
+#: The server went quiet while serving (``FailedStep.SERVER_STALLED``): a hang or a slow candidate end alike.
+SERVER_STALLED_REASON = "server_stalled"
+#: The steps inference_suite names a round failed at that are not about the candidate, or that name the cause better
+#: than any line of a log that holds only the symptom. Every other step leaves the verdict to the logs.
+_FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
+    FailedStep.PORT_IN_USE: (FailureClass.INFRA, PORT_IN_USE_REASON),
+    FailedStep.GPUS_UNAVAILABLE: (FailureClass.INFRA, HOST_GPUS_UNAVAILABLE_REASON),
+    FailedStep.SERVER_SILENT_BEFORE_READY: (FailureClass.INFRA, HUNG_BEFORE_READY),
+    FailedStep.DISK_FULL: (FailureClass.INFRA, DISK_FULL),
+    FailedStep.TEARDOWN_INCOMPLETE: (FailureClass.INFRA, FailedStep.TEARDOWN_INCOMPLETE.value),
+    FailedStep.SERVER_STALLED: (FailureClass.UNCLEAR, SERVER_STALLED_REASON),
+}
 #: The two causes an unclear failure names when its log carries them; the reason is ``<prefix>: <the log's line>``.
 #: A failure the log only calls a crashed evaluation names the refused request too, when the log carries one.
 LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
@@ -207,6 +223,7 @@ def classify_test_failure(
     logs: Iterable[str] = (),
     client_logs: Iterable[str] = (),
     detail: str = "",
+    failed_step: FailedStep | None = None,
 ) -> FailureClassification:
     """Classify how one test ended.
 
@@ -214,7 +231,9 @@ def classify_test_failure(
     failure signature may be found in (stdout and stderr tails, the tails of ``server.log`` and of the benchmark's
     stderr); ``client_logs`` are the benchmark client's own output, read only for the infrastructure cause it states (a
     Hub download refused), never for a candidate's signature, since a client that failed on its own says nothing of the
-    server; ``detail`` is what the caller observed of a boot timeout, which the return code alone does not say.
+    server; ``detail`` is what the caller observed of a boot timeout, which the return code alone does not say;
+    ``failed_step`` is the step the failed round's ``report.json`` names, which inference_suite records in place of the
+    return code it exits with.
     """
     if error_class is not None:
         return _from_error_class(error_class)
@@ -233,10 +252,13 @@ def classify_test_failure(
     if refused:
         # Before the signatures: the client that was refused may then fail to load a tokenizer, which reads as one.
         return _infra(f"{HUB_RATE_LIMITED}: {refused}")
+    if failed_step in _FAILED_STEP_VERDICTS:
+        failure_class, reason = _FAILED_STEP_VERDICTS[failed_step]
+        return FailureClassification(Disposition.FAILED, failure_class, reason)
     named = _named_by_logs(text)
     if named is not None:
         return named
-    if returncode == SERVER_BOOT_TIMEOUT_RC:
+    if returncode == SERVER_BOOT_TIMEOUT_RC or failed_step is FailedStep.SERVER_BOOT_TIMEOUT:
         return _candidate(f"{SERVER_BOOT_TIMEOUT_REASON}: {detail}" if detail else SERVER_BOOT_TIMEOUT_REASON)
     return _from_unnamed_logs(text)
 

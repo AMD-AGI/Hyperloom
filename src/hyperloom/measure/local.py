@@ -1224,8 +1224,24 @@ def _ended(run: _Run) -> _Ended:
     returncode = failed[0].returncode if failed else _clean_returncode(run)
     stderr = "\n".join([*(result.error for _, result in run.results if result.error), *notes])
     logs = [stderr, *_failure_logs(failing)]
-    verdict = classify_test_failure(returncode=returncode, logs=logs, client_logs=_client_logs(failing), detail=detail)
+    verdict = classify_test_failure(
+        returncode=returncode,
+        logs=logs,
+        client_logs=_client_logs(failing),
+        detail=detail,
+        failed_step=_failed_step(failing),
+    )
     return _Ended(rounds, returncode, stderr, verdict)
+
+
+def _failed_step(failing: list[VariantResult]) -> FailedStep | None:
+    """The step the report of the first failed round that names one failed at; a round with no run_dir names none."""
+    for result in failing:
+        if result.workspace and is_round_folder(Path(result.workspace)):
+            step = RoundFolder.read(Path(result.workspace)).report.failed_step
+            if step is not None:
+                return step
+    return None
 
 
 def _outcome(run: _Run) -> TestOutcome:
