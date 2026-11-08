@@ -269,7 +269,7 @@ def _isolation_as(
     without ``setpriv``, in a user namespace of these uid and gid maps (written under ``where``; the gid map is the uid
     map unless given), on a host with no bubblewrap; returns the maps' directory."""
     monkeypatch.setattr(preflight, "account_problem", isolated.account_problem)
-    monkeypatch.setattr(preflight, "bwrap_isolation", lambda: NoIsolation((_NO_BWRAP,)))
+    monkeypatch.setattr(preflight, "compile_bwrap", lambda: NoIsolation((_NO_BWRAP,)))
     monkeypatch.setattr(isolated.os, "geteuid", lambda: euid)
     found = shutil.which
     tool = "/usr/bin/setpriv" if setpriv else None
@@ -300,7 +300,7 @@ def ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PreflightSite:
     monkeypatch.setattr(preflight, "geteuid", lambda: 0)
     monkeypatch.setattr(preflight, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(preflight, "account_problem", lambda: None)
-    monkeypatch.setattr(preflight, "bwrap_isolation", lambda: pytest.fail("the account tier works: no bubblewrap"))
+    monkeypatch.setattr(preflight, "compile_bwrap", lambda: pytest.fail("the account tier works: no bubblewrap"))
     monkeypatch.setattr(preflight, "tracelens_problem", lambda: None)
     monkeypatch.setattr(preflight, "stat_path", stat_open_above(tmp_path))
     return PreflightSite(
@@ -325,7 +325,7 @@ def test_a_ready_host_passes(ready: PreflightSite) -> None:
 
 def _no_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(preflight, "account_problem", lambda: NOT_ROOT)
-    monkeypatch.setattr(preflight, "bwrap_isolation", lambda: NoIsolation(("bubblewrap: not found on PATH",)))
+    monkeypatch.setattr(preflight, "compile_bwrap", lambda: NoIsolation(("bubblewrap: not found on PATH",)))
 
 
 @pytest.mark.parametrize(
@@ -449,9 +449,26 @@ def _bwrap_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only bubblewrap isolates the compile, and the interpreters are looked up on this host's ``PATH``."""
     monkeypatch.setattr(preflight, "which", shutil.which)
     monkeypatch.setattr(preflight, "account_problem", lambda: NOT_ROOT)
-    monkeypatch.setattr(
-        preflight, "bwrap_isolation", lambda: BwrapIsolation(BwrapProbe("/usr/bin/bwrap", (0, 9, 0), ()))
+    monkeypatch.setattr(preflight, "compile_bwrap", lambda: BwrapIsolation(BwrapProbe("/usr/bin/bwrap", (0, 9, 0), ())))
+
+
+def test_a_bubblewrap_that_cannot_give_the_compile_a_network_of_its_own_is_refused_at_start(
+    ready: PreflightSite, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Its probe passes (the canary keeps the host's network), so only the compile's own check can name it."""
+    line = "bwrap: loopback: Failed RTM_NEWADDR: No space left on device"
+    script = tmp_path / "fake-bwrap"
+    script.write_text(
+        f'#!/bin/sh\nfor a in "$@"; do [ "$a" = --unshare-net ] && {{ echo "{line}" >&2; exit 1; }}; done\n'
     )
+    script.chmod(0o755)
+    _bwrap_only(monkeypatch)
+    monkeypatch.setattr(preflight, "compile_bwrap", isolated.compile_bwrap)
+    monkeypatch.setattr(isolated, "bwrap_isolation", lambda: BwrapIsolation(BwrapProbe(str(script), (0, 9, 0), ())))
+
+    problem = _refusal(ready)
+
+    assert f"nor under bubblewrap (bubblewrap (0.9.0 {script}) with a network of its own: {line})" in problem
 
 
 def test_a_bubblewrap_that_gave_no_answer_in_time_is_not_a_refusal_at_start(
@@ -461,7 +478,7 @@ def test_a_bubblewrap_that_gave_no_answer_in_time_is_not_a_refusal_at_start(
     no_answer = "bubblewrap at /usr/bin/bwrap: no answer in 10 s"
     monkeypatch.setattr(preflight, "which", shutil.which)
     monkeypatch.setattr(preflight, "account_problem", lambda: NOT_ROOT)
-    monkeypatch.setattr(preflight, "bwrap_isolation", lambda: NoIsolation((no_answer,), transient=True))
+    monkeypatch.setattr(preflight, "compile_bwrap", lambda: NoIsolation((no_answer,), transient=True))
 
     with caplog.at_level(logging.WARNING, logger=preflight.logger.name):
         build_preflight(ready)

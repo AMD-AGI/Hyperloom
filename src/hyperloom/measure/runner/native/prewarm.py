@@ -76,7 +76,7 @@ from hyperloom.measure.runner.native.aiter_modules import (
     buildable_modules,
 )
 from hyperloom.measure.runner.native.builder import BuildMachine
-from hyperloom.measure.runner.native.isolated import IsolatedBuilds, Isolation, local_isolation
+from hyperloom.measure.runner.native.isolated import IsolatedBuilds, Isolation, Unisolated, local_isolation
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.orchestrator.actions.executors._aiter_jit import (
     AITER_ENV_TO_SERVING_MODULES,
@@ -164,7 +164,7 @@ def build_environment(environ: Mapping[str, str], cu_num: int | None) -> dict[st
 def isolated_builder(
     machine: BuildMachine,
     *,
-    isolation: Callable[[], Isolation | None] = local_isolation,
+    isolation: Callable[[], Isolation | Unisolated] = local_isolation,
     factory: str = AITER_RECIPE_FACTORY,
     environ: Mapping[str, str] | None = None,
 ) -> ModuleBuilder:
@@ -183,7 +183,7 @@ def isolated_builder(
         if planned is None:
             return {}
         isolated = isolation()
-        if isolated is not None and isolated.uid is not None:
+        if isinstance(isolated, Isolation) and isolated.uid is not None:
             # The compile's user passes through ``scratch`` to its work directory below it, without listing it.
             os.chmod(scratch, stat.S_IMODE(os.stat(scratch).st_mode) | stat.S_IXOTH)
         work = scratch / "build"
