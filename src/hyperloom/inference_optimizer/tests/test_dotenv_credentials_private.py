@@ -992,6 +992,8 @@ def test_root_in_a_container_on_the_users_bind_mounted_checkout_reads_its_dotenv
     checkout, workspace = container
     os.chown(checkout, _OTHER_UID, _OTHER_UID)
     os.chown(checkout / ".env", _OTHER_UID, _OTHER_UID)
+    # Preflight, as root, judges the user's .env before the install has rewritten it.
+    assert preflight_env._dotenv_not_private(checkout / ".env") is None
     mounted = tmp_path / "container-view" / "hyperloom"
     mounted.mkdir(parents=True)
     installer = _write_installer(tmp_path / "assets")
