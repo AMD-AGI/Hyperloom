@@ -8,6 +8,7 @@ import importlib
 import time
 
 import pytest
+from inference_suite.contracts import FailedStep
 
 from hyperloom.common import failure_signature
 from hyperloom.measure import failures, returncodes
@@ -292,6 +293,52 @@ def test_either_phrase_of_the_bind_failure_is_enough_and_it_beats_a_candidate_si
 
 def test_a_successful_exit_is_not_changed_by_a_bind_message_in_its_log() -> None:
     assert _classify(returncode=0, logs=[BIND_LOG]).disposition is Disposition.SUCCEEDED
+
+
+TRACEBACK_LOG = 'Traceback (most recent call last):\n  File "x.py", line 1\nRuntimeError: boom\n'
+
+
+@pytest.mark.parametrize(
+    ("step", "failure_class", "reason"),
+    [
+        (FailedStep.PORT_IN_USE, FailureClass.INFRA, "port_in_use"),
+        (FailedStep.GPUS_UNAVAILABLE, FailureClass.INFRA, "host_gpus_unavailable"),
+        (FailedStep.SERVER_SILENT_BEFORE_READY, FailureClass.INFRA, "hung_before_ready"),
+        (FailedStep.DISK_FULL, FailureClass.INFRA, "disk_full"),
+        (FailedStep.TEARDOWN_INCOMPLETE, FailureClass.INFRA, "teardown_incomplete"),
+        (FailedStep.SERVER_STALLED, FailureClass.UNCLEAR, "server_stalled"),
+        (FailedStep.SERVER_BOOT_TIMEOUT, FailureClass.CANDIDATE, "server_boot_timeout"),
+    ],
+)
+def test_the_step_a_round_failed_at_names_a_cause_its_log_does_not(step, failure_class, reason) -> None:
+    """``port_in_use`` is the suite's own refusal, which leaves no bind error in the log; a traceback is no cause."""
+    for logs in ([], [TRACEBACK_LOG]):
+        verdict = _classify(returncode=1, logs=logs, failed_step=step)
+        assert (verdict.failure_class, verdict.failure_reason) == (failure_class, reason)
+
+
+def test_a_stalled_server_is_unclear_and_does_not_settle_the_test_whatever_its_log_says() -> None:
+    verdict = _classify(returncode=1, logs=[TRACEBACK_LOG, IMPORT_ERROR_LOG], failed_step=FailedStep.SERVER_STALLED)
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, "server_stalled")
+    assert not decides_test(verdict)
+
+
+def test_a_boot_timeout_step_yields_to_a_cause_its_log_names_as_its_return_code_does() -> None:
+    verdict = _classify(returncode=1, logs=[IMPORT_ERROR_LOG], failed_step=FailedStep.SERVER_BOOT_TIMEOUT)
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, IMPORT_ERROR_REASON)
+
+
+def test_a_hub_refusal_still_beats_the_step() -> None:
+    verdict = _classify(returncode=1, client_logs=[HUB_REFUSED_CLIENT_LOG], failed_step=FailedStep.SERVER_STALLED)
+    assert verdict.failure_reason == f"{failures.HUB_RATE_LIMITED}: {HUB_REFUSAL}"
+
+
+@pytest.mark.parametrize(
+    "step", [FailedStep.SERVER_DIED, FailedStep.SERVER_EXITED_BEFORE_READY, FailedStep.CLIENT_FAILED]
+)
+@pytest.mark.parametrize("logs", [[], [TRACEBACK_LOG], [IMPORT_ERROR_LOG]])
+def test_a_step_about_the_candidate_leaves_the_verdict_to_the_log(step, logs) -> None:
+    assert _classify(returncode=1, logs=logs, failed_step=step) == _classify(returncode=1, logs=logs)
 
 
 @pytest.mark.parametrize(
