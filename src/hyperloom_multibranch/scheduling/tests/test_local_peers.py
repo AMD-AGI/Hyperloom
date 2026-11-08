@@ -473,6 +473,10 @@ async def test_an_agentx_session_measures_the_agentx_benchmark_it_writes_for_its
             str(tmp_path / "models" / "Llama-3-8B"),
         )
         assert (str(canonical["envs"]["TP"]), str(canonical["envs"]["CONC"])) == (str(workload.tp), str(workload.conc))
+        launch, frozen = canonical["agentx"]["launch_overrides"], frozen_base(toolbox)
+        assert frozen is not None and frozen.launch.args
+        assert launch["replace_args"] is True
+        assert launch["append_args"][: len(frozen.launch.args)] == list(frozen.launch.args)
 
 
 async def test_an_agentx_session_on_a_model_directory_serves_it_at_its_ep_in_the_sessions_image(
