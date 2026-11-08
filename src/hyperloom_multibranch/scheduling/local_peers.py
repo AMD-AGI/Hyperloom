@@ -189,7 +189,8 @@ class ToolboxBackend(Protocol):
 @dataclass(frozen=True)
 class LocalCards:
     """Tests run in local sandboxes on these cards of this machine, their sandboxes, archive and submit log under
-    ``MB-toolbox``."""
+    ``MB-toolbox``. The runners read the inference_suite staging from this host's runner cache, where it is published
+    before the toolbox is built; one already published is verified and kept."""
 
     cards: tuple[int, ...]
     on_this_machine: ClassVar[bool] = True
@@ -198,8 +199,18 @@ class LocalCards:
         self, setup: PeerSetup, blackboard: LocalBlackboard, acceptance: AcceptanceSetup, spec: SpecContext
     ) -> RealToolbox:
         from hyperloom.measure.framework.base import image_configs
-        from hyperloom_multibranch.toolbox.local_hosted import LocalOptions, LocalSession, build_local_toolbox
+        from hyperloom.measure.runner import suite_publish
+        from hyperloom_multibranch.toolbox.local_hosted import (
+            LocalOptions,
+            LocalSession,
+            build_local_toolbox,
+            runner_cache_dir,
+        )
 
+        try:
+            suite_publish.publish_own_inference_suite(runner_cache_dir(os.environ))
+        except suite_publish.SuitePublishError as exc:
+            raise PeersUnavailable(f"the inference_suite staging the runners read cannot be published: {exc}") from exc
         layout = setup.layout
         session = LocalSession(layout.toolbox, layout.session_id, self.cards, setup.workload.tp)
         # The tests read private copies of the tables of the aiter this machine's servers import (a vLLM image's

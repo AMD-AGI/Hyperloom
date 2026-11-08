@@ -8,7 +8,9 @@ It runs where the runner cache is built, on a host with network, after the commi
 the commit's own pins, so it is published by the commit's own ``inference_suite``, run from the entry's source
 (``python -m inference_suite publish``): it downloads the pinned CPython build and the client lock's wheels, verifies
 both by sha256, fetches InferenceX at its pin, and publishes the staging by rename under its staging key
-(:func:`inference_suite.staging_key`). A staging already published is verified and used as it is.
+(:func:`inference_suite.staging_key`). A staging already published is verified and used as it is. A session whose
+runners start from this installation publishes the staging of the ``inference_suite`` this interpreter imports
+(:func:`publish_own_inference_suite`).
 """
 
 from __future__ import annotations
@@ -18,9 +20,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import inference_suite
 from hyperloom.measure.runner.tools import INFERENCE_SUITE_DIR
 
-__all__ = ["SuitePublishError", "publish_inference_suite"]
+__all__ = ["SuitePublishError", "publish_inference_suite", "publish_own_inference_suite"]
 
 _TAIL = 2000
 #: Below an entry's source: the packages the commit's ``inference_suite`` imports from.
@@ -38,9 +41,23 @@ def publish_inference_suite(source: Path, cache_root: Path) -> Path:
     Raises:
         SuitePublishError: The publish command failed (its ``staging_missing`` line is in the message).
     """
+    return _publish(source / _SOURCE_PACKAGES, cache_root)
+
+
+def publish_own_inference_suite(cache_root: Path) -> Path:
+    """Publish the staging of the inference_suite this interpreter imports below ``cache_root``; returns the published
+    directory.
+
+    Raises:
+        SuitePublishError: The publish command failed (its ``staging_missing`` line is in the message).
+    """
+    return _publish(Path(inference_suite.__file__).resolve().parents[1], cache_root)
+
+
+def _publish(packages: Path, cache_root: Path) -> Path:
     argv = [sys.executable, "-m", "inference_suite", "publish", "--stagings", str(cache_root / INFERENCE_SUITE_DIR)]
     # The entry is checked file by file on reuse, so running its source must not write bytecode into it.
-    env = {**os.environ, "PYTHONPATH": str(source / _SOURCE_PACKAGES), "PYTHONDONTWRITEBYTECODE": "1"}
+    env = {**os.environ, "PYTHONPATH": str(packages), "PYTHONDONTWRITEBYTECODE": "1"}
     try:
         done = subprocess.run(argv, capture_output=True, text=True, check=False, env=env)
     except OSError as exc:
