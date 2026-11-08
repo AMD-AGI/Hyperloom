@@ -154,9 +154,9 @@ points. The single-session review, in Hyperloom's docs: `docs/how-to/multibranch
 - **No merge across operating points:** each point's session ends with its own recipe. A rule that combines them
   (for example, keep a change only if no point regresses) is not built.
 - **A dropped flag of the resolved launch:** a KEEP that runs without a flag the `--agent-launch` file sets now
-  removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, `b9d65167d` and
-  after). Only on AgentX, though: there the round applies it; on InferenceX such a removal is refused.
-- **No profile on CUDA-graph runs:** a branch's `component.profile` takes op shares only. On a run where TraceLens
+  removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, Hyperloom `b9d65167d` and after). Only
+  on AgentX, though: there the round applies it; on InferenceX such a removal is refused.
+- **No profile on graph-captured runs:** a branch's `component.profile` takes op shares only. On a run where TraceLens
   degraded, the branches get none, though the dossier pass got kernel shares.
 - **One Arbor without the review:** with `--no-review-gate` and no `--agent-directions`, a lone Arbor gets no
   dossier pass and makes its own dossier inside its branch.

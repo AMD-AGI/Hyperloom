@@ -48,14 +48,28 @@ done
 [ "$found" -gt 0 ] || echo "no dossier under: ${roots[*]} (looked for docs/dossier/*/README.md)"
 
 [ "${ARBOR_DOSSIER_NO_SHARE:-0}" = 1 ] && exit 0
-share_root=${ARBOR_SHARE_ROOT:-/path/to/arbor-share}
+# The site's own settings (ARBOR_SETTINGS, default ~/.arbor/settings.env) fill what the environment leaves unset.
+setting() {
+    local v=${!1:-} f=${ARBOR_SETTINGS:-$HOME/.arbor/settings.env}
+    if [ -z "$v" ] && [ -f "$f" ]; then
+        v=$(sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?$1=//p" "$f" | tail -1)
+        v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
+    fi
+    printf '%s' "$v"
+}
+share_root=$(setting ARBOR_SHARE_ROOT)
+if [ -z "$share_root" ]; then
+    echo "share not searched: no share root set (ARBOR_SHARE_ROOT, in the environment or ~/.arbor/settings.env)"
+    exit 0
+fi
 share_glob="$share_root/projects/*/*/*/knowledge/dossier/README.md"
 if [ -d "$share_root/projects" ]; then
     # shellcheck disable=SC2086  # the glob expands here
     bash -c "$report" _ $share_glob \
         || echo "no dossier on the share: $share_root/projects (looked for */*/*/knowledge/dossier/README.md)"
 else
-    host=${ARBOR_SHARE_HOST:-arbor-share}
+    host=$(setting ARBOR_SHARE_HOST)
+    host=${host:-arbor-share}
     # Some ssh gateways take commands, not piped stdin, so the listing travels
     # inside the command. Some also exit 0 whatever happened, so a marker, not
     # the exit status, says the listing ran.

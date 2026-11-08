@@ -11,10 +11,12 @@ git revert rolls both back atomically.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ARBOR_CONFIG_RELPATH = "arbor/config.json"
@@ -42,6 +44,57 @@ def run_in(container: str, argv: list[str], workdir: str | None = None,
     it: without ``-i``, ``docker exec`` gives it an empty stdin (``git apply -`` then applies nothing)."""
     cmd, cwd = exec_argv(container, argv, workdir, stdin="input" in kwargs)
     return subprocess.run(cmd, cwd=cwd, **kwargs)
+
+
+MOUNT_PROBE = ".arbor-mount-probe"
+
+
+def session_mount_problem(container: str, session_dir: str | Path, session_mount: str,
+                          tries: int = 3) -> str | None:
+    """Why the container does not see the session at ``<session_mount>/<session name>``, or None.
+
+    The bench writes ``<session_mount>/<session name>/iter_N/bench_output.json`` in the container,
+    and the harness reads ``<session>/iter_N`` here, so ``session_mount`` must be the container's
+    path of the session's parent directory. A mount of the session itself puts every file one
+    level deeper, where the harness never reads it. A token written here and read back there
+    proves the two paths are one directory; a directory that only exists there does not.
+    None too when it cannot be checked (no container, the host itself, docker not answering):
+    a broken container fails on its own soon enough.
+    """
+    if not container or container == HOST or not session_mount:
+        return None
+    session_dir = Path(session_dir)
+    probe = session_dir / MOUNT_PROBE
+    there = f"{session_mount.rstrip('/')}/{session_dir.name}/{MOUNT_PROBE}"
+    token = f"{os.getpid()}-{time.time_ns()}"
+    try:
+        probe.write_text(token)
+    except OSError:
+        return None
+    try:
+        seen = None
+        for attempt in range(tries):
+            try:
+                r = run_in(container, ["cat", there], capture_output=True, text=True, timeout=60)
+            except (OSError, subprocess.SubprocessError):
+                return None
+            if r.returncode == 0 and r.stdout.strip() == token:
+                return None
+            said = (r.stderr or "") + (r.stdout or "")
+            if r.returncode != 0 and "No such file" not in said:
+                return None                # no container, no daemon, no permission: not this check's to judge
+            seen = (r.stdout or r.stderr or "").strip()[:120]
+            if attempt + 1 < tries:
+                time.sleep(1)              # a shared filesystem can lag behind a fresh write
+        return (f"the container {container!r} does not see this session at {there.rsplit('/', 1)[0]} "
+                f"(read {seen or 'nothing'!r} there): session_mount ({session_mount!r}) must be the container's "
+                f"path of the session's parent directory, {session_dir.parent}. Otherwise the bench writes "
+                f"its results one level deeper, where the harness never reads them")
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
 
 
 def write_workspace_config(
@@ -242,7 +295,14 @@ def commit(container: str, workspace: str, message: str) -> str:
 
 
 def revert(container: str, workspace: str) -> None:
-    """Revert the last commit."""
+    """Revert the last commit. An empty one (a probe's, or a change made only in another editable tree,
+    arbor/execute/trees.py) has nothing to undo, which ``git revert`` refuses: its revert is an empty commit too,
+    so the history still says the iteration was reverted."""
+    r = run_in(container, ["git", "diff", "--quiet", "HEAD~1", "HEAD"], workdir=workspace, capture_output=True)
+    if r.returncode == 0:
+        subject = git(container, workspace, "log", "-1", "--format=%s")
+        git(container, workspace, "commit", "--allow-empty", "-m", f'Revert "{subject}"')
+        return
     git(container, workspace, "revert", "--no-edit", "HEAD")
 
 
@@ -451,27 +511,49 @@ def recover_orphaned_commit(
     Happens when the process is killed after commit() but before state.save().
     Handles multiple stacked orphans (e.g. killed run left 2 commits).
     Returns True if any revert was performed.
+
+    An iteration already reverted is not an orphan: its ``Revert "iter-N: ..."`` commit has
+    undone it, and reverting that revert would put the change back. Earlier the walk matched
+    the revert too, so a retried iteration re-applied the change it had just undone, and the
+    tree held a patch the session recorded as reverted. The walk goes down from HEAD: a
+    revert marks its iteration undone, an ``iter-N:`` commit above the record that is not
+    undone is an orphan, and anything else ends the walk. The orphans are reverted newest
+    first, and what the recovery changed is logged.
     """
-    reverted_any = False
-    for _ in range(20):
-        try:
-            last_msg = git(container, workspace, "log", "-1", "--format=%s")
-        except RuntimeError:
+    try:
+        log = git(container, workspace, "log", "-60", "--format=%H%x09%s")
+    except RuntimeError:
+        return False
+    undone: set[int] = set()
+    orphans: list[tuple[str, str]] = []
+    for line in log.splitlines():
+        sha, _, subject = line.partition("\t")
+        m = re.match(r'Revert "iter-(\d+):', subject)
+        if m:
+            undone.add(int(m.group(1)))
+            continue
+        m = re.match(r"iter-(\d+):", subject)
+        if not m or int(m.group(1)) <= recorded_iteration:
             break
-        # Match iter-N commits AND their reverts (Revert "iter-N: ...")
-        m = re.match(r"(?:Revert \")?iter-(\d+):", last_msg)
-        if m and int(m.group(1)) > recorded_iteration:
-            print(
-                f"[arbor] Orphaned commit detected (iter-{m.group(1)} > recorded "
-                f"iter-{recorded_iteration}) — reverting: {last_msg[:60]}"
-            )
-            try:
-                git(container, workspace, "checkout", "--", ".")
-                git(container, workspace, "clean", "-fd")
-            except RuntimeError:
-                pass
-            revert(container, workspace)
-            reverted_any = True
+        if int(m.group(1)) not in undone:
+            orphans.append((sha, subject))
+    if not orphans:
+        return False
+    before = git(container, workspace, "rev-parse", "HEAD")
+    try:
+        git(container, workspace, "checkout", "--", ".")
+        git(container, workspace, "clean", "-fd")
+    except RuntimeError:
+        pass
+    for sha, subject in orphans:
+        print(f"[arbor] Orphaned commit detected ({subject.split(':', 1)[0]} > recorded "
+              f"iter-{recorded_iteration}) — reverting: {subject[:60]}")
+        empty = run_in(container, ["git", "diff", "--quiet", f"{sha}~1", sha], workdir=workspace,
+                       capture_output=True).returncode == 0
+        if empty:
+            git(container, workspace, "commit", "--allow-empty", "-m", f'Revert "{subject}"')
         else:
-            break
-    return reverted_any
+            git(container, workspace, "revert", "--no-edit", sha)
+    print(f"[arbor] Orphan recovery changed: "
+          f"{git(container, workspace, 'diff', '--stat', before, 'HEAD').strip() or 'nothing in the tree'}")
+    return True

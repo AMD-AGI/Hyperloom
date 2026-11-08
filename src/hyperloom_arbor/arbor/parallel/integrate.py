@@ -142,6 +142,8 @@ def _submit(ctx, n: int, doc: dict, a: dict, exclude: list[str]) -> None:
            "PAR_TEMPLATE": str(cfg.template_config), "PAR_AITER": str(aiter) if aiter.is_file() else "",
            "PAR_MARKER": "", "CAMPAIGN_ARBOR": str(cfg.arbor_root)}
     # TODO(phase 4): PAR_POINTS, an architectural addition measured at every point of its table.
+    if not cfg.cluster.ab_script:
+        raise ValueError("the run config names no cluster.ab_script, the launcher of the A/B")
     track_submit(ctx.cluster, rec, str(cfg.path(cfg.cluster.ab_script)), env=env, exclude=exclude,
                  time_limit=cfg.cluster.time_limit,
                  output=f"{cfg.cluster.log_dir}/{rec['name']}.out" if cfg.cluster.log_dir else str(d / "job.log"))

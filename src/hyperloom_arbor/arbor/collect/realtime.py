@@ -198,8 +198,8 @@ PHASE_RULES = [
     # Between iterations: a chunk's start, its bar (a campaign launcher's log prefix),
     # a round end's A/B (the launcher's round_ab hook; the page shows the A/B's last line).
     (r"^\[chunk .* takes over", "chunk", "a new chunk starts"),
-    (r"^\[campaign\] .*(measuring the bar|\[rebase\])", "rebase", "measuring this node's bar"),
-    (r"^\[campaign\] .*driver starting", "driver", "driver starting"),
+    (r"^\[(?!arbor\])[\w.-]+\] .*(measuring the bar|\[rebase\])", "rebase", "measuring this node's bar"),
+    (r"^\[(?!arbor\])[\w.-]+\] .*driver starting", "driver", "driver starting"),
     (r"^\[(round-ab\]|arbor\] round: A/B)", "round_ab", "round-end A/B"),
 ]
 
