@@ -17,7 +17,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv, parse_removal_specs
-from inference_suite.contracts.base_launch import BaseLaunch, EnvValue
+from inference_suite.contracts.base_launch import BaseLaunch, EnvValue, RunnerOwned
 from inference_suite.contracts.config import GoldenUse, LaunchDelta, RunnerLayer, ServerConfig, SuiteConfig
 from inference_suite.contracts.launch import (
     ClientInvocation,
@@ -95,9 +95,23 @@ def _layer_refusal(source: LayerSource, touch: _Touch, owned: _Touch, golden_hel
     return None
 
 
-def _owned(base: BaseLaunch, runner_flags: Iterable[str | None]) -> _Touch:
-    flags = base.runner_owned.flags() | {canonical_flag_name(flag) for flag in runner_flags if flag}
-    return _Touch(flags=flags, env=frozenset({*base.runner_owned.env, GPU_MASK_ENV}), golden=())
+def runner_owned(base: BaseLaunch) -> RunnerOwned:
+    """What no user or candidate layer on ``base`` may set: the base's runner-owned keys, the guard's and the metrics
+    flag. A launch a round composed spells them, so a layer replayed from it leaves them out."""
+    spec = framework_facts(Framework(base.framework))
+    server_flags = spec.server_flags
+    guard = (
+        (server_flags.model, server_flags.host, server_flags.port, server_flags.served_model_name)
+        if server_flags is not None
+        else ()
+    )
+    flags = {*base.runner_owned.args, *(flag for flag in (*guard, spec.metrics_flag) if flag)}
+    return RunnerOwned(args=tuple(sorted(flags)), env=tuple(sorted({*base.runner_owned.env, GPU_MASK_ENV})))
+
+
+def _owned(base: BaseLaunch) -> _Touch:
+    owned = runner_owned(base)
+    return _Touch(flags=owned.flags(), env=frozenset(owned.env), golden=())
 
 
 def _first_refusal(server: ServerConfig, base: BaseLaunch, owned: _Touch) -> Refusal | None:
@@ -228,8 +242,7 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     server_flags = spec.server_flags
     if server_flags is None:
         raise LaunchError(f"{framework.value} runs no server, so it has no launch to compose")
-    guard_flags = (server_flags.model, server_flags.host, server_flags.port, server_flags.served_model_name)
-    refusal = _first_refusal(server, base, _owned(base, (*guard_flags, spec.metrics_flag)))
+    refusal = _first_refusal(server, base, _owned(base))
     if refusal is not None:
         return refusal
 
@@ -267,4 +280,4 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     )
 
 
-__all__ = ["GPU_MASK_ENV", "Refusal", "RoundFacts", "compose"]
+__all__ = ["GPU_MASK_ENV", "Refusal", "RoundFacts", "compose", "runner_owned"]

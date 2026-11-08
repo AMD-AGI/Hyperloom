@@ -11,7 +11,7 @@ from dataclasses import replace
 
 import pytest
 
-from inference_suite.compose import GPU_MASK_ENV, Refusal, RoundFacts, compose
+from inference_suite.compose import GPU_MASK_ENV, Refusal, RoundFacts, compose, runner_owned
 from inference_suite.contracts import FailedStep, GoldenUse, LaunchDelta, RunnerLayer
 from inference_suite.contracts.launch import (
     LAUNCH_SCHEMA,
@@ -171,6 +171,26 @@ def test_a_candidate_setting_a_runner_owned_key_is_refused(delta, named):
 
     assert (refusal.step, refusal.source) == (FailedStep.CONFIG_INVALID, LayerSource.CANDIDATE)
     assert named in refusal.detail
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm"])
+def test_runner_owned_names_every_key_the_composer_refuses(framework):
+    base = (
+        _base()
+        if framework == "sglang"
+        else _base(framework=framework, entrypoint=("vllm", "serve"), args=("--tensor-parallel-size", "8"))
+    )
+    owned = runner_owned(base)
+    config = _config()
+    server = replace(config.server, base=replace(config.server.base, digest=base.digest()))
+
+    for flag in owned.args:
+        user = LaunchDelta(args_add=(flag,))
+        refusal = compose(replace(config, server=replace(server, user=user)), base, _FACTS)
+        assert isinstance(refusal, Refusal) and flag in refusal.detail, flag
+    assert GPU_MASK_ENV in owned.env
+    if framework == "sglang":
+        assert "enable-metrics" in owned.flags()
 
 
 def test_a_base_naming_a_guard_flag_is_refused():

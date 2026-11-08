@@ -3,8 +3,8 @@
 
 """What the model behind a branch's specialist is told: its role once, and at every launch where its branch stands.
 
-The role says how a long-running specialist works through the session's tools, what has found gains on ROCm before,
-how its candidates are judged, how it
+The role says how a long-running specialist works through the session's tools, the base launch every recipe changes,
+what has found gains on ROCm before, how its candidates are judged, how it
 declares a correctness fix with its repro case, and which gains the toolbox refuses as fake (main's ``FAKE_GAINS``
 catalog, so a new row reaches the role). The
 launch prompt opens, on a branch log longer than it shows, with a summary of what was tried, its results and the
@@ -26,6 +26,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from hyperloom.measure.runner.native.recipes import NATIVE_BUILD_REFUSE
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
@@ -38,6 +39,9 @@ from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_na
 from hyperloom_multibranch.specialist.following import REROOT
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionStart, restart_notice
+
+if TYPE_CHECKING:
+    from hyperloom.orchestrator.state.base_launch import ServerBase
 
 #: Branch-log entries a launch prompt shows; the specialist reads further back with blackboard_branch_log.
 RECENT_ENTRIES = 20
@@ -200,10 +204,15 @@ the target's share of GPU time on that commit (target_share_pct), the summed sha
 speeding up a part worth w of the time gains at most w/(1-w), so prefer the directions with the largest such ceiling. Claim the intent before you work on it. A refused claim says why: the change was \
 tested or is being tested on this state, its ceiling is below the session's bar, or another branch is testing it \
 (testing_elsewhere), whose outcome then reaches you as a peer_outcome; read that result or choose another direction.
-3. Make the change. For server arguments or environment variables, write the delta's config yourself, with exactly \
-these keys: {{{{"config": {{{{"extra_server_args": "--flag value --other-flag", "extra_envs": {{{{"NAME": "value"}}}}}}}}}}}}. \
-extra_server_args is one string of command-line flags; a key the delta does not define is refused, and the error \
-lists the keys it takes. For source, \
+3. Make the change. For server arguments or environment variables, write the delta's config yourself, with these \
+keys, each optional: {{{{"config": {{{{"extra_server_args": "--flag value --other-flag", "extra_envs": {{{{"NAME": \
+"value"}}}}, "remove_args": ["--old-flag"], "unset_envs": ["OLD_NAME"]}}}}}}}}. extra_server_args is one string of \
+command-line flags it adds or sets anew, extra_envs the variables it sets; a key the delta does not define is refused, \
+and the error lists the keys it takes. remove_args turns flags off by name, their values with them: one your head's \
+recipe sets leaves the recipe, and one only the session's base launch sets is removed from the launch on an AgentX \
+workload, while on an InferenceX workload (ISL and OSL) that removal is refused, so such a flag stays: set its value \
+instead where it takes one. unset_envs drops variables your head's recipe sets; a variable of the base launch changes \
+only by setting it in extra_envs. For source, \
 call worktree_sync, edit the files in your worktree, and call worktree_check with the component until it passes (the \
 files compile and the package imports with your change); then worktree_patch returns the delta and the parent commit \
 to test. When your change adds a code path, put a one-time log line on the path it adds, and when its result is \
@@ -466,19 +475,21 @@ def role_prompt(
     workload: str,
     references: Mapping[str, Path] | None = None,
     *,
+    base: ServerBase | None = None,
     dev_leases: int = 0,
     native: Mapping[str, NativeTree] | None = None,
 ) -> str:
     """The system prompt of every session of every specialist; ``workload`` names what the session optimizes,
     ``references`` the reference material the session was given, each source's name and the directory it was copied
-    to, ``dev_leases`` how many dev sandboxes the session lends at once (none: the specialist has no GPU), and
-    ``native`` the native trees its worktrees hold, by component (none: native code is not built)."""
+    to, ``base`` the server half of the session's frozen base launch, which every recipe changes (none: not shown),
+    ``dev_leases`` how many dev sandboxes the session lends at once (none: the specialist has no GPU), and ``native``
+    the native trees its worktrees hold, by component (none: native code is not built)."""
     named = " ".join(workload.split())
     if not named:
         raise ValueError("a specialist's role names the workload its session optimizes")
     gpu_rule = _DEV_SANDBOX if dev_leases > 0 else _NO_GPU
     role = _ROLE.format(workload=named, fake_gains=_fake_gains(), directions=_direction_names(), gpu_rule=gpu_rule)
-    return role + _native(native or {}) + _references(references or {})
+    return role + _native(native or {}) + _references(references or {}) + _base(base)
 
 
 _NATIVE = """
@@ -517,6 +528,21 @@ Reference material for this session, read-only and copied in when it started, on
 Before you guess at a kernel, a tuning step or a setting, read what it says about this model's operators and your \
 direction, and name the file you used in your branch log.
 """
+
+
+_BASE = """
+The session's base launch, frozen when it started and read-only: every test's server starts from it, your head's \
+recipe on top of it (a flag set again takes the recipe's value). Server arguments: {args}. Environment: {env}. A \
+recipe holds only what it changes on this launch: an empty extra_server_args means this launch as it is, so read a \
+flag's state here before you call a change to it a no-op.
+"""
+
+
+def _base(base: ServerBase | None) -> str:
+    if base is None:
+        return ""
+    env = " ".join(f"{name}={value}" for name, value in sorted(base.env.items()))
+    return _BASE.format(args=base.args or "none", env=env or "none")
 
 
 def _references(references: Mapping[str, Path]) -> str:
@@ -658,7 +684,7 @@ def prompt_versions() -> dict[str, str]:
     role = _ROLE.format(
         workload="{workload}", fake_gains=_fake_gains(), directions=_direction_names(), gpu_rule=_NO_GPU
     )
-    settings = (_DEV_SANDBOX, _NATIVE, _REFERENCES, *_HOLDS.values())
+    settings = (_DEV_SANDBOX, _NATIVE, _REFERENCES, _BASE, *_HOLDS.values())
     texts = {
         "specialist_role": "\n".join((role, *settings)),
         "specialist_launch": "\n".join((*_LAUNCH, _LEASE_WAKE, _WAIT_WAKE)),
