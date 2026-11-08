@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 """A session freezes the base launch its tests run on once, resolved as ``hyperloom optimize`` resolves it, and a
-resumed session keeps the one it froze."""
+resumed session keeps the one it froze; an operator's base launch record is the base, frozen without reading any
+recipe source, and the Arbor agents are served the frozen base."""
 
 from __future__ import annotations
 
@@ -10,24 +11,30 @@ import dataclasses
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
 from hyperloom.inference_optimizer.cli import base_launch as cli_base_launch
 from hyperloom.measure.tests.bundle_factory import base_launch
 from hyperloom.inference_optimizer.session.base_launch import write_base_launch
-from hyperloom.orchestrator.state.base_launch import freeze_base, frozen_base
+from hyperloom.orchestrator.state.base_launch import FrozenBase, freeze_base, frozen_base
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
-from hyperloom_multibranch.scheduling.session_base import freeze_session_base
+from hyperloom_multibranch.scheduling.session_base import freeze_session_base, served_launch
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
+from hyperloom_multibranch.specialist.arbor_adapter import read_launch
+from hyperloom_multibranch.tests.base_records import MODEL_ID, base_record, write_record
 from inference_suite import SourceSnapshot
 from inference_suite.contracts import Workload as LaunchWorkload
+from inference_suite.recipe import sources
 from inference_suite.recipe.resolve import UnreadSource
 
 WORKLOAD = Workload(
     "/models/Llama-3.1-8B-Instruct", "sglang", 2, 16, "fp8", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
 )
 AGENTX = replace(WORKLOAD, inferencex=None, ep=2)
+#: The AgentX workload the record of :func:`base_record` serves.
+RECORDED = Workload(MODEL_ID, "vllm", 2, 8, "fp8", "mi355x", KernelOptimizer.FORGE, None)
 
 
 @pytest.fixture
@@ -43,6 +50,16 @@ def asked(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, object]]:
 
     monkeypatch.setattr(cli_base_launch, "fetch_sources", fetch)
     return calls
+
+
+@pytest.fixture
+def offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """InferenceX cannot be read, as on a host without egress."""
+
+    def unread(*_: object) -> NoReturn:
+        raise AssertionError("a recipe source was read")
+
+    monkeypatch.setattr(sources, "_inferencex", unread)
 
 
 def test_a_fresh_session_freezes_the_base_resolved_for_its_workload_in_the_toolbox_directory(
@@ -141,3 +158,35 @@ def test_a_base_on_another_topology_than_the_workloads_is_refused(tmp_path: Path
     with pytest.raises(PeersUnavailable, match="the query asks for tp 2, the launch runs 1"):
         freeze_session_base(tmp_path / "toolbox", WORKLOAD, str(record))
     assert frozen_base(tmp_path / "toolbox") is None
+
+
+def test_a_record_is_frozen_as_the_base_without_a_source_and_arbor_is_served_the_frozen_base(
+    tmp_path: Path, offline: None
+) -> None:
+    record = write_record(tmp_path / "base_launch.json")
+
+    frozen = freeze_session_base(tmp_path / "toolbox", RECORDED, str(record))
+
+    assert (frozen.launch.args, frozen.launch.golden_al) == (base_record().args, base_record().golden_al)
+    assert served_launch(frozen, str(record)) == str(frozen.path)
+    assert read_launch(frozen.path).digest == frozen.launch.digest()
+
+
+def test_a_resumed_session_keeps_its_base_and_serves_it_for_a_record(tmp_path: Path, offline: None) -> None:
+    toolbox = tmp_path / "toolbox"
+    first = freeze_session_base(toolbox, RECORDED, str(write_record(tmp_path / "first.json")))
+    other = write_record(tmp_path / "other.json", base_record(env={"VLLM_ROCM_USE_AITER": "0"}))
+
+    resumed = freeze_session_base(toolbox, RECORDED, str(other))
+
+    assert resumed.launch == first.launch
+    assert served_launch(resumed, str(other)) == str(first.path)
+
+
+def test_an_arbor_launch_file_is_served_as_it_is(tmp_path: Path) -> None:
+    launch = tmp_path / "launch.json"
+    launch.write_text(json.dumps({"server_flags": "--max-num-seqs 64", "server_env": {}}), encoding="utf-8")
+    frozen = FrozenBase(tmp_path / "toolbox" / "base_launch.json", base_record())
+
+    assert served_launch(frozen, str(launch)) == str(launch)
+    assert served_launch(frozen, "") == ""
