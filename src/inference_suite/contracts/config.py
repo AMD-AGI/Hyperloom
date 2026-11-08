@@ -21,7 +21,7 @@ from inference_suite.contracts.base_launch import _ENV_NAME, _OPTION, BaseLaunch
 
 CONFIG_SCHEMA = "inference-suite-config/1"
 DEFAULT_MAX_TOKENS_CAP = 4096
-DEFAULT_PRE_READY_SILENCE_SEC = 900
+DEFAULT_PRE_READY_SILENCE_SEC = 1800
 #: The only client environment an AgentX round passes through, and the fast mode it must pin off.
 AGENTX_CLIENT_ENV_PREFIX = "AIPERF_"
 AGENTX_FAST_MODE_ENV = "AIPERF_EXPERIMENTAL_FAST"
