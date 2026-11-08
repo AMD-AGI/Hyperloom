@@ -223,13 +223,15 @@ class FailureEvidence:
     the infrastructure cause it states (a Hub download refused), never for a candidate's signature, since a client that
     failed on its own says nothing of the server; ``detail`` is what the caller observed of a boot timeout, which the
     return code alone does not say; ``failed_step`` is the step the failed round's ``report.json`` names, which
-    inference_suite records in place of the return code it exits with.
+    inference_suite records in place of the return code it exits with; ``unrun`` is ``<error_class>: <message>`` of a
+    failed round refused before it ran, which left no log: the only account of it there is.
     """
 
     logs: tuple[str, ...] = ()
     client_logs: tuple[str, ...] = ()
     detail: str = ""
     failed_step: FailedStep | None = None
+    unrun: str = ""
 
 
 def classify_test_failure(
@@ -268,7 +270,7 @@ def classify_test_failure(
     if returncode == SERVER_BOOT_TIMEOUT_RC or step is FailedStep.SERVER_BOOT_TIMEOUT:
         detail = evidence.detail
         return _candidate(f"{SERVER_BOOT_TIMEOUT_REASON}: {detail}" if detail else SERVER_BOOT_TIMEOUT_REASON)
-    return _from_unnamed_logs(text)
+    return _from_unnamed_logs(text, evidence.unrun)
 
 
 def decides_test(verdict: FailureClassification) -> bool:
@@ -322,8 +324,11 @@ def _named_by_logs(text: str) -> FailureClassification | None:
     return None
 
 
-def _from_unnamed_logs(text: str) -> FailureClassification:
-    """An unclear failure, with the line of the log that says what happened when there is one."""
+def _from_unnamed_logs(text: str, unrun: str) -> FailureClassification:
+    """An unclear failure, named by what the runner recorded of a round that never ran, else by the line of the log that
+    says what happened when there is one."""
+    if unrun:
+        return _unclear(" ".join(unrun.split())[:LOG_LINE_CHARS])
     for reason, cause in (
         (LM_EVAL_BAD_REQUEST_REASON, log_causes.bad_request(text)),
         (PYTHON_EXCEPTION_REASON, log_causes.python_exception(text)),

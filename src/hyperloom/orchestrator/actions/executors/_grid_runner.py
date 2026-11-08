@@ -736,6 +736,13 @@ async def _reported_round(run: _GridRun, at: _VariantSlot, label: str, bench_rou
                 run_grid_suite_round, route, bench_round, env_drop=unset, serving_lease=lease, on_poll=activity.note
             )
         except SuiteRoundRefused as exc:
+            log.warning(
+                "grid_runner: variant %s %s round refused before it ran: %s",
+                _variant_tag(run, at),
+                label,
+                exc,
+                exc_info=True,
+            )
             _abort_variant(at, _VariantFailure(exc.error_class, exc.detail))
     return _RoundProcess(ended.returncode, "", ended.detail)
 

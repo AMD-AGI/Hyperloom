@@ -502,6 +502,18 @@ def test_a_round_whose_client_could_not_fetch_its_dependencies_is_an_infrastruct
     assert outcome.failure_reason.startswith("git_fetch_timeout: subprocess.TimeoutExpired")
 
 
+def test_a_round_refused_before_it_ran_names_its_class_and_detail_as_the_reason(grid, server, tmp_path):
+    """No run_dir, no server log: what the round runner recorded is the only account of the failure."""
+    detail = "inferencex is not staged in /tools"
+    grid.answers["warmup"] = grid.result(
+        "warmup", status="failed", returncode=None, workspace=None, error=detail, error_class="staging_missing"
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == ("unclear", f"staging_missing: {detail}")
+
+
 @pytest.mark.parametrize(
     ("step", "failure_class", "reason"),
     [
