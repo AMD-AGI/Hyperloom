@@ -867,7 +867,7 @@ hosted run refuses to build the toolbox instead. Each sandbox writes its own `fs
 removes it; it reads its toolchain, its interpreter, the model and what its entries link to (each link's target
 itself, never the directory it is in; a hub snapshot's repository `blobs`), the Hugging Face hub cache, and the trees
 its template names (the framework snapshot, the staged rule pack, the compiled-code store, the runner cache, the native
-build store and trust file, a local InferenceX or Magpie repository); the app's credential locations those show are
+build store and trust file, a local InferenceX repository); the app's credential locations those show are
 masked, and a sandbox one of whose read paths is itself a credential location (a home, a login file) runs as before
 with a WARNING, refused in a hosted run. So does one whose model links to or below a credential location, or into a
 hidden entry of a home (`~/.ssh`, `~/.claude`, `~/.config`, `~/.aws`, `~/.netrc`), where no mask could hide the logins;

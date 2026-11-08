@@ -26,7 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import agent_isolation, proctree
+from hyperloom.common import agent_isolation
+from hyperloom_common import proctree
 from hyperloom.common.agent_isolation import require_agent_isolation
 from hyperloom.sandbox import confined, local_sandbox
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
