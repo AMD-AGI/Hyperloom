@@ -103,6 +103,17 @@ def freeze_base(session: Path, base: BaseLaunch) -> FrozenBase:
     return FrozenBase(path, base)
 
 
+def session_cards(session: Path, tp: int) -> int:
+    """The GPUs a launch at ``tp`` of the session at ``session`` occupies: its frozen base's cards, ``tp`` when it
+    froze none.
+
+    Raises:
+        BaseLaunchMismatch: As :func:`frozen_base`.
+    """
+    frozen = frozen_base(session)
+    return tp if frozen is None else frozen.launch.cards
+
+
 def session_server_base() -> ServerBase:
     """The current session's server base; raises :class:`BaseLaunchMismatch` when the file and the state disagree."""
     frozen = frozen_session_base()
@@ -117,5 +128,6 @@ __all__ = [
     "frozen_base",
     "frozen_session_base",
     "server_base",
+    "session_cards",
     "session_server_base",
 ]

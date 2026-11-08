@@ -5,10 +5,15 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
+from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
 from hyperloom.orchestrator.actions.executors._gpu_pin import resolve_gpu_pin
+from hyperloom.orchestrator.state.tests._session_base import freeze_base, session_base
+from inference_suite.contracts import Topology
 
 from ._workload_envs_helpers import clear_env, materialize, write_config
 
@@ -57,6 +62,26 @@ def test_autofill_without_any_mask_is_not_a_geak_pin(tmp_path):
     envs = materialize(src, tmp_path / "out")["envs"]
     assert envs["ROCR_VISIBLE_DEVICES"] == "0,1"
     assert resolve_gpu_pin(recipe_envs=envs, environ={}) == {}
+
+
+def _freeze_tp2_base(session, monkeypatch, *args: str) -> None:
+    monkeypatch.setenv(ENV_CURRENT_SESSION_DIR, str(session))
+    freeze_base(session, dataclasses.replace(session_base(args), topology=Topology(tp=2)))
+
+
+def test_autofill_holds_every_card_the_sessions_base_launch_needs(tmp_path, monkeypatch):
+    _freeze_tp2_base(tmp_path / "session", monkeypatch, "--dp-size", "2")
+
+    assert _materialized_mask(tmp_path, TP=2) == "0,1,2,3"
+    assert _materialized_mask(tmp_path, TP=2, ROCR_VISIBLE_DEVICES="7") == "0,1,2,3"
+    envs = apply_runtime_benchmark_overrides({"envs": {"TP": 2}})
+    assert envs["ROCR_VISIBLE_DEVICES"] == "0,1,2,3"
+
+
+def test_dp_attention_replicas_add_no_cards_to_the_autofill(tmp_path, monkeypatch):
+    _freeze_tp2_base(tmp_path / "session", monkeypatch, "--dp-size", "2", "--enable-dp-attention")
+
+    assert _materialized_mask(tmp_path, TP=2) == "0,1"
 
 
 def test_runtime_rebuild_keeps_the_point_mask(monkeypatch):

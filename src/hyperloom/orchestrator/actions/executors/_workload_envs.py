@@ -57,7 +57,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_ISL,
     DEFAULT_OSL,
 )
-from hyperloom.inference_optimizer.session.paths import asset_root
+from hyperloom.inference_optimizer.session.paths import asset_root, session_dir
 from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS, GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs, operator_benchmark_script
 from hyperloom.inference_optimizer.grid_server_args import (
@@ -73,7 +73,7 @@ from hyperloom.inference_optimizer.grid_server_args import validate_server_args_
 from inference_suite.argv import compact_json_server_args, remove_server_args
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-from hyperloom.orchestrator.state.base_launch import ServerBase, session_server_base
+from hyperloom.orchestrator.state.base_launch import ServerBase, session_cards, session_server_base
 from ._gpu_pin import pin_rocr_visible_devices
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
@@ -890,7 +890,7 @@ def _pin_workload_shape_envs(envs: dict[str, Any]) -> None:
             )
             resolved_tp = visible
     envs["TP"] = resolved_tp
-    pin_rocr_visible_devices(envs, tp=resolved_tp)
+    pin_rocr_visible_devices(envs, cards=session_cards(session_dir(), resolved_tp))
 
 
 def _apply_xdit_profile(envs: dict[str, Any]) -> tuple[str, ...]:
@@ -1085,8 +1085,6 @@ def _publish_scriptable_wiring(bench: dict[str, Any], window: _RequestWindow, es
     if not window.serves_requests:
         _qref = _first_env(QUALITY_REF_ENVS)
         if not _qref:
-            from hyperloom.inference_optimizer.session.paths import session_dir
-
             _qref = str(session_dir() / "storage" / "quality_ref" / "baseline.png")
         if window.profiling:
             _ref_compare, _ref_write = "", ""

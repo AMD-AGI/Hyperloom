@@ -9,6 +9,8 @@ import os
 from typing import Any
 
 from hyperloom.common.agentx_workload import is_agentx_client_script, pin_mlperf_round_concurrency
+from hyperloom.inference_optimizer.session.paths import session_dir
+from hyperloom.orchestrator.state.base_launch import session_cards
 
 from ._workload_envs import (
     apply_agentx_switch,
@@ -61,6 +63,6 @@ def apply_runtime_benchmark_overrides(
     )
     _apply_sizing_env_overrides(envs)
     pin_mlperf_round_concurrency(envs)
-    pin_rocr_visible_devices(envs, tp=int(envs.get("TP", 1) or 1))
+    pin_rocr_visible_devices(envs, cards=session_cards(session_dir(), int(envs.get("TP", 1) or 1)))
 
     return envs
