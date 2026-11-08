@@ -18,6 +18,7 @@ from hyperloom.measure.failures import (
     FailureClass,
     FailureClassification,
     FailureEvidence,
+    StepFailure,
     classify_test_failure,
     decides_test,
 )
@@ -357,14 +358,44 @@ TRACEBACK_LOG = 'Traceback (most recent call last):\n  File "x.py", line 1\nRunt
 def test_the_step_a_round_failed_at_names_a_cause_its_log_does_not(step, failure_class, reason) -> None:
     """``port_in_use`` is the suite's own refusal, which leaves no bind error in the log; a traceback is no cause."""
     for logs in ([], [TRACEBACK_LOG]):
-        verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=tuple(logs), failed_step=step))
+        verdict = classify_test_failure(
+            returncode=1, evidence=FailureEvidence(logs=tuple(logs), step_failure=StepFailure(step))
+        )
         assert (verdict.failure_class, verdict.failure_reason) == (failure_class, reason)
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "the user layer: unrecognized arguments: --foo-bar 1",
+        "the user layer: argument --attention-backend: invalid choice: 'nonexistent' (choose from 'fa3', 'triton')",
+    ],
+    ids=["bad_flag", "bad_choice"],
+)
+@pytest.mark.parametrize("logs", [[], [TRACEBACK_LOG]])
+def test_a_flag_the_suite_refused_before_boot_is_a_candidate_serve_flag_quoting_the_refusal(detail, logs) -> None:
+    """The suite parses the argv before the server starts, so no server log states the refusal; its report does."""
+    verdict = classify_test_failure(
+        returncode=1,
+        evidence=FailureEvidence(logs=tuple(logs), step_failure=StepFailure(FailedStep.FLAG_UNKNOWN, detail)),
+    )
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, f"serve_flag: {detail}")
+    assert decides_test(verdict)
+
+
+def test_a_flag_refusal_without_a_detail_is_still_a_candidate_serve_flag() -> None:
+    verdict = classify_test_failure(
+        returncode=1, evidence=FailureEvidence(step_failure=StepFailure(FailedStep.FLAG_UNKNOWN))
+    )
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, "serve_flag")
 
 
 def test_a_stalled_server_is_unclear_and_does_not_settle_the_test_whatever_its_log_says() -> None:
     verdict = classify_test_failure(
         returncode=1,
-        evidence=FailureEvidence(logs=(TRACEBACK_LOG, IMPORT_ERROR_LOG), failed_step=FailedStep.SERVER_STALLED),
+        evidence=FailureEvidence(
+            logs=(TRACEBACK_LOG, IMPORT_ERROR_LOG), step_failure=StepFailure(FailedStep.SERVER_STALLED)
+        ),
     )
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, "server_stalled")
     assert not decides_test(verdict)
@@ -372,7 +403,8 @@ def test_a_stalled_server_is_unclear_and_does_not_settle_the_test_whatever_its_l
 
 def test_a_boot_timeout_step_yields_to_a_cause_its_log_names_as_its_return_code_does() -> None:
     verdict = classify_test_failure(
-        returncode=1, evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG,), failed_step=FailedStep.SERVER_BOOT_TIMEOUT)
+        returncode=1,
+        evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG,), step_failure=StepFailure(FailedStep.SERVER_BOOT_TIMEOUT)),
     )
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, IMPORT_ERROR_REASON)
 
@@ -380,7 +412,9 @@ def test_a_boot_timeout_step_yields_to_a_cause_its_log_names_as_its_return_code_
 def test_a_hub_refusal_still_beats_the_step() -> None:
     verdict = classify_test_failure(
         returncode=1,
-        evidence=FailureEvidence(client_logs=(HUB_REFUSED_CLIENT_LOG,), failed_step=FailedStep.SERVER_STALLED),
+        evidence=FailureEvidence(
+            client_logs=(HUB_REFUSED_CLIENT_LOG,), step_failure=StepFailure(FailedStep.SERVER_STALLED)
+        ),
     )
     assert verdict.failure_reason == f"{failures.HUB_RATE_LIMITED}: {HUB_REFUSAL}"
 
@@ -391,7 +425,7 @@ def test_a_hub_refusal_still_beats_the_step() -> None:
 @pytest.mark.parametrize("logs", [[], [TRACEBACK_LOG], [IMPORT_ERROR_LOG]])
 def test_a_step_about_the_candidate_leaves_the_verdict_to_the_log(step, logs) -> None:
     assert classify_test_failure(
-        returncode=1, evidence=FailureEvidence(logs=tuple(logs), failed_step=step)
+        returncode=1, evidence=FailureEvidence(logs=tuple(logs), step_failure=StepFailure(step))
     ) == classify_test_failure(returncode=1, evidence=FailureEvidence(logs=tuple(logs)))
 
 

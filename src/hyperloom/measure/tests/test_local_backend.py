@@ -538,6 +538,20 @@ def test_the_step_a_rounds_report_failed_at_classifies_the_test_its_logs_cannot(
     assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
 
 
+def test_a_flag_the_suite_refused_names_the_refusal_its_report_records(grid, server, tmp_path):
+    """The suite parses the argv before boot: the refusal is in ``report.json``'s ``failure_detail``, in no log."""
+    detail = "the user layer: argument --attention-backend: invalid choice: 'nonexistent'"
+    workspace = write_run_dir(
+        grid.tmp_path / "ws" / "warmup", failed_step=FailedStep.FLAG_UNKNOWN, failure_detail=detail
+    )
+    grid.answers["warmup"] = grid.result("warmup", status="failed", returncode=1, error="flag_unknown")
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == ("candidate", f"serve_flag: {detail}")
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup"]
+
+
 @pytest.mark.parametrize("round_name", ["warmup", "test", "eval"])
 def test_a_graded_test_the_run_stops_in_a_round_reports_the_stop_and_runs_no_round_after_it(
     grid, server, tmp_path, round_name
