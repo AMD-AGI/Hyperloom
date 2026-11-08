@@ -325,3 +325,67 @@ class TestTheSuitePathClasses:
         client = nonzero_output_signature("client_failed", "", "Traceback: boom at port 8001")
         nonzero = nonzero_output_signature("round_nonzero_invalid_measurement", "", "Traceback: boom at port 8001")
         assert client.startswith("client_failed|") and client.split("|")[1] == nonzero.split("|")[1]
+
+
+class TestAnUnknownFrameworkVersion:
+    """A round the suite stopped at ``framework_version_unknown`` is attributed as the toolbox settles a test that
+    stopped there (``hyperloom.measure.failures``): the candidate's when the framework could not be imported, the
+    environment's when the probe says nothing of the framework. The details are the real probe's."""
+
+    @staticmethod
+    def _bare_interpreter(tmp_path) -> str:
+        """An interpreter that sees the standard library only, so no framework package is importable from it."""
+        import shlex
+        import sys
+
+        script = tmp_path / "bare-python"
+        script.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -S "$@"\n')
+        script.chmod(0o755)
+        return str(script)
+
+    def _details(self, tmp_path) -> dict[str, str]:
+        from inference_suite import framework_version
+        from inference_suite.framework_probe import FrameworkProbeError, probe_install, run_probe
+        from inference_suite.frameworks import Framework
+
+        bare = self._bare_interpreter(tmp_path)
+        details = {"unversioned": framework_version.check(None, "0.5.0").detail}  # type: ignore[union-attr]
+        probes = {
+            "not-installed": lambda: probe_install(bare, Framework.SGLANG, {}),
+            "import-raised": lambda: run_probe(bare, "import sglang_patch", (), {}),
+            "no-interpreter": lambda: run_probe(str(tmp_path / "no-such-python"), "pass", (), {}),
+            "other-error": lambda: run_probe(bare, "1/0", (), {}),
+        }
+        for name, probe in probes.items():
+            with pytest.raises(FrameworkProbeError) as refused:
+                probe()
+            details[name] = str(refused.value)
+        return details
+
+    def test_the_ledger_attributes_it_as_the_toolbox_settles_it(self, tmp_path):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.contracts.measurement import FailureClass
+        from hyperloom.measure.failures import FailureEvidence, StepFailure, classify_test_failure
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+
+        error_class = failed_step_error_class(FailedStep.FRAMEWORK_VERSION_UNKNOWN)
+        attributed, settled = {}, {}
+        for name, detail in self._details(tmp_path).items():
+            attributed[name] = classify_failure_attribution(error_class=error_class, error_excerpt=detail)
+            evidence = FailureEvidence(step_failure=StepFailure(FailedStep.FRAMEWORK_VERSION_UNKNOWN, detail))
+            settled[name] = (
+                classify_test_failure(returncode=1, evidence=evidence).failure_class is FailureClass.CANDIDATE
+            )
+
+        assert attributed == {
+            "unversioned": FAILURE_ATTRIBUTION_ENVIRONMENT,
+            "not-installed": FAILURE_ATTRIBUTION_CANDIDATE,
+            "import-raised": FAILURE_ATTRIBUTION_CANDIDATE,
+            "no-interpreter": FAILURE_ATTRIBUTION_ENVIRONMENT,
+            "other-error": FAILURE_ATTRIBUTION_ENVIRONMENT,
+        }
+        assert {name: how == FAILURE_ATTRIBUTION_CANDIDATE for name, how in attributed.items()} == settled
+
+    def test_with_no_evidence_it_stays_the_environments(self):
+        assert classify_failure_attribution(error_class="framework_version_unknown") == FAILURE_ATTRIBUTION_ENVIRONMENT
