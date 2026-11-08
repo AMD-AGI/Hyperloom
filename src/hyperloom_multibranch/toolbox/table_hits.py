@@ -128,8 +128,8 @@ class _Tally:
 class _Scan:
     """What a pass over the server logs found: per table (by artifact reference), and what no table is credited with.
 
-    ``logs`` is how many server logs there were, ``logs_with_hits`` how many of them hold a hit line of some table, and
-    ``requested`` whether every point of the test asks its server for hits.
+    ``logs`` is how many server logs there were (a round's copy of a live log is not one), ``logs_with_hits`` how many
+    of them hold a hit line of some table, and ``requested`` whether every point of the test asks its server for hits.
     """
 
     tallies: dict[str, _Tally]
