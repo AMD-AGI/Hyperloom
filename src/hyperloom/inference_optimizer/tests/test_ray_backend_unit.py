@@ -547,20 +547,28 @@ def test_ray_exec_enabled_pytest_default_off(monkeypatch: pytest.MonkeyPatch):
 
 
 # ── serving-lease routing ────────────────────────────────────────────────────
-def test_num_gpus_for_config_reads_tp(tmp_path: Path):
+@pytest.mark.parametrize(("args", "cards"), [(("--dp-size", "2"), 4), (("--dp-size", "2", "--enable-dp-attention"), 2)])
+def test_a_serving_lease_holds_the_cards_the_sessions_base_launch_occupies(tmp_path: Path, args, cards):
+    from dataclasses import replace
+
+    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+    from hyperloom.orchestrator.state.tests._session_base import freeze_base, session_base
+    from inference_suite.contracts import Topology
+
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("benchmark:\n  envs:\n    TP: 2\n", encoding="utf-8")
+    freeze_base(tmp_path, replace(session_base(args), topology=Topology(tp=2)))
+    assert gr.lease_cards(cfg, tmp_path) == cards
+
+
+def test_a_serving_lease_of_a_session_without_a_base_holds_the_points_tp(tmp_path: Path):
     from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 
     cfg = tmp_path / "c.yaml"
     cfg.write_text("benchmark:\n  envs:\n    TP: 4\n", encoding="utf-8")
-    assert gr._num_gpus_for_config(cfg) == 4.0
-
-
-def test_num_gpus_for_config_defaults_to_one(tmp_path: Path):
-    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-
-    cfg = tmp_path / "c.yaml"
+    assert gr.lease_cards(cfg, tmp_path) == 4
     cfg.write_text("benchmark:\n  envs: {}\n", encoding="utf-8")
-    assert gr._num_gpus_for_config(cfg) == 1.0
+    assert gr.lease_cards(cfg, tmp_path) == 1
 
 
 # ── T2: strip *_VISIBLE_DEVICES from the benchmark config ────────────────────

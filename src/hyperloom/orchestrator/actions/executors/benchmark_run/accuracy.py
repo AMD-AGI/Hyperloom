@@ -25,7 +25,7 @@ from inference_suite.contracts import FailedStep
 from inference_suite.server_log import death_excerpt
 from .._accuracy_gate import ACCURACY_DEFINITION_DIGEST_KEY, EVAL_DEFINITION_DIGEST_KEY, parse_eval_results
 from .._failed_step import failed_step_error_class
-from .._grid_runner import _num_gpus_for_config, session_grid_bounds
+from .._grid_runner import lease_cards, session_grid_bounds
 from .._ray_serving import ServingLease, maybe_serving_lease
 from .._subprocess_kill import resolve_benchmark_timeouts
 from .._suite_config import AccuracyRound, SuiteRoundRefused, deadline_unix, run_accuracy_suite_round, session_route
@@ -99,7 +99,7 @@ async def run_accuracy_round(request: AccuracyRound, *, session: Path) -> Accura
         return AccuracyRoundOutcome(slot, failed_step_error_class(FailedStep.CONFIG_INVALID))
     owned = None
     if request.serving_lease is None:
-        owned = maybe_serving_lease(num_gpus=_num_gpus_for_config(request.config_path))
+        owned = maybe_serving_lease(num_gpus=lease_cards(request.config_path, session))
         request = replace(request, serving_lease=owned)
     try:
         async with heartbeat_while_output_flows(unit="accuracy_round", label="eval") as activity:

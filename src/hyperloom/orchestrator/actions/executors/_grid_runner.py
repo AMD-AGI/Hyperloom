@@ -61,6 +61,7 @@ from .benchmark_result import (
 from ._gpu_metrics import write_gpu_metrics_from_report
 from ._round_folder import RoundFolder, is_round_folder, round_report_path
 from ._suite_config import SuiteRoundRefused, suite_route
+from hyperloom.orchestrator.state.base_launch import session_cards
 from .benchmark_config import composed_benchmark_timeout_sec
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
 from ._spec_decode_pin import SpeculativeDecodingPinnedError, refuse_unpinned_speculative_change
@@ -375,13 +376,14 @@ class GridStop:
     checkpoint: AgentxCheckpoint | None = None
 
 
-def _num_gpus_for_config(config_path: Path) -> float:
-    """Read the tensor-parallel size (``TP``) from a materialized benchmark YAML."""
+def lease_cards(config_path: Path, session: Path) -> int:
+    """The GPUs a serving lease holds for the point at ``config_path``: as many as its launch occupies in the session
+    at ``session`` (:func:`session_cards`)."""
     try:
-        envs = read_benchmark_point(Path(config_path)).envs
-        return float(int(envs.get("TP", 1) or 1))
+        tp = int(read_benchmark_point(Path(config_path)).envs.get("TP", 1) or 1)
     except (OSError, ValueError, TypeError, yaml.YAMLError):  # best-effort; default to 1 GPU
-        return 1.0
+        tp = 1
+    return session_cards(session, tp)
 
 
 def _mn_restart_env(

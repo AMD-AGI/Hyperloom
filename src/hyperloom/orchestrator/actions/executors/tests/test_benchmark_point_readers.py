@@ -36,8 +36,8 @@ def test_the_eval_switch_reads_the_point(tmp_path: Path) -> None:
 def test_grid_readers_of_a_point(tmp_path: Path) -> None:
     path = _point(tmp_path, {"benchmark": {"framework": "xdit", "envs": {"TP": 4}}})
 
-    assert _grid_runner._num_gpus_for_config(path) == 4.0
-    assert _grid_runner._num_gpus_for_config(_point(tmp_path, _NO_BLOCK)) == 1.0
+    assert _grid_runner.lease_cards(path, tmp_path) == 4
+    assert _grid_runner.lease_cards(_point(tmp_path, _NO_BLOCK), tmp_path) == 1
 
 
 def test_launch_evidence_of_a_config_that_is_not_a_point_declares_nothing(tmp_path: Path) -> None:
