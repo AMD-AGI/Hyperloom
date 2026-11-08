@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Arbor campaign dashboard: one campaign live (local mode), or every campaign
-// on the share (global mode). Ported from an earlier campaign dashboard;
-// README.md here says what changed.
+// on the share (global mode). Ported from an earlier per-cluster campaign
+// dashboard; README.md here says what changed.
 //
 //   node server.mjs local    --host <host with the session> --session <dir> [--slurm-job <name>] ...
-//   node server.mjs global   [--share-host arbor-share] [--share-root /path/to/arbor-share]
+//   node server.mjs global   [--share-host arbor-share] [--share-root <share root>]
 //   node server.mjs parallel --host <host with the run's store> --store <store>/<run_id>
 //
 // local:  each refresh runs the realtime collector (arbor/collect/realtime.py,
@@ -188,8 +188,8 @@ function ssh(host, command) {
   return run(SSH, ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20", ...cfg.sshOpts, host, command]);
 }
 
-// The command's answer is the JSON object on its stdout. Through the
-// the platform gateway every command exits 0 and its stderr arrives on stdout,
+// The command's answer is the JSON object on its stdout. Through the share
+// host's ssh gateway every command exits 0 and its stderr arrives on stdout,
 // so a failure there is either share_query's
 // {"error": ...} or output that is not JSON, never an exit status.
 function parseJson(result) {

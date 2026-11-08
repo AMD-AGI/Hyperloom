@@ -2,10 +2,10 @@
 
 landed.patch carries the workspace only (save_landed_patch), so an edit a KEEP made to
 another editable package -- AITER, under site-packages -- lived only in its container.
-The model-m launchers rebuild those edits from the agent's own landed_aiter.py, and nothing
-checked that it could: AITER-only KEEPs could miss landed_aiter.py, so a chunk roll
-rebuilt a tree without them, and a round-end A/B then measured the previous round's tree
-as the current round's.
+A campaign's launchers rebuild those edits from the agent's own landed_aiter.py, and
+nothing checked that it could: a KEEP's AITER-only change that landed_aiter.py never
+received is missing from the tree the next chunk rebuilds, and a round-end A/B then
+measures the previous round's tree as the current one's. Hence this guard.
 
 On every KEEP the driver copies each editable package's .py files that differ from the
 container's image (changed or added) to <session>/landed_packages/<name>/, and lists them

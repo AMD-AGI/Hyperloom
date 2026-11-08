@@ -1,6 +1,6 @@
 # The dossier and the profiler in this campaign
 
-This campaign runs two skills by default: `dossier` and `profiler`. A pack derived from this one
+This campaign runs two skills by default: `dossier-v1` and `profiler`. A pack derived from this one
 may add `hardware`, `serving-playbook` and `kernels`. Read this before your first iteration.
 
 Whether a dossier exists depends on the model, the workload and the GPU: look it up (below)
@@ -16,10 +16,10 @@ work those directions, and write or refresh only the dossier parts they need.
 | What | Where |
 | --- | --- |
 | Dossiers | `docs/dossier/<model>-<workload>-<gpu>/` in this Arbor checkout (your working directory); `README.md` is each one's index |
-| Lookup | `bash .claude/skills/dossier/find-dossier.sh` |
-| Template | `.claude/skills/dossier/template.md` |
+| Lookup | `bash .claude/skills/dossier-v1/find-dossier.sh` |
+| Template | `.claude/skills/dossier-v1/template.md` |
 | The served tree | the config's `workspace_root` (the framework's installed package, made a git repository) |
-| TraceLens | installed with the environment; reads PyTorch-profiler traces (the `profiler` skill) |
+| The tracer | the profiler skill's vendored tracer; a launcher mounts and builds it in the container |
 | Profiles | `<session>/profiles/<name>/PROFILE.md` and their small files |
 | The operating point | `knowledge/operating-point.md` |
 
@@ -33,9 +33,10 @@ need no GPU first; one iteration can write several.
    through the model's code, method by method.
 2. **Parts 4–6** (target, workload and its CPU work, baseline): pack.yaml §5,
    `knowledge/operating-point.md`, the bench's own output, and the baseline.
-3. **Part 7** (profile) with the `profiler` skill. The host's profile comes first, when there is one;
-   then a TraceLens profile of prefill and decode steps at the operating point, graphs on, with an eager
-   trace (labelled eager) when op attribution is needed. Stop any traced server before DONE.
+3. **Part 7** (profile) with the `profiler` skill. A model the tracer has not traced is a new target
+   ("Another model" in the tracer's new-target.md): the facts job, then its checks, then a profile of
+   prefill and decode steps at the operating point. Label every number unvalidated until the
+   checks pass. Stop any traced server before DONE.
 4. **Part 8** (kernel usage) from part 7's kernels, AITER's source in the container, and the CUDA
    path if the model has one.
 5. **Parts 9 and 10** need people: a reference on another GPU, and earlier AMD optimizations
@@ -48,5 +49,5 @@ need no GPU first; one iteration can write several.
 
 - The rendered program you read lists the skills under "Skills". If it does not, say so in your
   first DONE line: the skills did not load.
-- TraceLens answers (`TraceLens_generate_perf_report_pytorch_inference --help`). If it does not, record why as
-  an UNKNOWN and profile nothing until it is fixed.
+- The tracer's build succeeded. If it failed, record why as an UNKNOWN and profile nothing until it
+  is fixed: the PyTorch profiler is not the fallback.

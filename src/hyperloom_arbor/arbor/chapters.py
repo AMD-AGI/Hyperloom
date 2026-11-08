@@ -37,7 +37,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from arbor import lifecycle
+from arbor import conflicts, lifecycle
 
 RUNS_DIR = "runs"
 DOSSIER_ROOT = Path("docs") / "dossier"
@@ -93,6 +93,9 @@ def turn_runs(campaign, chapter: str, arbor_root) -> list[Run]:
     if plan is None:
         return []
     found = skillcheck.find(Path(arbor_root))
+    session = lifecycle.session_of(campaign)
+    if session:                                      # a merged skill declares what it produces itself
+        _names, found = conflicts.applied(session, list(plan.load), found)
     runs = []
     for each in TURN_CHAPTERS.get(chapter, ()):
         for name in plan.runs(each):
@@ -105,9 +108,23 @@ def _record_path(session_dir, skill: str) -> Path:
     return Path(session_dir) / RUNS_DIR / f"{skill.replace(':', '__')}.json"
 
 
+#: The chapters whose run skills write the directions, and so are told the map's length (arbor/directions.py).
+LENGTH_CHAPTERS = ("map.directions", "round_end")
+
+
 def _reuse(campaign, run: Run) -> dict[str, str]:
+    """``run``'s reuse key, from the config; ``directions_length`` as it resolves, so its default counts as set."""
+    from arbor import directions
     config = getattr(campaign, "config", None) or {}
-    return {key: str(config.get(key, "")) for key in run.reuse_key}
+    return {key: directions.length(campaign) if key == "directions_length" else str(config.get(key, ""))
+            for key in run.reuse_key}
+
+
+def settings(campaign, run: Run) -> list[str]:
+    """The campaign settings ``run``'s skill reads from its brief: the map's length, for the chapters that write the
+    directions."""
+    from arbor import directions
+    return [f"- {directions.length_text(campaign)}"] if run.chapter in LENGTH_CHAPTERS else []
 
 
 def fresh(session_dir, run: Run, outputs: list[Path], reuse: dict[str, str]) -> bool:
@@ -121,7 +138,8 @@ def fresh(session_dir, run: Run, outputs: list[Path], reuse: dict[str, str]) -> 
             and all(path.exists() for path in outputs))
 
 
-def brief(session_dir, run: Run, outputs: list[Path], values: dict[str, str], program: str, iteration: int) -> Path:
+def brief(session_dir, run: Run, outputs: list[Path], values: dict[str, str], program: str, iteration: int,
+          settings: list[str] | None = None) -> Path:
     """Write the brief ``run``'s turn reads, and return its path."""
 
     lines = [
@@ -136,6 +154,7 @@ def brief(session_dir, run: Run, outputs: list[Path], values: dict[str, str], pr
         "## Where things are",
         *[f"- **{key}:** `{value}`" for key, value in values.items() if value],
         "",
+        *(["## Settings", *settings, ""] if settings else []),
         "## The campaign (what the main agent reads)",
         "",
         program,
@@ -162,9 +181,10 @@ def run_turns(campaign, chapter: str, session_dir, arbor_root, iteration: int, p
             lifecycle.record(session_dir, "run", run.skill, chapter=run.chapter, iteration=iteration, status=FRESH)
             summary.append(f"{run.skill} fresh")
             continue
-        path = brief(session_dir, run, outputs, values, program, iteration)
+        path = brief(session_dir, run, outputs, values, program, iteration, settings(campaign, run))
         began = time.time()
-        text = run_agent(f"/{run.skill} {path}", list(declared.uses(run.chapter)), f"run:{run.skill}")
+        uses = [conflicts.dispatch(session_dir, name) for name in declared.uses(run.chapter)]
+        text = run_agent(f"/{conflicts.dispatch(session_dir, run.skill)} {path}", uses, f"run:{run.skill}")
         missing = [str(p) for p in outputs if not p.exists()]
         status = INCOMPLETE if missing else DONE
         record = {"skill": run.skill, "chapter": run.chapter, "iteration": iteration, "status": status,

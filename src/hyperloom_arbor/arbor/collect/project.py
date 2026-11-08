@@ -2,9 +2,8 @@
 
 The share lays campaigns out as ``projects/<project>/<user>/<campaign>/``, so
 every campaign on one model has to land in one ``<project>``. Campaigns name the
-model many ways (pack ``agentx-dsv41``, session
-``dsv41flash-c32``, model ``deepseek-ai/DeepSeek-V4.1-Flash``);
-``projects.json`` maps them to one name. A name it does not know becomes a slug
+model many ways (pack ``dsr1-fp4``, session ``dsr1-c32-run2``, model
+``deepseek-ai/DeepSeek-R1``); ``projects.json`` maps them to one name. A name it does not know becomes a slug
 of itself, and the collector says so, so a new family shows up as its own
 project until someone adds it to the table.
 """
@@ -49,7 +48,7 @@ def resolve_project(explicit: str | None, candidates: list[tuple[str, str | None
     """The project, and how it was chosen.
 
     ``explicit`` (a flag, ``ARBOR_PROJECT``, or the config's ``project``) wins,
-    normalized through the table so "DeepSeek V4.1 Flash" and "dsv41" agree.
+    normalized through the table so "DeepSeek R1" and "dsr1" agree.
     Otherwise the first candidate, in order, that the table knows; otherwise a
     slug of the first non-empty candidate.
     """

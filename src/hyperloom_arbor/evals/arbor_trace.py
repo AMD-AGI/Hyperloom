@@ -34,7 +34,7 @@ from __future__ import annotations
 # Import budget is load-bearing, not style. `hook` runs twice per tool call, in a
 # fresh interpreter each time, so every module imported here is latency the user
 # feels on every action the agent takes. `hashlib`, `subprocess`, and `typing`
-# each cost ~11 ms to import and none is needed on the hook path, so they are
+# each cost milliseconds to import and none is needed on the hook path, so they are
 # imported inside the functions that actually use them. `Any` survives in
 # annotations only because `from __future__ import annotations` leaves them
 # unevaluated strings.
@@ -116,15 +116,15 @@ _REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
             r"[^\s,;'\"]+"
         ),
         # Callable, not a literal: a bare number is never a credential, but
-        # "TOKEN" matches the field names token *counters* use. Observed in a
-        # real trajectory as `subagent_tokens: [REDACTED]`, which quietly
-        # destroyed the per-subagent usage the cost metrics want. Keep numeric
+        # "TOKEN" matches the field names token *counters* use: redacted, a
+        # counter reads `subagent_tokens: [REDACTED]`, which quietly destroys
+        # the per-subagent usage the cost metrics want. Keep numeric
         # values, redact everything else.
         _keep_numeric,
     ),
 )
 
-# Arbor addition: the AMD gateway ships its key in a header rather than in any
+# Arbor addition: an LLM gateway may take its key in a header rather than in any
 # shape above, and that header is in this process's own environment — so it
 # reaches disk through `env`, `docker exec -e`, and settings dumps unless it is
 # named explicitly.
@@ -249,8 +249,8 @@ def _host_writable(path: Path, *, probe: bool = True) -> bool:
     """Whether the host process can create ``path``.
 
     Load-bearing: config.json points ``session_root`` at a *container* path
-    (/workspace/...) while hooks run on the host, whereas the campaign configs
-    in configs/mi355x/ point it at a host path. bench.py:_read_output copes
+    (/workspace/...) while hooks run on the host, whereas other campaign configs
+    point it at a host path. bench.py:_read_output copes
     with the same ambiguity via a docker-cp fallback; this is that pattern.
 
     ``probe=False`` accepts an existing directory without the create/unlink
@@ -525,9 +525,9 @@ def _migrate_fallback_events(trace_dir: Path) -> int:
 
     Hooks start firing at ``SessionStart``, which is necessarily before the
     agent can run ``mark session-start``. Those early rows land under
-    ``~/.arbor/trajectories/<session_id>/`` and used to stay there: on a real
-    run that stranded the early events, costing those orchestrator steps their
-    timing and permission mode. Moving them at open time closes the window.
+    ``~/.arbor/trajectories/<session_id>/`` and used to stay there, leaving the
+    orchestrator's first steps without their timing and permission mode. Moving
+    them at open time closes the window.
     """
     moved = 0
     try:
@@ -610,9 +610,7 @@ def _mark_session_start(args) -> None:
         data.setdefault("claude_sessions", [])
         # Recorded because it is a property of the MODEL, not of the run or the
         # collector: some models return no reasoning text on any capture route
-        # while still billing the tokens. Probed against the gateway
-        # directly — opus-5 withholds, sonnet-4.6 and haiku-4.5 do not.
-        # See docs/archive/evals-README.md, "Reasoning text".
+        # while still billing the tokens.
         data["thinking_capture"] = "withheld-by-model"
         return data
 
@@ -638,7 +636,7 @@ def _mark_session_start(args) -> None:
 def _run_hook_fast() -> int:
     """The hook path, with no argparse.
 
-    Called before ``main`` builds a parser, because argparse costs ~2 ms to
+    Called before ``main`` builds a parser, because argparse costs milliseconds to
     import and the hook runs twice per tool call for the entire session.
     """
     try:

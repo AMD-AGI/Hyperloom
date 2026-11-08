@@ -30,8 +30,6 @@ WHY ``NOT_MEASURED`` IS. A bench that never ran, a server that never came up, a
 404 from the wrong wire name, a moved instrument — none of these say anything
 about the change. They are not a REVERT, they are the absence of a
 measurement: the tree stands, the counters do not move, and the caller retries.
-That rule was bought with lost iterations: a change that was correct the whole
-time was reverted again and again.
 """
 
 from __future__ import annotations
@@ -71,7 +69,7 @@ class Intent:
         campaign could escape escalation pressure by surveying.
 
     ``server``
-        ``skip_if_readonly`` lets the loop bypass the server run (tens of minutes)
+        ``skip_if_readonly`` lets the loop bypass the full server run
         when the diff cannot change what the server does. Only a probe earns
         this, and only when its diff is confined to inert paths.
 
@@ -100,15 +98,14 @@ class Intent:
 
 
 # How far below best a change may land and still count as neutral. Default 1% —
-# just above the run-to-run spread measured on the reference node. Packs with a
+# just above the run-to-run spread measured on one platform. Packs with a
 # noisier validator raise this in objective.measurement.
 DEFAULT_NOISE_BAND_PCT = 1.0
 
 # How far a correctness fix may regress before it is refused. Wide on purpose:
 # the point of the intent is that the fix ships regardless of a small cost, and
 # only a catastrophe — a fix that disables a fast path outright — is worth
-# refusing. Without this, the loop reverts fixes for being slow, and a fix can
-# be lost while it is still inert.
+# refusing. Without this, the loop reverts fixes for being slow.
 DEFAULT_CORRECTNESS_CAP_PCT = 5.0
 
 
@@ -177,14 +174,13 @@ REGISTRY: tuple[Intent, ...] = (
         # (claude_loop.py) is the rule that actually decides -- eval/,
         # knowledge/, ledger.jsonl, arbor/ -- and those are harness-level
         # conventions (cf. ALLOWED_PACK_DIRS), not one pack's layout, so naming
-        # them here is general as well as true. The pre-split prompt named them
-        # and campaigns probed often; do not re-abstract this
+        # them here is general as well as true. Do not re-abstract this
         # without measuring what it costs.
         deliverable=(
             "buying knowledge rather than throughput. The deliverable is a "
             "resolved ledger entry, and an iteration that closes none is a "
             "REVERT. A LEARN touching only `eval/` and the ledger SKIPS THE "
-            "SERVER RUN ENTIRELY — minutes instead of ~45 — so reach for it "
+            "SERVER RUN ENTIRELY — minutes instead of a full server run — so reach for it "
             "often. The best one kills its own lead."
         ),
     ),
@@ -243,8 +239,8 @@ def tolerance(intent: Intent, measurement: dict) -> float:
 #   BASELINE  written by record_baseline, the opening measurement
 #   ESCALATE  written by apply_escalation, a forced tier move
 #   NOTE      written BY HAND by the campaign owner, to correct the record —
-#             e.g. "iteration N's REVERT was a HARNESS failure, not a verdict".
-#   REBASELINE  written by scripts/model-m-campaign/rebase_bar.py, the bar on a new node
+#             e.g. "this iteration's REVERT was a HARNESS failure, not a verdict".
+#   REBASELINE  written by a launcher's rebase script, the bar on a new node
 #   MAP_ROUND   written by apply_map_round (arbor/directions.py), a map round's event
 #   ROUND_END   written by arbor/rounds.py, a round end's request, incomplete A/B or stop
 #   ROUND_AB    written by arbor/rounds.py, a confirmed round-end A/B: the bar on its node

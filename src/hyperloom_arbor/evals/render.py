@@ -81,8 +81,8 @@ def _actor_tag(step: dict[str, Any], agent_index: dict[str, int]) -> str:
     Deliberately at the front of the line and fixed-shape. The previous form
     put a `subagent` badge in the middle, after a variable-length tool name and
     before an optional duration — invisible when skimming and impossible to
-    grep reliably, which is how a run's subagent lines read as if they were
-    the orchestrator's.
+    grep reliably, which is how 1,101 subagent lines read as if they were the
+    orchestrator's.
     """
     if step.get("actor") != "subagent":
         return "MAIN "
