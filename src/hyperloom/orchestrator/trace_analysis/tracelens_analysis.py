@@ -27,7 +27,12 @@ from hyperloom.inference_optimizer.framework_paths import (
 )
 
 
-from .tracelens_arch_benchmark import internal_extension_arch_json, normalize_platform, populate_gpu_arch_json
+from .tracelens_arch_benchmark import (
+    ArchSpec,
+    internal_extension_arch_json,
+    normalize_platform,
+    populate_gpu_arch_json,
+)
 from .tracelens_skill_runner import (
     TraceLensSkillRequest,
     TraceLensSkillRunResult,
@@ -123,26 +128,37 @@ def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextMan
     )
 
 
-def _gpu_arch_json(
-    args: argparse.Namespace, *, tl_root: Path, tl_internal_root: Path | None, log_path: Path
-) -> Path | None:
+def _gpu_arch_json(run: AnalysisRun, *, tl_root: Path, tl_internal_root: Path | None) -> ArchSpec | None:
     """The arch JSON roofline reads: the bundled spec under the internal extension, else bundled, measured or fallback."""
+    log_path = run.log_path
     arch_benchmark_timeout_s = _resolve_arch_benchmark_timeout_s()
     if tl_internal_root is not None:
-        return internal_extension_arch_json(args.target_platform, log=lambda msg: append_log(log_path, msg))
+        return internal_extension_arch_json(run.args.target_platform, log=lambda msg: append_log(log_path, msg))
     return populate_gpu_arch_json(
         tracelens_root=tl_root,
-        platform=args.target_platform,
+        platform=run.args.target_platform,
+        fallback_dir=run.session_runs_dir / "gpu_arch",
         log=lambda msg: append_log(log_path, msg),
-        run_command=lambda cmd, *, cwd, timeout_s, env=None: run_command(
+        run_command=lambda cmd, *, cwd, env=None: run_command(
             cmd,
             cwd=cwd,
             log_path=log_path,
-            timeout_s=timeout_s,
+            timeout_s=arch_benchmark_timeout_s,
             env=env,
         ),
-        timeout_s=arch_benchmark_timeout_s,
     )
+
+
+def _record_gpu_arch(run: AnalysisRun, gpu_arch: ArchSpec | None) -> Path | None:
+    """Record the arch JSON roofline reads, and a warning when it holds vendor peaks, on ``run``; return its path."""
+    if gpu_arch is None:
+        return None
+    run.artifacts["tracelens_gpu_arch_json"] = str(gpu_arch.path)
+    note_step(run.run_meta, "populate_gpu_arch_json", category="preflight", status="ok", source=gpu_arch.source.value)
+    warning = gpu_arch.health_warning(run.args.target_platform)
+    if warning is not None:
+        run.trace_health_warnings.append(warning)
+    return gpu_arch.path
 
 
 class _TraceLensCheckout(NamedTuple):
@@ -980,9 +996,7 @@ def _analyse_trace(run: AnalysisRun, trace_input: Path, trace_files: list[Path])
         state="running",
         current_step="populate_gpu_arch_json",
     )
-    gpu_arch_path = _gpu_arch_json(args, tl_root=tl_root, tl_internal_root=tl_internal_root, log_path=run.log_path)
-    if gpu_arch_path is not None:
-        run.artifacts["tracelens_gpu_arch_json"] = str(gpu_arch_path)
+    gpu_arch_path = _record_gpu_arch(run, _gpu_arch_json(run, tl_root=tl_root, tl_internal_root=tl_internal_root))
 
     # Split the full-window filtered trace into steady-state chunks via
     # TraceLens's own splitter, since the perf report expects a single
