@@ -82,3 +82,14 @@ path = [
 precedence = "override"
 SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
 SPDX-License-Identifier = "Apache-2.0"
+
+# This repository's weight-precision check, which Arbor carries as a copy (src/hyperloom_arbor/VENDOR.md): the toolbox's
+# module, and the shim of what it imports from Hyperloom. MIT, as this repository, and as their own headers say.
+[[annotations]]
+path = [
+    "src/hyperloom_arbor/arbor/measure/weight_precision.py",
+    "src/hyperloom_arbor/arbor/measure/_hyperloom_shim.py",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
+SPDX-License-Identifier = "MIT"
