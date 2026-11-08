@@ -232,7 +232,9 @@ def test_a_hub_cache_above_the_home_masks_the_home_s_logins_and_a_model_link_to_
 
     assert plan.refused == () and hub in plan.readable
     assert confined_
-    assert seen == {"tokenizer": "ok:tokenizer", "ssh": "EACCES"}
+    # Hugging Face's login not made yet below the home hides the first missing path on its way, so the home in the hub
+    # is bound entry by entry, and its .ssh is left out of it rather than masked.
+    assert seen == {"tokenizer": "ok:tokenizer", "ssh": "ENOENT"}
 
     (model / "keys").symlink_to(home / ".ssh")
     plan = runner_plan(session, model, {}, sys.executable)
