@@ -51,6 +51,7 @@ from hyperloom_multibranch.toolbox.tests.test_toolbox_kinds_gpu import (  # noqa
 VARIABLE = "AITER_CONFIG_GEMM_BF16"
 SHARED = Path(DEFAULT_CONFIGS) / "bf16_tuned_gemm.csv"
 SERVER_SAW = ("duplicate shape", "Updated files", "tuned config")
+USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 pytestmark = [
     pytestmark,
     pytest.mark.skipif(not SHARED.is_file(), reason=f"needs the image's aiter table {SHARED}"),
