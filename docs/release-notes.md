@@ -35,7 +35,8 @@ it.
   table (with a warning); omitted `--tp` / `--ep` follow the base. Resume
   reads the frozen file and never refetches. A `--reference-script` flag set
   from a shell variable, which used to be dropped silently, now exits 2, as
-  does a `# hyperloom-launch-controls:` line; `--host`, `--port`,
+  does a `# hyperloom-launch-controls:` line or a launch file or default row
+  that needs more GPUs than the session has; `--host`, `--port`,
   `--served-model-name` and `--result-*` are recorded as stripped. A JSON
   `base_launch.json` from an earlier session is accepted as the launch file.
   **Upgrade note:** a session whose state predates `base_launch.json`

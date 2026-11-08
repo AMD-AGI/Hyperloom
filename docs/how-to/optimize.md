@@ -157,6 +157,7 @@ fix every flag in its text. These exit 2:
 - a flag whose value is a shell variable, such as `--tp $TP`;
 - a `# hyperloom-launch-controls:` line;
 - a file that cannot be read or launches another framework.
+- a launch that needs more GPUs than the session has.
 
 `--host`, `--port`, `--served-model-name` and `--result-*` are dropped and
 recorded under `stripped`, because the runner sets them every round.
