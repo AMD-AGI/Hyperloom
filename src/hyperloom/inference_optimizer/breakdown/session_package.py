@@ -20,9 +20,7 @@ import os
 import re
 import shutil
 import stat
-import tempfile
 import zipfile
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -30,7 +28,13 @@ from pathlib import Path
 from typing import Iterable
 
 from hyperloom_common.env import env_flag
-from hyperloom_common.shared_storage import copy_shared_file, make_shared_dirs, write_shared_bytes
+from hyperloom_common.shared_storage import (
+    SHARED_DIR_MODE,
+    copy_shared_file,
+    make_shared_dirs,
+    replace_shared_file,
+    write_shared_bytes,
+)
 from hyperloom.common.env_safety import redact_secret_env_values
 from inference_suite.contracts.layout import (
     AGENTX_TIMELINE,
@@ -189,13 +193,20 @@ def _exported_state_bytes(path: Path) -> bytes:
 
 
 def _group_mode(root: Path) -> int | None:
-    """The mode of a destination root the accounts of one group share (it has the setgid bit, as the hosted archive
-    does), which the directories made below it get; ``None`` for a root of one account's."""
+    """The mode asked of what is made below a destination root with the setgid bit (the hosted archive is ``2770``):
+    the root's own, never wider than the shared modes (``2775``, so never writable by others); ``None`` for a root
+    without it, which is written as one account's. Whether a mode asked is given or masked by the umask is
+    :mod:`hyperloom_common.shared_storage`'s to decide (:func:`~hyperloom_common.shared_storage.parent_is_shared`),
+    for the archive as for the loose copies beside it."""
     try:
         info = os.stat(root)
     except OSError:
         return None
-    return stat.S_IMODE(info.st_mode) if info.st_mode & stat.S_ISGID else None
+    return stat.S_IMODE(info.st_mode) & SHARED_DIR_MODE if info.st_mode & stat.S_ISGID else None
+
+
+#: The zip below a root of one account's, as ``mkstemp`` made it before.
+_PRIVATE_ZIP_MODE = 0o600
 
 
 def _make_dirs(path: Path, shared: int | None) -> None:
@@ -651,23 +662,18 @@ def package_session_artifacts(
     _make_dirs(out_dir, shared)
     target = out_dir / f"{sid}.zip"
 
-    # Atomic write: build into a temp zip in the same dir, through the descriptor that made it, then replace.
-    fd, tmp = tempfile.mkstemp(prefix=f".{sid}.", suffix=".zip.tmp", dir=str(out_dir))
-    tmp_path = Path(tmp)
-    try:
-        with os.fdopen(fd, "w+b") as handle, zipfile.ZipFile(handle, "w", zipfile.ZIP_DEFLATED) as zf:
-            if shared is not None:
-                os.fchmod(handle.fileno(), _file_mode(shared))
-            written, write_failures = _write_zip_members(zf, selected)
-            # Built here so it describes the members that exist, not the ones that were selected.
-            manifest = _build_manifest(plan, written, write_failures)
-            zf.writestr(MANIFEST_JSON_NAME, json.dumps(manifest, indent=2))
-            zf.writestr(MANIFEST_TXT_NAME, _manifest_text(manifest))
-        os.replace(tmp_path, target)
-    except Exception:
-        with suppress(OSError):
-            tmp_path.unlink()
-        raise
+    # Atomic write: build into a new zip beside the target, then rename it over the target. Its mode is decided as the
+    # loose copies' is: the root's below shared storage, else masked by the umask; one account's own stays 0600.
+    zip_mode = _PRIVATE_ZIP_MODE if shared is None else _file_mode(shared)
+    with (
+        replace_shared_file(target, mode=zip_mode) as handle,
+        zipfile.ZipFile(handle, "w", zipfile.ZIP_DEFLATED) as zf,
+    ):
+        written, write_failures = _write_zip_members(zf, selected)
+        # Built here so it describes the members that exist, not the ones that were selected.
+        manifest = _build_manifest(plan, written, write_failures)
+        zf.writestr(MANIFEST_JSON_NAME, json.dumps(manifest, indent=2))
+        zf.writestr(MANIFEST_TXT_NAME, _manifest_text(manifest))
 
     log.info(
         "session package: wrote %s (%d files, %d bytes pre-zip, complete=%s)",

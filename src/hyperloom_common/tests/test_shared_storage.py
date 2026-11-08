@@ -647,6 +647,7 @@ def _planted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Pat
         "os.close(open_shared_replacement(target))",
         "os.close(create_new_shared_file(target.with_name('new.json')))",
         "create_shared_file(target.with_name('new.json'))",
+        "with replace_shared_file(target) as handle: handle.write(b'theirs')",
         "make_shared_dirs(target.with_name('new'))",
         "atomic_write_json(target, {}, options=WriteOptions(shared=True, make_parents=True))",
     ],
@@ -812,6 +813,8 @@ s.write_shared_text(parent / "text", "x")
 os.close(s.open_shared_replacement(parent / "replacement.log"))
 os.close(s.create_new_shared_file(parent / "segment.jsonl"))
 s.copy_shared_file(parent / "text", parent / "copy")
+with s.replace_shared_file(parent / "archive.zip") as handle:
+    handle.write(b"PK")
 atomic_write_text(parent / "io" / "a" / "state.json", "x", options=WriteOptions(make_parents=True, shared=True))
 modes = {{}}
 for path in sorted(parent.rglob("*")):
@@ -838,6 +841,7 @@ def test_below_a_setgid_group_writable_directory_every_helper_widens_whatever_th
     modes = _every_helper_under(_setgid_parent(tmp_path / "shared"), umask=umask)
     assert modes == {
         "archive": 0o2770,
+        "archive.zip": 0o664,
         "bytes": 0o664,
         "chain": 0o2775,
         "chain/a": 0o2775,
@@ -875,6 +879,7 @@ def test_anywhere_else_every_helper_leaves_what_it_makes_to_the_umask(tmp_path, 
     directory, file = (0o775 & ~umask) | inherited, 0o664 & ~umask
     assert modes == {
         "archive": (0o770 & ~umask) | inherited,
+        "archive.zip": file,
         "bytes": file,
         "chain": directory,
         "chain/a": directory,
@@ -916,8 +921,27 @@ def test_a_link_at_the_final_name_is_refused_or_replaced_never_followed(tmp_path
         make_shared_dirs(parent / "dangling")
     shared_storage.create_shared_file(parent / "file-link")
     assert not (parent / "file-link").is_symlink(), "the link itself is replaced by rename"
+    with shared_storage.replace_shared_file(parent / "dir-link") as handle:
+        handle.write(b"x")
+    assert (parent / "dir-link").read_bytes() == b"x" and not (parent / "dir-link").is_symlink()
     assert ((elsewhere / "file").read_text(), _mode(elsewhere / "file"), _mode(elsewhere)) == ("theirs", 0o600, 0o700)
     assert not (tmp_path / "nowhere").exists()
+
+
+def _write_half_then_fail(handle):
+    handle.write(b"half")
+    raise RuntimeError("writer failed")
+
+
+@pytest.mark.parametrize("shared", [True, False], ids=["shared", "private"])
+def test_a_replacement_whose_block_raises_leaves_the_file_there_and_no_new_one(tmp_path, shared):
+    parent = _setgid_parent(tmp_path / "parent") if shared else tmp_path
+    target = parent / "archive.zip"
+    target.write_bytes(b"earlier")
+    with pytest.raises(RuntimeError, match="writer failed"), shared_storage.replace_shared_file(target) as handle:
+        _write_half_then_fail(handle)
+    assert target.read_bytes() == b"earlier"
+    assert sorted(path.name for path in parent.iterdir()) == ["archive.zip"]
 
 
 def test_a_link_to_shared_storage_is_not_taken_for_it(tmp_path):
