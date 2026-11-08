@@ -880,10 +880,26 @@ deployments.
    system roots (`/etc`, `/opt`, `/usr`) is readable: an image must not keep a credential there.
 
 Only an agent launched through the chooser is isolated: every specialist (the dispatcher, its Ray GPU actor path and the
-agent runner). Agents started elsewhere that can run shell commands run as the app and can read what it can, in a
-hosted run too: the TraceLens skill runner's (`orchestrator/trace_analysis/tracelens_skill_runner.py`, whose agent may
-use `Bash`), GEAK's (`orchestrator/kernel/geak_runner.py`) and kernelforge's forge loops'. A hosted run whose spec's
-`flow` is `multibranch` is handed to `hyperloom-multibranch` before the entry's isolation check (below).
+agent runner). Agents started elsewhere run as the app and can read what it can, in a hosted run too:
+
+- the orchestration role (`inference_optimizer/cli/backends.py`, `_build_orchestration_backend`), on whichever agent
+  CLI it runs: on Codex, the backend every non-critic role gets when the only credential is OpenAI's
+  (`orchestrator/roles/codex.py`, `CodexBackend._session_for`), its shell commands run in Codex's own sandbox, which
+  limits writes, not reads, and takes `bwrap` from `PATH`; on the DeepSeek Harness (`orchestrator/roles/deepseek.py`,
+  named only by `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`) the harness's read-only mode likewise limits writes; on Claude it
+  has no shell, but its `Read` (`orchestrator/mcp_tool_names.py`, `ORCHESTRATION_BUILTIN_TOOL_NAMES`) is limited to
+  no tree;
+- the TraceLens skill runner's agent (`orchestrator/trace_analysis/tracelens_skill_runner.py`): Claude with `Bash`
+  (`DEFAULT_ALLOWED_TOOLS`), Codex (`_run_tracelens_skill_codex`) or the DeepSeek Harness;
+- GEAK's agents (`orchestrator/kernel/geak_runner.py`, which starts GEAK's `run_e2e`);
+- kernelforge's agents, each in a `python -m kernelforge.cli` child: `kernel-rewrite-controller`'s forge loops
+  (`orchestrator/kernel/controller_submit.py`), `forge-fuse`'s kernel author (`orchestrator/kernel/forge_fusion.py`)
+  and `gemm-tune`'s generated-tuner author (`orchestrator/kernel/forge_gemm_tuning.py`; `kernelforge/workflows/gemm_tune/tier3`);
+- the quantization agent (`agents/quantization/driver/runner.py`: Claude with `Bash`, or the DeepSeek Harness), which
+  runs only with `--quantize` and `HYPERLOOM_QUANTIZE_ENABLED` set; no hosted spec field sets `--quantize`.
+
+The critic and the one-shot Claude calls start no agent with tools. A hosted run whose spec's `flow` is `multibranch`
+is handed to `hyperloom-multibranch` before the entry's isolation check (below).
 
 **Specialists in a bubblewrap sandbox** (`orchestrator/specialists/launch_env.py`; the dispatcher, its Ray GPU actor
 path and the agent runner) write their workspace and worktree, and a private `/tmp` and `/dev/shm` (directories of
