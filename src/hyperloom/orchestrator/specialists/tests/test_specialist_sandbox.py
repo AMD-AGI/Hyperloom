@@ -7,24 +7,30 @@ process manager: what the agent reaches, how it is stopped, and how a sandbox th
 from __future__ import annotations
 
 import asyncio
+import http.server
+import ipaddress
 import json
 import logging
 import os
+import signal
+import socket
 import sys
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Callable, Iterator
 
 import pytest
 
 from hyperloom_common.git_safety import app_git, recorded_admin_dir, trusted_admin_dir, worktree_head
-from hyperloom_common.tests._bwrap_host import usable_bwrap
+from hyperloom_common.tests._bwrap_host import unavailable, usable_bwrap
 from hyperloom.common import agent_isolation, confinement
 from hyperloom.common.agent_isolation import BwrapIsolation, session_isolation_lines
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.proctree import REAP_MARK_ENV
+from hyperloom.common.proctree import REAP_MARK_ENV, marked_pids, proc_identity, signal_processes
 from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
 from hyperloom.orchestrator.specialists import agent_runner, launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss
@@ -513,3 +519,182 @@ def test_a_login_the_app_replaces_or_makes_while_a_specialist_runs_is_not_shown_
     assert child.returncode == 0, err
     assert "SECRET" not in out + err
     assert json.loads(out) == {"token": "ENOENT", "login": "ENOENT", "model": "ok:weights", "doc": "ok:reference"}
+
+
+#: The stand-in CLI that calls its LLM gateways and MCP server, and tries what else listens on this host: a Ray
+#: head's port on loopback and at the host's address, directly and through the proxy the sandbox names.
+_CALLS = """#!{python} -I
+import json, socket, sys, urllib.request
+sys.stdin.read()
+def post(url):
+    try:
+        return urllib.request.urlopen(urllib.request.Request(url, data=b"{{}}"), timeout=20).read().decode()
+    except Exception as exc:
+        return type(exc).__name__
+def tcp(host, port):
+    try:
+        socket.create_connection((host, port), timeout=5).close()
+        return "connected"
+    except OSError as exc:
+        return type(exc).__name__
+reach = {{
+    "gateway": post("{gateway}/v1/messages"),
+    "far_gateway": post("{far}/v1/responses"),
+    "mcp": post("{mcp}"),
+    "head": tcp("127.0.0.1", {head}),
+    "head_at_host": tcp("{host}", {head}),
+    "head_jobs_api": post("http://{host}:{head}/api/jobs/"),
+}}
+json.dump(reach, open("reach.json", "w"))
+open("specialist_done.json", "w").write('{{"summary": "called", "proposal_set": []}}')
+"""
+
+
+def _host_address() -> str:
+    """This host's address on its default route (a UDP connect sends nothing); unavailable on a host without one."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        try:
+            probe.connect(("192.0.2.1", 9))
+            found = probe.getsockname()[0]
+        except OSError:
+            found = "127.0.0.1"
+    if ipaddress.ip_address(found).is_loopback:
+        unavailable("this host has no address besides loopback to try its listeners at")
+    return found
+
+
+class _Recorded(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        server = self.server
+        assert isinstance(server, _RecordingServer)
+        server.seen.append(self.path)
+        body = server.name.encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+class _RecordingServer(http.server.ThreadingHTTPServer):
+    """An HTTP server on ``host`` answering a POST with its ``name`` and recording the paths it was asked."""
+
+    def __init__(self, name: str, host: str) -> None:
+        super().__init__((host, 0), _Recorded)
+        self.name = name
+        self.seen: list[str] = []
+
+
+@pytest.fixture
+def http_servers() -> Iterator[Callable[[str, str], _RecordingServer]]:
+    """Start :class:`_RecordingServer` instances on this host; each is shut down after the test."""
+    started: list[_RecordingServer] = []
+
+    def start(name: str, host: str) -> _RecordingServer:
+        server = _RecordingServer(name, host)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        started.append(server)
+        return server
+
+    yield start
+    for server in started:
+        server.shutdown()
+        server.server_close()
+
+
+async def test_a_sandboxed_specialist_calls_its_llm_gateways_and_mcp_server_and_reaches_nothing_else_on_this_host(
+    tmp_path: Path, sandboxed: BwrapIsolation, monkeypatch: pytest.MonkeyPatch, http_servers
+) -> None:
+    """Its network is its own: the gateway and MCP server on loopback are relayed in at their ports, the gateway at
+    the host's address goes through the bridge's proxy, and a Ray head's port (bound to every address, as ``ray
+    start --head`` binds its GCS) is refused on loopback, unroutable at the host's address, and a 403 through the
+    proxy, which never connects to it."""
+    host = _host_address()
+    gateway, far, mcp = (
+        http_servers("gateway", "127.0.0.1"),
+        http_servers("far", host),
+        http_servers("mcp", "127.0.0.1"),
+    )
+    head = http_servers("head", "0.0.0.0")
+    head_port = head.server_address[1]
+    gateway_url, far_url = f"http://127.0.0.1:{gateway.server_address[1]}", f"http://{host}:{far.server_address[1]}"
+    mcp_url = f"http://localhost:{mcp.server_address[1]}/mcp"
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", gateway_url)
+    monkeypatch.setenv("OPENAI_BASE_URL", far_url)
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"tools": {"type": "http", "url": mcp_url}}}), encoding="utf-8")
+    calls = _CALLS.format(
+        python=sys.executable, gateway=gateway_url, far=far_url, mcp=mcp_url, head=head_port, host=host
+    )
+    cli = _script(tmp_path / "cli" / "bin" / "claude", calls)
+    dispatcher = SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(
+            agent_backend="claude", claude_executable=str(cli), poll_interval_seconds=0.1, mcp_config_path=str(config)
+        )
+    )
+    workspace = tmp_path / "ws"
+
+    result = await dispatcher.run(_spawn(workspace))
+
+    assert result.error == "" and result.done_payload["summary"] == "called", result
+    assert json.loads((workspace / "reach.json").read_text(encoding="utf-8")) == {
+        "gateway": "gateway",
+        "far_gateway": "far",
+        "mcp": "mcp",
+        "head": "ConnectionRefusedError",
+        "head_at_host": "OSError",
+        "head_jobs_api": "HTTPError",
+    }
+    assert (gateway.seen, mcp.seen, far.seen) == (["/v1/messages"], ["/mcp"], [f"{far_url}/v1/responses"])
+    assert head.seen == []
+
+
+#: Run as a Ray actor's worker would: the actor's process manager starts the launch, then the actor waits.
+_ACTOR = """
+import json, sys, time
+from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
+spawn = json.loads(sys.argv[1])
+print(ManagedServerProcess().start(spawn["argv"], env=spawn["env"], cwd=spawn["cwd"]), flush=True)
+time.sleep(600)
+"""
+
+
+def _marked_within(mark: str, done: Callable[[list[int]], bool], seconds: float) -> list[int]:
+    """The processes carrying ``mark`` once ``done`` holds for them, or when ``seconds`` have passed."""
+    deadline = time.monotonic() + seconds
+    while True:
+        found = marked_pids(REAP_MARK_ENV, mark)
+        if done(found) or time.monotonic() > deadline:
+            return found
+        time.sleep(0.1)
+
+
+def test_a_sandbox_a_ray_actor_started_ends_when_the_actor_is_killed(tmp_path: Path, sandboxed: BwrapIsolation):
+    """The actor's death (an OOM kill, say) ends its bubblewrap, and with it every process of the sandbox: nothing
+    keeps the GPU devices and the worktree with no deadline, heartbeat or reaper left to end it."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    mark = f"actor-dies-{os.getpid()}-{time.monotonic_ns()}"
+    cmd = ["/bin/sh", "-c", "sleep 300 & sleep 300 & wait"]
+    env = {"PATH": "/usr/bin:/bin", REAP_MARK_ENV: mark}
+    prepared = prepare_launch(sandboxed, LaunchPlace(workspace), cmd, env)
+    spawn = prepared.actor(cmd, env)
+    child_env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+    payload = json.dumps({"argv": spawn.argv, "env": spawn.env, "cwd": str(workspace)})
+    actor = subprocess.Popen([sys.executable, "-c", _ACTOR, payload], env=child_env, stdout=subprocess.PIPE, text=True)
+    try:
+        assert actor.stdout is not None and actor.stdout.readline().strip().isdigit()
+        running_before = _marked_within(mark, lambda found: len(found) >= 3, 30)
+        actor.kill()
+        actor.wait(timeout=30)
+        left = _marked_within(mark, lambda found: not found, 30)
+    finally:
+        actor.kill()
+        signal_processes(
+            [(pid, seen[1]) for pid in marked_pids(REAP_MARK_ENV, mark) if (seen := proc_identity(pid))], signal.SIGKILL
+        )
+        prepared.release()
+    assert len(running_before) >= 3  # the shell, its two sleeps (and the network relay)
+    assert left == []

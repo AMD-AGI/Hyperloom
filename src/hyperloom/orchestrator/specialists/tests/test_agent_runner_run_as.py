@@ -230,7 +230,7 @@ async def test_a_sandboxed_codex_runs_with_its_own_sandbox_off(tmp_path: Path, m
     _workspace, calls = await _launch(tmp_path, argv=codex, backend="codex", mcp=False)
 
     [(argv, _kwargs)] = calls
-    assert argv[argv.index("--") + 1 :] == ["codex", "exec", CODEX_BYPASS_FLAG, "--json", "-"]
+    assert argv[argv.index("--") + 1 :][-5:] == ["codex", "exec", CODEX_BYPASS_FLAG, "--json", "-"]
 
 
 @pytest.mark.parametrize("value", [None, "", "   "])

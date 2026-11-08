@@ -128,13 +128,15 @@ class BwrapIsolation:
         *,
         marks: Sequence[str] = (),
         status_fd: int | None = None,
+        spawned_here: bool = True,
     ) -> tuple[list[str], dict[str, str]]:
         """``argv`` in ``policy``'s sandbox: the bubblewrap command line, and the environment to start it with.
 
         The variables ``marks`` names leave ``env`` and are set inside with ``--setenv``, so bubblewrap's own
         processes carry no mark and a reaper's TERM reaches only the sandbox (their values show in bubblewrap's
         command line: never a secret). ``--die-with-parent`` is kept only on the main thread: it follows the thread
-        that starts bubblewrap, and one that ends first would SIGKILL the sandbox with no grace.
+        that starts bubblewrap, and one that ends first would SIGKILL the sandbox with no grace. Where another process
+        starts it (``spawned_here`` false: a Ray actor), this thread decides nothing, and the policy's stands.
 
         Raises:
             IsolationRefused: ``policy`` names a problem for this bubblewrap's version (nothing was started).
@@ -147,7 +149,9 @@ class BwrapIsolation:
         moved = tuple((name, child_env.pop(name)) for name in marks if name in child_env)
         on_main = threading.current_thread() is threading.main_thread()
         policy = dataclasses.replace(
-            policy, marks=(*policy.marks, *moved), die_with_parent=policy.die_with_parent and on_main
+            policy,
+            marks=(*policy.marks, *moved),
+            die_with_parent=policy.die_with_parent and (on_main or not spawned_here),
         )
         try:
             return policy.argv(self.probe, argv, status_fd=status_fd), child_env

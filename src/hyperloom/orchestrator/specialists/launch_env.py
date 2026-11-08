@@ -12,7 +12,8 @@ the launch has ended.
 In a sandbox (:func:`specialist_confinement`) the specialist writes its workspace and worktree, where its home, CLI
 state and compiler caches are pointed, and its own ``/tmp`` and ``/dev/shm``; it reads its toolchain, its worktree's
 git metadata, its model and references; the credential locations inside what it reads are hidden; a GPU task gets
-the GPU devices. The claude CLI cannot read its own login file there, so it runs in one only with a login in its
+the GPU devices. Its network is its own (:mod:`.sandbox_network`): it reaches the LLM endpoints and MCP servers its
+launch names, and nothing else listening on this host or beyond. The claude CLI cannot read its own login file there, so it runs in one only with a login in its
 environment; without one it runs unconfined, said and counted, unless it must be isolated, which refuses it
 (:func:`claude_login_isolation`). codex runs with its own sandbox off (:func:`codex_sandbox_off`), since bubblewrap
 already confines it and codex's own, a nested bubblewrap, could not map a user namespace inside.
@@ -21,7 +22,8 @@ bubblewrap ends its sandbox at once on a SIGTERM of its own, without passing it 
 when it cannot set the sandbox up. So the process a sandboxed launch gives (:class:`SandboxedProcess`) asks the agent
 to stop by TERMing the sandbox's marked processes, and tells a setup failure from the agent's exit by what bubblewrap
 wrote on ``--json-status-fd``. A Ray GPU actor's launch is built from this host's probe and paths, so under bubblewrap
-it is for a single-node Ray cluster only; its status goes to a file the actor's shell opens.
+it is for a single-node Ray cluster only; its status goes to a file the actor's shell opens, and its sandbox ends
+when the actor does (``--die-with-parent``).
 """
 
 from __future__ import annotations
@@ -67,6 +69,7 @@ from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_
 from hyperloom_common.llm.llm_attribution import inject_env as inject_attribution_env
 
 from .agent_cli_config import SpecialistAgentUnavailableError, _build_specialist_env, load_mcp_servers
+from .sandbox_network import SANDBOX_DROPPED, SOCKET_DIR, NetworkBridge, Reach, specialist_reach
 
 log = logging.getLogger(__name__)
 
@@ -456,7 +459,8 @@ def marked_pids_as(run_as: RunAs, mark: str) -> list[int]:
 @dataclass
 class PreparedLaunch:
     """One launch made ready in its tier: ``popen_kwargs`` start it as another account; ``policy`` is its sandbox's,
-    with ``scratch`` (its ``/tmp`` and ``/dev/shm``) bound in it.
+    with ``scratch`` (its ``/tmp`` and ``/dev/shm``) bound in it, and ``network`` what the sandbox reaches from its own
+    network.
 
     :meth:`local` or :meth:`actor` gives the spawn's arguments and :meth:`started` the process to supervise;
     :meth:`marked_pids` finds what carries the launch's reap mark; :meth:`release` removes what the launch left here
@@ -467,6 +471,7 @@ class PreparedLaunch:
     popen_kwargs: dict[str, Any] = field(default_factory=dict)
     policy: BwrapPolicy | None = None
     scratch: Scratch | None = None
+    network: NetworkBridge | None = None
     status: LaunchStatus | None = None
     mark: str = ""
 
@@ -489,16 +494,17 @@ class PreparedLaunch:
     def actor(self, cmd: Sequence[str], env: Mapping[str, str]) -> Spawn:
         """The arguments that start ``cmd`` with ``env`` in a Ray GPU actor on this host: built from this host's
         probe and paths, so under bubblewrap for a single-node cluster only. There a shell opens the status file on
-        descriptor 3 and execs bubblewrap, which keeps no ``--die-with-parent`` (the actor's thread is not this one).
+        descriptor 3 and execs bubblewrap with ``--die-with-parent``, so the sandbox ends when the actor does: the
+        actor's process manager starts it from the thread it runs on, as it arms its own ``PR_SET_PDEATHSIG``.
 
         Raises:
             IsolationRefused: This bubblewrap must not launch the sandbox's policy, or there is none.
         """
         if not isinstance(self.isolation, BwrapIsolation):
             return self.local(cmd, env)
-        policy = replace(self._policy(), die_with_parent=False)
+        policy = replace(self._policy(), die_with_parent=True)
         self.status = LaunchStatus.file()
-        argv, child_env = self._sandboxed(self.isolation, cmd, env, policy, _ACTOR_STATUS_FD)
+        argv, child_env = self._sandboxed(self.isolation, cmd, env, policy, _ACTOR_STATUS_FD, spawned_here=False)
         return Spawn(["/bin/sh", "-c", _OPEN_STATUS, str(self.status.path), *argv], child_env, {})
 
     def _policy(self) -> BwrapPolicy:
@@ -520,11 +526,20 @@ class PreparedLaunch:
         env: Mapping[str, str],
         policy: BwrapPolicy,
         status_fd: int,
+        *,
+        spawned_here: bool = True,
     ) -> tuple[list[str], dict[str, str]]:
-        """bubblewrap's command line and environment for ``cmd``: the reap mark moves inside, and is kept for
-        :meth:`started`."""
+        """bubblewrap's command line and environment for ``cmd``, started by the relay of the sandbox's network: the
+        reap mark moves inside, and is kept for :meth:`started`."""
         self.mark = env.get(REAP_MARK_ENV, "")
-        return isolation.launch(cmd, policy, env, marks=(REAP_MARK_ENV,), status_fd=status_fd)
+        inside, env = list(cmd), dict(env)
+        if self.network is not None:
+            inside = self.network.relay(cmd)
+            for name in SANDBOX_DROPPED:
+                env.pop(name, None)
+        return isolation.launch(
+            inside, policy, env, marks=(REAP_MARK_ENV,), status_fd=status_fd, spawned_here=spawned_here
+        )
 
     def started(self, process: Any) -> Any:
         """The process to supervise for ``process``, just started with :meth:`local` or :meth:`actor`."""
@@ -541,9 +556,12 @@ class PreparedLaunch:
         return marked_pids(REAP_MARK_ENV, mark)
 
     def release(self) -> None:
-        """Close the status, and remove the sandbox's scratch with what the agent left in it."""
+        """Close the status and the sandbox's network, and remove its scratch with what the agent left in it."""
         if self.status is not None:
             self.status.close()
+        network, self.network = self.network, None
+        if network is not None:
+            network.close()
         scratch, self.scratch = self.scratch, None
         if scratch is not None:
             try:
@@ -559,8 +577,9 @@ def prepare_launch(
 
     As another account: the workspace and worktree are shared with it, the private files set back to 0600, and the
     identity variables are its. In a bubblewrap sandbox: ``HOME``, the CLI state and compiler caches named outside
-    the trees it writes, and the temporary directory, are pointed inside it (:data:`SANDBOX_DIRECTORIES`), and its
-    confinement is derived (:func:`specialist_confinement`). Unconfined: nothing is changed, and the launch is said and
+    the trees it writes, and the temporary directory, are pointed inside it (:data:`SANDBOX_DIRECTORIES`), its
+    confinement is derived (:func:`specialist_confinement`), and what it reaches from its own network is served
+    (:func:`_network`). Unconfined: nothing is changed, and the launch is said and
     counted for the session report (:func:`~hyperloom.common.agent_isolation.unconfined_launch`).
 
     Raises:
@@ -577,12 +596,32 @@ def prepare_launch(
     _point_into_sandbox(place, env)
     confinement = specialist_confinement(place, cmd[0], env)
     scratch = Scratch.create()
+    prepared = PreparedLaunch(isolation, scratch=scratch)
     try:
-        policy = confinement.policy(scratch=scratch, chdir=place.cwd)
+        policy = _scratch_where_free(confinement.policy(scratch=scratch, chdir=place.cwd), isolation.probe.version)
+        prepared.policy, prepared.network = _network(policy, scratch, specialist_reach(cmd, env, place.mcp_config), env)
     except BwrapPolicyError as refused:
-        scratch.remove()
+        prepared.release()
         raise IsolationRefused(refused.problems) from None
-    return PreparedLaunch(isolation, policy=_scratch_where_free(policy, isolation.probe.version), scratch=scratch)
+    except BaseException:
+        prepared.release()
+        raise
+    return prepared
+
+
+def _network(
+    policy: BwrapPolicy, scratch: Scratch, reach: Reach, env: Mapping[str, str]
+) -> tuple[BwrapPolicy, NetworkBridge]:
+    """``policy`` with a network of its own, and the bridge that serves ``reach`` into it from a directory of
+    ``scratch``'s ``/tmp``: seen there inside, or bound read-only at its own path where the sandbox's ``/tmp`` is a
+    fresh tmpfs instead (:func:`_scratch_where_free`)."""
+    directory = Path(scratch.tmp, SOCKET_DIR)
+    if policy.tmp == scratch.tmp:
+        inside = f"/tmp/{SOCKET_DIR}"
+    else:
+        inside = str(directory)
+        policy = replace(policy, read_only=(*policy.read_only, inside))
+    return replace(policy, own_network=True), NetworkBridge.open(reach, directory, inside, env)
 
 
 def _demote(run_as: RunAs, place: LaunchPlace, env: dict[str, str]) -> dict[str, Any]:
