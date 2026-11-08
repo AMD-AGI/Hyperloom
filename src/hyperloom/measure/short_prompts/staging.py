@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom.measure.docs import canonical_json
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.short_prompts.prompts import GENERATOR, Prompt, PromptSetError, parse_prompts, prompts_bytes
@@ -62,6 +63,8 @@ _PROMPTS_PATH = f"{DATA_DIR}/{PROMPTS_FILE}"
 KEY_PREFIX = "short-prompts-"
 _SCHEMA = 1
 _KEY_DIGITS = 16
+_ENTRY_DIR_MODE = 0o755
+_ENTRY_FILE_MODE = 0o644
 _UTF8 = "utf-8"
 
 
@@ -110,7 +113,9 @@ def stage_file(root: Path, raw: bytes, inputs: Mapping[str, Any], *, generator: 
     same one is left as it is.
 
     The data and then the manifest are written into a directory of their own, which becomes the entry in one rename, so
-    a reader never sees half an entry.
+    a reader never sees half an entry. The entry is readable by every account whatever this process's umask (a runner
+    sandbox reads it as an account of its own) and writable by none but its writer; ``evalsets`` is made group-shared
+    (``2775``), so the next account of a run's group can stage another entry beside it.
 
     Raises:
         PromptSetError: An entry with this key exists and differs from what would be written.
@@ -123,11 +128,13 @@ def stage_file(root: Path, raw: bytes, inputs: Mapping[str, Any], *, generator: 
         if (final / MANIFEST_NAME).read_bytes() != manifest or (final / DATA_DIR / PROMPTS_FILE).read_bytes() != raw:
             raise PromptSetError(f"the entry {final} exists and differs from the one that would be written")
         return staged
-    incoming = final.parent / f".incoming-{uuid.uuid4().hex}"
-    (incoming / DATA_DIR).mkdir(parents=True, mode=0o755)
+    incoming = make_shared_dirs(final.parent) / f".incoming-{uuid.uuid4().hex}"
+    (incoming / DATA_DIR).mkdir(parents=True)
     try:
-        (incoming / DATA_DIR / PROMPTS_FILE).write_bytes(raw)
-        (incoming / MANIFEST_NAME).write_bytes(manifest)
+        _write_readable(incoming / DATA_DIR / PROMPTS_FILE, raw)
+        _write_readable(incoming / MANIFEST_NAME, manifest)
+        for directory in (incoming / DATA_DIR, incoming):
+            os.chmod(directory, _ENTRY_DIR_MODE)
         try:
             os.rename(incoming, final)
         except OSError:
@@ -136,6 +143,12 @@ def stage_file(root: Path, raw: bytes, inputs: Mapping[str, Any], *, generator: 
     finally:
         shutil.rmtree(incoming, ignore_errors=True)
     return staged
+
+
+def _write_readable(path: Path, data: bytes) -> None:
+    """``data`` in a new file at ``path`` with mode ``644``, which the umask does not decide."""
+    path.write_bytes(data)
+    os.chmod(path, _ENTRY_FILE_MODE)
 
 
 def recorded_sha256(entry: Path) -> str:
