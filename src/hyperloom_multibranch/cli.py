@@ -904,8 +904,6 @@ def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = Fa
     return ready_session(workload, load, hosted_storage(host, os.environ, cache))
 
 
-
-
 def ready_session(
     workload: Workload, load: Callable[[Workload], PeerFactory], storage: Mapping[str, Path] | None = None
 ) -> ReadySession:
