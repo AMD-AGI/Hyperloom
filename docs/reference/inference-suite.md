@@ -37,6 +37,9 @@ A launch script is read, never run. It must launch the session's framework and f
 every flag in its own text: a flag whose value names a shell variable, or a
 `# hyperloom-launch-controls:` line, is refused.
 
+A launch script, frozen base or default row that needs more GPUs than `--gpus` is
+refused, naming both counts.
+
 A source may hold several launches for one point. The base takes the one with the
 largest TP the GPUs fit, preferring an arm that does not offload KV cache, and
 records the others as alternatives.
