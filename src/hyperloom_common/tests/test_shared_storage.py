@@ -838,9 +838,10 @@ def test_a_replacement_whose_block_raises_leaves_the_file_there_and_no_new_one(t
     parent = _setgid_parent(tmp_path / "parent") if shared else tmp_path
     target = parent / "archive.zip"
     target.write_bytes(b"earlier")
-    with pytest.raises(RuntimeError, match="writer failed"), shared_storage.replace_shared_file(target) as handle:
-        handle.write(b"half")
-        raise RuntimeError("writer failed")
+    with pytest.raises(RuntimeError, match="writer failed"):
+        with shared_storage.replace_shared_file(target) as handle:
+            handle.write(b"half")
+            raise RuntimeError("writer failed")
     assert target.read_bytes() == b"earlier"
     assert sorted(path.name for path in parent.iterdir()) == ["archive.zip"]
 
