@@ -26,15 +26,28 @@ from pathlib import Path
 from hyperloom.contracts.long_context import PROMPT_OK
 from hyperloom.measure.long_context.outputs import PromptEntry, RunFacts, write_outputs
 from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR, OUTPUTS_FILE, LongContextPlan
+from hyperloom.measure.long_context.prompts import PER_TASK, TASKS
 from hyperloom.measure.long_context.rounds import run_long_context
 from hyperloom.measure.long_context.staging import stage_entry
 from hyperloom.measure.long_context.tasks import build_prompts
 from hyperloom.measure.short_prompts.tests.support import LocalServer, free_port
 
-__all__ = ["LENGTH", "MODEL", "FakeServer", "encode", "free_port", "outputs_files", "prompt_set", "staged_plan"]
+__all__ = [
+    "LENGTH",
+    "MODEL",
+    "PROMPTS",
+    "FakeServer",
+    "encode",
+    "free_port",
+    "outputs_files",
+    "prompt_set",
+    "staged_plan",
+]
 
 MODEL = "fake-model"
 LENGTH = 2048
+#: The prompts of a set: ``PER_TASK`` of each task.
+PROMPTS = PER_TASK * len(TASKS)
 NIAH, TRACKING, WORDS = "niah", "tracking", "words"
 _COMMON = 5
 

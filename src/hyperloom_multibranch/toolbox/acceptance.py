@@ -245,6 +245,7 @@ class AcceptanceSetup:
     ``long_context`` is the staged prompt set of the long-context check, which runs under the short-prompt check's lever
     list and always purposes, or when a request sets ``long_context_check``; ``None`` runs none. A
     :class:`~.long_context.ServedLongContext` gives each test the model's own set at the context its planned launch serves.
+    An AgentX campaign runs no long-context check: its tests' servers are not held up past their rounds for one.
 
     ``explore_accuracy`` off leaves the accuracy evaluation (GSM8K) out of a plain ``explore`` test (one that does not
     force the consistency check), whose accepted request then records ``accuracy=False``: the check was skipped, and the
@@ -359,8 +360,10 @@ class Acceptance:
     async def _long_context_setup(self, planned: object) -> LongContextSetup | None:
         """The prompt set a test planned as ``planned`` would run the long-context check with: the named one, or the
         model's own at the context the planned launch serves (read, and staged, in a worker thread: staging builds the
-        prompts with the model's tokenizer)."""
+        prompts with the model's tokenizer). An AgentX test gets none: its server is not held up for the check."""
         source = self._long_context
+        if self._workload is WorkloadKind.AGENTX:
+            return None
         if not isinstance(source, ServedLongContext):
             return source
         if not isinstance(planned, AcceptedMeasurement) or not planned.points:

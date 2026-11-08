@@ -19,7 +19,7 @@ import pytest
 from hyperloom.contracts.long_context import LONG_CONTEXT_COMPLETE, LONG_CONTEXT_INCOMPLETE
 from hyperloom.contracts.measurement import TestResult, Validity
 from hyperloom.measure.long_context.plan import LongContextPlan
-from hyperloom.measure.long_context.tests.support import LENGTH
+from hyperloom.measure.long_context.tests.support import LENGTH, PROMPTS
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
@@ -100,10 +100,12 @@ async def test_an_edited_score_with_untouched_hashes_is_named(tmp_path: Path, ri
     assert check is not None and check.score == 0.25
     tasks = tuple(replace(t, passed=t.n, score=1.0) for t in check.tasks)
     prompts = tuple(replace(p, passed=True) for p in check.prompts)
-    edited = replace(result, long_context=replace(check, passed=64, score=1.0, tasks=tasks, prompts=prompts))
+    edited = replace(result, long_context=replace(check, passed=PROMPTS, score=1.0, tasks=tasks, prompts=prompts))
 
     assert edited.manifest_sha256 == result.manifest_sha256
-    assert session.executor.difference(edited) == ("long_context.passed: recorded 64, the bundle's outputs give 16")
+    assert session.executor.difference(edited) == (
+        f"long_context.passed: recorded {PROMPTS}, the bundle's outputs give {PROMPTS // 4}"
+    )
 
 
 async def test_a_runner_that_left_no_outputs_gives_an_incomplete_check_with_no_score(tmp_path: Path, rig) -> None:

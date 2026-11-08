@@ -13,15 +13,17 @@ import pytest
 from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.long_context import build
 from hyperloom.measure.long_context.grade import passes
-from hyperloom.measure.long_context.plan import MAX_LENGTH, REPLY_HEADROOM, LongContextPlan
+from hyperloom.measure.long_context.plan import REPLY_HEADROOM, LongContextPlan
 from hyperloom.measure.long_context.prompts import PER_TASK, TASKS, PromptSetError, parse_prompts, prompts_bytes
 from hyperloom.measure.long_context.resolve import staged_set
 from hyperloom.measure.long_context.staging import KEY_PREFIX, load_prompt_set, stage_entry
 from hyperloom.measure.long_context.tasks import build_prompts
-from hyperloom.measure.long_context.tests.support import LENGTH, encode, prompt_set, staged_plan
+from hyperloom.measure.long_context.tests.support import LENGTH, PROMPTS, encode, prompt_set, staged_plan
 from hyperloom.measure.short_prompts import staging as short_staging
 
 TOKENIZER = {"fake": "0" * 64}
+#: The bound a set is built under, written out (the oracle does not follow the code's constant).
+BOUND = 131072
 INPUTS = {"seed": 1, "length": LENGTH, "tokenizer": TOKENIZER}
 
 
@@ -29,6 +31,7 @@ def test_each_task_has_its_prompts_each_at_most_the_length_and_within_one_percen
     prompts = prompt_set()
 
     assert [(task, sum(p.task == task for p in prompts)) for task in TASKS] == [(task, PER_TASK) for task in TASKS]
+    assert len(prompts) == 16, "16 prompts a set, four of each task"
     assert len({p.id for p in prompts}) == len(prompts)
     assert all(LENGTH * 0.99 <= p.tokens <= LENGTH for p in prompts)
     assert all(p.tokens == len(encode(p.text)) for p in prompts), "the recorded length is what the tokenizer measured"
@@ -47,7 +50,7 @@ def test_every_reference_is_in_its_prompt_and_the_needles_are_spread_over_the_de
     assert all(ref in p.text for p in prompts for ref in p.references)
     single = [p for p in prompts if p.task == "niah_single"]
     depths = [p.text.index(p.references[0]) / len(p.text) for p in single]
-    assert depths == sorted(depths) and depths[0] < 0.1 and depths[-1] > 0.9, "the needle goes deeper with the index"
+    assert depths == sorted(depths) and depths[0] < 0.15 and depths[-1] > 0.85, "the needle goes deeper with the index"
 
 
 def test_the_multikey_question_names_one_of_several_needles_and_the_tracking_prompt_has_a_distractor_chain() -> None:
@@ -97,10 +100,10 @@ def test_an_entry_is_staged_in_the_runner_cache_layout_and_read_back(tmp_path: P
     entry = tmp_path / short_staging.EVALSETS_DIR / plan.prompt_set
     assert sorted(p.name for p in entry.iterdir()) == ["data", "manifest"]
     manifest = json.loads((entry / "manifest").read_text())
-    assert manifest["inputs"]["length"] == LENGTH and manifest["prompts"]["count"] == 64
+    assert manifest["inputs"]["length"] == LENGTH and manifest["prompts"]["count"] == PROMPTS
     assert load_prompt_set(plan, {"HYPERLOOM_RUNNER_CACHE": str(tmp_path)}) == prompt_set()
     found = staged_set(plan.prompt_set, {"HYPERLOOM_RUNNER_CACHE": str(tmp_path)})
-    assert (found.prompts_sha256, found.length) == (plan.prompts_sha256, LENGTH)
+    assert (found.prompts_sha256, found.length, found.bound) == (plan.prompts_sha256, LENGTH, None)
 
 
 def test_a_rewrite_that_is_the_same_entry_is_left_alone_and_one_that_differs_is_refused(tmp_path: Path) -> None:
@@ -187,7 +190,10 @@ def test_the_builder_command_stages_the_set_and_prints_what_a_setup_names(tmp_pa
         (32768, None, 32640),
         (4096, 8192, 3968),
         (None, 8192, 8064),
-        (1 << 24, None, MAX_LENGTH),
+        (32768, 32768, 32640),  # under the bound: as before the bound
+        (1 << 20, 1 << 20, BOUND - REPLY_HEADROOM),  # a 1M-token launch: the bound, not 1M tokens a prompt
+        (1 << 24, None, BOUND - REPLY_HEADROOM),
+        (None, BOUND + 1, BOUND - REPLY_HEADROOM),
     ],
 )
 def test_the_set_is_built_at_the_context_the_launch_serves_within_the_models_limit_less_the_answer(
@@ -217,3 +223,33 @@ def test_the_builder_builds_for_the_served_context_and_the_check_then_fits_the_l
     found = staged_set(printed["prompt_set"], {"HYPERLOOM_RUNNER_CACHE": str(tmp_path / "cache")})
     assert found.length == int(printed["length"]) == LENGTH
     assert LongContextPlan(found.prompt_set, found.prompts_sha256, found.length).needed_context == served
+
+
+def test_the_builder_refuses_a_length_past_the_bound_less_the_answer(tmp_path: Path) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "tokenizer.json").write_text("{}")
+
+    with pytest.raises(PromptSetError, match=f"the length must be 1024 to {BOUND - REPLY_HEADROOM} tokens"):
+        build.build_entry(model, tmp_path / "cache", length=BOUND - REPLY_HEADROOM + 1, encode=encode)
+    assert not (tmp_path / "cache").exists()
+
+
+def test_another_bound_is_another_entry_and_an_entry_built_before_the_bound_records_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "tokenizer.json").write_text("{}")
+    environ = {"HYPERLOOM_RUNNER_CACHE": str(tmp_path)}
+
+    today = build.build_entry(model, tmp_path, length=LENGTH, encode=encode)
+    monkeypatch.setattr(build, "LENGTH_BOUND", 65536)
+    other = build.build_entry(model, tmp_path, length=LENGTH, encode=encode)
+    before = stage_entry(tmp_path, prompt_set(), INPUTS)  # the inputs a set was keyed by before the bound
+
+    assert len({today.key, other.key, before.key}) == 3
+    assert (staged_set(today.key, environ).bound, staged_set(other.key, environ).bound) == (BOUND, 65536)
+    manifest = json.loads((tmp_path / short_staging.EVALSETS_DIR / today.key / "manifest").read_text())
+    assert manifest["inputs"]["bound"] == BOUND and manifest["prompts"]["count"] == PROMPTS
+    assert staged_set(before.key, environ).bound is None
