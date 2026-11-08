@@ -23,6 +23,7 @@ from enum import Enum
 
 from hyperloom_common.contract_fields import ContractFields, field_names
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv
+from inference_suite.frameworks import Framework, framework_facts
 from inference_suite.golden import golden_owned_settings
 
 BASE_LAUNCH_SCHEMA = "hyperloom-base-launch/1"
@@ -613,6 +614,12 @@ class BaseLaunch:
         self._check_source()
         self._check_layers()
         self._check_script()
+
+    @property
+    def cards(self) -> int:
+        """The GPUs its launch occupies: ``tp`` for each data-parallel replica that holds cards of its own."""
+        data_parallel = framework_facts(Framework(self.framework)).data_parallel
+        return self.topology.tp * (1 if data_parallel is None else data_parallel.replicas(self.args))
 
     @property
     def script(self) -> str:

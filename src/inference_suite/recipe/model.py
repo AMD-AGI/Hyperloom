@@ -101,7 +101,7 @@ VLLM_RUNNER_OWNED = frozenset(
 VLLM_TOPOLOGY = TopologySpelling(
     tp=(_TENSOR_PARALLEL_SIZE, "-tp"),
     ep_switch=("--enable-expert-parallel", "-ep"),
-    dp=("--data-parallel-size", "-dp"),
+    dp=framework_facts(Framework.VLLM).data_parallel.aliases,
 )
 
 

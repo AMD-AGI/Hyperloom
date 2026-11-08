@@ -9,11 +9,11 @@
 rows:
   - framework: sglang
     gfx: [gfx942]
-    args: [--trust-remote-code, --mem-fraction-static, "0.8", --disable-radix-cache]
+    args: [--trust-remote-code, --mem-fraction-static, "0.8"]
     env: {SGLANG_USE_AITER: "1", SGLANG_AITER_MLA_PERSIST: "1"}
   - framework: sglang
     gfx: [gfx950]
-    args: [--trust-remote-code, --mem-fraction-static, "0.8", --disable-radix-cache]
+    args: [--trust-remote-code, --mem-fraction-static, "0.8"]
     env: {SGLANG_USE_AITER: "1"}
   - framework: sglang
     gfx: [gfx1151]
@@ -21,7 +21,6 @@ rows:
       - --trust-remote-code
       - --mem-fraction-static
       - "0.5"
-      - --disable-radix-cache
       - --attention-backend
       - triton
       - --disable-cuda-graph
