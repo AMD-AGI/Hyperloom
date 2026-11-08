@@ -48,7 +48,7 @@ from functools import cache, partial
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
-from inference_suite.contracts import AGENTX_DEFAULT_DURATION_SEC, BaseLaunch
+from inference_suite.contracts import AGENTX_DEFAULT_DURATION_SEC
 from hyperloom_common.llm.llm_config import preferred_agent_backend, provider_model_defaults, resolve_forge_llm_model
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom_multibranch.contracts.llm_prices import price_of
@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     from hyperloom.measure.hosted_spec import SpecContext
     from hyperloom.measure.pins import ActiveImage
     from hyperloom.measure.points import CanonicalMeasurement
+    from hyperloom.orchestrator.state.base_launch import ServerBase
     from hyperloom_multibranch.specialist.agent_session import AgentCommand
     from hyperloom_multibranch.specialist.agent_sessions import AgentSandboxes
     from hyperloom_multibranch.specialist.dev_sandbox import DevLeases, SandboxFor
@@ -123,7 +124,8 @@ class SessionWiring:
     tokens that grant a branch's specialist the MCP service's tools (a grant names the service's URL, so it is issued
     when a specialist starts), each branch's log, the session's briefs, its dev sandboxes, ``None`` when it lends
     none, the canonical configuration the toolbox rendered, which the gate's benchmark client is read from, the
-    native trees the branches edit (:func:`native_trees`) and the sandboxes autonomous agents run in."""
+    native trees the branches edit (:func:`native_trees`), the sandboxes autonomous agents run in and the server half
+    of the session's frozen base launch, which every test starts from."""
 
     setup: PeerSetup
     repo: ExperimentRepo
@@ -135,6 +137,7 @@ class SessionWiring:
     canonical: Path
     native: Mapping[str, NativeTree]
     agent_sandboxes: AgentSandboxes
+    base: ServerBase
 
 
 #: Builds the specialist runtime's session factory, and the worktree of each branch the worktree tools serve, on a
@@ -300,14 +303,13 @@ def workload_rule(workload: Workload, blackboard: CommitQuery) -> Rule:
     return InferenceXRule(blackboard, workload.conc)
 
 
-def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost, base: BaseLaunch) -> CanonicalMeasurement:
+def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost, base: ServerBase) -> CanonicalMeasurement:
     """The canonical measurement every point of the session is rendered from. The renderer takes the model and the
-    runner type only as arguments, so a point never falls back to the shipped YAML's model, and the session's frozen
-    ``base`` too: this process is no Hyperloom session, so an AgentX point is seeded with no base it would find.
-    Raises :class:`PeersUnavailable` when it cannot be rendered."""
+    runner type only as arguments, so a point never falls back to the shipped YAML's model, and the server half of the
+    session's frozen ``base`` too: this process is no Hyperloom session, so an AgentX point is seeded with no base it
+    would find. Raises :class:`PeersUnavailable` when it cannot be rendered."""
 
     from hyperloom.measure.points import PointError, default_canonical
-    from hyperloom.orchestrator.state.base_launch import server_base
 
     try:
         return default_canonical(
@@ -316,7 +318,7 @@ def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost, base: B
             model_path=resolve_serving_model_path(workload.model),
             gpu_type=workload.gpu_type,
             inferencex_path=host.inferencex.path,
-            server_base=server_base(base),
+            server_base=base,
         )
     except PointError as exc:
         raise PeersUnavailable(f"the canonical measurement cannot be taken: {exc}") from exc
@@ -341,6 +343,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     """
 
     from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
+    from hyperloom.orchestrator.state.base_launch import server_base
     from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
     from hyperloom_multibranch.specialist.blocked import BlockedCandidates, register_blocked_tools
     from hyperloom_multibranch.specialist.tools import register_worktree_tools
@@ -348,7 +351,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox, host.image.ref)
     frozen = freeze_session_base(layout.toolbox, workload, setup.agent_launch)
-    base, setup = frozen.launch, replace(setup, agent_launch=served_launch(frozen, setup.agent_launch))
+    base, setup = server_base(frozen.launch), replace(setup, agent_launch=served_launch(frozen, setup.agent_launch))
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
@@ -372,7 +375,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     tokens = McpSpecialistTokens(mcp)
     rendered = canonical_dir / RENDERED_CANONICAL
     wiring = SessionWiring(
-        setup, repo, tokens, runtime_blackboard, briefs, toolbox, leases, rendered, native, sandboxes.agents
+        setup, repo, tokens, runtime_blackboard, briefs, toolbox, leases, rendered, native, sandboxes.agents, base
     )
     built = sessions(wiring)
     register_worktree_tools(mcp, repo=repo, worktrees=built.worktrees)
@@ -616,6 +619,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             role=role_prompt(
                 _specialist_role(workload),
                 references=wiring.setup.references,
+                base=wiring.base,
                 dev_leases=wiring.dev_leases.limits.cap if wiring.dev_leases else 0,
                 native=wiring.native,
             ),
