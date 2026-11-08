@@ -219,7 +219,9 @@ def graded_integrate_case(native_benchmark, session_dir, tmp_path, monkeypatch):
 def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.double_run_requested", lambda params: False)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.baseline.double_run_requested", lambda params, config_path: False
+    )
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)

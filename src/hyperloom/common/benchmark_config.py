@@ -109,6 +109,15 @@ class BenchmarkPoint:
             server_ready_timeout_s=_number(ready),
         )
 
+    @property
+    def measured_once(self) -> bool:
+        """Whether a test of this point runs no discarded warmup round before its measured one.
+
+        An AgentX replay runs 600-3600 s, holds steady, and warms its own client inside the round, so a second round
+        on a freshly booted server only doubles the boot and the replay. A fixed-shape point keeps its warmup round.
+        """
+        return self.agentx
+
 
 def read_benchmark_point(path: Path) -> BenchmarkPoint:
     """Read the point YAML at ``path``.
