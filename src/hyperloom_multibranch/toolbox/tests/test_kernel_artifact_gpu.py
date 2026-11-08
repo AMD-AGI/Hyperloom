@@ -25,7 +25,6 @@ import csv
 import hashlib
 import json
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +37,7 @@ from hyperloom.measure.framework.merge import PRIVATE
 from hyperloom.measure.points import default_canonical
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
+from hyperloom_multibranch.toolbox.tests.gpu_session import freeze_gpu_session_base
 from hyperloom_multibranch.toolbox.tests.integration_inputs import IMAGE, baseline_recipe
 from hyperloom_multibranch.toolbox.tests.integration_rig import Specialist, Stack, Variant, build_stack
 from hyperloom_multibranch.toolbox.tests.test_framework_isolation_gpu import _landed
@@ -74,6 +74,8 @@ ENVS = {USE_AITER: "1", LOG_LOOKUPS: "1"}
 #: The decode batch sizes of a small test: the rows put are for these.
 DECODE_BATCHES = (1, 2, 4, 8, 12, 16, 24, 32)
 TEST_WAIT_SEC = 3300
+PRIMARY = 4
+USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 LOOKUP = re.compile(r"(?:tuned config|tuned on cu_num = \d+) in (\S+?)[, ]")
 TORCH_ROW = {"libtype": "torch", "solidx": "0", "splitK": "0", "us": "0.0", "kernelName": "torch", "err_ratio": "0.0"}
 SHAPE_ROW = {"bias": "False", "dtype": "torch.bfloat16", "outdtype": "torch.bfloat16", "scaleAB": "False"}
@@ -151,17 +153,15 @@ def _assert_refused(replies: dict[str, str]) -> None:
 
 
 def _variant(root: Path) -> Variant:
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=INFERENCEX, capture_output=True, text=True, check=True
-    ).stdout.strip()
     spec = spec_context(
         root,
         image_ref="local",
         image_digest=IMAGE,
         gpu_type="MI355X",
     )
+    freeze_gpu_session_base(root / "session", MODEL, spec.gpu_type, tp=1, conc=PRIMARY)
     canonical = default_canonical(
-        root / "canonical", primary_concurrency=4, config_path=default_baseline_config(), model_path=MODEL
+        root / "canonical", primary_concurrency=PRIMARY, config_path=default_baseline_config(), model_path=MODEL
     )
     return Variant(
         tuple(CARDS),
