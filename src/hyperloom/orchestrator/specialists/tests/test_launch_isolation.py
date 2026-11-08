@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,7 @@ from hyperloom.orchestrator.specialists.launch_env import (
     stage_mcp_config,
     without_codex_sandbox,
 )
+from hyperloom.orchestrator.specialists.sandbox_network import RELAY
 from hyperloom.orchestrator.specialists.tests._agent_fixtures import make_runner, make_spec, wait_finished
 
 FAKE_BWRAP = "/opt/fake/bwrap"
@@ -115,8 +117,10 @@ def test_a_sandboxed_launch_sets_its_mark_inside_only_and_passes_its_status_desc
         spawn = prepared.local(["claude", "--print"], env)
         argv = spawn.argv
         [status_fd] = spawn.kwargs["pass_fds"]
-        assert argv[0] == FAKE_BWRAP and argv[argv.index("--") + 1 :] == ["claude", "--print"]
-        assert {"--unshare-user", "--unshare-pid", "--cap-drop"} <= set(argv)
+        inside = argv[argv.index("--") + 1 :]
+        assert argv[0] == FAKE_BWRAP and inside[:4] == [sys.executable, "-I", "-S", "-c"]
+        assert inside[4] == RELAY and inside[-2:] == ["claude", "--print"]
+        assert {"--unshare-user", "--unshare-pid", "--cap-drop", "--unshare-net"} <= set(argv)
         assert argv[argv.index("--json-status-fd") + 1] == str(status_fd)
         assert argv[argv.index("--setenv") + 1 : argv.index("--setenv") + 3] == [REAP_MARK_ENV, "mark-1"]
         assert REAP_MARK_ENV not in spawn.env and "token-value" not in argv
@@ -747,16 +751,21 @@ def test_a_sandbox_whose_agent_carries_no_mark_is_not_waited_on(tmp_path):
         child.wait(timeout=5)
 
 
-def test_a_ray_actor_launch_opens_its_status_file_in_a_shell_and_keeps_no_die_with_parent(tmp_path):
+def test_a_ray_actor_launch_opens_its_status_file_in_a_shell_and_dies_with_the_actor(tmp_path):
+    """``--die-with-parent`` stays whatever thread here builds the launch: the actor's thread starts bubblewrap."""
     place = _place(tmp_path)
     env = _env()
     prepared = prepare_launch(_bwrap(), place, ["claude"], env)
     try:
-        spawn = prepared.actor(["claude"], env)
+        built: list = []
+        worker = threading.Thread(target=lambda: built.append(prepared.actor(["claude"], env)))
+        worker.start()
+        worker.join()
+        [spawn] = built
         status_path = Path(spawn.argv[3])
         assert spawn.argv[:3] == ["/bin/sh", "-c", 'exec 3>>"$0" && exec "$@"'] and spawn.argv[4] == FAKE_BWRAP
         assert spawn.argv[spawn.argv.index("--json-status-fd") + 1] == "3"
-        assert "--die-with-parent" not in spawn.argv and spawn.kwargs == {} and REAP_MARK_ENV not in spawn.env
+        assert "--die-with-parent" in spawn.argv and spawn.kwargs == {} and REAP_MARK_ENV not in spawn.env
         assert status_path.parent.stat().st_mode & 0o777 == 0o700 and not status_path.exists()
         assert isinstance(prepared.started(object()), SandboxedProcess)
     finally:
@@ -848,3 +857,18 @@ async def test_a_ray_actor_writes_the_agents_output_to_a_log_made_fresh_and_neve
     assert not log.is_symlink() and "agent-output" in log.read_text(encoding="utf-8")
     assert raced.error == "failed to submit specialist GPU actor: OSError(40, 'Too many levels of symbolic links')"
     assert victim.read_text(encoding="utf-8") == "the app's own\n"
+
+
+def test_a_sandbox_gets_the_relay_of_its_own_network_and_never_the_apps_proxy_or_its_login(tmp_path):
+    env = _env(HTTPS_PROXY="http://agent:proxy-secret@proxy.example.test:3128", NO_PROXY="internal.example.test")
+    env["https_proxy"] = env["HTTPS_PROXY"]
+    prepared = prepare_launch(_bwrap(), _place(tmp_path), ["claude"], env)
+    try:
+        spawn = prepared.local(["claude"], env)
+    finally:
+        prepared.release()
+
+    assert "--unshare-net" in spawn.argv
+    assert spawn.argv[spawn.argv.index("--") + 1 :][:4] == [sys.executable, "-I", "-S", "-c"]
+    assert not {"HTTPS_PROXY", "https_proxy", "NO_PROXY"} & set(spawn.env)
+    assert not any("proxy-secret" in part for part in (*spawn.argv, *spawn.env.values()))
