@@ -6,9 +6,10 @@ host owns them: Hyperloom's multibranch (MB) today, which runs Arbor as an
 merges what Arbor keeps, and polls session.json's KEEP lessons as the keep
 signal (docs/component-mode.md, the design and the operator's decisions).
 
-MB built a sandbox around what standalone Arbor did wrong inside it: Arbor stopped MB's servers with a pattern `pkill`,
-ran on cards outside its lease, kept iterating after the session had ended, hung
-in an agent turn with no bound, and loaded kernel tables from paths outside the workspace.
+MB runs Arbor in a sandbox, against what standalone Arbor would do wrong inside it: stop
+MB's servers with a pattern `pkill`, run on cards outside its lease, keep iterating after
+the session has ended, hang in an agent turn with no bound, and load kernel tables from
+paths outside the workspace.
 This module is the part of the fix that is not the serving path:
 
 - **the switch**: ``"mode": "standalone" | "component"`` and the ``"component"``
@@ -119,8 +120,8 @@ STOP_AT = ("map",)
 # without the key, the first commit is the base (workspace.base_commit).
 _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
-# Each phase's cap, in minutes (``component.phase_minutes`` overrides). A hang
-# MB saw was one agent turn with no bound at all.
+# Each phase's cap, in minutes (``component.phase_minutes`` overrides): an agent
+# turn with no bound at all can hang.
 PHASE_MINUTES = {"agent": 90, "server": 45, "bench": 60, "critic": 15, "correctness": 30,
                  "short_prompts": 10}
 
@@ -372,8 +373,7 @@ def refusals(config, env=None, session_dir=None) -> list[str]:
             if r.returncode != 0 or not r.stdout.strip():
                 out.append(f"component.root {root} is not a commit of the workspace {ws}: every "
                            "patch and snapshot is measured against it")
-        # A server with no flags is not the host's launch: one MB onboarding wrote an empty
-        # server_flags, and the base server then failed its CUDA-graph capture.
+        # A server with no flags is not the host's launch.
         if not str(config.get("server_flags") or "").strip():
             out.append("component mode needs server_flags: the launch the host measures (its "
                        "start commit's server args); an empty one serves defaults that are not it")
@@ -758,7 +758,7 @@ def server_paths(session_dir) -> tuple[Path, Path]:
 
 def strip_masks(env: dict | None) -> dict:
     """``env`` without ROCR_/HIP_/CUDA_VISIBLE_DEVICES: the host sets them, never Arbor
-    (MB found Arbor's servers on cards outside its lease)."""
+    (a server must never land on cards outside its lease)."""
     return {k: v for k, v in (env or {}).items() if k not in MASK_KEYS}
 
 
@@ -771,7 +771,7 @@ def seed_env(config) -> dict:
 
 def gpu_list(value) -> list[int] | None:
     """``gpu_ids`` as a list of ints: "4,5,6,7" or [4, 5, 6, 7], since a host's manifest
-    may write either (a list crashed every iteration before); None when there are none."""
+    may write either; None when there are none."""
     items = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
     ids = [int(g) for g in items if str(g).strip()]
     return ids or None
@@ -782,9 +782,9 @@ def gpu_list(value) -> list[int] | None:
 def turn_block(config, session_dir=None, now: float | None = None) -> str:
     """The main agent's time this turn: its phase cap and what is left before the deadline.
 
-    Under a host an agent once started an AITER fused-MoE tuning sweep inside a capped
-    turn, hit the cap before measuring, and lost much of Arbor's time: nothing had
-    told it how long its turn was. Empty in standalone, where turns have no cap.
+    Under a host, an agent that is not told how long its turn is can start a tuning sweep
+    inside a capped turn, hit the cap before measuring, and lose much of Arbor's time.
+    Empty in standalone, where turns have no cap.
     """
     if not is_component(config):
         return ""
@@ -983,7 +983,7 @@ def _copy_tables(server_env: dict, workspace: str, dest: Path, say=log,
     (``tables``: {VAR: {path, file, sha256, bytes}}, ``tables_outside_workspace``:
     {VAR: path}). A host uploads tables/ as kernel artifacts, so a table need not sit
     in the worktree; one outside it (symlinks resolved) is still flagged, since a host
-    that loads only the worktree does not find it (MB's sandbox finding). A file over
+    that loads only the worktree does not find it. A file over
     TABLE_MAX_BYTES is listed with ``skipped``, not copied.
 
     A value that is a ``:``-separated list (aiter's tables: MB gives the start's as its
@@ -1065,7 +1065,7 @@ def carried_changes(container: str, workspace: str, parent: str, commit: str, it
     ``Revert "iter-N: ..."`` undoes, and that changes what is served: the served pathspec,
     or arbor/config.json (flags and env, which the patches leave out). A NOT_MEASURED
     iteration keeps its tree, so its change rides into the next KEEP, whose gate judges
-    only the two together (an INT4 QuickReduce env once rode into a later KEEP that way).
+    only the two together.
     Each is named with its own verdict from session.json, for the host to see.
     """
     from arbor.execute.workspace import git
@@ -1119,7 +1119,7 @@ def snapshot_keep(config, session_dir, *, container: str, workspace: str, number
     - Both patches use the served pathspec (no probes, logs, bytecode or arbor/config.json),
       byte for byte as git wrote them (``workspace._write_diff``).
     - ``left_out``: a file over ``workspace.OVERSIZE_BYTES`` stays out of both patches and
-      is named here, with its size (a GPU core dump once rode in one).
+      is named here, with its size (a GPU core dump, for example).
     - config.json is the live arbor/config.json, what was measured (the server and
       bench agents may edit it after the commit), without the GPU masks the launch drops.
     """
