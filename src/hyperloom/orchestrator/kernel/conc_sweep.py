@@ -910,7 +910,7 @@ async def _sweep_arm(
 
     The ladder's other rungs are recorded as never run under ``unpaired``, the stop that kept the first arm from them.
     """
-    from ..actions.executors._grid_runner import _num_gpus_for_config
+    from ..actions.executors._grid_runner import lease_cards
     from ..actions.executors._ray_serving import maybe_serving_lease
 
     grid = run.arm_grid(arm)
@@ -936,9 +936,9 @@ async def _sweep_arm(
         run.close_arm(arm.name, None)
         return
 
-    # Ray-managed GPU execution: one held Ray lease (``num_gpus=TP``) spans the arm's whole ladder -- its persistent
+    # Ray-managed GPU execution: one held Ray lease (as many GPUs as the launch occupies) spans the arm's whole ladder -- its persistent
     # server's boot and every reuse round, or each per-rung restart -- so no GPU process outlives it.
-    lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(run.base_yaml_path))
+    lease = maybe_serving_lease(num_gpus=lease_cards(run.base_yaml_path, run.session_dir))
     strategy = _resolve_arm_strategy(run, arm.name, serving_lease_held=lease is not None)
     pid_dir = run.workspace / f"server_{arm.name}"
     pid_dir.mkdir(parents=True, exist_ok=True)

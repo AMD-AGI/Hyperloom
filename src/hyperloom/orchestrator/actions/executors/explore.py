@@ -82,7 +82,7 @@ from ._grid_runner import (
     GridVariant,
     SessionDirField,
     _build_variant_yaml,
-    _num_gpus_for_config,
+    lease_cards,
     _safe,
     run_grid,
     sanitize_result_dir,
@@ -757,7 +757,7 @@ class _ExploreRound:
         self._open_schedule()
         round_ctx = await prefilter_round(self, session_dir)
         # One Ray serving lease (actor) spans the WHOLE round; every variant reuses it.
-        self.lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(self.config_path)) if self.runnable else None
+        self.lease = maybe_serving_lease(num_gpus=lease_cards(self.config_path, session_dir)) if self.runnable else None
         try:
             for idx, gv in enumerate(self.runnable):
                 if self._refused(gv, idx):

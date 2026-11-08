@@ -291,12 +291,12 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         application = self._prepare_round_patches(params, output_dir, shared_state)
         if isinstance(application, Mapping) and application.get("status") == "failed":
             return self._roll_back_failed_patches(application, params, output_dir, shared_state)
-        # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``) spans this baseline's benchmark
+        # Ray-managed GPU execution (§12 T1): one held Ray lease (as many GPUs as the launch occupies) spans this baseline's benchmark
         # rounds — a double-run's warmup + measure reuse one persistent server, so both must run under the same lease.
-        from ._grid_runner import _num_gpus_for_config
+        from ._grid_runner import lease_cards
         from ._ray_serving import maybe_serving_lease
 
-        lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
+        lease = maybe_serving_lease(num_gpus=lease_cards(config_path, self.session_dir))
         attempt = replace(attempt, serving_lease=lease)
         try:
             if double_run:

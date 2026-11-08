@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,7 +33,9 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePa
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.state.tests._session_base import freeze_base, session_base
 from hyperloom.orchestrator.tests._helpers import init_git_repo, integrate_extra
+from inference_suite.contracts import Topology
 
 _AGENTX = "agentx"
 
@@ -56,7 +59,6 @@ def suite_rounds(tmp_path, monkeypatch) -> list[AccuracyRound]:
 
     monkeypatch.setattr(accuracy, "session_route", lambda session: SimpleNamespace(session=session))
     monkeypatch.setattr(accuracy, "run_accuracy_suite_round", run_accuracy_suite_round)
-    monkeypatch.setattr(accuracy, "_num_gpus_for_config", lambda config_path: 1)
     return requests
 
 
@@ -95,13 +97,15 @@ def test_a_candidate_round_runs_on_the_lease_its_gate_holds_and_leaves_it_open(t
 
 
 def test_a_round_without_a_lease_runs_on_one_of_its_own_and_releases_it(tmp_path, suite_rounds, monkeypatch):
-    owned = _Lease()
-    monkeypatch.setattr(accuracy, "maybe_serving_lease", lambda num_gpus: owned)
+    owned, asked = _Lease(), []
+    monkeypatch.setattr(accuracy, "maybe_serving_lease", lambda num_gpus: asked.append(num_gpus) or owned)
+    freeze_base(tmp_path, replace(session_base(("--dp-size", "2")), topology=Topology(tp=2)))
     slot = tmp_path / "slot"
 
     asyncio.run(run_accuracy_round(AccuracyRound(slot / "point.yaml", slot, 900.0), session=tmp_path))
 
     assert suite_rounds[0].serving_lease is owned and owned.closed
+    assert asked == [4]
 
 
 def test_a_failed_round_is_recorded_with_a_warning_and_no_verdict(tmp_path) -> None:

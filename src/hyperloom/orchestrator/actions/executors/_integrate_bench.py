@@ -34,7 +34,7 @@ from ._grid_runner import (
     GridStop,
     GridVariant,
     VariantResult,
-    _num_gpus_for_config,
+    lease_cards,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
@@ -207,7 +207,7 @@ class BenchStageMixin:
         # patch benchmark serializes against other serving instead of colliding
         # with a concurrent GPU specialist server on the same card. ``None`` keeps
         # the local path (multi-node / RAY_EXEC off / pytest default).
-        serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
+        serving_lease = maybe_serving_lease(num_gpus=lease_cards(config_path, self.session_dir))
         try:
             base = LaunchLayer(
                 extra_server_args=base_extra_args,
