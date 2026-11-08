@@ -115,6 +115,17 @@ def test_a_host_tool_repository_that_is_not_set_is_not_in_the_runner_template(
     assert "INFERENCEX_REPO" not in template.envs, "a blank value is absent, not empty"
 
 
+def test_the_host_hugging_face_settings_reach_the_runner_template(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A draft model named by repo id resolves in the host's Hugging Face cache; the runner's own home has none."""
+    monkeypatch.setenv("HF_HOME", "/data/hf")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    template = _runner_template(LocalSession(tmp_path, "run-1", [0]), LocalOptions())
+    assert template.envs["HF_HOME"] == "/data/hf"
+    assert template.envs["HF_HUB_OFFLINE"] == "1"
+
+
 def test_only_the_named_tool_repositories_are_taken_from_the_host() -> None:
     environ = {"INFERENCEX_REPO": "/a", "OTHER_REPO": "/b", "GITHUB_TOKEN": "t", "INFERENCEX_REF": "main"}
     assert host_tool_repos(environ) == {"INFERENCEX_REPO": "/a"}
