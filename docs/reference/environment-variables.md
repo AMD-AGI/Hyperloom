@@ -858,9 +858,11 @@ deployments.
 2. **bubblewrap**: the agent runs in a sandbox that starts from an empty root (`hyperloom_common/bwrap.py`): only the
    paths its confinement binds exist inside, read-only unless they are its work trees, and the root takes no new name;
    the credential locations inside a bound tree are hidden (the app's home and XDG directories, every path an
-   environment variable with a credential-shaped name points at, Hugging Face's login files, made yet or not, and the
-   files the app registers): a directory is masked, and a read-only tree that holds a file is bound entry by entry
-   without it, so a login the app replaces or makes there after the launch is not shown either. A credential file in a
+   environment variable with a credential-shaped name points at, Hugging Face's login files, made yet or not, where
+   `huggingface_hub` puts them (`HF_TOKEN_PATH` and `stored_tokens` beside it, else under `HF_HOME`,
+   `XDG_CACHE_HOME` or the home), and the files the app registers): a directory is masked, and a read-only tree that
+   holds a file, or the first missing directory on the way to a login not made yet, is bound entry by entry without
+   it, so a login the app replaces or makes there after the launch is not shown either. A credential file in a
    work tree refuses the launch, naming it. It has its own
    user, pid and IPC namespaces, its own `/proc`, no capability and `no_new_privs`, and shares the app's network
    (loopback MCP). A program's own directory is bound, and its parent only away from those credential locations, so
@@ -926,8 +928,25 @@ mark and waits for them, then kills what is left. A sandbox bubblewrap could not
 bubblewrap's line (`specialist sandbox could not be set up: bwrap: ...`) rather than as the agent's exit, read from
 its `--json-status-fd`; an agent killed by signal `n` exits `128 + n`. A Ray GPU actor's sandbox is built from the
 driver's probe and paths, so it is for a single-node Ray cluster only, and its status goes to a file a shell in the
-actor opens for bubblewrap. The sandbox keeps the host's network, loopback included, so a specialist on the Ray actor
-path, where a Ray head always runs, can reach the Ray head and dashboard ports on this host, as an unconfined one can.
+actor opens for bubblewrap; the sandbox has `--die-with-parent` there, so it ends when the actor dies (an OOM kill,
+say). The app creates the launch's `process.log` fresh, as for a local launch, and the actor only appends to that
+file: a link or anything else put at the name is refused, never written through.
+
+A specialist's sandbox has a network of its own (`--unshare-net`): nothing that listens on this host or beyond is
+reachable from it, the run's Ray head included (its dashboard Jobs API, client server and workers run what they are
+sent as the app). What it needs is relayed in over Unix sockets in its scratch `/tmp` by the app
+(`orchestrator/specialists/sandbox_network.py`): each loopback endpoint its launch names (an HTTP MCP server, an LLM
+gateway on this host) at the same port on the sandbox's own loopback, and an HTTP proxy, which the sandbox's
+`HTTPS_PROXY` and `HTTP_PROXY` name (loopback exempt), that connects only to the other LLM endpoints and MCP
+servers its launch names: `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` and any other `*_BASE_URL` variable, codex's
+`model_providers.<name>.base_url`, each provider's API host where no base URL names one
+(`api.anthropic.com`, `api.openai.com`; Bedrock's runtime host in `AWS_REGION` with `CLAUDE_CODE_USE_BEDROCK`),
+and the MCP config's HTTP servers. It goes through the app's own `HTTPS_PROXY`/`HTTP_PROXY` (with any login in its
+URL) unless `NO_PROXY` exempts the host; the app's proxy settings are not shown inside. Anything else gets a 403:
+a sandboxed specialist downloads no model or package; what it reads must be on the host already (a Hugging Face
+model in the cache shown to it, say). A loopback endpoint below port 1024 cannot be served inside (a WARNING names
+it). The relay is a `python -I -S` of the app's interpreter that starts ahead of the agent and ends with the
+sandbox.
 
 The app's own git over a specialist's worktree (the commit it starts from and the harvested patch) goes through the
 admin directory the repository recorded when the worktree was made, in every tier; a worktree the repository does not

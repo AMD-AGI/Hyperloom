@@ -67,8 +67,7 @@ def isolation(monkeypatch) -> Isolation:
     monkeypatch.setattr(confinement, "PRIVATE_PATHS", confinement.PrivatePaths())
     monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
     stand_in = Isolation()
-    require = agent_isolation.require_agent_isolation
-    monkeypatch.setattr(entry, "require_agent_isolation", lambda *, bwrap: require(bwrap=bwrap, probe=stand_in.probe))
+    monkeypatch.setattr(agent_isolation, "bwrap_probe", stand_in.probe)
     return stand_in
 
 
