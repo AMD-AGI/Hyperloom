@@ -118,8 +118,6 @@ _UTF8 = "utf-8"
 #: A profiled round, and a repro case's server, run once with no warmup: neither is a statistic.
 _NO_WARMUP = RoundPlan(warmup_rounds=0)
 _REASON_DETAIL_CHARS = 300
-#: What a refusal's reason keeps of what the backend said (:func:`_both_ends`).
-_REFUSAL_DETAIL_CHARS = 300
 _ELIDED = " ... "
 #: What an infrastructure failure's reason keeps of what the runner or the platform said: its beginning, which names the
 #: failing step, with room for the sandbox and node it names after the runner's bounded message.
@@ -598,7 +596,7 @@ def _refuse_unless_measured(outcome: TestOutcome) -> None:
     verdict = classify_test_failure(returncode=outcome.returncode)
     if verdict.disposition is Disposition.STOPPED:
         raise asyncio.CancelledError(verdict.failure_reason)  # the run is stopping: the test is picked up at restart
-    detail = _both_ends((outcome.stderr or "").strip(), _REFUSAL_DETAIL_CHARS)
+    detail = _both_ends((outcome.stderr or "").strip(), _REASON_DETAIL_CHARS)
     raise MeasurementRefused(f"{verdict.failure_reason or 'unclassified end'}: {detail}".strip(": "))
 
 

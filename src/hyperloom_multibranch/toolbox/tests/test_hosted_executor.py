@@ -30,6 +30,7 @@ from hyperloom_multibranch.toolbox.hosted_executor import (
     TEST_SILENCE_TIMEOUT_SEC,
     HostedExecutor,
     _accuracy_values,
+    _both_ends,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import FakePlanner, Rig as ToolboxRig, build, req
@@ -550,3 +551,11 @@ def test_a_failed_accuracy_round_is_never_a_score_even_when_the_outcome_says_suc
         _accuracy_values(rounds, wanted=True)
     passed = (rounds[0], replace(rounds[1], returncode=0))
     assert _accuracy_values(passed, wanted=True) == (score,)
+
+
+def test_a_long_refusal_keeps_what_was_refused_and_what_the_backend_added() -> None:
+    said = "spec_rejected: the short-prompt set short-prompts-0 cannot be used: " + "x" * 400 + " (the sheet is v2)"
+    kept = _both_ends(said, 300)
+    assert len(kept) <= 300
+    assert kept.startswith("spec_rejected: the short-prompt set short-prompts-0") and kept.endswith("(the sheet is v2)")
+    assert _both_ends("short", 300) == "short"
