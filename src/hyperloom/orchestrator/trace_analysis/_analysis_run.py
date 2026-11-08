@@ -24,6 +24,7 @@ class AnalysisRun(NamedTuple):
     route: AnalysisRoute
     session_id: str
     run_id: str
+    session_runs_dir: Path
     run_dir: Path
     log_path: Path
     status_path: Path
@@ -42,8 +43,8 @@ def start_run(args: argparse.Namespace, route: AnalysisRoute) -> AnalysisRun:
     # now_iso renders UTC as "+00:00", never "Z", so the suffix is always added.
     ts_compact = started_at.replace("-", "").replace(":", "").split(".")[0] + "Z"
     sub_dir = f"{ts_compact}_{run_id}"
-    root = Path(args.workspace_path) / "kernel-agent"
-    run_dir = root / "runs" / session_id / sub_dir
+    session_runs_dir = Path(args.workspace_path) / "kernel-agent" / "runs" / session_id
+    run_dir = session_runs_dir / sub_dir
     log_path = run_dir / "logs" / "tracelens_analysis" / f"{run_id}.log"
     status_path = run_dir / "status" / "tracelens_analysis" / f"{run_id}.json"
     artifacts: dict[str, str] = {}
@@ -60,6 +61,7 @@ def start_run(args: argparse.Namespace, route: AnalysisRoute) -> AnalysisRun:
         route=route,
         session_id=session_id,
         run_id=run_id,
+        session_runs_dir=session_runs_dir,
         run_dir=run_dir,
         log_path=log_path,
         status_path=status_path,

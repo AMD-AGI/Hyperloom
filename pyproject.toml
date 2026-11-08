@@ -396,6 +396,7 @@ markers = [
     "upstream_sources: runs a recipe source's own code at a pinned commit fetched over the network; skip with '-m \"not upstream_sources\"' in CI.",
     "agent_isolation: launches a real bubblewrap sandbox; skipped where the host has no bubblewrap or no user namespace for it, failed instead where HYPERLOOM_REQUIRE_ISOLATION_TESTS=1.",
     "claw_policy: a sandbox contract test of the Claw sandbox service's own policy (sealed paths, signing identity, platform metadata, avoid-nodes); it runs against the local provider and a real Claw service, not against the E2B stand-in.",
+    "agent_isolation: launches a real bubblewrap sandbox; skipped where the host has no bubblewrap or no user namespace for it, failed instead where HYPERLOOM_REQUIRE_ISOLATION_TESTS=1.",
 ]
 
 [tool.coverage.run]
