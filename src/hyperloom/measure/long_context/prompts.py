@@ -19,9 +19,10 @@ from hyperloom.measure.short_prompts.prompts import PromptSetError, parse_lines
 __all__ = ["GENERATOR", "PER_TASK", "TASKS", "Prompt", "PromptSetError", "parse_prompts", "prompts_bytes"]
 
 #: The version of the generators: a change to a task, the filler or the placement rule changes it.
-GENERATOR = "hl-long-context/1"
+GENERATOR = "hl-long-context/2"
 TASKS = ("niah_single", "niah_multikey", "variable_tracking", "common_words")
-PER_TASK = 16
+#: Prompts of each task: 16 prompts a set, at four needle depths a task.
+PER_TASK = 4
 _KEYS = {"id", "task", "input", "outputs", "tokens"}
 
 
