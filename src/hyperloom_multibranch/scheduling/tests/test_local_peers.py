@@ -108,7 +108,7 @@ from hyperloom.inference_optimizer.cli import base_launch as cli_base_launch
 from hyperloom.measure.runner import suite_publish
 from hyperloom.measure.runner.suite_publish import SuitePublishError
 from hyperloom.measure.tests.bundle_factory import base_launch
-from hyperloom.orchestrator.state.base_launch import freeze_base, frozen_base
+from hyperloom.orchestrator.state.base_launch import ServerBase, freeze_base, frozen_base, server_base
 from inference_suite import SourceSnapshot
 from inference_suite.recipe.resolve import UnreadSource
 from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
@@ -132,6 +132,7 @@ WORKLOAD = Workload(
     "/models/Llama-3-8B", "sglang", 2, 16, "bf16", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
 )
 AGENTX = replace(WORKLOAD, inferencex=None)
+BASE = ServerBase(args="--tp-size 2 --enable-hierarchical-cache --hicache-size 180", env={"SGLANG_X": "true"})
 IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
 LOCAL = LocalCards((0, 1, 2, 3))
 HOST = MeasurementHost(LOCAL, IMAGE, InferenceXCheckout(INFERENCEX_CLIENT_COMMIT, "/opt/tools/inferencex/client"))
@@ -636,6 +637,13 @@ async def test_a_fresh_session_freezes_its_base_launch_in_the_toolbox_directory_
         assert frozen.launch.topology.tp == WORKLOAD.tp
 
 
+async def test_the_specialists_are_wired_the_frozen_base_launch_s_server_half(built: _Built) -> None:
+    frozen = frozen_base(built.layout.toolbox)
+
+    assert frozen is not None and built.wiring.base == server_base(frozen.launch)
+    assert built.wiring.base.args
+
+
 async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -> None:
     layout, setup, peers, wiring = built.layout, built.setup, built.peers, built.wiring
     assert (wiring.setup, wiring.repo, wiring.briefs) == (setup, peers.repo, peers.briefs)
@@ -933,13 +941,17 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
             dev_leases=held,
             native={},
             agent_sandboxes=None,
+            base=BASE,
         )
         model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
 
     without, lending = built
     assert (without.dev_leases, lending.dev_leases) == (None, leases)
-    assert without.role == role_prompt(_specialist_role(WORKLOAD), references={})
-    assert lending.role == role_prompt(_specialist_role(WORKLOAD), references={}, dev_leases=1) != without.role
+    assert without.role == role_prompt(_specialist_role(WORKLOAD), references={}, base=BASE)
+    assert "Server arguments: --tp-size 2 --enable-hierarchical-cache --hicache-size 180." in without.role
+    assert (
+        lending.role == role_prompt(_specialist_role(WORKLOAD), references={}, base=BASE, dev_leases=1) != without.role
+    )
     # A hosted lease's sandbox roots in the branch's directory: the branch's specialist is shown that area alone.
     assert without.lease_area is None and lending.lease_area is not None
     assert lending.lease_area("s1") == tmp_path / DEV_DIR and (tmp_path / DEV_DIR).is_dir()
@@ -1046,6 +1058,7 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
         dev_leases=None,
         native={},
         agent_sandboxes=None,
+        base=BASE,
     )
 
     model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
@@ -1170,6 +1183,7 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
             dev_leases=None,
             native=native,
             agent_sandboxes=None,
+            base=BASE,
         )
         model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
 
@@ -1184,4 +1198,4 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
     assert laid["without"] == ["python/sglang/__init__.py"]
     with_native, without = roles[0], roles[-1]
     assert "python/sglang/kernels/aot" in with_native and "pending_build" in with_native
-    assert without == role_prompt(_specialist_role(WORKLOAD), references={})
+    assert without == role_prompt(_specialist_role(WORKLOAD), references={}, base=BASE)
