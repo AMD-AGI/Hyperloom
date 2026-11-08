@@ -8,7 +8,9 @@ Every repository is read at the head of its ``main`` and recorded with that comm
 model's HF card and the framework's latest release are recorded as the responses they were. Which variant an
 InferenceX point binds, its acceptance length, its golden overrides and the golden length of a cookbook launch are
 InferenceX's own code: they run here once, in an isolated interpreter of a throwaway virtual environment holding
-InferenceX's ``recipes`` dependencies, and their answers are recorded as data that resolving reads.
+InferenceX's ``recipes`` dependencies, and their answers are recorded as data that resolving reads. The environment is
+built on the pinned CPython build (:func:`inference_suite.client_env.pinned_python`), never on the interpreter running
+this module, and only once that build satisfies the checkout's ``requires-python``.
 
 A source that cannot be read, InferenceX included, stops the reading there, and the snapshot names it. The
 operator's own launch file needs no source read: the load client is pinned in :mod:`inference_suite.pins`.
@@ -19,7 +21,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import subprocess
-import sys
 import tempfile
 import time
 import urllib.error
@@ -29,6 +30,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
 
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+
+from inference_suite.client_env import ClientEnvError, pinned_python
 from inference_suite.contracts.base_launch import LaunchQuery, Workload
 from inference_suite.recipe.atom_catalog import ATOM_REPO, CATALOG, RECIPES_DIR
 from inference_suite.recipe.golden_curve import GoldenLength, GoldenRequest, golden_requests
@@ -140,6 +144,19 @@ lengths = {asked["key"]: golden(asked["request"]) for asked in request["golden"]
 answers.write(json.dumps({"selections": selections, "rejections": rejections, "golden_lengths": lengths}))
 """
 
+# Run as ``python -I -c`` with an InferenceX ``pyproject.toml``: the interpreter's version and the project's
+# ``requires-python`` ("" when it states none) as JSON. Run by the interpreter it asks about, which has tomllib.
+_REQUIRES_PYTHON_CHILD = """
+import json
+import platform
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as pyproject:
+    requires = tomllib.load(pyproject).get("project", {}).get("requires-python", "")
+print(json.dumps({"version": platform.python_version(), "requires": requires}))
+"""
+
 
 class SourceFetchError(RuntimeError):
     """A source could not be read, or its own code failed rather than answer."""
@@ -217,11 +234,38 @@ def fetch_response(url: str) -> ApiResponse:
     return ApiResponse(url, status, text, int(time.time()))
 
 
+def _require_python(python: Path, project: Path) -> None:
+    """Refuse unless ``python`` satisfies the ``requires-python`` of the InferenceX project at ``project``: pip would
+    otherwise backtrack through every release of each dependency until the command timeout."""
+    asked = json.loads(_run((str(python), "-I", "-c", _REQUIRES_PYTHON_CHILD, str(project / "pyproject.toml"))))
+    try:
+        satisfied = SpecifierSet(asked["requires"]).contains(asked["version"], prereleases=True)
+    except InvalidSpecifier as error:
+        raise SourceFetchError(f"InferenceX's requires-python {asked['requires']!r} does not read: {error}") from error
+    if not satisfied:
+        raise SourceFetchError(
+            f"InferenceX requires Python {asked['requires']}; the pinned interpreter {python} is Python "
+            f"{asked['version']}"
+        )
+
+
 def inferencex_python(project: Path, into: Path) -> Path:
-    """The interpreter of a new virtual environment in ``into`` holding the ``recipes`` dependencies of the
-    InferenceX project at ``project``."""
-    _run((sys.executable, "-m", "venv", str(into)))
-    python = into / "bin" / "python"
+    """The interpreter of a new virtual environment in the new directory ``into``, on the pinned CPython build, holding
+    the ``recipes`` dependencies of the InferenceX project at ``project``.
+
+    Raises:
+        SourceFetchError: The build cannot be had, it does not satisfy the project's ``requires-python``, or the
+            environment cannot be built.
+    """
+    into.mkdir()
+    try:
+        base = pinned_python(into / "python")
+    except (ClientEnvError, OSError) as error:
+        raise SourceFetchError(f"the pinned Python build cannot be had: {error}") from error
+    _require_python(base, project)
+    environment = into / "venv"
+    _run((str(base), "-I", "-m", "venv", str(environment)))
+    python = environment / "bin" / "python"
     _run(
         (
             str(python),
@@ -366,7 +410,7 @@ def _with_inferencex_answers(
     if not points and not requests:
         return snapshot
     project = checkout.root / PROJECT
-    python = inferencex_python(project, scratch / "venv")
+    python = inferencex_python(project, scratch / "resolver")
     answers = inferencex_answers(python, project, points, requests)
     answered = dataclasses.replace(inferencex, selections=answers.selections, rejections=answers.rejections)
     return dataclasses.replace(snapshot, inferencex=answered, golden_lengths=answers.golden_lengths)
