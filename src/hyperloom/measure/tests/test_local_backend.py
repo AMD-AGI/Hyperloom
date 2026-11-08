@@ -847,14 +847,13 @@ def _graded_sweep(tmp_path: Path, *levels: int, run_eval: str = "true") -> TestC
 
 
 @pytest.mark.parametrize("ambient_conc", [None, "64"], ids=["clean", "conc_left_in_the_process"])
-def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no_bench_evaluates(
+def test_the_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no_bench_evaluates(
     grid, server, tmp_path, monkeypatch, ambient_conc
 ):
     if ambient_conc is None:
         monkeypatch.delenv("CONC", raising=False)
     else:
         monkeypatch.setenv("CONC", ambient_conc)
-    grid.answers["c8"] = grid.result("c8", status="failed", returncode=1, error_class="no_benchmark_workspace")
     call = _graded_sweep(tmp_path, 8, 4, 2)
     points = [Path(p).read_text() for p in call.points]
 
@@ -862,29 +861,36 @@ def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no
 
     boots = [c for c in grid.calls if c["launch"].lifecycle_boot_only]
     measured = [c for c in grid.calls if not c["launch"].lifecycle_boot_only]
-    assert [c["grid"][0].name for c in boots] == ["c8", "c4"], "the failed boot and the one it stepped down to"
-    assert [c["grid"][0].name for c in measured] == ["c4", "c2", "eval"]
+    assert [c["grid"][0].name for c in boots] == ["c8"]
+    assert [c["grid"][0].name for c in measured] == ["c8", "c4", "c2", "eval"]
     assert all(c["recipe"].base.extra_envs == BOOT_ENVS for c in boots)
     assert [c["recipe"].base.extra_envs for c in measured] == [
+        {"RUN_EVAL": "false"},
         {"RUN_EVAL": "false"},
         {"RUN_EVAL": "false"},
         {"RUN_EVAL": "true", "EVAL_ONLY": "true"},
     ]
     assert [Path(p).read_text() for p in call.points] == points, "the points are the ones the call was accepted on"
-    for index, boot in enumerate(boots):
-        level = (8, 4)[index]
-        envs = _envs_handed_to_the_round(grid, tmp_path, boot)
-        assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"]) == ("false", "1"), f"the boot at {level}"
-        assert "HYPERLOOM_RUN_PHASE" not in envs and envs["CONC"] == level
-        assert envs["NUM_WARMUPS"] == min(level, 8), "a variable outside the reuse check is the point's own"
-    for level, round_ in zip((4, 2, 4), measured, strict=True):
+    envs = _envs_handed_to_the_round(grid, tmp_path, boots[0])
+    assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"]) == ("false", "1")
+    assert "HYPERLOOM_RUN_PHASE" not in envs and envs["CONC"] == 8
+    assert envs["NUM_WARMUPS"] == 8, "a variable outside the reuse check is the point's own"
+    for level, round_ in zip((8, 4, 2, 8), measured, strict=True):
         envs = _envs_handed_to_the_round(grid, tmp_path, round_)
         assert (envs["NUM_PROMPTS"], envs["NUM_WARMUPS"], envs["CONC"]) == (level * 10, min(level, 8), level)
         assert "HYPERLOOM_RUN_PHASE" not in envs
-    assert [_envs_handed_to_the_round(grid, tmp_path, c)["RUN_EVAL"] for c in measured] == ["false", "false", "true"], (
-        "no bench evaluates; one evaluation, from the level the server booted on, after the last bench"
-    )
-    assert [(r.point, r.phase) for r in outcome.rounds] == [(1, "measure"), (2, "measure"), (1, "accuracy")]
+    assert [_envs_handed_to_the_round(grid, tmp_path, c)["RUN_EVAL"] for c in measured] == [
+        "false",
+        "false",
+        "false",
+        "true",
+    ], "no bench evaluates; one evaluation, from the level the server booted on, after the last bench"
+    assert [(r.point, r.phase) for r in outcome.rounds] == [
+        (0, "measure"),
+        (1, "measure"),
+        (2, "measure"),
+        (0, "accuracy"),
+    ]
     assert outcome.returncode == 0
     assert os.environ.get("CONC") == ambient_conc, "the process environment is put back after the test"
 
@@ -1025,14 +1031,32 @@ def test_a_boot_does_not_pin_what_the_point_pins_for_a_graded_round(grid, server
 
 def test_an_agentx_boot_pins_nothing(grid, server, tmp_path, monkeypatch):
     """An AgentX point has no evaluation round and no prompt count, and no backend phase is said for a boot."""
+    _boot_only(grid)
+    _Case(tmp_path, monkeypatch, "exit 0")
     point = _agentx_point(tmp_path, monkeypatch)
 
-    _run(_call(tmp_path, point, prep="conc_sweep"))
+    _run(_call(tmp_path, point, kind="repro", attachments=(_CASE,), timeout_sec=30))
 
-    boot, *measured = grid.calls
+    (boot,) = grid.calls
     assert boot["launch"].lifecycle_boot_only
     assert boot["recipe"].base.extra_envs == {}
-    assert all(c["recipe"].base.extra_envs is None for c in measured)
+
+
+@pytest.mark.parametrize("levels", [(8, 4, 2), (4,)], ids=["levels", "one-level"])
+def test_an_agentx_sweep_boots_a_server_of_its_own_for_each_level(grid, tmp_path, monkeypatch, levels):
+    """Every level replays one trace corpus with one seed: on a server a level before it warmed, it reads its cache."""
+    torn_down: list[Path] = []
+    monkeypatch.setattr(local, "teardown_variant_server", lambda slot: torn_down.append(slot) or [])
+    points = [_agentx_point(tmp_path, monkeypatch, conc=level) for level in levels]
+    assert local.resolve_lifecycle_params(points[0])["eligible"], "the lifecycle could hold an AgentX server"
+
+    outcome = _run(_call(tmp_path, *points, prep="conc_sweep"))
+
+    assert [c["grid"][0].name for c in grid.calls] == [f"c{level}" for level in levels]
+    assert all(_lifecycle(c) is None and not c["launch"].lifecycle_boot_only for c in grid.calls)
+    assert [(r.point, r.phase) for r in outcome.rounds] == [(i, "measure") for i in range(len(levels))]
+    assert "server restarted per level: an AgentX replay is cache-sensitive" in outcome.stderr
+    assert outcome.returncode == 0 and torn_down == []
 
 
 def test_no_call_of_a_sweep_runs_without_the_shared_server(grid, server, tmp_path):
@@ -1062,17 +1086,20 @@ def test_a_sweep_that_restarts_per_level_gives_every_level_a_port_of_its_own(mon
     assert all(config == yaml.safe_load(point.read_text()) for config, point in zip(grid.configs, call.points[:2]))
 
 
-def test_a_boot_that_fails_steps_down_one_level_and_that_level_is_measured_on_the_new_server(grid, server, tmp_path):
+@pytest.mark.parametrize("levels", [(8, 4, 2), (8,)], ids=["levels", "one-level"])
+def test_a_boot_that_fails_is_the_sweeps_failed_row_and_the_launch_is_not_booted_again(grid, server, tmp_path, levels):
+    """A level's CONC never reaches the server's launch: a lower level, or a server per level, boots the same one."""
     grid.answers["c8"] = grid.result(
         "c8", status="failed", returncode=1, error_class="no_benchmark_workspace", error="oom"
     )
 
-    outcome = _run(_sweep_call(tmp_path, 8, 4, 2))
+    outcome = _run(_sweep_call(tmp_path, *levels))
 
-    assert [c["grid"][0].name for c in grid.calls] == ["c8", "c4", "c4", "c2"]
-    assert [r.point for r in outcome.rounds] == [1, 2]
-    assert "stepping down" in outcome.stderr
-    assert len(server.teardowns) == 2  # after the failed boot, and at the end
+    (boot,) = grid.calls
+    assert boot["grid"][0].name == "c8" and boot["launch"].lifecycle_boot_only
+    assert [(r.point, r.phase, r.returncode) for r in outcome.rounds] == [(0, "measure", 1)]
+    assert outcome.returncode == 1 and "oom" in outcome.stderr
+    assert len(server.teardowns) == 1
 
 
 def test_a_sweep_takes_its_server_down_through_its_pid_dir_and_names_what_outlived_it(monkeypatch, grid, tmp_path):
@@ -1084,19 +1111,6 @@ def test_a_sweep_takes_its_server_down_through_its_pid_dir_and_names_what_outliv
 
     assert server.teardowns == [{"pid_dir": Path(call.output_dir) / "server_arm"}]
     assert "server pids [4242] outlived SIGKILL" in outcome.stderr
-
-
-def test_when_no_level_boots_the_ladder_falls_back_to_one_server_per_level(grid, server, tmp_path):
-    for level in (8, 4):
-        grid.answers[f"c{level}"] = grid.result(f"c{level}", status="failed", returncode=1, error_class="x")
-
-    outcome = _run(_sweep_call(tmp_path, 8, 4))
-
-    restart_calls = grid.calls[2:]
-    assert [c["grid"][0].name for c in restart_calls] == ["c8", "c4"]
-    assert all(_lifecycle(c) is None for c in restart_calls)
-    assert "every boot attempt failed" in outcome.stderr
-    assert outcome.returncode == 1
 
 
 def test_a_framework_that_cannot_hold_a_server_restarts_per_level_and_says_so(monkeypatch, grid, tmp_path):
@@ -1209,19 +1223,19 @@ def test_a_patched_test_measures_the_rebuilt_framework_that_the_compile_produced
     assert outcome.sandbox.image_digest == IMAGE
 
 
-def _agentx_point(tmp_path, monkeypatch, **launch_envs: str) -> Path:
-    """The point the toolbox renders for an AgentX session whose recipe launches with ``launch_envs``."""
+def _agentx_point(tmp_path, monkeypatch, conc: int = 4, **launch_envs: str) -> Path:
+    """The point the toolbox renders for an AgentX session at ``conc`` whose recipe launches with ``launch_envs``."""
     from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
     from hyperloom.inference_optimizer.cli.benchmark_config import AgentXWorkload, write_agentx_benchmark
     from hyperloom.orchestrator.actions.executors import LaunchLayer, materialize_benchmark_config
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.setenv(BENCHMARK_CONFIG_ENV, "")
-    source = tmp_path / "agentx.yaml"
-    workload = AgentXWorkload(framework="sglang", model="Qwen/Qwen3-8B", precision="fp8", tp=2, ep=1, conc=4)
+    source = tmp_path / f"agentx-c{conc}.yaml"
+    workload = AgentXWorkload(framework="sglang", model="Qwen/Qwen3-8B", precision="fp8", tp=2, ep=1, conc=conc)
     write_agentx_benchmark(source, workload)
     envs = {**launch_envs, "RUN_EVAL": "false"}
-    return materialize_benchmark_config(source, tmp_path / "agentx", launch=LaunchLayer(extra_envs=envs))
+    return materialize_benchmark_config(source, tmp_path / f"agentx-c{conc}", launch=LaunchLayer(extra_envs=envs))
 
 
 def _agentx_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
