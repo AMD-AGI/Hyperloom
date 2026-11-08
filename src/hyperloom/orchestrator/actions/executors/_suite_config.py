@@ -327,21 +327,14 @@ def _user_args(point: _Point) -> tuple[tuple[str, ...], tuple[str, ...]]:
 
 
 def _gpus(point: _Point, cards: int) -> tuple[int, ...]:
-    """The first ``cards`` GPUs of the point's mask, or of the session's when the point names none.
-
-    The server drops the masks it inherits and runs on these ids as absolute cards, so a point without a mask (an
-    AgentX point never carries one) must still land on the session's cards rather than on ``0..cards-1``.
-    """
+    """The first ``cards`` GPUs of the point's mask: the mask may be the whole session's, not the round's."""
     mask = point.text(_GPU_MASK_ENV)
-    source = "the point's" if mask is not None else "the process's"
-    if mask is None:
-        mask = ",".join(session_cards_mask(cards))
     try:
-        gpus = tuple(int(gpu) for gpu in mask.split(","))
+        gpus = tuple(range(cards)) if mask is None else tuple(int(gpu) for gpu in mask.split(","))
     except ValueError:
-        raise ConfigError(f"{source} {_GPU_MASK_ENV} is not a list of GPU indices: {mask!r}") from None
+        raise ConfigError(f"the round's {_GPU_MASK_ENV} is not a list of GPU indices: {mask!r}") from None
     if len(gpus) < cards:
-        raise ConfigError(f"{source} {_GPU_MASK_ENV}={mask!r} holds {len(gpus)} GPUs; the launch needs {cards}")
+        raise ConfigError(f"the round's {_GPU_MASK_ENV}={mask!r} holds {len(gpus)} GPUs; the launch needs {cards}")
     return gpus[:cards]
 
 
@@ -946,9 +939,21 @@ def _read_point(config_path: Path) -> Mapping[str, object]:
     return yaml.safe_load(config_path.read_text(encoding=_UTF8)) or {}
 
 
-def _round_point(config_path: Path, lease: ServingLease | None) -> Mapping[str, object]:
-    # Ray places a leased round on GPUs of its choosing, so the host's GPU masks the point carries must not size it.
-    return _read_point(config_path if lease is None else strip_visible_devices_from_config(config_path))
+def _round_point(config_path: Path, lease: ServingLease | None, cards: int) -> Mapping[str, object]:
+    """The point a round runs: a leased one without GPU masks, a local one on the session's cards when it names none.
+
+    Ray places a leased round on GPUs of its choosing, so no host mask may size it. A local server drops the masks it
+    inherits and runs on its GPU ids as absolute cards, so a point without a mask (an AgentX point never carries one)
+    runs on the front of the session's mask rather than on ``0..cards-1``.
+    """
+    if lease is not None:
+        return _read_point(strip_visible_devices_from_config(config_path))
+    document = _read_point(config_path)
+    bench = _bench(document)
+    envs = _envs(bench)
+    if envs.get(_GPU_MASK_ENV, "").strip():
+        return document
+    return {**document, "benchmark": {**bench, "envs": {**envs, _GPU_MASK_ENV: ",".join(session_cards_mask(cards))}}}
 
 
 def _server_phase_point(document: Mapping[str, object]) -> Mapping[str, object]:
@@ -1060,7 +1065,7 @@ def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable
     run_dir = _next_run_dir(request.round_dir)
     settings = _settings(route, run_dir, request.lifecycle, request.deadline_unix, request.env_drop)
     try:
-        point = _round_point(request.config_path, request.serving_lease)
+        point = _round_point(request.config_path, request.serving_lease, route.base.cards)
         if request.boot_only:
             point = _server_phase_point(point)
         config = suite_config(point, route.base, settings)
@@ -1106,7 +1111,10 @@ def run_accuracy_suite_round(route: SuiteRoute, request: AccuracyRound, *, on_po
     settings = _settings(route, run_dir, Lifecycle(LifecycleMode.OWN), request.deadline_unix)
     try:
         config = accuracy_config(
-            _round_point(request.config_path, request.serving_lease), route.base, settings, request.timeout_sec
+            _round_point(request.config_path, request.serving_lease, route.base.cards),
+            route.base,
+            settings,
+            request.timeout_sec,
         )
     except ConfigError as exc:
         raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc

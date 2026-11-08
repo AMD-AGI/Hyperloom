@@ -154,6 +154,43 @@ def test_a_discarded_warmup_round_draws_its_prompts_with_the_warmup_seed(session
     assert config.lifecycle == lifecycle
 
 
+@pytest.mark.parametrize(("session_mask", "gpus"), [("4,5,6,7", (4, 5)), (None, (0, 1))])
+def test_a_point_without_a_gpu_mask_runs_on_the_first_cards_of_the_sessions_mask(
+    session, tmp_path, monkeypatch, session_mask, gpus
+) -> None:
+    if session_mask is None:
+        monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("ROCR_VISIBLE_DEVICES", session_mask)
+    rounds = _rounds()
+    monkeypatch.setattr(_suite_config, "run_round", rounds.run_round)
+    request = _maskless_round(tmp_path / "slot" / "point.yaml")
+
+    run_suite_round(suite_route(session), request, on_poll=lambda: None)
+
+    (config,) = [call.config for call in rounds.calls]
+    assert config.server.gpus == gpus
+
+
+def test_a_session_mask_narrower_than_the_launch_refuses_a_point_without_one(session, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "7")
+    request = _maskless_round(tmp_path / "slot" / "point.yaml")
+
+    with pytest.raises(SuiteRoundRefused) as refused:
+        run_suite_round(suite_route(session), request, on_poll=lambda: None)
+
+    assert refused.value.error_class == failed_step_error_class(FailedStep.CONFIG_INVALID)
+    assert "ROCR_VISIBLE_DEVICES='7' holds 1 GPUs; the launch needs 2" in refused.value.detail
+
+
+def _maskless_round(path: Path) -> SuiteRound:
+    _write_point(path)
+    point = yaml.safe_load(path.read_text(encoding="utf-8"))
+    del point["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"]
+    path.write_text(yaml.safe_dump(point), encoding="utf-8")
+    return SuiteRound(path, path.parent, round_lifecycle(path.parent, LifecycleMode.OWN))
+
+
 def test_the_round_sees_the_host_environment_but_not_its_gpu_masks() -> None:
     names = inherited_env_names({"PATH": "/bin", "HF_HOME": "/hf", "ROCR_VISIBLE_DEVICES": "0", "BASH_FUNC_x%%": "()"})
 
