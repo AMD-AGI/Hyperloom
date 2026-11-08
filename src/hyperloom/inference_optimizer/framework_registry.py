@@ -177,7 +177,3 @@ def format_primary_metric(framework: str | None, tput: float | int | None, *, pr
     if value is None:
         return f"n/a {unit}"
     return f"{value:.{precision}f} {unit}"
-
-
-# The old table, for multibranch-dev's specialist.arbor_adapter; removed with 5.12 once it is gone.
-EXPERT_PARALLEL_FLAGS = {name: row for name in FRAMEWORKS if (row := expert_parallel_flag(name)) is not None}
