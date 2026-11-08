@@ -37,7 +37,7 @@ import hyperloom_multibranch
 from hyperloom_common.jsonio import read_jsonl
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
-from hyperloom.common.proctree import running
+from hyperloom_common.proctree import running
 from hyperloom.common.outside_facts.image_check import FactResult, ImageCheckFailed, ImageCheckMode, ImageCheckReport
 from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity

@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
-from hyperloom.common.proctree import collect_tree, kill_tree
+from hyperloom_common.proctree import collect_tree, kill_tree
 from hyperloom_multibranch.specialist.agent_watch import REGISTRY_PREFIX, beyond, marked_pids
 
 
