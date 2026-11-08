@@ -72,7 +72,10 @@ _GENERATIONS_TRIED = 3
 _INCOMING = ".incoming-"
 _DAMAGED = ".damaged-"
 _FILE_MODE = 0o600
-_BLOB_MODE = 0o444
+#: A stored blob or snapshot is readable by its owner only and writable by none: the store is content-addressed and never
+#: rewritten in place. Every reader opens the store as the account that wrote it (or as root) and copies what it needs
+#: into a private file of its own (``_FILE_MODE``), so no group or other bit is granted.
+_BLOB_MODE = 0o400
 _FETCH_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
