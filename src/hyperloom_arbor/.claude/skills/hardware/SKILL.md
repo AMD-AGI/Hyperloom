@@ -7,8 +7,7 @@ description: AMD Instinct hardware facts for kernel authoring, rooflines and com
 
 The facts a campaign needs when it prices a direction, writes a kernel plan or reads a roofline.
 `reference/` holds the detail. It is KernelForge's hardware knowledge base
-(`local_knowledge/hardware/`, AMD, MIT licence: `reference/LICENSE-KernelForge`), imported unchanged
-on 2026-10-20.
+(`local_knowledge/hardware/`, AMD, MIT licence: `reference/LICENSE-KernelForge`), imported unchanged.
 
 KernelForge's separate gfx950 summary (`knowledge_base/shared/gpu_arch_gfx950.md`) was not imported:
 it says "304 CUs", "32 banks" and "similar to MI300X's 5.3 TB/s", all wrong for gfx950.
@@ -33,7 +32,7 @@ it says "304 CUs", "32 banks" and "similar to MI300X's 5.3 TB/s", all wrong for 
 | GPU↔GPU | Infinity Fabric, 8 fully connected, 1075 GB/s per card | 7 links per GPU | as MI300X |
 | FP16 ridge (spec) | ≈ 312 FLOP/B | ≈ 247 FLOP/B | — |
 
-**Official sources for the gfx950 column** (checked 2026-10-20):
+**Official sources for the gfx950 column:**
 - [ROCm: AMD Instinct MI350 Series microarchitecture](https://rocm.docs.amd.com/en/latest/reference/gpu-arch/mi350.html):
   8 XCDs of 32 active CUs (256), 160 KB LDS per CU, 4 MB L2 per XCD, 256 MB Infinity Cache,
   8 TB/s and 288 GB HBM3E as "peak theoretical", 7 Infinity Fabric links at 38.4 Gbps.
@@ -108,4 +107,4 @@ low), RCCL's tests for collectives, a graph-captured loop for launch cost.
   - 304 CUs become 256, so redo the grid and wave arithmetic;
   - TF32 is gone.
 - **Every fact here carries its source.** When one turns out wrong, fix it here and in the place
-  that cited it. The MI350X dossier's "304 CUs" carries a correction note.
+  that cited it.

@@ -89,14 +89,14 @@ Parallel mode reads a separate run config ([operations.md](operations.md)).
 
 | Variable | Meaning |
 |---|---|
-| `ANTHROPIC_BASE_URL` | the LLM gateway the agents use. If it does not answer, Arbor tries `localhost:9101`, `9100` and `9102` at import. The gateway's other variables (its token) pass through to the agent's CLI; launchers source them from `~/.arbor/gateway.env`. Never commit them |
+| `ANTHROPIC_BASE_URL` | the LLM gateway the agents use. If it does not answer, Arbor tries a few local ports at import. The gateway's other variables (its token) pass through to the agent's CLI; launchers source them from `~/.arbor/gateway.env`. Never commit them |
 | `ARBOR_ROOT` | where `packs/` is found, when the config is not under an Arbor checkout |
 | `ARBOR_ROLL=1` | turn on rolling chunks; `ARBOR_ROLL_WALL_MIN`, `ARBOR_ROLL_SUCCESSOR_AT_MIN`, `ARBOR_ROLL_EXIT_MARGIN_MIN`, `ARBOR_ROLL_MAX_CHUNKS`, `ARBOR_ROLL_EST_DEFAULT_MIN`, `ARBOR_ROLL_EST_FLOOR_MIN` override `cluster.roll` |
 | `ARBOR_ROUND_AB` | the round-end A/B hook (over the config's `round_ab.command`) |
 | `ARBOR_REVIEW_GATE` | `0` starts new campaigns without the review gate, `1` with it; over the config's `review_gate`, under `run --[no-]review-gate` |
 | `ARBOR_SHARE_HOST`, `ARBOR_SHARE_ROOT`, `ARBOR_PROJECT`, `ARBOR_USER` | where the collectors push (`arbor-share`, `/path/to/arbor-share`) |
 | `ARBOR_AGENT_BACKEND` | leave unset. Its non-Claude value imports a module that is not in the tree |
-| `SLURM_JOB_ID`, `SPUR_JOB_ID` | read to label rows and rounds |
+| `SLURM_JOB_ID` | read to label rows and rounds |
 
 ## The session directory
 

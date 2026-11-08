@@ -36,6 +36,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 log = logging.getLogger(__name__)
 
@@ -327,18 +328,6 @@ def make_shared_dirs(path: Path, *, mode: int = SHARED_DIR_MODE) -> Path:
     return path
 
 
-def share_new_directory(directory: Path, *, mode: int = SHARED_DIR_MODE) -> None:
-    """Give a directory this process has just made (``mkdir``, ``mkdtemp``) its shared ``mode``, by ``fchmod`` on the
-    directory opened without following a link, in its parent reached as :func:`open_directory` reaches it, when that
-    parent is shared storage (:func:`parent_is_shared`); logged as in :func:`make_shared_dirs` when it does not keep
-    setgid. Anywhere else it is left as it was made; a link at its name is refused either way."""
-    with shared_parent(directory) as (parent, name, widen):
-        if widen:
-            _share(parent, name, mode, directory)
-        else:
-            os.close(os.open(name, _DIRECTORY, dir_fd=parent))  # a link at its name is refused (ELOOP)
-
-
 @contextmanager
 def shared_parent(path: Path) -> Iterator[tuple[int, str, bool]]:
     """The directory of ``path`` opened by :func:`open_directory` (``O_PATH``, closed after the block), the name of
@@ -377,25 +366,6 @@ def _new_temporary(directory: int, name: str, mode: int, flags: int = 0) -> tupl
             raise
         return descriptor, temporary
     raise FileExistsError(errno.EEXIST, "no free name for a new file beside it", name)
-
-
-def create_shared_file(path: Path) -> None:
-    """Create ``path`` empty with mode ``664`` below shared storage (:func:`parent_is_shared`), else as the umask leaves
-    ``664``; an existing file is replaced by rename, never truncated or chmodded."""
-    with shared_parent(path) as (directory, name, widen):
-        try:
-            descriptor = os.open(
-                name, _NEW_FILE, _OWNER_ONLY, dir_fd=directory
-            )  # the umask never decides it: fchmod below
-        except FileExistsError:
-            descriptor = None
-        if descriptor is not None:
-            try:
-                os.fchmod(descriptor, _final_mode(SHARED_FILE_MODE, widen))
-            finally:
-                os.close(descriptor)
-            return
-    write_shared_bytes(path, b"")
 
 
 def open_shared_append(path: Path) -> int:
@@ -545,14 +515,20 @@ def _create_in_place(directory: int, name: str, mode: int) -> int:
     return descriptor
 
 
-def copy_shared_file(source: Path, path: Path, *, mode: int = SHARED_FILE_MODE) -> None:
-    """Copy ``source`` to a new file beside ``path`` with ``mode`` (masked by the umask outside shared storage) and
-    rename it over ``path``, as :func:`write_shared_bytes` does, without holding the content in memory."""
+@contextmanager
+def replace_shared_file(path: Path, *, mode: int = SHARED_FILE_MODE) -> Iterator[BinaryIO]:
+    """A new file beside ``path``, open for writing, renamed over ``path`` when the block ends: for a writer that
+    streams what it writes (a copy, an archive) rather than hold it in memory.
+
+    The file is made as :func:`write_shared_bytes` makes it: under a name of its own (``O_EXCL``, never through a
+    link), with ``mode`` below shared storage (:func:`parent_is_shared`) and ``mode`` masked by the umask anywhere
+    else, set before the first byte. When the block raises, the new file is removed and ``path`` is left as it was.
+    """
     with shared_parent(path) as (directory, name, widen):
         descriptor, temporary = _new_temporary(directory, name, _final_mode(mode, widen))
         try:
-            with os.fdopen(descriptor, "wb") as handle, open(source, "rb") as content:
-                shutil.copyfileobj(content, handle)
+            with os.fdopen(descriptor, "wb") as handle:
+                yield handle
             os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
         except BaseException:
             with suppress(OSError):
@@ -560,9 +536,11 @@ def copy_shared_file(source: Path, path: Path, *, mode: int = SHARED_FILE_MODE) 
             raise
 
 
-def write_shared_text(path: Path, text: str, *, mode: int = SHARED_FILE_MODE) -> None:
-    """:func:`write_shared_bytes` of ``text`` as UTF-8."""
-    write_shared_bytes(path, text.encode("utf-8"), mode=mode)
+def copy_shared_file(source: Path, path: Path, *, mode: int = SHARED_FILE_MODE) -> None:
+    """Copy ``source`` to a new file beside ``path`` with ``mode`` (masked by the umask outside shared storage) and
+    rename it over ``path`` (:func:`replace_shared_file`), without holding the content in memory."""
+    with replace_shared_file(path, mode=mode) as handle, open(source, "rb") as content:
+        shutil.copyfileobj(content, handle)
 
 
 def current_umask() -> int:
@@ -634,20 +612,18 @@ __all__ = [
     "Flush",
     "copy_shared_file",
     "create_new_shared_file",
-    "create_shared_file",
     "current_umask",
     "make_shared_dirs",
     "open_directory",
     "open_shared",
     "open_shared_append",
     "read_directory",
+    "replace_shared_file",
     "open_shared_replacement",
     "ownership",
     "parent_is_shared",
-    "share_new_directory",
     "shared_parent",
     "setgid_warnings",
     "writable_problems",
     "write_shared_bytes",
-    "write_shared_text",
 ]
