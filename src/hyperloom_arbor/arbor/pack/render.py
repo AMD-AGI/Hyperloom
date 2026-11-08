@@ -197,8 +197,8 @@ def _render_barren(campaign, state) -> str:
         # NOT a claim about what the campaign has or has not measured. The
         # design sketched two variants ("nothing has measured it" / "the last
         # measurement was iteration X"), and rendering the first against a
-        # campaign that held many denominator and census ledger entries
-        # produced a flat falsehood. A block the agent can catch lying is a
+        # campaign that holds many denominator and census ledger entries
+        # produces a flat falsehood. A block the agent can catch lying is a
         # block it discounts. Asking instead is always true, and after N landed
         # changes STALENESS is the live question anyway.
         prov = ("Name the measurement that answer rests on, and when it was "
@@ -266,10 +266,8 @@ def _render_barren(campaign, state) -> str:
                 f"- `{f.id}` — {str(f.claim)[:150]}"
                 for f in uncited[:_BARREN_LIST_CAP]) + "\n")
 
-    # (2) Re-land candidates. This is the highest-yield move in the corpus and
-    # nothing currently asks for it: one campaign re-landed previously
-    # REVERTed work several times, unprompted, and cleared
-    # a bar every time.
+    # (2) Re-land candidates. Previously REVERTed work, re-landed, can clear a
+    # bar, and nothing else asks for it.
     # Only intents that BOOK. A `LEARN -> REVERT` is a probe that closed no
     # finding, not a change sitting on the shelf — listing those as re-land
     # candidates (the first draft did) points the agent at nothing.
@@ -290,13 +288,12 @@ def _render_barren(campaign, state) -> str:
         f"**Your LEARN budget is {state.learn_budget()} consecutive this "
         f"iteration, not {MAX_CONSECUTIVE_PROBES}.** A LEARN touching only "
         f"`eval/` and the ledger skips the server run entirely — minutes "
-        f"instead of ~45. While this drought lasts, knowledge is the cheapest "
+        f"instead of a full server run. While this drought lasts, knowledge is the cheapest "
         f"thing on the menu.\n")
 
     # THE CLOSING PARAGRAPH IS NOT A HEDGE. A forced-diversity rule is the
-    # obvious move here and it is wrong: one campaign's entire lead came
-    # from going DEEPER on one seam it had already touched (its leading KEEPs
-    # are all the same one). Breadth is the right prior when you do
+    # obvious move here and it is wrong: a lead can come entirely from going
+    # DEEPER on one seam already touched. Breadth is the right prior when you do
     # not know where the cost is; it is the wrong rule once you do.
     parts.append(
         "You are NOT required to change direction. Going deeper on a seam "
@@ -416,9 +413,8 @@ def render_program(campaign, state, arbor_root: str | Path,
     #
     # It was parsed into Pack.description from the beginning but at first
     # never rendered. Packs had been written against the assumption that it
-    # reached the agent, so one pack's header -- its operating point, its
-    # baseline and target, and the warning that the inherited roadmap's
-    # numbers came from another operating point -- was invisible to the
+    # reached the agent, so a pack's header -- its operating point, its
+    # baseline and target -- was invisible to the
     # agent it was written for.
     if campaign.pack.description:
         sections.append(campaign.pack.description.strip())

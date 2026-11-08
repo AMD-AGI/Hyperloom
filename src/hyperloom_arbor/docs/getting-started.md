@@ -27,7 +27,7 @@ From a laptop dry run to a first campaign on a GPU node.
 
 ```bash
 cd src/hyperloom_arbor   # this repository's copy
-python3 -m arbor run --config configs/agentx-glm52-mi355x.json --dry-run
+python3 -m arbor run --config configs/serving-template.json --dry-run
 ```
 
 The dry run drives the real loop (the program, the gate, escalation, the records) on synthetic
@@ -38,7 +38,8 @@ pack before spending a node.
 ## 2. Choose a pack and write a config
 
 - **The pack** says what is optimized and how it is measured ([packs.md](packs.md)). Start from the
-  nearest existing one: `model-m-c8-tp4` (vLLM at TP4), `balanced` (every rule and five skills).
+  nearest existing one: `serving` (the serving template, any vLLM or SGLang model), `balanced`
+  (every rule and five skills).
 - **The config** says where: the pack, the container and the workspace inside it, the model, the
   server's flags and env, the bench and correctness scripts, and the session directory. Copy a
   config from `configs/` ([configs/README.md](../configs/README.md)) and change the paths;
@@ -50,16 +51,10 @@ Arbor drives a container that has the serving stack (vLLM or SGLang), the model'
 pack's validators. The served tree must be a git repository; the launchers make the installed
 framework's directory one, with a baseline commit.
 
-- **With a launcher** (recommended): the launchers provision the node (the image, the container,
-  the workspace, a restore of earlier KEEPs) and start the driver. For Model M on Cluster A:
-
-  ```bash
-  ARBOR_URL=<a clone URL the cluster can read> CAMPAIGN_BRANCH=main \
-    bash scripts/model-m-campaign/launch_model_m.sh <campaign>
-  ```
-
-  Set `ARBOR_URL` and the branch: the launchers' defaults still name retired repositories.
-  [operations.md](operations.md) covers the launchers, rolling chunks and parallel mode.
+- **With a launcher** (recommended): a launcher provisions the node (the image, the container,
+  the workspace, a restore of earlier KEEPs) and starts the driver. Launchers are specific to a
+  cluster: point yours at an Arbor clone the cluster can read, and at the branch to run.
+  [operations.md](operations.md) covers what a launcher does, rolling chunks and parallel mode.
 - **By hand**, on a node whose container is up: `docker_container` names it, `workspace_root` is
   the served tree inside it, and
 

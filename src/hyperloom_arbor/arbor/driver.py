@@ -41,7 +41,7 @@ def _resolve_target(target, metric: str):
 
     A config may express `target` either as a bare number or as a dict of
     documented reference points, e.g.
-    ``{"_source": ..., "output_tok_per_chip": <number>, "gap_pct": <number>}``.
+    ``{"_source": ..., "output_tok_per_chip": <number>}``.
     Comparing `best_metric >= <dict>` raises TypeError, which killed the loop
     on the first iteration that had a metric to compare (iteration 1 was safe
     only because best_metric was still None).
@@ -75,7 +75,7 @@ def _aborted_detail(session_dir: Path) -> str:
     """ABORTED.md's message (the streak and the last not-measured reason), for the exit record.
 
     A host has to tell a broken harness from a finished run: an abort recorded as `done`
-    read as a normal end under a host (a gateway outage).
+    reads as a normal end under a host.
     """
     try:
         text = (session_dir / "ABORTED.md").read_text()
@@ -311,7 +311,7 @@ def _main(argv: list[str] | None, held: dict) -> int:
     if refused:
         return component.refuse(refused, campaign.config, session_dir)
 
-    # Cluster A's rolling chunks (Arbor main only; arbor/cluster/handoff.py): the
+    # Rolling chunks (arbor/cluster/handoff.py): the
     # launcher opts in with ARBOR_ROLL=1. The lease is taken before anything
     # writes the session, so two drivers never share one.
     roll = None
@@ -455,8 +455,7 @@ def _main(argv: list[str] | None, held: dict) -> int:
         # RELOAD THE MEASUREMENT BLOCK EACH ITERATION.
         #
         # `state` is re-read from disk every iteration, so the BAR can be
-        # corrected between iterations (scripts/dsv41-campaign/fix_bar.py does
-        # exactly that). The BANDS could not: load_campaign() runs once before
+        # corrected between iterations. The BANDS could not: load_campaign() runs once before
         # this loop, and gate.py reads threshold_rel / noise_band_pct /
         # secondary_noise_band_pct off that in-memory pack. Editing pack.yaml
         # mid-run did nothing, and the only way to widen a band was to resubmit
@@ -583,7 +582,7 @@ def _main(argv: list[str] | None, held: dict) -> int:
             if last.get("iteration") == iteration and last.get("decision") == "KEEP":
                 from arbor.cluster import handoff
                 handoff.mirror_workspace_config(campaign.config, session_dir, os.environ.get(
-                    "SLURM_JOB_ID") or os.environ.get("SPUR_JOB_ID") or "local")
+                    "SLURM_JOB_ID") or "local")
         keeps = sum(1 for l in state.lessons if l.get("decision") == "KEEP")
         reverts = sum(1 for l in state.lessons if l.get("decision") == "REVERT")
         invalid = sum(1 for l in state.lessons if l.get("decision") == "INVALID")

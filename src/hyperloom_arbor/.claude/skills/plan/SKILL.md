@@ -10,8 +10,8 @@ that has just finished. Arbor records each iteration (what changed, what the
 gate said); it does not record why the round tried what it tried, what it
 expected, or when a failed idea is worth reopening. A round plan carries that,
 before and after. The
-skeleton is [template.md](template.md). A planning campaign (pack `model-m-plan`)
-scores drafts with its linter, `packs/model-m-plan/validator/lint_plan.py`: run
+skeleton is [template.md](template.md). A planning campaign's pack
+scores drafts with its linter (its `validator/lint_plan.py`): run
 `python3 <that file> PLAN.md` to see what a draft is missing.
 
 ## Inputs, read in this order
