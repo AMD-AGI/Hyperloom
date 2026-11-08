@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from hyperloom.common import confinement
+from hyperloom.common.outside_facts import ENV_CONC, ENV_ISL, ENV_NUM_PROMPTS, ENV_NUM_WARMUPS, ENV_OSL
 from hyperloom.common.outside_facts.rule_pack import PACK_ENV, load_pack
 from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
 from hyperloom.measure.archive import DirResultArchive
@@ -544,6 +545,10 @@ def _require_tool_checkout(repo: Path, commit: str, home: Path, monkeypatch: pyt
         )
 
 
+#: The fixed workload a round's suite config is built from; a point without it fails as ``yaml_build_error``.
+_SHAPE = {ENV_CONC: "8", ENV_ISL: "128", ENV_OSL: "128", ENV_NUM_PROMPTS: "8", ENV_NUM_WARMUPS: "1"}
+
+
 def _toolbox_of(
     blackboard: LocalBlackboard, tmp_path: Path, session: Path, commit: str, **extra: Any
 ) -> LocalHostedToolbox:
@@ -551,7 +556,7 @@ def _toolbox_of(
     return build_local_toolbox(
         LocalSession(session, "run-1", range(8)),
         blackboard,
-        AcceptanceSetup(FakeRepo(), PointPlanner(_point(tmp_path)), IMAGE, WorkloadKind.AGENTX),
+        AcceptanceSetup(FakeRepo(), PointPlanner(_point(tmp_path, **_SHAPE)), IMAGE, WorkloadKind.AGENTX),
         spec_context(tmp_path, blob_root=str(session / "hosted" / "blobs")),
         options=LocalOptions(
             policy=QueuePolicy(per_branch_k=2, global_concurrency=64),
@@ -633,13 +638,11 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
         result = TestResult.from_document(entry.outcome["result"])
         # No GPU here, so the shipped runner cannot serve a model: what this proves is the wiring. The real runner
         # started from the local template, signed a bundle, the backend verified it, and the toolbox took the cause
-        # the server log names, quoted (no sglang module) as the candidate's failure, did not rerun it and wrote it to the
-        # blackboard.
+        # the suite's framework probe names, quoted (no sglang package) as the candidate's failure, did not rerun it
+        # and wrote it to the blackboard.
         assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.CANDIDATE
         assert result.failure_reason is not None and result.failure_reason.startswith("import_error: ")
-        assert "No module named 'sglang'" in result.failure_reason, (
-            "the reason quotes the line the server log ends with"
-        )
+        assert "cannot import sglang" in result.failure_reason, "the reason quotes the probe's failure_detail"
         assert len(result.attempts) == 1 and result.manifest_sha256, result
         sandboxes = {rec.sandbox_id for rec in toolbox.backend.journal.records() if rec.request_id == request_id}
         assert len(sandboxes) == 1
