@@ -340,6 +340,23 @@ def test_an_operator_topology_must_be_the_one_launched():
 
 
 @pytest.mark.parametrize(
+    ("framework", "args", "cards"),
+    [
+        ("sglang", ("--tp", "8"), 8),
+        ("sglang", ("--tp", "8", "--dp-size", "2"), 16),
+        ("sglang", ("--tp", "8", "--data-parallel-size", "8", "--enable-dp-attention"), 8),
+        ("vllm", ("--tensor-parallel-size", "8"), 8),
+        ("vllm", ("--tensor-parallel-size", "8", "--data-parallel-size", "2"), 16),
+        ("vllm", ("-tp", "8", "-dp=2", "--enable-expert-parallel"), 16),
+    ],
+)
+def test_a_launch_occupies_tp_cards_per_data_parallel_replica_that_holds_its_own(framework, args, cards):
+    base = _base(query=replace(_base().query, framework=framework), framework=framework, args=args, golden_al=None)
+
+    assert base.cards == cards
+
+
+@pytest.mark.parametrize(
     ("workload", "isl", "osl"),
     [(Workload.FIXED, None, None), (Workload.FIXED, 8192, None), (Workload.AGENTX, 8192, 1024)],
 )
