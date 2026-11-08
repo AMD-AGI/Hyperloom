@@ -33,10 +33,12 @@ session directory left behind. Only the image check itself runs later, in the ne
 | `INFERENCE_SUITE_TOOL_CACHE` | no | The tool cache `install.sh` staged the pinned InferenceX client in, which every test runs. Default `inference-suite-tools` under the dependency cache. Without a staging there that verifies, the command fails, naming `python -m inference_suite stage --tool-cache <dir>`. |
 | `KB_STORE_URL`, `KB_STORE_TOKEN` | no | Both set: PRELUDE reads warm-start leads from the Recipe KB and CLOSE writes the final recipe back. Neither set: no Recipe KB. Only one set is refused. |
 
-Two consistency checks run on each test's own server by default, each reading a prompt set staged in this host's
-runner cache (`HYPERLOOM_RUNNER_CACHE`): `HYPERLOOM_SHORT_PROMPTS` names the short-prompt set's key and
-`HYPERLOOM_LONG_CONTEXT` the long-context set's; `off` turns that check off. Unset, each uses the session model's own
-set, staged when it is missing. A named set that is not staged refuses the measurement before any test starts.
+The short-prompt and long-context consistency checks are on by default and, when a test runs them, run on its own
+server, reading a prompt set staged in this host's runner cache (`HYPERLOOM_RUNNER_CACHE`). `HYPERLOOM_SHORT_PROMPTS`
+names the short-prompt set's key and `HYPERLOOM_LONG_CONTEXT` the long-context set's; `off` turns that check off.
+Unset, each uses the session model's own set: the local measurement stages it when it is missing, `--measurement
+hosted` runs the check only when it is already staged. A named set that is not staged refuses the measurement before
+any test starts.
 
 `HYPERLOOM_ACTIVE_IMAGE_REF` and `HYPERLOOM_ACTIVE_IMAGE_DIGEST` must name the image the session runs on, and the
 agent CLI the specialists run must be installed. `--measurement hosted` also needs the grant variables its help lists
