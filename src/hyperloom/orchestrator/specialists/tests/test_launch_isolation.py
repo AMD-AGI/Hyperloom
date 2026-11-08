@@ -35,7 +35,7 @@ from hyperloom.common.agent_isolation import (
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env_safety import RunAs
 from hyperloom_common.proctree import REAP_MARK_ENV, running
-from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
+from hyperloom.orchestrator.actions.executors._ray_serving import CreatedLog, ManagedServerProcess
 from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.agent_cli_config import SpecialistAgentUnavailableError
@@ -801,9 +801,8 @@ class _ActorHere:
             launch.cmd,
             env=launch.env,
             cwd=launch.cwd,
-            log_path=launch.log_path,
+            log_path=CreatedLog(launch.log_path, launch.log_identity),
             stdin_path=launch.stdin_path,
-            log_identity=launch.log_identity,
         )
 
     def poll_started(self) -> int | None:
