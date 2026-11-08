@@ -309,7 +309,8 @@ def pinned_runner_python(directory: Path, commit: str) -> str:
     return str(script)
 
 
-def staged_runner_cache(tmp: Path) -> dict[str, str]:
-    """The runner variable naming a runner cache that already holds a staging that verifies: the stand-in InferenceX
-    repository is not at the commit the staging pins, so a runner that staged from it would refuse the staging."""
-    return {CACHE_ENV: str(stage_into(tmp / "runner-cache").parents[1])}
+def stage_runner_cache(tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Name, as this host's runner cache, one below ``tmp`` that already holds a staging that verifies: a local toolbox
+    tells its runners this host's cache, and the stand-in InferenceX repository is not at the commit the staging pins,
+    so a runner that staged from it would refuse the staging."""
+    monkeypatch.setenv(CACHE_ENV, str(stage_into(tmp / "runner-cache").parents[1]))

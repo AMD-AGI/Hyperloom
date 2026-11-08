@@ -32,7 +32,7 @@ from hyperloom_multibranch.toolbox.local_hosted import (
     build_local_toolbox,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, freeze_base_at, req, staged_runner_cache
+from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, freeze_base_at, req
 from hyperloom_multibranch.toolbox.tests.test_analysis_route import _Analysis
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 from hyperloom_multibranch.toolbox.tests.test_local_hosted import _require_tool_checkout
@@ -79,7 +79,6 @@ def _toolbox(tmp_path: Path, blackboard: LocalBlackboard, commit: str, repo: Pat
             runner_envs={
                 "INFERENCEX_REPO": str(repo),
                 "ROCM_PATH": str(tmp_path / "no-rocm"),
-                **staged_runner_cache(tmp_path),
             },
             python=_runner_python(tmp_path),
             poll_interval_sec=0.1,

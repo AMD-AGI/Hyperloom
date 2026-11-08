@@ -12,6 +12,7 @@ short-prompt tests of the measure package and of the toolbox.
 from __future__ import annotations
 
 import dataclasses
+import os
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,9 @@ from hyperloom_multibranch.toolbox.local_hosted import (
     LocalOptions,
     LocalSession,
     build_local_toolbox,
+    runner_cache_dir,
 )
+from hyperloom_multibranch.toolbox.long_context import LONG_CONTEXT_ENV, LONG_CONTEXT_OFF
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.short_prompts import (
     MODEL_PATH_ENV,
@@ -301,14 +304,19 @@ async def _planned(toolbox: LocalHostedToolbox | HostedToolbox, **request: Any) 
 
 
 async def test_a_toolbox_built_without_a_set_runs_no_check_even_for_a_test_the_rule_always_checks(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv(CACHE_ENV, str(tmp_path / "cache"))
+    monkeypatch.setenv(LONG_CONTEXT_ENV, LONG_CONTEXT_OFF)
     _setup(tmp_path / "cache")
 
     toolbox, branch_env = await _built(tmp_path)
 
-    assert toolbox._acceptance._short_prompts is None
-    assert CACHE_ENV not in _runner_env(toolbox) and CACHE_ENV not in branch_env
+    assert toolbox._acceptance._short_prompts is None and toolbox._acceptance._long_context is None
+    assert _runner_env(toolbox)[CACHE_ENV] == str(runner_cache_dir(os.environ)), (
+        "every runner reads the inference_suite staging from the cache the session publishes it to"
+    )
+    assert CACHE_ENV not in branch_env
     assert await _planned(toolbox, purpose=Purpose.FINAL) is None
     assert await _planned(toolbox, **_TOUCHING) is None
 

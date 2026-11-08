@@ -429,10 +429,11 @@ def runner_cache_dir(environ: Mapping[str, str]) -> Path:
     return cache_root(environ).expanduser().resolve()
 
 
-def _shared_dirs(jit_store: Path | None, eval_sets: bool, environ: Mapping[str, str]) -> dict[str, str]:
-    """The host directories the runners are told, by the variable each reads, for the shared stores that are on: the
-    compiled-code cache, and the runner cache the check sets are read from when a check is on."""
-    named = {JIT_CACHE_ENV: jit_store, RUNNER_CACHE_ENV: runner_cache_dir(environ) if eval_sets else None}
+def _shared_dirs(jit_store: Path | None, environ: Mapping[str, str]) -> dict[str, str]:
+    """The host directories the runners are told, by the variable each reads, for the shared stores: the compiled-code
+    cache when it is on, and always the runner cache, which holds the inference_suite staging every test runs. The
+    runner's environment is cleared, so without it a runner reads the default cache, where nothing was published."""
+    named = {JIT_CACHE_ENV: jit_store, RUNNER_CACHE_ENV: runner_cache_dir(environ)}
     return {name: str(path) for name, path in named.items() if path is not None}
 
 
@@ -539,8 +540,7 @@ def build_local_toolbox(
         jit_store=DirJitStore(jit_root),
     )
     template = _runner_template(session, options)
-    eval_sets = acceptance.short_prompts is not None or acceptance.long_context is not None
-    shared_dirs = {**_shared_dirs(jit_root, eval_sets, os.environ), **(native.runner_envs if native else {})}
+    shared_dirs = {**_shared_dirs(jit_root, os.environ), **(native.runner_envs if native else {})}
     acceptance = replace(acceptance, aiter_builds_missing=aiter_builds_missing({**template.envs, **shared_dirs}))
     provider = _provider(session, cards, template, options, shared_dirs)
     backend = started_backend(provider, config)
