@@ -277,7 +277,7 @@ class EnvdHost:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
-                pass
+                pass  # the group ended between the poll and the kill
         try:
             process.wait(timeout=_KILL_WAIT_SEC)
         except subprocess.TimeoutExpired as exc:
