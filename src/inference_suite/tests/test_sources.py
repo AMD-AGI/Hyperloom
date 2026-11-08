@@ -377,6 +377,8 @@ def test_upstream_code_that_fails_rather_than_answers_is_refused(tmp_path: Path)
         inferencex_answers(Path(sys.executable), project, [point], [])
 
 
+# The test interpreter stands in for the pinned build, whose own tomllib reads the project's requires-python.
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib arrived in Python 3.11")
 def test_inferencex_needing_a_newer_python_than_the_pinned_build_is_refused_before_installing(
     tmp_path: Path, monkeypatch
 ) -> None:
