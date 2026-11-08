@@ -10,7 +10,8 @@
 * a single-point test whose server the lifecycle cannot hold (a profile, a framework it cannot hold) is ``run_grid``
   with one variant: measured round, the evaluation after its bench when the point asks for one, teardown;
 * one arm of a concurrency sweep boots the inference server once and benches the levels from high to low on it, the
-  way ``conc_sweep`` does, stepping down a level when the boot fails; a graded arm then evaluates once on that server;
+  way ``conc_sweep`` does; a graded arm then evaluates once on that server. An arm whose levels must not share a
+  server (``BenchmarkPoint.sweeps_on_cold_servers``), or whose server the lifecycle cannot hold, boots one per level;
 * accuracy is the ``RUN_EVAL`` switch in the point's own YAML, which must say what the caller asked for.
 
 Nothing in the old flow changes: this file only calls what ``orchestrator.actions.executors`` exports.
@@ -801,25 +802,24 @@ class _Lifecycle:
 
 
 async def _sweep(run: _Run) -> None:
-    """One arm: boot once on the highest level that boots, bench every level on that server, evaluate a graded arm once
-    after the last bench from the level it booted on (the highest, the quickest to evaluate), tear the server down."""
+    """One arm: boot once on the highest level, bench every level on that server, evaluate a graded arm once after the
+    last bench from the level it booted on (the quickest to evaluate), tear the server down."""
     order = sorted(range(len(run.call.points)), key=lambda i: -_levels(run.call.points)[i])
+    if _point(run.call.points[0]).sweeps_on_cold_servers:
+        run.notes.append("server restarted per level: an AgentX replay is cache-sensitive")
+        await _sweep_by_restart(run, order)
+        return
     lifecycle = _Lifecycle(run)
     if not lifecycle.eligible:
         run.notes.append(f"server restarted per level: {lifecycle.reason}")
         await _sweep_by_restart(run, order)
         return
     try:
-        booted = await _boot(run, lifecycle, order)
-        if run.stopped_rc is not None:
-            return
-        if booted is None:
-            run.notes.append("every boot attempt failed; server restarted per level")
-            await _sweep_by_restart(run, order)
+        if not await _boot(run, lifecycle, order[0]):
             return
         run.evaluates_apart = True
-        await _reuse(run, lifecycle, order[booted:])
-        await _evaluate(run, lifecycle, order[booted])
+        await _reuse(run, lifecycle, order)
+        await _evaluate(run, lifecycle, order[0])
         await _held_checks(run, lifecycle)
     finally:
         lifecycle.teardown()
@@ -847,18 +847,14 @@ async def _boot_server(run: _Run, lifecycle: _Lifecycle, point: int, name: str) 
     )
 
 
-async def _boot(run: _Run, lifecycle: _Lifecycle, order: list[int]) -> int | None:
-    """Boot the server on the first level in ``order`` that boots (stepping down on failure); its position, or None."""
-    for position, point in enumerate(order):
-        boot = await _boot_server(run, lifecycle, point, f"c{_levels(run.call.points)[point]}")
-        if not _is_failure(boot):
-            return position
-        if boot.error_class in _STOP_RETURNCODES:
-            run.add(point, boot)
-            return None
-        lifecycle.teardown()
-        run.notes.append(f"boot at {_levels(run.call.points)[point]} failed ({boot.error_class}); stepping down")
-    return None
+async def _boot(run: _Run, lifecycle: _Lifecycle, point: int) -> bool:
+    """Boot the server from the point at index ``point``; whether it is up. A failed boot is the arm's failed row: no
+    level boots another server, as ``CONC`` never reaches the server's launch."""
+    boot = await _boot_server(run, lifecycle, point, f"c{_levels(run.call.points)[point]}")
+    if _is_failure(boot):
+        run.add(point, boot)
+        return False
+    return True
 
 
 async def _reuse(run: _Run, lifecycle: _Lifecycle, order: list[int]) -> None:
@@ -879,7 +875,7 @@ async def _reuse(run: _Run, lifecycle: _Lifecycle, order: list[int]) -> None:
 
 
 async def _sweep_by_restart(run: _Run, order: list[int]) -> None:
-    """The fallback ``conc_sweep`` has for a framework that cannot hold a server: one server per level."""
+    """One server per level, booted and torn down by the level's own round."""
     for point in order:
         result = await _grid(run, point, f"c{_levels(run.call.points)[point]}", warmup_before_measure=False)
         if not run.add(point, result):
