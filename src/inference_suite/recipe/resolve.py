@@ -211,10 +211,10 @@ def _preference(launch: SourceLaunch) -> tuple[int, bool, bool]:
 
 def _choose(launches: Sequence[SourceLaunch], gpus: int) -> _Choice | SourceMiss:
     """The launch to run of those one source holds, and the others that also fit ``gpus`` GPUs."""
-    fitting = [launch for launch in launches if launch.topology.tp <= gpus]
+    fitting = [launch for launch in launches if launch.cards <= gpus]
     if not fitting:
-        sizes = sorted({launch.topology.tp for launch in launches})
-        return SourceMiss(launches[0].source.kind, f"its launches run tp {sizes}, more than the {gpus} GPUs here")
+        sizes = sorted({launch.cards for launch in launches})
+        return SourceMiss(launches[0].source.kind, f"its launches need {sizes} GPUs, more than the {gpus} here")
     ranked = sorted(fitting, key=_preference, reverse=True)
     return _Choice(ranked[0], tuple(ranked[1:]))
 

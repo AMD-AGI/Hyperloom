@@ -39,12 +39,16 @@ from inference_suite.recipe.golden_curve import GoldenLength, golden_requests
 from inference_suite.recipe.image_version import recipe_image_facts, tag_version
 from inference_suite.recipe.model import (
     ATOM_TOPOLOGY,
+    SGLANG_ENTRYPOINT,
     SGLANG_TOPOLOGY,
+    VLLM_ENTRYPOINT,
     VLLM_TOPOLOGY,
     InferencexSnapshot,
     RecipeSourceError,
     RepoBundle,
+    SourceLaunch,
 )
+from inference_suite.recipe import resolve
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, UnreadSource, resolve_base
 from inference_suite.recipe.sglang_cookbook import sglang_cookbook_launches
 from inference_suite.recipe.user_file import parse_user_file
@@ -230,7 +234,39 @@ def test_tp_ambiguity_takes_the_largest_tp_the_gpus_fit_and_records_the_rest():
 
     two = _base(_fixed(), gpus=2)
     assert two.source.kind is SourceKind.DEFAULT_TABLE
-    assert "inferencex holds no launch: its launches run tp [4, 8], more than the 2 GPUs here" in two.warnings
+    assert "inferencex holds no launch: its launches need [4, 8] GPUs, more than the 2 here" in two.warnings
+
+
+def _only_launch(monkeypatch, framework: str, args: tuple[str, ...]) -> None:
+    """Every source of ``framework`` holds one launch, at tp 2, running ``args``."""
+    launch = SourceLaunch(
+        source=_base(_fixed()).source,
+        framework=framework,
+        entrypoint=VLLM_ENTRYPOINT if framework == "vllm" else SGLANG_ENTRYPOINT,
+        topology=Topology(2),
+        conc=64,
+        exact=True,
+        image=None,
+        args=args,
+        env={},
+    )
+    monkeypatch.setattr(resolve, "_readers", lambda _framework: (lambda query, snapshot: [launch],))
+
+
+def test_a_launch_fits_the_machine_by_the_cards_each_data_parallel_replica_holds(monkeypatch):
+    _only_launch(monkeypatch, "vllm", ("--tensor-parallel-size", "2", "--data-parallel-size", "2"))
+
+    assert _base(_fixed(framework="vllm"), gpus=4).source.kind is SourceKind.INFERENCEX
+    two = _base(_fixed(framework="vllm"), gpus=2)
+    assert two.source.kind is SourceKind.DEFAULT_TABLE
+    assert "inferencex holds no launch: its launches need [4] GPUs, more than the 2 here" in two.warnings
+
+
+def test_dp_attention_replicas_share_the_tp_cards_when_the_launch_is_fitted(monkeypatch):
+    args = ("--tp", "2", "--dp-size", "2", "--enable-dp-attention")
+    _only_launch(monkeypatch, "sglang", args)
+
+    assert _base(_fixed(), gpus=2).source.kind is SourceKind.INFERENCEX
 
 
 def test_an_operator_tp_keeps_only_its_arm():
