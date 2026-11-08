@@ -150,7 +150,9 @@ def _sha256(path: Path) -> str:
 
 
 def _download(url: str, destination: Path) -> None:
-    with urllib.request.urlopen(url) as response, destination.open("wb") as sink:
+    # The build's mirror answers 403 to urllib's default User-Agent.
+    request = urllib.request.Request(url, headers={"User-Agent": "inference-suite"})
+    with urllib.request.urlopen(request) as response, destination.open("wb") as sink:
         shutil.copyfileobj(response, sink, _CHUNK)
 
 

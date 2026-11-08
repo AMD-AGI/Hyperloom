@@ -137,3 +137,28 @@ def test_the_lm_eval_wheel_pin_is_a_hash_the_sealed_runner_lock_installs(lock) -
     text = (_REPO / "requirements" / lock).read_text()
     block = text[text.index(f"lm-eval=={LM_EVAL_VERSION}") :].split("# via")[0]
     assert f"--hash=sha256:{LM_EVAL_WHEEL_SHA256}" in block
+
+
+def test_the_build_is_downloaded_with_a_user_agent_its_mirror_serves(tmp_path, monkeypatch) -> None:
+    sent = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> None:
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            return b""
+
+    def urlopen(request, **_):
+        sent.append(request)
+        return _Response()
+
+    monkeypatch.setattr(client_env.urllib.request, "urlopen", urlopen)
+    client_env._download(AGENTX_PYTHON_BUILD.url, tmp_path / "build.tar.gz")
+
+    (request,) = sent
+    assert request.full_url == AGENTX_PYTHON_BUILD.url
+    assert not request.get_header("User-agent", "Python-urllib").startswith("Python-urllib")
