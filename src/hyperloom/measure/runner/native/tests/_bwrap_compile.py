@@ -23,5 +23,5 @@ def bwrap_compile_isolation(monkeypatch: pytest.MonkeyPatch) -> Isolation:
     usable_bwrap()
     monkeypatch.setattr(isolated, "account_problem", lambda: ONE_ID)
     found = local_isolation(lambda unshare: pytest.fail("a sandbox has a network of its own: nothing to probe"))
-    assert found is not None and found.level == ISOLATION_BWRAP_NETNS and found.bwrap is not None, found
+    assert isinstance(found, Isolation) and found.level == ISOLATION_BWRAP_NETNS and found.bwrap is not None, found
     return found

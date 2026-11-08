@@ -1016,16 +1016,20 @@ bubblewrap's own line; the usual causes:
 
 A native build's compile (`hyperloom.measure.runner.native.isolated`) has its own two tiers, also without a switch:
 user 65534 through `setpriv` (in a network namespace of its own where `unshare --net` works) when the build service is
-root and its user namespace maps 65534, else bubblewrap with the same probe and the same choice of binary: the compile
-runs as the service's own user with only its work directory writable, the toolchain, both interpreters, the tree the
-child imports from, the image's packages and the upstream build directory read-only (an aiter module build lays its
-farm in the work directory, and the image's aiter directories the farm links into are read-only), only
-`/sys/devices/system/cpu` of `/sys`, the base `/dev` nodes and no GPU, a network of its own (outside addresses give
-`ENETUNREACH`), and the signing key and trust file (registered as the app's private paths) absent, also where a
-bound tree holds them (that tree is bound entry by entry without them); its environment is only `PATH`, `HOME`, `TMPDIR` and `LC_ALL`. The build record's `isolation`
-entry is `uid+netns`, `uid` or `bwrap+netns`. Where neither tier works, the toolbox refuses at start
-(`build_preflight`) and each build fails as the machine's, naming both reasons; a bubblewrap whose probe gives no
-answer in time is not refused but logged, and each build asks again.
+root and its user namespace maps 65534, else bubblewrap with the same probe and the same choice of binary, where it
+also starts a sandbox with a network of its own (the probe's canary keeps the host's network, so a host that allows no
+new network namespace is named here). Under bubblewrap the compile runs as the service's own user and keeps its
+supplementary groups (as root where the user namespace maps only root), so it reads in the bound `/etc` and `/opt`
+whatever that account reads, as an agent's sandbox does; only its work directory is writable, the toolchain, both
+interpreters, the tree the child imports from, the image's packages and the upstream build directory are read-only (an
+aiter module build lays its farm in the work directory, and the image's aiter directories the farm links into are
+read-only), it sees only `/sys/devices/system/cpu` of `/sys`, the base `/dev` nodes and no GPU, it has a network of
+its own (outside addresses give `ENETUNREACH`), and the signing key and trust file (registered as the app's private
+paths) are absent, also where a bound tree holds them (that tree is bound entry by entry without them); its environment
+is only `PATH`, `HOME`, `TMPDIR` and `LC_ALL`. The build record's `isolation` entry is `uid+netns`, `uid` or
+`bwrap+netns`. Where neither tier works, the toolbox refuses at start (`build_preflight`) and each build fails as the
+machine's, naming both reasons as its choice found them; a bubblewrap whose probe gives no answer in time is not
+refused but logged, and each build asks again.
 
 A multi-branch session records in its manifest and `MB-report.json` (`agent_isolation`) how the paths that launch its
 agents and tests start them (`hyperloom_multibranch.scheduling.launch_isolation`): its specialists as the agent runner's
