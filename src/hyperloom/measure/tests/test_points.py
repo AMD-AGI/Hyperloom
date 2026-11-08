@@ -387,6 +387,62 @@ def test_an_agentx_point_runs_on_the_sessions_frozen_base_as_the_main_flow_compo
     assert user.env_set["HSA_FORCE_FINE_GRAIN_PCIE"] == "1"
 
 
+#: A base option an AgentX recipe turns off, the way an Arbor KEEP drops a default feature.
+BASE_OPTION = "--enable-dp-attention"
+
+
+def _canonical_on_a_base_with(option, tmp_path, model):
+    base = _agentx_base()
+    base = replace(
+        base,
+        topology=replace(base.topology, tp=2),
+        client=replace(base.client, env={"WEKA_LOADER_OVERRIDE": "corpus"}),
+        args=(*base.args, option, "--mem-fraction-static", "0.8"),
+    )
+    canonical = default_canonical(
+        tmp_path / "canonical",
+        primary_concurrency=32,
+        config_path=agentx_source(tmp_path / "bench" / "benchmark.yaml", 32),
+        model_path=str(model),
+        server_base=server_base(base),
+    )
+    return base, canonical
+
+
+def test_an_agentx_point_on_the_frozen_base_drops_a_base_option_the_recipe_removes(tmp_path, model, blobs):
+    base, canonical = _canonical_on_a_base_with(BASE_OPTION, tmp_path, model)
+    delta = RecipeDelta(config=ConfigDelta(remove_args=(BASE_OPTION,)))
+
+    (point,) = generate_points(environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points")
+
+    rendered = load(point)
+    launch = rendered["benchmark"]["agentx"]["launch_overrides"]
+    assert BASE_OPTION not in launch["append_args"]
+    assert "--mem-fraction-static" in launch["append_args"]
+    rendered["benchmark"]["timeout_seconds"] = 7200
+    assert suite_config(rendered, base, _settings()).server.user.args_remove == (BASE_OPTION,)
+
+
+def test_an_agentx_point_on_the_frozen_base_whose_renderer_keeps_a_removed_option_is_refused(
+    tmp_path, model, blobs, monkeypatch
+):
+    _base, canonical = _canonical_on_a_base_with(BASE_OPTION, tmp_path, model)
+    rendered = points.materialize_benchmark_config
+
+    def keeping(*args, **kwargs):
+        path = rendered(*args, **kwargs)
+        config = load(path)
+        config["benchmark"]["agentx"]["launch_overrides"]["append_args"].append("--enable_dp_attention")
+        path.write_text(yaml.safe_dump(config, sort_keys=False))
+        return path
+
+    monkeypatch.setattr(points, "materialize_benchmark_config", keeping)
+    delta = RecipeDelta(config=ConfigDelta(remove_args=(BASE_OPTION,)))
+
+    with pytest.raises(PointError, match=f"the renderer did not remove launch arguments {BASE_OPTION}"):
+        generate_points(environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points")
+
+
 #: An option of the launch resolved from the InferenceX recipe, which the recipe's own arguments lack.
 RESOLVED_OPTION = "--enable-linear-replayssm-spec"
 
