@@ -1451,8 +1451,10 @@ ensure_rocprof_compute() {
 #
 # A round fetches nothing: it runs the InferenceX client, GSM8K task, AgentX
 # aggregator and AgentX harness venv staged here at the commit
-# inference_suite.pins pins, and refuses with staging_missing when the tool
-# cache's manifest lists anything absent, changed or off-pin.
+# inference_suite.pins pins, and its eval under $PYTHON with the pinned lm-eval.
+# It refuses with staging_missing when the tool cache's manifest lists anything
+# absent, changed or off-pin, or $PYTHON lacks that lm-eval. A stage without
+# --source completes a cache that verifies by installing lm-eval, fetching nothing.
 INFERENCE_SUITE_TOOL_CACHE="${INFERENCE_SUITE_TOOL_CACHE:-${_open_source_root}/inference-suite-tools}"
 
 ensure_inference_suite_staging() {
@@ -1468,6 +1470,10 @@ ensure_inference_suite_staging() {
   commit="$("$PYTHON" -c 'from inference_suite.pins import INFERENCEX_CLIENT_COMMIT; print(INFERENCEX_CLIENT_COMMIT)')"
   if [ "$DRY_RUN" -eq 1 ]; then
     log "would stage InferenceX ${commit} from ${INFERENCEX_REPO} into ${INFERENCE_SUITE_TOOL_CACHE}"
+    return 0
+  fi
+  if sha="$("$PYTHON" -m inference_suite.staging stage --tool-cache "$INFERENCE_SUITE_TOOL_CACHE")"; then
+    log "InferenceSuite tools staged at ${INFERENCE_SUITE_TOOL_CACHE} (manifest sha256 ${sha}); installed the pinned lm-eval into ${PYTHON}"
     return 0
   fi
   checkout="${INFERENCE_SUITE_TOOL_CACHE}/.source-${commit}"

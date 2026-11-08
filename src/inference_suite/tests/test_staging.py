@@ -339,13 +339,68 @@ def test_an_unreadable_manifest_is_staging_missing(tmp_path: Path) -> None:
     assert "readable staging manifest" in report.detail
 
 
-def test_check_exits_one_naming_staging_missing_then_zero_with_the_digest_once_staged(staged, tmp_path, capsys) -> None:
+def test_check_exits_one_naming_staging_missing_then_zero_with_the_digest_once_staged(
+    staged, tmp_path, monkeypatch, capsys
+) -> None:
     cache, _, digest = staged
+    monkeypatch.setattr(staging, "_distribution_version", {LM_EVAL_DISTRIBUTION: LM_EVAL_VERSION}.get)
 
     assert staging.main(["check", "--tool-cache", str(tmp_path / "empty")]) == 1
     assert capsys.readouterr().err.startswith(f"{FailedStep.STAGING_MISSING.value}: ")
     assert staging.main(["check", "--tool-cache", str(cache)]) == 0
     assert capsys.readouterr().out.strip() == digest
+
+
+@pytest.mark.parametrize("installed", [None, "0.4.11"])
+def test_check_refuses_an_intact_cache_whose_interpreter_lacks_the_pinned_lm_eval(
+    staged, monkeypatch, capsys, installed
+) -> None:
+    cache, _, _ = staged
+    monkeypatch.setattr(staging, "_distribution_version", {LM_EVAL_DISTRIBUTION: installed}.get)
+
+    assert staging.main(["check", "--tool-cache", str(cache)]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith(f"{FailedStep.STAGING_MISSING.value}: ")
+    assert f"{sys.executable} has {LM_EVAL_DISTRIBUTION} {installed}, not {LM_EVAL_REQUIREMENT}" in err
+
+
+@pytest.mark.parametrize(("installed", "installs"), [(None, True), ("0.4.11", True), (LM_EVAL_VERSION, False)])
+def test_stage_without_a_source_installs_lm_eval_beside_an_intact_cache_and_stages_nothing(
+    staged, install, monkeypatch, capsys, installed, installs
+) -> None:
+    cache, _, digest = staged
+    install.calls.clear()
+    manifest = (cache / MANIFEST_FILE).stat().st_mtime_ns
+    monkeypatch.setattr(staging, "_distribution_version", {LM_EVAL_DISTRIBUTION: installed}.get)
+
+    assert staging.main(["stage", "--tool-cache", str(cache)]) == 0
+    assert capsys.readouterr().out.strip() == digest
+    assert install.calls == ([_lm_eval_install()] if installs else [])
+    assert (cache / MANIFEST_FILE).stat().st_mtime_ns == manifest
+
+
+def test_stage_without_a_source_refuses_a_cache_that_does_not_verify_and_installs_nothing(
+    staged, install, tmp_path, capsys
+) -> None:
+    cache, _, _ = staged
+    install.calls.clear()
+    task = inferencex_root(cache) / GSM8K_TASK
+    task.write_text("edited\n")
+
+    for tool_cache, named in ((tmp_path / "empty", MANIFEST_FILE), (cache, f"{task} (changed since staging)")):
+        assert staging.main(["stage", "--tool-cache", str(tool_cache)]) == 1
+        err = capsys.readouterr().err
+        assert err.startswith(f"{FailedStep.STAGING_MISSING.value}: ") and named in err
+    assert install.calls == []
+
+
+def test_stage_from_a_source_installs_lm_eval_at_its_pin(staged, install, monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setattr(staging, "_distribution_version", {}.get)
+    install.calls.clear()
+
+    assert staging.main(["stage", "--source", str(tmp_path / "InferenceX"), "--tool-cache", str(tmp_path / "t")]) == 0
+    assert _lm_eval_install() in install.calls
+    assert verify(tmp_path / "t", capsys.readouterr().out.strip()).failed_step is None
 
 
 def test_the_manifest_digest_a_host_names_is_the_one_stage_printed_and_none_without_a_manifest(
@@ -382,7 +437,37 @@ def _install_function(name: str) -> str:
     return block[: re.search(r"(?m)^\}", block).end()]
 
 
-def _run_install_staging(cache: Path, *, check_only: int, fetch: str) -> subprocess.CompletedProcess[str]:
+_FAKE_PIP = f"""
+import shutil
+import sys
+from pathlib import Path
+
+site = Path(__file__).resolve().parents[1]
+with open(site / "pip.calls", "a") as calls:
+    calls.write(" ".join(sys.argv[1:]) + "\\n")
+if "{LM_EVAL_REQUIREMENT}" in sys.argv:
+    for old in site.glob("{LM_EVAL_DISTRIBUTION}-*.dist-info"):
+        shutil.rmtree(old)
+    dist = site / "{LM_EVAL_DISTRIBUTION}-{LM_EVAL_VERSION}.dist-info"
+    dist.mkdir()
+    (dist / "METADATA").write_text("Metadata-Version: 2.1\\nName: {LM_EVAL_DISTRIBUTION}\\nVersion: {LM_EVAL_VERSION}\\n")
+"""
+
+
+def _fake_site(tmp_path: Path, lm_eval: str) -> Path:
+    """A directory ahead of site-packages holding lm-eval at ``lm_eval`` and a ``pip`` that only records its argv and
+    installs that fake lm-eval at its pin, so the interpreter install.sh runs is never really installed into."""
+    site = tmp_path / "fake-site"
+    (site / "pip").mkdir(parents=True)
+    (site / "pip" / "__init__.py").write_text("")
+    (site / "pip" / "__main__.py").write_text(_FAKE_PIP)
+    dist = site / f"{LM_EVAL_DISTRIBUTION}-{lm_eval}.dist-info"
+    dist.mkdir()
+    (dist / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {LM_EVAL_DISTRIBUTION}\nVersion: {lm_eval}\n")
+    return site
+
+
+def _run_install_staging(cache: Path, *, check_only: int, fetch: str, site: Path) -> subprocess.CompletedProcess[str]:
     script = f"""
 set -euo pipefail
 log() {{ echo "LOG $*"; }}
@@ -399,7 +484,7 @@ _STALE_KEYS=()
 ensure_inference_suite_staging
 echo "STALE ${{_STALE_KEYS[*]:-}}"
 """
-    env = {**os.environ, "PYTHONPATH": str(_SRC)}
+    env = {**os.environ, "PYTHONPATH": f"{site}:{_SRC}"}
     return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=120, check=False)
 
 
@@ -417,17 +502,38 @@ def _cache_at_the_real_pin(cache: Path) -> str:
 
 
 def test_install_leaves_a_cache_staged_at_the_pin_alone(tmp_path: Path) -> None:
-    digest = _cache_at_the_real_pin(tmp_path)
+    cache = tmp_path / "tools"
+    cache.mkdir()
+    digest = _cache_at_the_real_pin(cache)
+    site = _fake_site(tmp_path, LM_EVAL_VERSION)
 
-    done = _run_install_staging(tmp_path, check_only=0, fetch="echo FETCHED; return 1")
+    done = _run_install_staging(cache, check_only=0, fetch="echo FETCHED; return 1", site=site)
 
     assert done.returncode == 0, done.stderr
     assert "FETCHED" not in done.stdout
     assert f"manifest sha256 {digest}" in done.stdout
+    assert not (site / "pip.calls").exists()
+
+
+def test_install_puts_the_pinned_lm_eval_beside_an_intact_cache_without_fetching(tmp_path: Path) -> None:
+    cache = tmp_path / "tools"
+    cache.mkdir()
+    digest = _cache_at_the_real_pin(cache)
+    site = _fake_site(tmp_path, "0.4.11")
+
+    done = _run_install_staging(cache, check_only=0, fetch="echo FETCHED; return 1", site=site)
+
+    assert done.returncode == 0, done.stderr
+    assert "FETCHED" not in done.stdout and "WARN" not in done.stdout
+    assert f"manifest sha256 {digest}" in done.stdout
+    assert LM_EVAL_REQUIREMENT in (site / "pip.calls").read_text()
+    assert (site / f"{LM_EVAL_DISTRIBUTION}-{LM_EVAL_VERSION}.dist-info").is_dir()
 
 
 def test_install_check_only_reports_an_unstaged_cache_as_stale(tmp_path: Path) -> None:
-    done = _run_install_staging(tmp_path / "tools", check_only=1, fetch="echo FETCHED; return 1")
+    done = _run_install_staging(
+        tmp_path / "tools", check_only=1, fetch="echo FETCHED; return 1", site=_fake_site(tmp_path, LM_EVAL_VERSION)
+    )
 
     assert done.returncode == 0, done.stderr
     assert "FETCHED" not in done.stdout
@@ -435,7 +541,12 @@ def test_install_check_only_reports_an_unstaged_cache_as_stale(tmp_path: Path) -
 
 
 def test_install_fetches_the_pinned_commit_and_warns_when_it_cannot(tmp_path: Path) -> None:
-    done = _run_install_staging(tmp_path / "tools", check_only=0, fetch='echo "FETCHED $3"; return 1')
+    done = _run_install_staging(
+        tmp_path / "tools",
+        check_only=0,
+        fetch='echo "FETCHED $3"; return 1',
+        site=_fake_site(tmp_path, LM_EVAL_VERSION),
+    )
 
     assert done.returncode == 0, done.stderr
     assert f"FETCHED {INFERENCEX_CLIENT_COMMIT}" in done.stdout
