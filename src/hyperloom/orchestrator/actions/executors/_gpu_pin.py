@@ -35,6 +35,15 @@ _BASELINE_RECIPE = "baseline_recipe"
 ROCR_AUTOFILL_ENV = "HYPERLOOM_ROCR_AUTOFILL"
 
 
+def session_cards_mask(cards: int) -> list[str]:
+    """The ``cards`` a launch whose point names no mask runs on: the front of the process's ROCR mask.
+
+    The process mask is the session's cards; with none, ``0..cards-1``. The result is narrower than ``cards`` only
+    when the process mask is.
+    """
+    return (mask_tokens(os.environ.get(ROCR_VISIBLE_DEVICES_ENV, "")) or [str(i) for i in range(cards)])[:cards]
+
+
 def pin_rocr_visible_devices(envs: dict[str, Any], *, cards: int) -> None:
     """Set the ROCR mask a benchmark point launches on, at least the ``cards`` its launch occupies wide.
 
@@ -64,7 +73,7 @@ def pin_rocr_visible_devices(envs: dict[str, Any], *, cards: int) -> None:
         )
     mask = point or session
     if len(mask) < cards:
-        widened = (session or [str(i) for i in range(cards)])[:cards]
+        widened = session_cards_mask(cards)
         if mask and widened != mask:
             log.warning(
                 "ROCR_VISIBLE_DEVICES=%r has %d devices but the launch needs %d; expanding to %r.",
