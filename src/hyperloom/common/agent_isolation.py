@@ -109,10 +109,13 @@ class AccountIsolation:
 
 @dataclass(frozen=True)
 class BwrapIsolation:
-    """The agent runs in a bubblewrap sandbox with the probed bubblewrap; ``notes`` say why not as an account."""
+    """The agent runs in a bubblewrap sandbox with the probed bubblewrap; ``notes`` say why not as an account.
+    ``started_elsewhere``: another process (a Ray actor) starts bubblewrap, so no thread here decides what
+    ``--die-with-parent`` follows (:meth:`launch`)."""
 
     probe: BwrapProbe
     notes: tuple[str, ...] = ()
+    started_elsewhere: bool = False
 
     @property
     def shown(self) -> str:
@@ -128,7 +131,6 @@ class BwrapIsolation:
         *,
         marks: Sequence[str] = (),
         status_fd: int | None = None,
-        spawned_here: bool = True,
     ) -> tuple[list[str], dict[str, str]]:
         """``argv`` in ``policy``'s sandbox: the bubblewrap command line, and the environment to start it with.
 
@@ -136,7 +138,7 @@ class BwrapIsolation:
         processes carry no mark and a reaper's TERM reaches only the sandbox (their values show in bubblewrap's
         command line: never a secret). ``--die-with-parent`` is kept only on the main thread: it follows the thread
         that starts bubblewrap, and one that ends first would SIGKILL the sandbox with no grace. Where another process
-        starts it (``spawned_here`` false: a Ray actor), this thread decides nothing, and the policy's stands.
+        starts it (:attr:`started_elsewhere`), this thread decides nothing, and the policy's stands.
 
         Raises:
             IsolationRefused: ``policy`` names a problem for this bubblewrap's version (nothing was started).
@@ -151,7 +153,7 @@ class BwrapIsolation:
         policy = dataclasses.replace(
             policy,
             marks=(*policy.marks, *moved),
-            die_with_parent=policy.die_with_parent and (on_main or not spawned_here),
+            die_with_parent=policy.die_with_parent and (on_main or self.started_elsewhere),
         )
         try:
             return policy.argv(self.probe, argv, status_fd=status_fd), child_env
