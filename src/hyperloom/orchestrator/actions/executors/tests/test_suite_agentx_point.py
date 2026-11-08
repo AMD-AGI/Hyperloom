@@ -103,6 +103,32 @@ def test_an_agentx_point_replays_on_its_launch_over_the_base_with_the_golden_lay
     assert SuiteConfig.from_document(json.loads(json.dumps(config.to_document()))) == config
 
 
+def test_an_agentx_server_runs_on_the_first_cards_of_the_sessions_mask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The materialized AgentX point names no mask, so the session's mask places its server."""
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+    session = tmp_path / "session"
+    session.mkdir()
+    freeze_base(session, _base())
+    _stage(tmp_path, monkeypatch)
+    ran = []
+    monkeypatch.setattr(
+        _suite_config, "_run_config", lambda config, lease, on_poll, checkpoint=None: ran.append(config)
+    )
+    point = tmp_path / "slot" / "point.yaml"
+    point.parent.mkdir()
+    point.write_text(yaml.safe_dump(_point()), encoding="utf-8")
+    assert "ROCR_VISIBLE_DEVICES" not in _point()["benchmark"]["envs"]
+    route = suite_route(session)
+    assert route is not None
+
+    run_suite_round(route, SuiteRound(point, point.parent, Lifecycle(LifecycleMode.OWN)), on_poll=lambda: None)
+
+    (config,) = ran
+    assert config.server.gpus == tuple(range(4, 4 + _base().cards))
+
+
 def test_the_replay_takes_the_bases_client_knobs_under_the_points() -> None:
     base = _base()
     client = {"AIPERF_WARMUP_REQUESTS_PER_LANE": "4", "AIPERF_TRACE_IDLE_GAP_CAP_SECONDS": "300"}

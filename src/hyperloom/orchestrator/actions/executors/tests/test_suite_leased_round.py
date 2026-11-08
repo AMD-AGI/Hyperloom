@@ -151,6 +151,18 @@ def test_a_leased_round_sizes_its_server_by_tp_not_by_the_gpu_mask_the_point_car
     assert _gpus(leased) == (6, 7)
 
 
+def test_a_leased_round_is_not_sized_by_the_hosts_gpu_mask(session, tmp_path, monkeypatch) -> None:
+    """Ray may place the round on another node, so a host mask narrower than the launch does not refuse it."""
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "7")
+    lease = _Lease(_rounds())
+    point = _write_point(tmp_path / "slot" / "point.yaml")
+
+    run_suite_round(suite_route(session), _request(point, lease), on_poll=lambda: None)
+
+    (leased,) = lease.leased
+    assert _gpus(leased) == (0, 1)
+
+
 def _leased(tmp_path: Path, gpus: tuple[int, ...]) -> SuiteLeasedRound:
     config = _config()
     config = replace(config, server=replace(config.server, gpus=gpus))
