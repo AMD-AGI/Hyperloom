@@ -82,7 +82,7 @@ from hyperloom.common.agent_isolation import (
 )
 from hyperloom.common.confinement import Confinement, credential_paths, toolchain_paths
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
-from hyperloom.common.proctree import descendants, running
+from hyperloom_common.proctree import descendants, running
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, UnsupportedComponentError, locate_installed_package
 from hyperloom.measure.local_templates import image_env
