@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from inference_suite.argv import flag_occurrences
+
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, GridRecipe
 from hyperloom.orchestrator.actions.executors._proposal_identity import BaseControls, effective_fingerprint
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
@@ -20,6 +22,9 @@ from hyperloom_common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
+
+from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
+from inference_suite import runner_owned
 
 from .conftest import make_mock_critic_coordinator
 from ._geak_helpers import forbid_geak_launch, measured_in_suite_round, stop_geak_before_launch
@@ -691,6 +696,64 @@ def test_geak_config_is_judged_on_the_launch_it_produces(coordinator, accepted_f
         assert params == {"skipped": True, "reason": "geak_no_material"}
     else:
         assert params["grid"][0]["provenance"] == "geak_revalidate"
+
+
+_MEASURED = "--tp 8 --same-config --enable-metrics"
+
+
+def test_geak_revalidation_leaves_runner_owned_keys_to_the_runner(coordinator, session_dir) -> None:
+    """GEAK reports the launch it measured, runner flags included; a candidate layer setting them is refused."""
+    base = freeze_session_base(session_dir)
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "explore", "tput": 110.0, "extra_server_args": "--same-config", "extra_envs": {}}
+    st.current_best_measurement = {"resolved_server_launch_flags": _MEASURED}
+    st.geak_result = {
+        "status": "ok",
+        "accepted_config": {
+            "flags": f"{_MEASURED} --attention-backend aiter --port 30000 --enable_metrics",
+            "env_map": {"SGLANG_USE_AITER": "1", "HIP_VISIBLE_DEVICES": "3"},
+            "args_mode": "replace",
+        },
+    }
+
+    params = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
+
+    row = params["grid"][0]
+    owned = runner_owned(base)
+    assert row["extra_args"] == "--tp 8 --same-config --attention-backend aiter"
+    assert row["extra_envs"] == {"SGLANG_USE_AITER": "1"}
+    assert not {name for name, _ in flag_occurrences(row["extra_args"])} & owned.flags()
+
+
+def test_a_geak_candidate_records_the_launch_the_runner_can_replay(coordinator, session_dir) -> None:
+    freeze_session_base(session_dir)
+    coordinator.shared_state.baseline_tput = 100.0
+    result = {
+        "status": "ok",
+        "final_throughput_tok_s": 120.0,
+        "accepted_config": {"flags": _MEASURED, "env_map": {"HIP_VISIBLE_DEVICES": "3"}, "args_mode": "replace"},
+    }
+
+    assert coordinator.phase_kernel._record_geak_candidate(result)
+
+    pending = coordinator.shared_state.geak_pending
+    assert (pending["accepted_flags"], pending["accepted_envs"]) == ("--tp 8 --same-config", {})
+
+
+def test_a_geak_config_restating_the_measured_launch_settles(coordinator, session_dir) -> None:
+    """The measured launch and GEAK's copy of it both carry the runner's flags; neither is a change to the launch."""
+    freeze_session_base(session_dir)
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "explore", "tput": 110.0, "extra_server_args": "--same-config", "extra_envs": {}}
+    st.current_best_measurement = {"resolved_server_launch_flags": _MEASURED}
+    st.geak_result = {"status": "ok", "accepted_config": {"flags": _MEASURED, "env_map": {}, "args_mode": "replace"}}
+
+    assert coordinator.writeback.geak_rebench_params(reason="geak_e2e_win") == {
+        "skipped": True,
+        "reason": "geak_no_material",
+    }
 
 
 @pytest.mark.asyncio

@@ -20,8 +20,8 @@ from types import MappingProxyType
 from hyperloom.common.env_safety import is_allowed_external_env_key
 from hyperloom.inference_optimizer.session.base_launch import base_launch_path, read_base_launch, write_base_launch
 from hyperloom.inference_optimizer.session.paths import session_dir
-from inference_suite import INFERENCEX_CLIENT_COMMIT
-from inference_suite.contracts import BaseLaunch
+from inference_suite import INFERENCEX_CLIENT_COMMIT, runner_owned
+from inference_suite.contracts import BaseLaunch, RunnerOwned
 
 from .shared_state import SharedState
 
@@ -120,6 +120,16 @@ def session_cards(session: Path, tp: int) -> int:
     return tp if frozen is None else frozen.launch.cards
 
 
+def session_runner_owned(session: Path) -> RunnerOwned:
+    """What the runner sets on every round of the session at ``session``, nothing when it froze no base.
+
+    Raises:
+        BaseLaunchMismatch: As :func:`frozen_base`.
+    """
+    frozen = frozen_base(session)
+    return RunnerOwned() if frozen is None else runner_owned(frozen.launch)
+
+
 def session_server_base() -> ServerBase:
     """The current session's server base; raises :class:`BaseLaunchMismatch` when the file and the state disagree."""
     frozen = frozen_session_base()
@@ -136,5 +146,6 @@ __all__ = [
     "server_argv",
     "server_base",
     "session_cards",
+    "session_runner_owned",
     "session_server_base",
 ]

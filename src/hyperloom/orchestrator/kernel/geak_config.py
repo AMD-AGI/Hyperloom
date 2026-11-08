@@ -23,7 +23,9 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_NO_PROMOTE,
     REBENCH_VALIDATED,
 )
+from hyperloom.inference_optimizer.grid_server_args import without_runner_owned
 from inference_suite.argv import remove_server_args
+from inference_suite.contracts import RunnerOwned
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +81,15 @@ def _accepted_config_as_variant(cfg: Any) -> tuple[str, dict[str, str]]:
         envs = legacy_envs
     envs, _dropped = filter_untrusted_env_mapping(envs, allow_predicate=is_allowed_variant_env_key)
     return flags, envs
+
+
+def geak_candidate_launch(cfg: Any, owned: RunnerOwned) -> tuple[str, dict[str, str]]:
+    """GEAK's ``accepted_config`` as the ``(args, envs)`` a candidate layer runs, without what ``owned`` names.
+
+    GEAK reports the launch it measured, runner-owned flags included; the runner sets those on every round itself.
+    """
+    flags, envs = _accepted_config_as_variant(cfg)
+    return without_runner_owned(flags, owned), {name: value for name, value in envs.items() if name not in owned.env}
 
 
 def _accepted_config_controls(cfg: Any, *, inherited_remove_args: Any = None) -> dict[str, Any]:

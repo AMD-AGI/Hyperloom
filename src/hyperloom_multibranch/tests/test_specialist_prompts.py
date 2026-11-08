@@ -7,6 +7,7 @@ import pytest
 
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.measure.fake_gain import FAKE_GAINS
+from hyperloom.orchestrator.state.base_launch import ServerBase
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.fork import RepairRequest
@@ -123,11 +124,33 @@ def test_the_role_says_an_explore_delta_carries_the_claimed_change():
 
 def test_the_role_names_the_config_delta_keys_that_recipe_delta_reads():
     prompt = role_prompt(WORKLOAD)
-    example = prompt.split("with exactly these keys: ", 1)[1].split(". extra_server_args", 1)[0]
+    example = prompt.split("with these keys, each optional: ", 1)[1].split(". extra_server_args", 1)[0]
 
     config = RecipeDelta.from_document(json.loads(example)).config
     assert (config.server_args, dict(config.envs)) == ("--flag value --other-flag", {"NAME": "value"})
+    assert (config.remove_args, config.unset_envs) == (("--old-flag",), ("OLD_NAME",))
     assert "a key the delta does not define is refused, and the error lists the keys it takes" in prompt
+
+
+def test_the_role_says_when_a_flag_of_the_base_launch_can_be_removed():
+    prompt = " ".join(role_prompt(WORKLOAD).split())
+
+    assert "one only the session's base launch sets is removed from the launch on an AgentX workload" in prompt
+    assert "on an InferenceX workload (ISL and OSL) that removal is refused" in prompt
+    assert "unset_envs drops variables your head's recipe sets" in prompt
+
+
+def test_the_role_shows_the_session_s_frozen_base_launch_read_only():
+    base = ServerBase(args="--tp-size 4 --enable-hierarchical-cache --hicache-size 180", env={"SGLANG_X": "true"})
+    prompt = " ".join(role_prompt(WORKLOAD, base=base).split())
+
+    assert "The session's base launch, frozen when it started and read-only" in prompt
+    assert "Server arguments: --tp-size 4 --enable-hierarchical-cache --hicache-size 180." in prompt
+    assert "Environment: SGLANG_X=true." in prompt
+    assert "an empty extra_server_args means this launch as it is" in prompt
+    assert "frozen when it started" not in " ".join(role_prompt(WORKLOAD).split())
+    empty = " ".join(role_prompt(WORKLOAD, base=ServerBase()).split())
+    assert "Server arguments: none. Environment: none." in empty
 
 
 def test_the_role_says_a_direction_another_branch_tests_comes_back_as_a_peer_outcome():
@@ -621,6 +644,7 @@ def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):
         ("_DEV_SANDBOX", lambda text: text + " One more rule.", "specialist_role"),
         ("_NATIVE", lambda text: text + " One more rule.", "specialist_role"),
         ("_REFERENCES", lambda text: text + " One more rule.", "specialist_role"),
+        ("_BASE", lambda text: text + " One more rule.", "specialist_role"),
         ("_HOLDS", lambda holds: {**holds, "geak": holds["geak"] + " more"}, "specialist_role"),
         ("_LEASE_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
         ("_WAIT_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
