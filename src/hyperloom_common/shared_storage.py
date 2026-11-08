@@ -38,6 +38,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 log = logging.getLogger(__name__)
 
@@ -600,19 +601,32 @@ def _create_in_place(directory: int, name: str, mode: int) -> int:
     return descriptor
 
 
-def copy_shared_file(source: Path, path: Path, *, mode: int = SHARED_FILE_MODE) -> None:
-    """Copy ``source`` to a new file beside ``path`` with ``mode`` (masked by the umask outside shared storage) and
-    rename it over ``path``, as :func:`write_shared_bytes` does, without holding the content in memory."""
+@contextmanager
+def replace_shared_file(path: Path, *, mode: int = SHARED_FILE_MODE) -> Iterator[BinaryIO]:
+    """A new file beside ``path``, open for writing, renamed over ``path`` when the block ends: for a writer that
+    streams what it writes (a copy, an archive) rather than hold it in memory.
+
+    The file is made as :func:`write_shared_bytes` makes it: under a name of its own (``O_EXCL``, never through a
+    link), with ``mode`` below shared storage (:func:`parent_is_shared`) and ``mode`` masked by the umask anywhere
+    else, set before the first byte. When the block raises, the new file is removed and ``path`` is left as it was.
+    """
     with shared_parent(path) as (directory, name, widen):
         descriptor, temporary = _new_temporary(directory, name, _final_mode(mode, widen))
         try:
-            with os.fdopen(descriptor, "wb") as handle, open(source, "rb") as content:
-                shutil.copyfileobj(content, handle)
+            with os.fdopen(descriptor, "wb") as handle:
+                yield handle
             os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
         except BaseException:
             with suppress(OSError):
                 os.unlink(temporary, dir_fd=directory)
             raise
+
+
+def copy_shared_file(source: Path, path: Path, *, mode: int = SHARED_FILE_MODE) -> None:
+    """Copy ``source`` to a new file beside ``path`` with ``mode`` (masked by the umask outside shared storage) and
+    rename it over ``path`` (:func:`replace_shared_file`), without holding the content in memory."""
+    with replace_shared_file(path, mode=mode) as handle, open(source, "rb") as content:
+        shutil.copyfileobj(content, handle)
 
 
 def write_shared_text(path: Path, text: str, *, mode: int = SHARED_FILE_MODE) -> None:
@@ -699,6 +713,7 @@ __all__ = [
     "open_shared_append",
     "open_shared_existing",
     "read_directory",
+    "replace_shared_file",
     "open_shared_replacement",
     "ownership",
     "parent_is_shared",
