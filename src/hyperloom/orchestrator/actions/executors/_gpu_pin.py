@@ -35,15 +35,15 @@ _BASELINE_RECIPE = "baseline_recipe"
 ROCR_AUTOFILL_ENV = "HYPERLOOM_ROCR_AUTOFILL"
 
 
-def pin_rocr_visible_devices(envs: dict[str, Any], *, tp: int) -> None:
-    """Set the ROCR mask a benchmark point launches on, at least ``tp`` cards wide.
+def pin_rocr_visible_devices(envs: dict[str, Any], *, cards: int) -> None:
+    """Set the ROCR mask a benchmark point launches on, at least the ``cards`` its launch occupies wide.
 
     The point's own mask wins; the process's (the session's cards) fills it only when the
     point names none, and a mask this function filled before (:func:`_is_autofilled_rocr`)
     is not the point's, so a config re-run in another process lands on that process's
     cards. ROCR ids are physical, so a point id outside the session's mask would land on
-    another session's card and is refused. A mask narrower than ``tp`` is widened from the
-    session's cards, or from ``0..tp-1`` when the process has no mask. No HIP-level mask is
+    another session's card and is refused. A mask narrower than ``cards`` is widened from the
+    session's cards, or from ``0..cards-1`` when the process has no mask. No HIP-level mask is
     written: the round starts its server on these ids as absolute cards and drops the masks it
     inherits (``_suite_config``).
 
@@ -63,14 +63,14 @@ def pin_rocr_visible_devices(envs: dict[str, Any], *, tp: int) -> None:
             "it from its source config instead of re-running the materialized copy."
         )
     mask = point or session
-    if len(mask) < tp:
-        widened = (session or [str(i) for i in range(tp)])[:tp]
+    if len(mask) < cards:
+        widened = (session or [str(i) for i in range(cards)])[:cards]
         if mask and widened != mask:
             log.warning(
-                "ROCR_VISIBLE_DEVICES=%r has %d devices but TP=%d; expanding to %r so the server sees enough GPUs.",
+                "ROCR_VISIBLE_DEVICES=%r has %d devices but the launch needs %d; expanding to %r.",
                 ",".join(mask),
                 len(mask),
-                tp,
+                cards,
                 ",".join(widened),
             )
         mask = widened
