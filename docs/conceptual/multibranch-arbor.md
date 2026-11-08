@@ -173,6 +173,8 @@ before the Arbor branches open </how-to/multibranch-review-gate>`.
 - **A dropped flag of the resolved launch:** a KEEP that runs without a flag the `--agent-launch` file sets now
   removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, `b9d65167d` and
   after). Only on AgentX, though: there Magpie applies it; on InferenceX such a removal is refused.
+- **A base launch record checks the whole launch:** an Arbor served a record with `--agent-launch` refuses to start
+  when the root recipe adds anything to the record's launch, since its check compares the whole launch with the record.
 - **One Arbor without the review:** with `--no-review-gate` and no `--agent-directions`, a lone Arbor gets no
   dossier pass and makes its own dossier inside its branch.
 - **Each Arbor measures the root itself:** one server boot and the full GSM8K per Arbor session. For a large model,

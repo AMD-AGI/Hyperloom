@@ -17,10 +17,13 @@ from pathlib import Path
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.specialist.agent_onboarding import make_ready
 from hyperloom_multibranch.specialist.arbor_adapter import (
+    BASE_LAUNCH_FILE,
     BRANCH_RUN,
     DOSSIER_PASS,
     KEY_SINCE,
+    ArborCheckout,
     arbor_config,
+    arbor_manifest,
     declared_keys,
     fit_keys,
     refusals,
@@ -39,6 +42,7 @@ from hyperloom_multibranch.tests.agent_rig import (
     _spec,
     _write,
 )
+from hyperloom_multibranch.tests.base_records import base_record, write_record
 
 #: An Arbor of 10-28, before the dossier pass and the root's profile (Arbor 15a46e6).
 BEFORE_PROFILE = (
@@ -103,3 +107,34 @@ async def test_a_branch_on_an_arbor_without_the_profile_starts_without_it_and_sa
     component = json.loads((ready.source_dir / CONFIG_FILE).read_text())["component"]
     assert "profile" not in component and component["plan"]
     assert ready.notes == (f"{PINNED} has no component.profile (Arbor {KEY_SINCE['profile']}): started without it",)
+
+
+# -- the session's base launch record --------------------------------------------------------------------------------
+
+
+def test_a_branch_served_a_record_carries_it_for_arbor_s_start_check(tmp_path: Path) -> None:
+    record = write_record(tmp_path / "record" / "base_launch.json")
+    spec, checkout = _spec(tmp_path, launch=str(record)), _write(tmp_path / "checkout", CHECKOUT_FILES)
+
+    manifest = arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
+
+    carried = checkout.absolute() / BASE_LAUNCH_FILE
+    component = manifest.config["component"]
+    assert component["base_launch"] == {"path": str(carried), "digest": base_record().digest()}
+    assert carried.read_bytes() == record.read_bytes()
+    assert "entrypoint" not in component  # vLLM's own command
+
+
+def test_an_arbor_without_the_check_runs_the_record_unchecked_but_not_another_entrypoint(tmp_path: Path) -> None:
+    entrypoint = ("python3", "-m", "vllm.entrypoints.openai.api_server")
+    record = write_record(tmp_path / "record" / "base_launch.json", base_record(entrypoint=entrypoint))
+    checkout = _checkout(tmp_path, GATED_COMPONENT)
+    config = arbor_config(_spec(tmp_path, launch=str(record)), checkout, BRANCH_RUN)
+
+    said = [reason for reason in refusals(config, declared_keys(checkout)) if PINNED in reason]
+    fitted, notes = fit_keys(config, checkout)
+
+    assert config["component"]["entrypoint"] == list(entrypoint)
+    assert said == [f"{PINNED} has no component.entrypoint: pin Arbor {KEY_SINCE['entrypoint']} or later"]
+    assert "base_launch" not in fitted["component"]
+    assert notes == (f"{PINNED} has no component.base_launch (Arbor {KEY_SINCE['base_launch']}): started without it",)

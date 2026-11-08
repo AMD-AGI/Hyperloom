@@ -24,7 +24,11 @@ Arbor looks a dossier up. The root's op shares are not the adapter's: the prefli
 
 The spec's ``launch``, a launch file (:func:`read_launch`), stands in for what MB does not carry yet: the launch an
 AgentX recipe resolves from InferenceX, of which the root recipe holds only what is added to it. Without one,
-an AgentX branch is refused before Arbor starts, which would otherwise serve defaults MB does not measure.
+an AgentX branch is refused before Arbor starts, which would otherwise serve defaults MB does not measure. The file
+may also be the session's frozen base launch (:data:`BASE_LAUNCH_SCHEMA`), the one MB's gate measures every change on.
+Arbor is then served its launch, and checks at its start that the launch it would run is the record's
+(``component.base_launch``, carried into its checkout), refusing before any GPU work when it is not; it serves with the
+record's entrypoint when that is not the framework's own (``component.entrypoint``).
 
 The spec's ``review`` hands Arbor's human review gate over: Arbor waits at the start of a new
 session for a person's approval unless the host says it reviewed (``component.review: "host"``, :data:`REVIEW_HOST`)
@@ -70,6 +74,7 @@ from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentMani
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.worktree import SKIPPED
 from inference_suite.argv import remove_server_args, tokenize_server_args_preserving_json
+from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunch, BaseLaunchError
 
 
 #: What makes a checkout Arbor's, run as a component: the mode, the entry point and the host's contract.
@@ -89,6 +94,11 @@ PLAN_FILE = f"{MB_DIR}/plan.json"
 OUTBOX = "keeps"
 #: The keys of a launch file (:func:`read_launch`): the first two it must give, the others it may.
 LAUNCH_KEYS = ("server_flags", "server_env", "model_name", "client")
+#: A placeholder of the repository's launch template still to be filled: ``<NAME>``, or a description such as ``<the
+#: name the server answers to>``. A literal tag in a real flag, ``<think>``, is neither.
+_PLACEHOLDER = re.compile(r"<(?:[A-Z_]+|[^<>]*\s[^<>]*)>")
+#: Where a branch's checkout carries the base launch record it is served, beside its config.
+BASE_LAUNCH_FILE = f"{MB_DIR}/base_launch.json"
 #: The pass floor of the serving pack's GSM8K check, which Arbor reads from the config's ``server_env``; without one
 #: it books every measured iteration whose accuracy it must judge as invalid. MB gives it its own absolute floor,
 #: ``DEFAULT_ENABLEMENT_ACCURACY_FLOOR``, the part of MB's accuracy rule that holds on any eval's scale: MB's eval
@@ -168,7 +178,11 @@ BLOCK_KEYS = (
     "stop_at",
     "profile",
     "review",
+    "base_launch",
+    "entrypoint",
 )
+#: The server command each framework's Arbor adapter runs unless ``component.entrypoint`` gives another.
+ENTRYPOINTS = {SGLANG: ("python3", "-m", "sglang.launch_server"), VLLM: ("vllm", "serve")}
 #: How a spec hands Arbor's review gate over: the host reviewed the campaign before it starts the run (the only value
 #: ``component.review`` takes), or nobody reviews it (``"review_gate": false`` at the config's top level).
 REVIEW_KEY = "review"
@@ -178,10 +192,19 @@ REVIEW_GATE_KEY = "review_gate"
 #: Where an Arbor checkout declares its component block's keys, which says whether it has the review gate.
 COMPONENT_MODULE = "arbor/component.py"
 #: The Arbor commit that added each key MB writes, which a refusal names; the rest came with component mode (32bf0c7).
-KEY_SINCE = {"root": "4249384", "plan": "0a17a7b", "stop_at": "15a46e6", "profile": "15a46e6", "review": "e28249f"}
+KEY_SINCE = {
+    "root": "4249384",
+    "plan": "0a17a7b",
+    "stop_at": "15a46e6",
+    "profile": "15a46e6",
+    "review": "e28249f",
+    "base_launch": "ba2f5a8",
+    "entrypoint": "ba2f5a8",
+}
 COMPONENT_SINCE = "32bf0c7"
-#: The keys an Arbor that lacks them runs without, losing only an input: left out, with a note, rather than refused.
-OPTIONAL_KEYS = ("profile",)
+#: The keys an Arbor that lacks them runs without, losing only an input or a check: left out, with a note, rather than
+#: refused. An older Arbor runs the record's launch without checking it.
+OPTIONAL_KEYS = ("profile", "base_launch")
 #: Arbor's ledger: FACT and DEAD_END records are what it measured and ruled out.
 LEDGER = {"id": "id", "kind": "type", "text": "claim", "kinds": {"FACT": "insight", "DEAD_END": "pitfall"}}
 ENCODING = "utf-8"
@@ -219,13 +242,18 @@ class ResolvedLaunch:
     server_env: Mapping[str, str] = field(default_factory=dict)
     model_name: str = ""
     client: str = ""
+    #: A base launch record's file, its digest and its entrypoint; empty for a launch file.
+    record: str = ""
+    digest: str = ""
+    entrypoint: tuple[str, ...] = ()
 
 
 def read_launch(path: Path) -> ResolvedLaunch:
     """The launch in the file ``path``, a JSON object of :data:`LAUNCH_KEYS` (the repository's
-    ``examples/multibranch-arbor-launch`` has a template); raise :class:`ArborRefused` with every reason it cannot be
-    used: unreadable, a key it does not have, no ``server_flags``, a ``server_env`` that is not an object of strings,
-    or a ``client`` Arbor could not fill."""
+    ``examples/multibranch-arbor-launch`` has a template), or a base launch record (:func:`_read_record`); raise
+    :class:`ArborRefused` with every reason it cannot be used: unreadable, a key it does not have, no ``server_flags``,
+    a ``server_env`` that is not an object of strings, a template placeholder left unfilled, or a ``client`` Arbor
+    could not fill."""
 
     try:
         document = json.loads(path.read_text(encoding=ENCODING))
@@ -233,6 +261,8 @@ def read_launch(path: Path) -> ResolvedLaunch:
         raise ArborRefused([f"the launch file {path} cannot be read: {error}"]) from error
     if not isinstance(document, dict):
         raise ArborRefused([f"the launch file {path} is not a JSON object"])
+    if document.get("schema") == BASE_LAUNCH_SCHEMA:
+        return _read_record(path, document)
     unknown = sorted(set(document) - set(LAUNCH_KEYS))
     reasons = [f"it has keys a launch does not: {', '.join(unknown)}"] if unknown else []
     flags, env = document.get("server_flags"), document.get("server_env")
@@ -242,11 +272,50 @@ def read_launch(path: Path) -> ResolvedLaunch:
         reasons.append("its server_env is not an object of strings")
     texts = {key: document.get(key, "") for key in LAUNCH_KEYS[2:]}
     reasons += [f"its {key} is not a string" for key, value in texts.items() if not isinstance(value, str)]
+    unfilled = [key for key in LAUNCH_KEYS if _PLACEHOLDER.search(json.dumps(document.get(key, "")))]
+    if unfilled:
+        reasons.append(f"its {', '.join(unfilled)} still hold the template's placeholders: fill them in")
     if reasons:
         raise ArborRefused([f"the launch file {path}: {reason}" for reason in reasons])
     if texts["client"]:
         bench_command(texts["client"])
     return ResolvedLaunch(flags, env, texts["model_name"], texts["client"])
+
+
+def _read_record(path: Path, document: Mapping[str, Any]) -> ResolvedLaunch:
+    """The launch the base launch record ``document`` read from ``path`` serves: its server argv and environment as the
+    gate seeds a launch with them (:func:`~hyperloom.orchestrator.state.base_launch.server_base`), the record itself,
+    its digest and its entrypoint, which Arbor checks its own launch against at its start. The record names no
+    served model and no client command: those are the gate's client's. Raise :class:`ArborRefused` when it is no
+    valid record, or a scriptable base, which launches no server."""
+
+    from hyperloom.orchestrator.state.base_launch import server_argv, server_base
+
+    try:
+        base = BaseLaunch.from_document(document)
+    except BaseLaunchError as error:
+        raise ArborRefused([f"the base launch record {path} cannot be used: {error}"]) from error
+    if base.scriptable:
+        raise ArborRefused([f"the base launch record {path} runs a script and launches no server for Arbor"])
+    return ResolvedLaunch(
+        server_flags=" ".join(_flag_word(word) for word in server_argv(base)),
+        server_env=dict(server_base(base).env),
+        record=str(path),
+        digest=base.digest(),
+        entrypoint=base.entrypoint,
+    )
+
+
+def _flag_word(word: str) -> str:
+    """A record's word as Arbor's server_flags carry it: a JSON value compact and unquoted, as Arbor splits one;
+    another word quoted for the shell only when it must be."""
+
+    if word[:1] in "{[":
+        try:
+            return json.dumps(json.loads(word), separators=(",", ":"))
+        except ValueError:
+            pass
+    return shlex.quote(word)
 
 
 @dataclass(frozen=True)
@@ -340,6 +409,11 @@ def arbor_manifest(spec: AgentSpec, checkout: ArborCheckout, run: ArborRun) -> A
         carried = path / PLAN_FILE
         carried.write_bytes(Path(component["plan"]).read_bytes())
         component["plan"] = str(carried)
+    if component.get("base_launch"):
+        carried = path / BASE_LAUNCH_FILE
+        carried.parent.mkdir(parents=True, exist_ok=True)
+        carried.write_bytes(Path(component["base_launch"]["path"]).read_bytes())
+        component["base_launch"] = {**component["base_launch"], "path": str(carried)}
     launch = f"{ARBOR_PYTHON} -m arbor run --config {shlex.quote(run.config_file)}"
     return AgentManifest.read(
         {
@@ -465,6 +539,10 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
     gate = spec.review if spec.review and has_review_gate(checkout) else ""
     if gate == REVIEW_HOST:
         component[REVIEW_KEY] = REVIEW_HOST
+    if launch.record:
+        component["base_launch"] = {"path": launch.record, "digest": launch.digest}
+    if launch.entrypoint and launch.entrypoint != ENTRYPOINTS.get(spec.framework):
+        component["entrypoint"] = list(launch.entrypoint)
     return {
         **({REVIEW_GATE_KEY: False} if gate == REVIEW_OFF else {}),
         "pack": name,
@@ -692,9 +770,11 @@ def _block_refusals(component: Mapping[str, Any]) -> list[str]:
 
 
 def _pin_refusals(component: Mapping[str, Any], declared: frozenset[str] | None) -> list[str]:
-    """A key MB writes that the pinned Arbor lacks, naming the Arbor commit that added it: Arbor would refuse it too."""
+    """A key MB writes that the pinned Arbor lacks, naming the Arbor commit that added it: Arbor would refuse it too.
+    An optional key is not refused: :func:`fit_keys` leaves it out, with a note, before Arbor starts."""
 
-    lacking = sorted(set(component) & set(BLOCK_KEYS) - (declared if declared is not None else set(BLOCK_KEYS)))
+    known = declared if declared is not None else set(BLOCK_KEYS)
+    lacking = sorted(set(component) & set(BLOCK_KEYS) - set(OPTIONAL_KEYS) - known)
     return [
         f"the pinned Arbor has no component.{key}: pin Arbor {KEY_SINCE.get(key, COMPONENT_SINCE)} or later"
         for key in lacking
@@ -837,6 +917,7 @@ __all__ = [
     "ACCURACY_FLOOR_ENV",
     "ACCURACY_POLICY",
     "ARBOR_PYTHON",
+    "BASE_LAUNCH_FILE",
     "BLOCK_KEYS",
     "BRANCH_RUN",
     "BUILT",
