@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import threading
 from pathlib import Path
 
@@ -21,6 +22,7 @@ import pytest
 from hyperloom.measure.jit import store as jit_store
 from hyperloom.measure.jit_kinds import AITER_JIT, TRITON
 from hyperloom.measure.jit.store import DirJitStore, JitStoreError, Snapshot, SnapshotInvalid, StoredFile
+from hyperloom.measure.jit.tests._accounts import as_store_owner
 from hyperloom.measure.jit.tests.triton_cache import PRODUCTS, get_group
 
 KEY = "a" * 64
@@ -66,6 +68,31 @@ def test_what_was_published_is_what_a_test_is_given_and_the_bytes_are_the_ones_p
     assert (tmp_path / "private" / "module_a.so").read_bytes() == MODULE
     assert (tmp_path / "private" / "module_b.so").read_bytes() == b"two"
     assert os.stat(tmp_path / "private" / "module_a.so").st_mode & 0o077 == 0, "the copy is the test's own"
+
+
+def _stored_files(root: Path) -> dict[str, tuple[int, int]]:
+    """Each regular file the store holds, as ``(permission bits, owner uid)``."""
+    return {
+        path.relative_to(root).as_posix(): (stat.S_IMODE(path.lstat().st_mode), path.lstat().st_uid)
+        for top in ("blobs", "snapshots")
+        for path in (root / top).rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+def test_a_stored_file_is_its_owners_alone_and_the_owner_still_reads_it(tmp_path) -> None:
+    def publish_and_fetch(base: Path) -> None:
+        store = DirJitStore(base / "store")
+        snapshot = _publish(store, base, {"module_a.so": MODULE})
+        got = store.fetch(AITER_JIT, KEY, base / "private")
+        assert got.snapshot == snapshot and got.problems == ()
+        assert (base / "private" / "module_a.so").read_bytes() == MODULE
+
+    owner = as_store_owner(tmp_path, publish_and_fetch)
+
+    stored = _stored_files(tmp_path / "store")
+    assert {name.split("/")[0] for name in stored} == {"blobs", "snapshots"}
+    assert set(stored.values()) == {(0o400, owner)}, "no group or other bit, and written by the account that reads it"
 
 
 def test_a_key_nothing_was_published_under_is_a_miss_not_a_problem(store, tmp_path) -> None:
