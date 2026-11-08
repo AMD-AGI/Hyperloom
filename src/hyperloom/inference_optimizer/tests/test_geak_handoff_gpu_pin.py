@@ -538,3 +538,12 @@ def test_a_yaml_sequence_element_is_stripped_before_it_reaches_value() -> None:
     """``[' 4', 5]`` must not produce ``" 4,5"`` — ROCm's parser rejects the token."""
     pin = resolve_gpu_pin(recipe_envs={"TP": 2, "ROCR_VISIBLE_DEVICES": [" 4", 5]}, environ={})
     assert pin["value"] == "4,5"
+
+
+def test_pin_prefers_process_env_over_the_recipes_own_mask_inside_it() -> None:
+    """GEAK's servers run under the process's mask even when the point ran on a subset of it."""
+    out = resolve_gpu_pin(
+        recipe_envs={"TP": 1, "ROCR_VISIBLE_DEVICES": "7"},
+        environ={"ROCR_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7"},
+    )
+    assert (out["value"], out["source"]) == ("0,1,2,3,4,5,6,7", "process_env")
