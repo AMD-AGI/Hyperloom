@@ -78,6 +78,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     MeasurementHost,
     SessionWiring,
     branch_sandboxes,
+    load_peers,
     local_peers,
     machine_cards,
     machine_parallel_tests,
@@ -262,6 +263,17 @@ def test_the_model_is_exported_as_the_directory_a_server_loads_it_from(
         "meta-llama/Llama-3-8B", "vllm", 1, 1, "fp8", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1, 1)
     )
     assert workload_environment(hub_id)["MODEL_PATH"] == str(tmp_path / "Llama-3-8B")
+
+
+def test_a_model_that_resolves_to_no_local_directory_refuses_the_local_peers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path / "models"))
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    hub_id = replace(AGENTX, model="amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4")
+
+    with pytest.raises(PeersUnavailable, match=r"amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4 .*HL_MODEL_BASE="):
+        load_peers(hub_id)
 
 
 def test_the_specialists_run_the_agent_cli_found_on_path(tmp_path: Path) -> None:

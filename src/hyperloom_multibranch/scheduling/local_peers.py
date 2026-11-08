@@ -24,8 +24,8 @@ runner the regression set uses and has the setup's critic review it. The runtime
 :data:`SpecialistSessions`: :func:`model_backed_sessions` runs each branch's specialist as an agent CLI in a worktree of
 its own, briefed by the session's :class:`SessionBriefs`, whose warm-start leads the session binds once PRELUDE has read
 them and which reads the repository for a replay's branch head. :func:`load_peers` reads the measurement host, checks
-the image holds the framework package those worktrees branch off and resolves that CLI first, and refuses when either
-cannot be had, so the command line fails before it creates anything.
+the workload's model is a directory here, that the image holds the framework package those worktrees branch off and
+resolves that CLI first, and refuses when any cannot be had, so the command line fails before it creates anything.
 
 On either backend a test of an AgentX workload may run for its trace window and the boot and warmup around it
 (:func:`attempt_timeout_sec`).
@@ -830,7 +830,24 @@ def load_peers(workload: Workload) -> PeerFactory:
     It creates nothing, so the command line calls it before the session directory exists.
     """
 
+    require_local_model(workload)
     return peers_on(measurement_host(os.environ, LocalCards(machine_cards())), workload)
+
+
+def require_local_model(workload: Workload) -> None:
+    """Check that ``workload``'s model resolves to a directory on this machine (:func:`resolve_serving_model_path`);
+    raises :class:`PeersUnavailable` naming where it was looked for otherwise. A local test's server runs with its
+    sandbox directory as its home, so a hub id finds none of this host's Hugging Face cache and is fetched from the
+    hub."""
+
+    served = resolve_serving_model_path(workload.model)
+    if not os.path.isdir(served):
+        base = os.environ.get("HL_MODEL_BASE", "")
+        raise PeersUnavailable(
+            f"the model {workload.model} is no directory on this machine (HL_MODEL_BASE={base!r}, nor in the "
+            "Hugging Face cache): pass --model the checkpoint's directory, or set HL_MODEL_BASE to the directory "
+            "holding it under its repository name"
+        )
 
 
 def peers_on(host: MeasurementHost, workload: Workload) -> PeerFactory:
@@ -855,6 +872,7 @@ __all__ = [
     "SpecialistSessions",
     "ToolboxBackend",
     "load_peers",
+    "require_local_model",
     "local_peers",
     "machine_cards",
     "machine_parallel_tests",
