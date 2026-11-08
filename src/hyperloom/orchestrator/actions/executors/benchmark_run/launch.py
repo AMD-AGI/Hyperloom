@@ -34,14 +34,7 @@ from ..benchmark_result import (
 )
 from .._failed_step import failed_step_error_class
 from .._round_folder import RoundFolder, round_report_path
-from .._suite_config import (
-    SuiteRound,
-    SuiteRoundRefused,
-    SuiteRoute,
-    deadline_unix,
-    round_lifecycle,
-    run_suite_round,
-)
+from .._suite.rounds import SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, round_lifecycle, run_suite_round
 from ..agentx_point import ServerArgvInvalidError
 from .bringup import open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
 from .records import (

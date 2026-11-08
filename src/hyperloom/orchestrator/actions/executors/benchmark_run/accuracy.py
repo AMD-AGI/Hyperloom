@@ -28,7 +28,7 @@ from .._failed_step import failed_step_error_class
 from .._grid_runner import lease_cards, session_grid_bounds
 from .._ray_serving import ServingLease, maybe_serving_lease
 from .._subprocess_kill import resolve_benchmark_timeouts
-from .._suite_config import AccuracyRound, SuiteRoundRefused, deadline_unix, run_accuracy_suite_round, session_route
+from .._suite.rounds import AccuracyRound, SuiteRoundRefused, deadline_unix, run_accuracy_suite_round, session_route
 from .records import (
     _BENCHMARK_MODE_ATTR,
     _DOUBLE_RUN_ROUND_DIRS,

@@ -54,7 +54,7 @@ def pin_rocr_visible_devices(envs: dict[str, Any], *, cards: int) -> None:
     another session's card and is refused. A mask narrower than ``cards`` is widened from the
     session's cards, or from ``0..cards-1`` when the process has no mask. No HIP-level mask is
     written: the round starts its server on these ids as absolute cards and drops the masks it
-    inherits (``_suite_config``).
+    inherits (``_suite.rounds``).
 
     Raises:
         ValueError: The point's mask names a card outside the process's mask.

@@ -19,7 +19,7 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors._grid_base import VARIANT_CONFIG_FILE, variant_config_of
 from hyperloom.orchestrator.actions.executors._accuracy_gate import ACCURACY_DIR, AccuracyReference
-from hyperloom.orchestrator.actions.executors._suite_config import AccuracyRound
+from hyperloom.orchestrator.actions.executors._suite.rounds import AccuracyRound
 from hyperloom.orchestrator.actions.executors.benchmark_run import accuracy
 from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import (
     ACCURACY_ROUND_KEY,

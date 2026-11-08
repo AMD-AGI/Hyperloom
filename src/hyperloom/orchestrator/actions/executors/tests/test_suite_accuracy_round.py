@@ -17,14 +17,14 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _suite_config
+from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 from hyperloom.orchestrator.actions.executors._accuracy_gate import ACCURACY_DIR
-from hyperloom.orchestrator.actions.executors._suite_config import (
+from hyperloom.orchestrator.actions.executors._suite.config import accuracy_config
+from hyperloom.orchestrator.actions.executors._suite.rounds import (
     TOOL_CACHE_ENV,
     AccuracyRound,
     SuiteRoundRefused,
-    accuracy_config,
     run_accuracy_suite_round,
     session_route,
 )
@@ -167,8 +167,8 @@ def session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     cache.mkdir()
     (cache / "staging_manifest.json").write_text('{"schema": "inference-suite-staging/1", "tools": {}}\n')
     monkeypatch.setenv(TOOL_CACHE_ENV, str(cache))
-    monkeypatch.setattr(_suite_config, "_resolve_probe_python", lambda framework: f"/venv/{framework}/python")
-    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: None)
+    monkeypatch.setattr(suite_rounds, "_resolve_probe_python", lambda framework: f"/venv/{framework}/python")
+    monkeypatch.setattr(suite_rounds, "client_only_server_url", lambda: None)
     return session_dir
 
 
@@ -180,7 +180,7 @@ def _write(path: Path, document: dict) -> Path:
 
 def test_the_round_writes_its_run_dir_into_the_slots_accuracy_dir(session, tmp_path, monkeypatch) -> None:
     configs = []
-    monkeypatch.setattr(_suite_config, "run_round", lambda config, cancel: configs.append(config) or "ran")
+    monkeypatch.setattr(suite_rounds, "run_round", lambda config, cancel: configs.append(config) or "ran")
     slot = tmp_path / "runs" / "baseline" / "t1"
     point = _write(slot / "point.yaml", _agentx_point(_agentx_base()))
     route = session_route(session)
@@ -221,7 +221,7 @@ def test_a_slot_run_again_replaces_the_accuracy_round_an_earlier_attempt_left(se
     point = _write(slot / "point.yaml", _agentx_point(_agentx_base()))
     (slot / ACCURACY_DIR / "leftover").mkdir(parents=True)
     claimed = []
-    monkeypatch.setattr(_suite_config, "run_round", lambda config, cancel: claimed.append(Path(config.paths.run_dir)))
+    monkeypatch.setattr(suite_rounds, "run_round", lambda config, cancel: claimed.append(Path(config.paths.run_dir)))
     route = session_route(session)
     assert route is not None
 
@@ -249,7 +249,7 @@ def test_the_accuracy_round_entry_reports_the_step_the_round_failed_at(session, 
     failed = SimpleNamespace(
         report=SimpleNamespace(failed_step=FailedStep.EVAL_FAILED), layout=SimpleNamespace(root=slot)
     )
-    monkeypatch.setattr(_suite_config, "run_round", lambda config, cancel: failed)
+    monkeypatch.setattr(suite_rounds, "run_round", lambda config, cancel: failed)
 
     outcome = asyncio.run(run_accuracy_round(AccuracyRound(point, slot, 900.0), session=session))
 
