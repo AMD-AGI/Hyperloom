@@ -3,12 +3,12 @@
 
 """Run the real aiperf parser, record metrics and export writer on constructed replies and print the export lines.
 
-A script, run as ``python -I aiperf_driver.py <aiperf checkout> <artifact dir>`` by an interpreter that has aiperf's
-dependencies (``test_aiperf_patch``): nothing of this repository is imported. It prints ``module`` and the path of the
-aiperf module it ran, then one ``<scenario>`` and the line of the export the real writer wrote for it, the replies being
-the ones a server gives: an answer with text, replies with nothing in them (a usage chunk that says zero tokens, one that
-says three, none, no chunk at all), an HTTP error and a refused connection. The client is configured as InferenceX runs
-it, to take the token counts from the server's usage chunk.
+A script, run as ``python -I aiperf_driver.py <site-packages holding aiperf> <artifact dir>`` by the client
+environment's interpreter (``test_aiperf_patch``): nothing of this repository is imported. It prints ``module`` and the
+path of the aiperf module it ran, then one ``<scenario>`` and the line of the export the real writer wrote for it, the
+replies being the ones a server gives: an answer with text, replies with nothing in them (a usage chunk that says zero
+tokens, one that says three, none, no chunk at all), an HTTP error and a refused connection. The client is configured as
+InferenceX runs it, to take the token counts from the server's usage chunk.
 """
 
 from __future__ import annotations
@@ -183,8 +183,8 @@ async def _export(artifacts: Path) -> list[str]:
     return writer.output_file.read_text(encoding="utf-8").splitlines()
 
 
-def main(client: Path, artifacts: Path) -> None:
-    sys.path.insert(0, str(client / "src"))
+def main(site: Path, artifacts: Path) -> None:
+    sys.path.insert(0, str(site))
     import aiperf
 
     print("module", json.dumps(aiperf.__file__), sep="\t")
