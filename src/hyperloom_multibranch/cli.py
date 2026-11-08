@@ -38,15 +38,15 @@ Arbor run once on a mapping branch EXPLORE opens beside the others, for at most 
 kernel shares); each share then opens as a branch of its own, when it still has ``--agent-share-minutes`` (default 63,
 0 for always) to its cutoff, the least in which Arbor runs an iteration. A negative or non-finite value of either,
 as of any other limit, is a usage error.
-``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's
-serving template; a name that is not one directory, or one given with no agent, is a usage error, and a pack the Arbor
-checkout lacks is refused when the branch starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX
-recipe's adds to, as resolved from InferenceX; a file the adapter cannot use, or one given with no agent, is a usage
-error. Each ``--specialist-prompt`` file holds a direction the user wrote
-for one specialist: its branch opens at PRELUDE's
-root ahead of the opening batch, counted within ``--max-branches``, its specialist sees the text in every launch
-prompt, and the judge neither stops it nor lowers its K for its first judged tests; an empty or unreadable file, or
-more files than ``--max-branches``, is a usage error.
+``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's serving template; a name that is not one
+directory, or one given with no agent, is a usage error, and a pack the Arbor checkout lacks is refused when the branch
+starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX recipe's adds to, as resolved from InferenceX,
+or is a base launch record (``hyperloom-base-launch/1``) frozen elsewhere, which the session freezes as its base without
+reading any recipe source and each Arbor checks its launch against; a file the adapter cannot use, an unfilled template
+among them, or one given with no agent, is a usage error. Each ``--specialist-prompt`` file holds a direction the user
+wrote for one specialist: its branch opens at PRELUDE's root ahead of the opening batch, counted within
+``--max-branches``, its specialist sees the text in every launch prompt, and the judge neither stops it nor lowers its K
+for its first judged tests; an empty or unreadable file, or more files than ``--max-branches``, is a usage error.
 Each ``--reference NAME=DIR`` names a directory the specialists read as reference, such as GEAK's tuning and kernel
 knowledge: it is copied to ``MB-reference/NAME`` before PRELUDE and the commit its checkout is on is recorded in the
 manifest, so every branch reads one fixed copy and the session says which. Only an InferenceX checkout named
@@ -117,11 +117,8 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
-from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
-from hyperloom_common.env import EnvValueError
 from hyperloom_common.shared_storage import open_shared_append
-from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_from_environment
-from hyperloom.common.perf_metric import agentx_enabled
+from hyperloom.common.outside_facts.image_check import ImageCheckFailed
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec
@@ -129,12 +126,9 @@ from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
 from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.measure.runner.cache_build import CacheBuildError
-from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
-from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
-from hyperloom_multibranch.contracts.llm_prices import price_of
+from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
-from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -154,7 +148,6 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     require_hosted_isolation,
     require_local_image,
     run_argv,
-    storage_problems,
     write_final_exit,
 )
 from hyperloom_multibranch.scheduling import review
@@ -173,15 +166,21 @@ from hyperloom_multibranch.scheduling.llm import (
     default_model,
 )
 from hyperloom_multibranch.scheduling.local_peers import (
-    AGENTX_ENV,
     load_peers,
     machine_parallel_tests,
-    specialist_model,
 )
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.reference import ReferenceSource, reference_source
 from hyperloom_multibranch.scheduling.roster import RosterCaps
+from hyperloom_multibranch.scheduling.session_environment import (
+    EnvironmentIncomplete,
+    hosted_runner_cache,
+    recipe_kb_from_env,
+    require_session_environment,
+    require_writable_storage,
+    rsi_archive_dir,
+)
 from hyperloom_multibranch.scheduling.settings import (
     AGENT_PORT,
     DOSSIER_MINUTES,
@@ -220,10 +219,6 @@ HOSTED_COMMAND = "hosted"
 #: What a grant handed to ``run --measurement hosted`` must give: the sandbox service, the measurement key and
 #: templates, the grant's limits and creation time, and the source the runner cache is built from.
 HANDED_GRANT = (HostGroup.SANDBOX, HostGroup.MEASUREMENT_KEY, HostGroup.GRANT, HostGroup.SOURCE)
-
-
-class EnvironmentIncomplete(RuntimeError):
-    """The environment lacks what a session needs; the message names the variables to set."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -484,9 +479,9 @@ def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar=FILE_METAVAR,
         help=(
-            "The launch an AgentX recipe's adds to, as resolved from InferenceX, for an Arbor"
-            " --autonomous-agent: a JSON object of server_flags, server_env, model_name and client"
-            " (examples/multibranch-arbor-launch)."
+            "For an Arbor --autonomous-agent: the launch an AgentX recipe's adds to, as resolved from InferenceX"
+            " (server_flags, server_env, model_name, client), or a base launch record (hyperloom-base-launch/1) the"
+            " session freezes as its base without reading any recipe source (examples/multibranch-arbor-launch)."
         ),
     )
     run.add_argument(
@@ -638,8 +633,8 @@ def _agent_pack(name: str | None, agents: list[str]) -> str:
 
 
 def _agent_launch(path: Path | None, agents: list[str]) -> str:
-    """The absolute path of the launch file the Arbor agents are served, ``""`` without one; refused with no agent to
-    serve, or with every reason the adapter could not use it."""
+    """The absolute path of the launch file or base launch record the Arbor agents are served, ``""`` without one;
+    refused with no agent to serve, or with every reason the adapter could not use it."""
 
     if path is None:
         return ""
@@ -800,73 +795,6 @@ def _parallel_tests(args: argparse.Namespace, tests_that_fit: Callable[[int], in
     return parallel
 
 
-def require_workload_switch(workload: Workload, env: Mapping[str, str]) -> None:
-    """Raise ValueError when ``env`` sets ``HYPERLOOM_AGENTX`` to anything but what ``workload``'s kind says, or names
-    a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``; the session sets both for an AgentX workload itself, so an
-    operator who set them means a workload ``--workload`` and its flags do not name."""
-
-    if benchmark_config_path(env) is not None:
-        raise ValueError(f"{BENCHMARK_CONFIG_ENV} names a workload YAML; --workload and its flags define the workload")
-    if AGENTX_ENV not in env:
-        return
-    try:
-        agentx = agentx_enabled(env)
-    except EnvValueError as exc:
-        raise ValueError(str(exc)) from exc
-    if agentx != (workload.kind is WorkloadKind.AGENTX):
-        raise ValueError(f"{AGENTX_ENV}={env[AGENTX_ENV]!r} contradicts --workload {workload.kind.value}")
-
-
-def require_priced_models(max_llm_usd: float, env: Mapping[str, str]) -> None:
-    """Raise ValueError when ``max_llm_usd`` caps the session's LLM dollars and the price sheet lists no rate for the
-    model the judge, the patch resolver and the fix critic ask or the one the specialists of ``env`` run on: their
-    calls would record tokens only, which the cap cannot count."""
-
-    if not max_llm_usd:
-        return
-    models = {"the judge's": default_model(), "the specialists'": specialist_model(env)}
-    unpriced = [f"{whose} model {model}" for whose, model in models.items() if price_of(model) is None]
-    if unpriced:
-        raise ValueError(
-            f"--max-llm-usd cannot count the dollars of {' or '.join(unpriced)}, which the price sheet does not list;"
-            " run on a listed model or without a dollar cap"
-        )
-
-
-def recipe_kb_from_env() -> RemoteRecipeClient | None:
-    """The Recipe KB client ``KB_STORE_URL`` and ``KB_STORE_TOKEN`` configure, ``None`` when neither is set; raises
-    :class:`EnvironmentIncomplete` when only one is."""
-
-    if not any(os.environ.get(name, "").strip() for name in ("KB_STORE_URL", "KB_STORE_TOKEN")):
-        return None
-    try:
-        return RemoteRecipeClient.from_env()
-    except RemoteRecipeConfigurationError as exc:
-        raise EnvironmentIncomplete(f"the Recipe KB is half configured: {exc}") from exc
-
-
-def rsi_archive_dir(env: Mapping[str, str]) -> dict[str, Path]:
-    """The RSI archive ``env`` names, by its variable; raises :class:`EnvironmentIncomplete` naming
-    ``HYPERLOOM_RSI_ARCHIVE`` when ``env`` does not set it (no default: it is the deployment's shared folder)."""
-
-    if not env.get(ARCHIVE_ENV, "").strip():
-        raise EnvironmentIncomplete(
-            f"{ARCHIVE_ENV} is not set: name the writable shared directory the session archives its search tree in"
-        )
-    return {ARCHIVE_ENV: Path(env[ARCHIVE_ENV].strip())}
-
-
-def require_writable_storage(dirs: Mapping[str, Path]) -> None:
-    """Raise :class:`EnvironmentIncomplete` naming, in one message, each of ``dirs`` this account cannot write
-    (:func:`~hyperloom_multibranch.scheduling.hosted_run.storage_problems`)."""
-
-    problems = storage_problems(dirs)
-    if problems:
-        raise EnvironmentIncomplete(
-            f"this account (uid {os.geteuid()}) cannot write the shared storage: {'; '.join(problems)}"
-        )
-
-
 def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
     """The judge, the patch resolver, the fix critic and CLOSE's playbook author and curator on the default model,
     and ``recipe_kb``."""
@@ -959,15 +887,6 @@ def _file_handler(path: Path) -> logging.Handler:
     return handler
 
 
-def require_session_environment(settings: RunSettings, env: Mapping[str, str]) -> None:
-    """Raise ValueError when ``env`` contradicts the workload of ``settings``, cannot price its dollar cap or sets an
-    image check mode there is none of."""
-
-    require_workload_switch(settings.workload, env)
-    require_priced_models(settings.max_llm_usd, env)
-    mode_from_environment(env)
-
-
 @dataclass(frozen=True)
 class ReadySession:
     """The peers a session is built on and the services it calls out to."""
@@ -985,18 +904,6 @@ def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = Fa
     return ready_session(workload, load, hosted_storage(host, os.environ, cache))
 
 
-def hosted_runner_cache(env: Mapping[str, str]) -> Path:
-    """This host's runner cache directory, which ``HYPERLOOM_RUNNER_CACHE`` must name as an absolute path; raises
-    :class:`EnvironmentIncomplete` naming the variable otherwise. Hosted sessions take no default: a cache built where
-    the measurement sandboxes do not mount it leaves them with no runner, and a sealed sandbox cannot fetch one."""
-
-    value = env.get(RUNNER_CACHE_ENV, "").strip()
-    if not value or not Path(value).is_absolute():
-        raise EnvironmentIncomplete(
-            f"{RUNNER_CACHE_ENV} is not set to an absolute path: name the directory of the runner cache on the shared"
-            " storage the measurement sandboxes mount"
-        )
-    return Path(value)
 
 
 def ready_session(
@@ -1181,7 +1088,6 @@ __all__ = [
     "MAGPIE_RUNNER_GPU_TYPES",
     "PROG",
     "SEQUENCE_LENGTHS",
-    "EnvironmentIncomplete",
     "HANDED_GRANT",
     "HandedGrant",
     "HostedStart",
@@ -1190,15 +1096,9 @@ __all__ = [
     "final_only",
     "grant_tests_that_fit",
     "hosted_ready_session",
-    "hosted_runner_cache",
     "hosted_run",
     "main",
-    "recipe_kb_from_env",
     "ready_session",
-    "require_priced_models",
-    "require_writable_storage",
-    "require_session_environment",
-    "require_workload_switch",
     "run_session",
     "session_services",
     "settings_from",

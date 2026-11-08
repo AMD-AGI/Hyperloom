@@ -236,13 +236,14 @@ An exported value still wins. `rocm700` additionally requires Python 3.10 and
 setup fails outright on any other interpreter, because the source install would
 pull a mismatched ROCm 7.2 Triton. Any other ROCm stack derives nothing and takes
 the source install, which is a fallback rather than a validated path.
-`INFERENCEX_PATH` and the kernel-agent paths `TRACELENS_ROOT`, `GEAK_ROOT` and
+The kernel-agent paths `TRACELENS_ROOT`, `GEAK_ROOT` and
 `GEAK_E2E_RUNNER` follow their pins and reach the runtime through the
 kernel-agent env file, not `.env`. To override a TraceLens or GEAK checkout
 persistently, write its path into `.env` yourself; the installer leaves a path
 outside its cache as written. A `TRACELENS_ROOT` or `GEAK_ROOT` override that
-does not exist is reported and replaced by the pinned checkout. Export
-`INFERENCEX_PATH` in the shell to override it.
+does not exist is reported and replaced by the pinned checkout. Nothing clones
+InferenceX into `INFERENCEX_PATH`; an InferenceX checkout of your own exported
+there in the shell reaches the runtime the same way.
 The installer also stages the InferenceX client at the commit
 `src/inference_suite/pins.py` pins, the GSM8K task and the AgentX harness into
 `INFERENCE_SUITE_TOOL_CACHE`, which every benchmark round reads without fetching

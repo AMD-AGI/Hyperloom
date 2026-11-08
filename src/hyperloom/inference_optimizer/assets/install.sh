@@ -996,9 +996,9 @@ PY
 
 # --- 1a. the `hosted` extra, on a hosted run of a packaged install ---
 # A hosted image installs the wheel with --no-deps and then runs this script, and
-# the packaged branch above installs only [llm,forge]: without this step hosted
-# measurement has no cryptography (signing), e2b (the sandbox SDK) or boto3 (the
-# result archive). The trigger is HYPERLOOM_STATE_DIR, which the hosted entry
+# the packaged branch above installs only [llm,forge]: without this step a hosted
+# run lacks what the `hosted` extra declares (the sandbox SDK among it). The
+# trigger is HYPERLOOM_STATE_DIR, which the hosted entry
 # requires on every run and nothing else sets. A source checkout already has the
 # extra through [test], and a local packaged install never uses it, so neither
 # changes. Requirements an installed distribution already satisfies are not asked

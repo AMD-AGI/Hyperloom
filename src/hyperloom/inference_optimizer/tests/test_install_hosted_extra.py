@@ -4,8 +4,8 @@
 """The packaged install of a hosted run installs the ``hosted`` extra, named by the installed wheel's own metadata.
 
 A hosted image installs the wheel with ``--no-deps`` and runs the packaged install.sh, whose packaged branch installs
-only ``[llm,forge]``. ``ensure_hosted_extra`` adds the ``hosted`` extra's requirements (signing, the sandbox SDK, the
-result archive), read off the installed distribution's Requires-Dist so ``pyproject.toml`` stays their one source.
+only ``[llm,forge]``. ``ensure_hosted_extra`` adds the ``hosted`` extra's requirements, read off the installed
+distribution's Requires-Dist so ``pyproject.toml`` stays their one source.
 
 The functions run as install.sh defines them, extracted from the real file. The interpreter is the real one started
 with ``-S``, so the only distributions it sees are the ones a test lays out in the ``pip install --target`` root
@@ -56,6 +56,11 @@ def _hosted_requirements() -> dict[str, Requirement]:
     """The ``hosted`` extra as pyproject.toml declares it, by project name."""
     declared = tomllib.loads((SOURCE_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     return {(req := Requirement(spec)).name: req for spec in declared["project"]["optional-dependencies"]["hosted"]}
+
+
+def _lowest_allowed(req: Requirement) -> str:
+    """The version a requirement names as its floor, which it accepts."""
+    return next(spec.version for spec in req.specifier if spec.operator == ">=")
 
 
 def _dist_info(root: Path, name: str, version: str, requires: Sequence[str] = ()) -> None:
@@ -149,22 +154,19 @@ def test_a_hosted_packaged_install_requests_exactly_the_hosted_extra_of_the_whee
     rc, out, pip_calls = _run(tmp_path)
     assert rc == 0 and END in out, out
     _same(_requested(pip_calls), _hosted_requirements())
-    assert set(_hosted_requirements()) == {"cryptography", "e2b", "boto3"}, "the extra this guards"
+    assert "e2b" in _hosted_requirements(), "the extra this guards"
 
 
 def test_requirements_already_installed_are_not_requested_and_all_installed_runs_no_pip(tmp_path: Path) -> None:
-    rc, out, pip_calls = _run(
-        tmp_path / "all", installed={"cryptography": "44.0.1", "e2b": "2.60.0", "boto3": "1.35.0"}
-    )
+    shipped = {name: _lowest_allowed(req) for name, req in _hosted_requirements().items()}
+    rc, out, pip_calls = _run(tmp_path / "all", installed=shipped)
     assert rc == 0 and END in out, out
     assert pip_calls == [], "an image that ships the extra (or an offline one) runs no pip"
     assert "every requirement is already installed" in out
 
-    rc, out, pip_calls = _run(
-        tmp_path / "old", installed={"cryptography": "41.0.0", "e2b": "2.60.0", "boto3": "1.35.0"}
-    )
+    rc, out, pip_calls = _run(tmp_path / "old", installed={**shipped, "e2b": "0.1.0"})
     assert rc == 0 and END in out, out
-    _same(_requested(pip_calls), {"cryptography": _hosted_requirements()["cryptography"]})
+    _same(_requested(pip_calls), {"e2b": _hosted_requirements()["e2b"]})
 
 
 @pytest.mark.parametrize(("packaged", "state_dir"), [(1, None), (1, ""), (0, "/state")])

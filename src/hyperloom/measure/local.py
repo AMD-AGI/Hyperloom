@@ -56,7 +56,13 @@ from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_lim
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.jit.native.config import store_from_environment
 from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
-from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure, decides_test
+from hyperloom.measure.failures import (
+    Disposition,
+    FailureClassification,
+    FailureEvidence,
+    classify_test_failure,
+    decides_test,
+)
 from hyperloom.measure.farm import (
     FarmError,
     build_farm,
@@ -1219,14 +1225,13 @@ def _ended(run: _Run) -> _Ended:
     failed = [r for r in rounds if r.returncode != 0]
     returncode = failed[0].returncode if failed else _clean_returncode(run)
     stderr = "\n".join([*(result.error for _, result in run.results if result.error), *notes])
-    logs = [stderr, *_failure_logs(failing)]
-    verdict = classify_test_failure(
-        returncode=returncode,
-        logs=logs,
-        client_logs=_client_logs(failing),
+    evidence = FailureEvidence(
+        logs=(stderr, *_failure_logs(failing)),
+        client_logs=tuple(_client_logs(failing)),
         detail=detail,
         failed_step=_failed_step(failing),
     )
+    verdict = classify_test_failure(returncode=returncode, evidence=evidence)
     return _Ended(rounds, returncode, stderr, verdict)
 
 

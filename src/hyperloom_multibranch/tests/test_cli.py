@@ -97,7 +97,9 @@ from hyperloom_multibranch.scheduling.settings import (
     RunSettings,
     Workload,
 )
+from hyperloom_multibranch.scheduling.session_environment import hosted_runner_cache
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
+from hyperloom_multibranch.tests.base_records import write_record
 
 #: What the session's launcher sets to name the image the session runs on.
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
@@ -416,6 +418,28 @@ def test_the_agent_launch_file_is_kept_by_its_absolute_path(tmp_path: Path, monk
 
     assert settings.agent_launch == str(tmp_path / "launch.json")
     assert _settings("--autonomous-agent", "/agents/arbor").agent_launch == ""
+
+
+def test_a_base_launch_record_is_an_agent_launch_kept_by_its_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    write_record(tmp_path / "base_launch.json")
+
+    settings = _settings("--autonomous-agent", "/agents/arbor", "--agent-launch", "base_launch.json")
+
+    assert settings.agent_launch == str(tmp_path / "base_launch.json")
+
+
+def test_an_unfilled_template_or_a_tampered_record_is_a_usage_error(tmp_path: Path) -> None:
+    template = Path(__file__).parents[3] / "examples" / "multibranch-arbor-launch" / "launch.template.json"
+    tampered = write_record(tmp_path / "base_launch.json", env={"VLLM_ROCM_USE_AITER": "0"})
+    agent = ("--autonomous-agent", "/agents/arbor")
+
+    with pytest.raises(ValueError, match="--agent-launch: .*still hold the template's placeholders"):
+        _settings(*agent, "--agent-launch", str(template))
+    with pytest.raises(ValueError, match="--agent-launch: .*base_digest_mismatch"):
+        _settings(*agent, "--agent-launch", str(tampered))
 
 
 @pytest.mark.parametrize(
@@ -1415,9 +1439,7 @@ def test_a_hosted_spec_whose_agents_cannot_run_ends_for_good_naming_why(
 
 
 def test_the_hosted_runner_cache_is_the_directory_the_variable_names() -> None:
-    assert cli.hosted_runner_cache({"HYPERLOOM_RUNNER_CACHE": " /data/hl/runner-cache "}) == Path(
-        "/data/hl/runner-cache"
-    )
+    assert hosted_runner_cache({"HYPERLOOM_RUNNER_CACHE": " /data/hl/runner-cache "}) == Path("/data/hl/runner-cache")
 
 
 def _no_local_cards() -> tuple[int, ...]:

@@ -14,7 +14,7 @@ import pytest
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 
-_NOW = datetime(2026, 10, 14, 8, 30, 5, tzinfo=timezone.utc).timestamp()
+_NOW = datetime(2030, 1, 2, 3, 4, 5, tzinfo=timezone.utc).timestamp()
 _CLOCK = Clock(now=lambda: _NOW)
 
 _DIRS = (
@@ -37,7 +37,7 @@ def test_session_dir_is_named_by_model_utc_time_and_random_suffix(tmp_path: Path
     layout = create_session(tmp_path, "Llama-3.1 70B/Instruct", _CLOCK)
 
     assert layout.root.parent == tmp_path / "Llama-3.1-70B-Instruct"
-    assert re.fullmatch(r"MB-20261014T083005Z-[0-9a-f]{8}", layout.session_id)
+    assert re.fullmatch(r"MB-20300102T030405Z-[0-9a-f]{8}", layout.session_id)
     assert layout.session_id == layout.root.name
 
 

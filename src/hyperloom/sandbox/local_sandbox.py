@@ -433,7 +433,7 @@ class LocalSandbox:
                 try:
                     self._startup_exit = status.wait_exit(proc, 0)
                 except TimeoutError:
-                    pass
+                    pass  # still running: no exit code yet
                 else:
                     if self._startup_exit is None and self._confined is not None:
                         # No launcher reported, so bubblewrap's own process may have ended (one that could not set
