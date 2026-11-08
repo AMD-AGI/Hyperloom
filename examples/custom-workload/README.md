@@ -36,9 +36,9 @@ reads exactly two things out of it:
 whatever you say it is -- kitems/s here, alignments/s or frames/s or steps/s
 elsewhere. No core code knows or cares.
 
-`quality_gate.passed` is the only correctness signal Hyperloom has. A missing or
-unparseable gate scores 0.0 accuracy, which rejects every candidate, so a run
-that "finds nothing" is often really a run whose gate never parsed.
+`quality_gate.passed` is the only correctness signal Hyperloom has. A baseline
+whose file has no gate stops the run at once with `baseline_accuracy_failed`,
+naming the report it read; a candidate without one scores 0.0 and is rejected.
 
 Everything else in the file is yours. Carry whatever makes the run explicable
 later -- this example records the checksum it compared, the config it ran, and
