@@ -22,7 +22,7 @@ from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
 from hyperloom.measure.tests.test_hosted_real_runner import _head, _rigs
 from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
-from hyperloom_multibranch.toolbox.tests.helpers import freeze_base_at, req
+from hyperloom_multibranch.toolbox.tests.helpers import freeze_base_at, pin_inferencex_at, req
 
 PHASED_RUNNER = (*IDLE_CARDS_PYTHON, "-m", "hyperloom.measure.tests.phased_runner_entry")
 AFTER_THE_RUNNER = ["result_signing", "runner_handoff", "result_landing", "sandbox_release", "result_read"]
@@ -47,9 +47,13 @@ def _point(tmp_path: Path, *, run_eval: str = "false", agentx: bool = False) -> 
     return path
 
 
-async def _attempt(tmp_path: Path, make, scenario: str, scale: float, point: Path, **fields: object) -> TestResult:
+async def _attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make, scenario: str, scale: float, point: Path, **fields: object
+) -> TestResult:
     r = make(envs={"HL_PHASE_SCENARIO": scenario, "HL_PHASE_SCALE": str(scale)})
-    freeze_base_at(tmp_path / "session", _head(tmp_path / "inferencex"))
+    commit = _head(tmp_path / "inferencex")
+    pin_inferencex_at(commit, monkeypatch)
+    freeze_base_at(tmp_path / "session", commit)
     executor = HostedExecutor(r.backend, tmp_path / "session", timeout_sec=120)
     request = req(kind=TestKind.TEST, **fields).accepted("req-1")
     return await executor.run(TestJob(request, 1, (), 2, 1, AcceptedMeasurement(None, (point,))))  # type: ignore[arg-type]
@@ -78,10 +82,12 @@ def _adds_up(result: TestResult) -> None:
     assert result.unaccounted_seconds == pytest.approx(starting + returning, abs=_SAME_INSTANT), "and nothing else is"
 
 
-async def test_a_graded_inferencex_test_has_every_phase_of_its_path_in_order(tmp_path: Path, phased) -> None:
+async def test_a_graded_inferencex_test_has_every_phase_of_its_path_in_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phased
+) -> None:
     point = _point(tmp_path, run_eval="true")
 
-    result = await _attempt(tmp_path, phased, "graded", 0.004, point, accuracy=True)
+    result = await _attempt(tmp_path, monkeypatch, phased, "graded", 0.004, point, accuracy=True)
 
     assert result.validity is Validity.SUCCEEDED
     names = [p.name for p in result.phases]
@@ -111,9 +117,9 @@ async def test_a_graded_inferencex_test_has_every_phase_of_its_path_in_order(tmp
 
 
 async def test_an_agentx_test_has_the_phases_of_its_warmup_run_and_of_its_clients_measured_run(
-    tmp_path: Path, phased
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phased
 ) -> None:
-    result = await _attempt(tmp_path, phased, "agentx", 0.004, _point(tmp_path, agentx=True))
+    result = await _attempt(tmp_path, monkeypatch, phased, "agentx", 0.004, _point(tmp_path, agentx=True))
 
     assert result.validity is Validity.SUCCEEDED
     names = [p.name for p in result.phases]
@@ -139,10 +145,10 @@ async def test_an_agentx_test_has_the_phases_of_its_warmup_run_and_of_its_client
 
 
 async def test_a_test_that_failed_at_boot_has_its_phases_up_to_the_failure_and_the_hosts_after_it(
-    tmp_path: Path, phased
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phased
 ) -> None:
     scale = 0.0005
-    result = await _attempt(tmp_path, phased, "failing_boot", scale, _point(tmp_path))
+    result = await _attempt(tmp_path, monkeypatch, phased, "failing_boot", scale, _point(tmp_path))
 
     assert result.validity is not Validity.SUCCEEDED
     names = [p.name for p in result.phases]
