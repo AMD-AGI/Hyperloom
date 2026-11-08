@@ -52,7 +52,7 @@ _SGLANG_ENTRY = ("python3", "-m", "sglang.launch_server")
 _ATOM_ENTRY = ("python3", "-m", "atom.entrypoints.openai_server")
 _SERVED = ("--model", _MODEL, "--host", "127.0.0.1", "--port", "8888", "--served-model-name", _MODEL)
 _SGLANG_ARGV = (
-    *("--trust-remote-code", "--mem-fraction-static", "0.8", "--disable-radix-cache", "--tensor-parallel-size", "2"),
+    *("--trust-remote-code", "--mem-fraction-static", "0.8", "--tensor-parallel-size", "2"),
     *("--context-length", "8192", "--cuda-graph-max-bs", "64", "--model-path", _MODEL, "--host", "127.0.0.1"),
     *("--port", "8888", "--served-model-name", _MODEL, "--enable-metrics"),
 )
@@ -207,8 +207,9 @@ def test_without_a_gpu_mask_the_round_takes_the_first_tp_gpus() -> None:
     assert suite_config(point, _base("sglang"), _settings()).server.gpus == (0, 1)
 
 
-def test_hierarchical_cache_drops_the_radix_cache_default_as_sglangs_launcher_does() -> None:
+def test_hierarchical_cache_drops_a_base_radix_cache_switch_as_sglangs_launcher_does() -> None:
     base = _base("sglang")
+    base = replace(base, args=(*base.args, "--disable-radix-cache"))
     point = _point("sglang", EXTRA_SGLANG_ARGS="--context-length 8192 --enable-hierarchical-cache")
     launch = _launch(suite_config(point, base, _settings()), base)
 
