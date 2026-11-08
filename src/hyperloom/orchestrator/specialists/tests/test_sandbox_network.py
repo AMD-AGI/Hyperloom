@@ -7,6 +7,7 @@ over Unix sockets, and a 403 for anything else. No namespaces here; the real san
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import socket
 import threading
@@ -70,11 +71,9 @@ def _ask(bridge: NetworkBridge, name: str, data: bytes) -> bytes:
         sock.sendall(data)
         got = b""
         sock.settimeout(1)
-        try:
+        with contextlib.suppress(TimeoutError):  # a second of quiet ends a reply on a connection left open
             while chunk := sock.recv(65536):
                 got += chunk
-        except TimeoutError:
-            pass
         return got
 
 
