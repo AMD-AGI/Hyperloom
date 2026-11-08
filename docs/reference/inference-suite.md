@@ -130,7 +130,9 @@ CPython 3.12 build `pins.py` pins, are staged ahead of time into a tool cache wi
 one `staging_manifest.json`. Two hosts compare stagings by their normalised
 manifest: each installed package's name, version and wheel sha256, the
 interpreter's version and build sha256, the InferenceX pin and lm-eval, with no
-path. `python -m inference_suite publish --stagings <dir>` publishes a staging
+path. A session's frozen base launch pins its client at that same InferenceX
+commit; a measurement sheet names it, and the result manifest a runner signs
+repeats it. `python -m inference_suite publish --stagings <dir>` publishes a staging
 shared by several hosts as `<dir>/<staging key>` by rename. A round refuses with `staging_missing` when the manifest
 lists a file that is absent, changed or staged at another commit, or when an eval
 round finds no `lm_eval` installed in the Python that runs it.
