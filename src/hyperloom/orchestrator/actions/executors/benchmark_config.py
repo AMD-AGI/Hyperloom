@@ -32,7 +32,7 @@ def check_mlperf_round(config_path: Path, env: Mapping[str, str]) -> None:
 
     Raises:
         AgentXPreflightError: The session froze no base launch for the round's server, or the harness cannot run.
-        BaseLaunchMismatch: The session's base launch is not the one it froze.
+        BaseLaunchMismatch: The session's base launch is not the one it froze, or its client is off the InferenceX pin.
     """
     # The default benchmark path never imports the agentx package.
     from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError, check_mlperf_harness

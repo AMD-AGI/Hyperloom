@@ -759,7 +759,8 @@ def session_facts(session: Path) -> SessionFacts:
     Raises:
         SessionNotMeasurable: The session froze no base, or the tool cache holds no staging this interpreter can
             identify: none, one that is not what its lock pins, or this interpreter's lm-eval is off the pin.
-        BaseLaunchMismatch: The session's ``base_launch.json`` is not the base it recorded.
+        BaseLaunchMismatch: The session's ``base_launch.json`` is not the base it recorded, or its client is off the
+            InferenceX pin.
     """
     frozen = frozen_base(session)
     if frozen is None:

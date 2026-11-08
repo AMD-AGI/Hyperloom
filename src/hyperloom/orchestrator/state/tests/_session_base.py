@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from hyperloom.orchestrator.state import base_launch as state_base_launch
+from inference_suite import INFERENCEX_CLIENT_COMMIT
 from inference_suite.contracts import (
     BaseLaunch,
     ClientLaunch,
@@ -50,7 +51,7 @@ def session_base(
         topology=Topology(tp=1),
         args=tuple(args),
         env=dict(env or {}),
-        client=ClientLaunch(tool="aiperf", commit="d" * 40),
+        client=ClientLaunch(tool="aiperf", commit=INFERENCEX_CLIENT_COMMIT),
         resolved_unix=1_700_000_000,
         golden_al=golden,
     )

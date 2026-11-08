@@ -99,10 +99,6 @@ class SpecContext:
     platform_env: Mapping[str, str] | None = None
     process_environ: Mapping[str, str] | None = None
     blob_root: str = ""
-    # Ignored: multibranch-dev's scheduling.local_peers still passes the tool commits a sheet named before the staging
-    # replaced them; removed once that caller moves.
-    magpie_commit: str | None = None
-    inferencex_commit: str | None = None
 
 
 # -- reading the call ------------------------------------------------------------------------------------------------

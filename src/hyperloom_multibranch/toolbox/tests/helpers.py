@@ -6,11 +6,15 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
+import stat
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+import pytest
 
 from hyperloom.contracts.measurement import (
     AccuracyValue,
@@ -26,6 +30,8 @@ from hyperloom.contracts.measurement import (
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.measure.runner.cache_layout import CACHE_ENV
 from hyperloom.measure.tests.bundle_factory import base_launch, stage_into
+from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
+from hyperloom.orchestrator.state import base_launch as state_base_launch
 from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta, RecipeError
 from hyperloom_multibranch.contracts.gate import ResultUnverified
@@ -281,6 +287,26 @@ def freeze_base_at(session: Path, commit: str) -> None:
     InferenceX repository a real runner checks out for the sheet."""
     base = base_launch()
     freeze_base(session, replace(base, client=replace(base.client, commit=commit)))
+
+
+def pin_inferencex_at(commit: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin this install's InferenceX client at ``commit``, the stand-in repository's, so a base frozen there is on the
+    pin."""
+    monkeypatch.setattr(state_base_launch, "INFERENCEX_CLIENT_COMMIT", commit)
+
+
+def pinned_runner_python(directory: Path, commit: str) -> str:
+    """An interpreter a local runner template can name, as :func:`idle_cards_python`, whose install pins the
+    InferenceX client at ``commit``: a runner reads its sheet's base through the same pin check as the application."""
+    script = directory / "pinned-runner-python"
+    code = (
+        "import runpy, sys; from hyperloom.orchestrator.state import base_launch; "
+        "base_launch.INFERENCEX_CLIENT_COMMIT = sys.argv.pop(1); "
+        f"runpy.run_module({IDLE_CARDS_PYTHON[2]!r}, run_name='__main__', alter_sys=True)"
+    )
+    script.write_text(f'#!/bin/sh\nexec {shlex.join((IDLE_CARDS_PYTHON[0], "-c", code, commit))} "$@"\n')
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    return str(script)
 
 
 def staged_runner_cache(tmp: Path) -> dict[str, str]:

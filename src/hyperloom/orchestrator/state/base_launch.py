@@ -5,7 +5,9 @@
 
 Every round's server starts from the base: its argv sits below the round's own args (last wins) and its environment
 below the round's envs. The base comes from ``base_launch.json`` and must be the one ``SharedState`` recorded by digest;
-a session that froze no base (a scriptable workload) starts from nothing.
+a session that froze no base (a scriptable workload) starts from nothing. A round runs the client this install
+stages, which is keyed by the InferenceX pin, so a base whose client names another commit is refused rather than
+measured with one client and signed with the other.
 """
 
 from __future__ import annotations
@@ -18,13 +20,14 @@ from types import MappingProxyType
 from hyperloom.common.env_safety import is_allowed_external_env_key
 from hyperloom.inference_optimizer.session.base_launch import base_launch_path, read_base_launch, write_base_launch
 from hyperloom.inference_optimizer.session.paths import session_dir
+from inference_suite import INFERENCEX_CLIENT_COMMIT
 from inference_suite.contracts import BaseLaunch
 
 from .shared_state import SharedState
 
 
 class BaseLaunchMismatch(RuntimeError):
-    """``base_launch.json`` is not the base the session recorded."""
+    """``base_launch.json`` is not the base the session recorded, or its client is off the InferenceX pin."""
 
 
 @dataclass(frozen=True)
@@ -61,7 +64,8 @@ def frozen_session_base() -> FrozenBase | None:
     """The current session's frozen base, ``None`` when it froze none.
 
     Raises:
-        BaseLaunchMismatch: The file and the digest the session recorded disagree.
+        BaseLaunchMismatch: The file and the digest the session recorded disagree, or the base's client is off the
+            InferenceX pin.
     """
     return frozen_base(session_dir())
 
@@ -70,7 +74,8 @@ def frozen_base(session: Path) -> FrozenBase | None:
     """The frozen base of the session at ``session``, ``None`` when it froze none.
 
     Raises:
-        BaseLaunchMismatch: The file and the digest the session recorded disagree.
+        BaseLaunchMismatch: The file and the digest the session recorded disagree, or the base's client is off the
+            InferenceX pin.
     """
     recorded = SharedState.load_or_init(session).base_launch_digest
     base = read_base_launch(session)
@@ -79,6 +84,11 @@ def frozen_base(session: Path) -> FrozenBase | None:
         raise BaseLaunchMismatch(
             f"{base_launch_path(session)} has digest {found or '(no file)'} but the session recorded "
             f"{recorded or '(none)'}; the session's base launch changed after it was frozen"
+        )
+    if base is not None and base.client is not None and base.client.commit != INFERENCEX_CLIENT_COMMIT:
+        raise BaseLaunchMismatch(
+            f"{base_launch_path(session)} was frozen with the InferenceX client at {base.client.commit}, but this "
+            f"install pins {INFERENCEX_CLIENT_COMMIT}; start a new session to measure with the pinned client"
         )
     return None if base is None else FrozenBase(base_launch_path(session), base)
 
