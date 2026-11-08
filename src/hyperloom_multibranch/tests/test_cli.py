@@ -694,8 +694,8 @@ def test_a_benchmark_yaml_the_operator_names_exits_two(
 @pytest.fixture
 def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
     """No Experience KB, no Recipe KB, the launcher's image named, the InferenceX client staged in the application's
-    tool cache, a model the price sheet lists, a writable RSI archive outside the test's workspace, and the framework's
-    package installed in the image."""
+    tool cache, a model the price sheet lists, a writable RSI archive outside the test's workspace, the framework's
+    package installed in the image, and the workloads' checkpoints under ``HL_MODEL_BASE``."""
 
     for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"):
         monkeypatch.delenv(name, raising=False)
@@ -708,6 +708,10 @@ def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path_factory.mktemp("rsi-archive")))
     installed = PackageBase("vllm", tmp_path_factory.mktemp("site-packages") / "vllm", "vllm", "0.0.0")
     monkeypatch.setattr(compile_module, "locate_installed_package", lambda layout: installed)
+    models = tmp_path_factory.mktemp("models")
+    for name in ("Llama-3-8B", "llama"):
+        (models / name).mkdir()
+    monkeypatch.setenv("HL_MODEL_BASE", str(models))
 
 
 @pytest.fixture
