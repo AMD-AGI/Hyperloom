@@ -479,7 +479,7 @@ def staging_key() -> str:
     inputs = {
         _SCHEMA_KEY: STAGING_SCHEMA,
         INFERENCEX_TOOL: PINNED_TOOLS[INFERENCEX_TOOL],
-        "python_build": [AGENTX_PYTHON_BUILD.url, AGENTX_PYTHON_BUILD.sha256],
+        "python_build": AGENTX_PYTHON_BUILD.sha256,
         "client_lock": _sha256(client_env.AGENTX_LOCK.read_bytes()),
         "client_patch": aiperf_patch.PATCH_SHA256,
     }

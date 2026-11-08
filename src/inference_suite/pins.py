@@ -44,7 +44,7 @@ LM_EVAL_WHEEL_SHA256 = "5daaa1973bf874005f64f28d3834b875f6886f0d6475878e6a6c8219
 #: x86_64, unpacked as is, so a staging can be built in one directory and renamed into another.
 AGENTX_PYTHON_BUILD = PinnedArchive(
     url=(
-        "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/"
+        "https://releases.astral.sh/github/python-build-standalone/releases/download/20261021/"
         "cpython-3.12.15%2B20261021-x86_64-unknown-linux-gnu-install_only.tar.gz"
     ),
     sha256="5ff9f0602ce964a529ed1e8555d3abab6341926d724402ba9a15e9e877191124",
