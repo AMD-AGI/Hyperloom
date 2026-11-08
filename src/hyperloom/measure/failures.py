@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import errno
 import re
-from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -215,26 +214,33 @@ class FailureClassification:
             raise ValueError("a success has no failure reason")
 
 
+@dataclass(frozen=True)
+class FailureEvidence:
+    """What a failed test left to read, consulted only when neither its error class nor its return code decides it.
+
+    ``logs`` are the texts a known failure signature may be found in (stdout and stderr tails, the tails of
+    ``server.log`` and of the benchmark's stderr); ``client_logs`` are the benchmark client's own output, read only for
+    the infrastructure cause it states (a Hub download refused), never for a candidate's signature, since a client that
+    failed on its own says nothing of the server; ``detail`` is what the caller observed of a boot timeout, which the
+    return code alone does not say; ``failed_step`` is the step the failed round's ``report.json`` names, which
+    inference_suite records in place of the return code it exits with.
+    """
+
+    logs: tuple[str, ...] = ()
+    client_logs: tuple[str, ...] = ()
+    detail: str = ""
+    failed_step: FailedStep | None = None
+
+
 def classify_test_failure(
     *,
     returncode: int,
     timed_out: bool = False,
     error_class: str | None = None,
-    logs: Iterable[str] = (),
-    client_logs: Iterable[str] = (),
-    detail: str = "",
-    failed_step: FailedStep | None = None,
+    evidence: FailureEvidence = FailureEvidence(),
 ) -> FailureClassification:
-    """Classify how one test ended.
-
-    ``error_class`` is what the runner's ``status.json`` or the hosted backend reports; ``logs`` are the texts a known
-    failure signature may be found in (stdout and stderr tails, the tails of ``server.log`` and of the benchmark's
-    stderr); ``client_logs`` are the benchmark client's own output, read only for the infrastructure cause it states (a
-    Hub download refused), never for a candidate's signature, since a client that failed on its own says nothing of the
-    server; ``detail`` is what the caller observed of a boot timeout, which the return code alone does not say;
-    ``failed_step`` is the step the failed round's ``report.json`` names, which inference_suite records in place of the
-    return code it exits with.
-    """
+    """Classify how one test ended; ``error_class`` is what the runner's ``status.json`` or the hosted backend
+    reports."""
     if error_class is not None:
         return _from_error_class(error_class)
     if returncode in _PROGRAM_ERROR_RETURNCODES:
@@ -247,18 +253,20 @@ def classify_test_failure(
         return _unclear(TEST_TIMEOUT_REASON)
     if returncode == 0:
         return FailureClassification(Disposition.SUCCEEDED)
-    text = "\n".join(_bounded(part) for part in logs if part)
-    refused = log_causes.hub_rate_limited("\n".join([text, *(_bounded(part) for part in client_logs if part)]))
+    text = "\n".join(_bounded(part) for part in evidence.logs if part)
+    refused = log_causes.hub_rate_limited("\n".join([text, *(_bounded(part) for part in evidence.client_logs if part)]))
     if refused:
         # Before the signatures: the client that was refused may then fail to load a tokenizer, which reads as one.
         return _infra(f"{HUB_RATE_LIMITED}: {refused}")
-    if failed_step in _FAILED_STEP_VERDICTS:
-        failure_class, reason = _FAILED_STEP_VERDICTS[failed_step]
+    step = evidence.failed_step
+    if step in _FAILED_STEP_VERDICTS:
+        failure_class, reason = _FAILED_STEP_VERDICTS[step]
         return FailureClassification(Disposition.FAILED, failure_class, reason)
     named = _named_by_logs(text)
     if named is not None:
         return named
-    if returncode == SERVER_BOOT_TIMEOUT_RC or failed_step is FailedStep.SERVER_BOOT_TIMEOUT:
+    if returncode == SERVER_BOOT_TIMEOUT_RC or step is FailedStep.SERVER_BOOT_TIMEOUT:
+        detail = evidence.detail
         return _candidate(f"{SERVER_BOOT_TIMEOUT_REASON}: {detail}" if detail else SERVER_BOOT_TIMEOUT_REASON)
     return _from_unnamed_logs(text)
 
