@@ -11,7 +11,8 @@ and a round with anything listed refuses with ``staging_missing``. The manifest'
 
 The AgentX harness runs in its own environment beside the InferenceX subset (:mod:`inference_suite.client_env`): the
 pinned CPython build with exactly the wheels ``agentx-client.lock`` pins. Its manifest entries are the interpreter, the
-build record, the lock and each installed distribution's ``RECORD``, which lists every installed file with its sha256.
+build record, the lock, each installed distribution's ``RECORD``, which lists every installed file with its sha256, and
+the two aiperf files staging patches so the harness exports ``error_osl``.
 The file manifest names bytes, some of which hold the directory the staging was built in; what two hosts compare is
 :func:`normalised_manifest`, the staging's identity with every path left out, and the lm-eval this interpreter runs.
 
@@ -51,8 +52,8 @@ from types import MappingProxyType
 
 from hyperloom_common.contract_fields import ContractFields, field_names
 from hyperloom_common.shared_storage import make_shared_dirs
-from inference_suite import client_env
-from inference_suite.client_env import CLIENT_PYTHON, ClientEnvError
+from inference_suite import aiperf_patch, client_env
+from inference_suite.client_env import CLIENT_PYTHON, PATCHED_FILES, ClientEnvError
 from inference_suite.contracts.normalised import NormalisedManifest, PackageIdentity
 from inference_suite.contracts.report import FailedStep
 from inference_suite.pins import (
@@ -98,8 +99,9 @@ INFERENCEX_SUBSET = (
     AGENTX_RESULTS_PACKAGE,
     AGENTX_REQUIREMENTS,
 )
-#: The files a staged InferenceX must hold for a round to run, whatever else its subset holds at the pin.
-INFERENCEX_REQUIRED = (CLIENT_FILE, GSM8K_TASK, AGENTX_AGGREGATOR_FILE, AGENTX_PYTHON)
+#: The files a staged InferenceX must hold for a round to run, whatever else its subset holds at the pin. The patched
+#: client files are among them, so a staging made before the patch is staged again.
+INFERENCEX_REQUIRED = (CLIENT_FILE, GSM8K_TASK, AGENTX_AGGREGATOR_FILE, AGENTX_PYTHON, *PATCHED_FILES)
 #: The prefix of a staging :func:`publish` has not renamed into place yet; no reader looks below one.
 PUBLISHING_PREFIX = ".staging-"
 
@@ -472,12 +474,14 @@ def normalised_manifest(tool_cache: Path) -> NormalisedManifest:
 
 def staging_key() -> str:
     """The directory name :func:`publish` publishes the staging of the inputs in force under: the sha256 of the
-    staging schema, the InferenceX pin, the interpreter build and the client lock, so any changed input gets a new one."""
+    staging schema, the InferenceX pin, the interpreter build, the client lock and the client's patch, so any changed
+    input gets a new one."""
     inputs = {
         _SCHEMA_KEY: STAGING_SCHEMA,
         INFERENCEX_TOOL: PINNED_TOOLS[INFERENCEX_TOOL],
         "python_build": [AGENTX_PYTHON_BUILD.url, AGENTX_PYTHON_BUILD.sha256],
         "client_lock": _sha256(client_env.AGENTX_LOCK.read_bytes()),
+        "client_patch": aiperf_patch.PATCH_SHA256,
     }
     return _sha256(json.dumps(inputs, sort_keys=True).encode())
 

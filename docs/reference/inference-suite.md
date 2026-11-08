@@ -127,7 +127,9 @@ A round fetches nothing. The InferenceX client, at the commit
 `src/inference_suite/pins.py` pins, and the AgentX harness, installed with
 `--no-deps` from `src/inference_suite/agentx-client.lock` into the relocatable
 CPython 3.12 build `pins.py` pins, are staged ahead of time into a tool cache with
-one `staging_manifest.json`. Two hosts compare stagings by their normalised
+one `staging_manifest.json`. Staging patches the harness's aiperf so a reply it found no content in exports the
+server's output token count as `error_osl`; a harness the patch does not apply to fails the staging, and a cache
+staged before the patch is staged again. Two hosts compare stagings by their normalised
 manifest: each installed package's name, version and wheel sha256, the
 interpreter's version and build sha256, the InferenceX pin and lm-eval, with no
 path. A session's frozen base launch pins its client at that same InferenceX

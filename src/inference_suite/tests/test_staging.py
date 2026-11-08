@@ -46,6 +46,7 @@ from inference_suite.staging import (
     tool_root,
     verify,
 )
+from inference_suite.tests import aiperf_source
 from inference_suite.tests.client_env_fakes import WHEELS, FakeClient
 
 _CLIENT = "infx/bench_serving/benchmark_serving.py"
@@ -56,6 +57,7 @@ _SUITE_INSTALL_SH = _SRC / "inference_suite" / "install.sh"
 _SHA = "a" * 64
 _SITE = "agentx-python/lib/python3.12/site-packages"
 _RECORDS = {f"{_SITE}/{name.replace('-', '_')}-{version}.dist-info/RECORD" for name, version in WHEELS.items()}
+_PATCHED = (f"{_SITE}/{aiperf_source.PARSER_FILE}", f"{_SITE}/{aiperf_source.METRIC_FILE}")
 _REQUIREMENTS_TEXT = "agentx-harness==1.0.13\n"
 
 
@@ -170,6 +172,7 @@ def test_staging_copies_the_client_the_task_the_agentx_aggregator_and_the_client
         BUILD_FILE,
         STAGED_LOCK,
         *_RECORDS,
+        *_PATCHED,
     }
     assert (root / _CLIENT).read_text() == _CLIENT_TEXT
     assert not (root / "infx/bench_serving/__pycache__").exists()
@@ -207,6 +210,38 @@ def test_a_client_environment_that_cannot_be_installed_leaves_no_manifest(tmp_pa
     next(client.index.glob("aiohttp-*")).write_bytes(b"another aiohttp")
 
     with pytest.raises(StagingError, match="downloading the wheels the AgentX client lock pins"):
+        stage(repo, tmp_path / "tools")
+    assert not (tmp_path / "tools" / MANIFEST_FILE).exists()
+
+
+def test_staging_patches_the_harness_to_export_error_osl_and_the_manifest_names_the_patched_bytes(staged) -> None:
+    cache, _, digest = staged
+    root = inferencex_root(cache)
+    parser = (root / _PATCHED[0]).read_text()
+    assert "token_counts=record.token_counts or TokenCounts()," in parser
+    assert 'tag = "error_osl"' in (root / _PATCHED[1]).read_text()
+    files = StagingManifest.from_document(json.loads((cache / MANIFEST_FILE).read_text())).tools[INFERENCEX_TOOL].files
+    for relative in _PATCHED:
+        assert files[relative] == hashlib.sha256((root / relative).read_bytes()).hexdigest()
+    record = (root / _SITE / "agentx_harness-1.0.13.dist-info" / "RECORD").read_bytes().decode()
+    for relative in (aiperf_source.PARSER_FILE, aiperf_source.METRIC_FILE):
+        line = aiperf_source.record_line(relative, (root / _SITE / relative).read_bytes())
+        assert line in record, "the RECORD the manifest hashes lists the patched bytes"
+
+    (root / _PATCHED[0]).write_text(aiperf_source.PARSER)
+
+    assert f"{root / _PATCHED[0]} (changed since staging)" in verify(cache, digest).missing
+
+
+def test_a_harness_that_cannot_be_patched_fails_the_staging_and_leaves_no_manifest(
+    tmp_path, monkeypatch, install, client: FakeClient
+):
+    moved = aiperf_source.PARSER.replace("# Parsed record was invalid, return as error record", "# the branch moved")
+    (client.harness / aiperf_source.PARSER_FILE).write_text(moved)
+    repo, commit = _checkout(tmp_path)
+    monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: commit})
+
+    with pytest.raises(StagingError, match="cannot be patched.*inference_result_parser.py does not hold the branch"):
         stage(repo, tmp_path / "tools")
     assert not (tmp_path / "tools" / MANIFEST_FILE).exists()
 
@@ -297,7 +332,7 @@ def test_the_client_file_is_the_one_the_client_module_loads() -> None:
     assert (CLIENT_MODULE, CLIENT_FILE) == ("infx.bench_serving.benchmark_serving", _CLIENT)
 
 
-@pytest.mark.parametrize("required", [_CLIENT, AGENTX_AGGREGATOR_FILE, AGENTX_PYTHON])
+@pytest.mark.parametrize("required", [_CLIENT, AGENTX_AGGREGATOR_FILE, AGENTX_PYTHON, *_PATCHED])
 def test_a_manifest_at_the_pin_that_does_not_stage_a_file_a_load_runs_is_staging_missing(staged, required) -> None:
     cache, commit, _ = staged
     path = cache / MANIFEST_FILE
@@ -492,6 +527,7 @@ def _cache_at_the_real_pin(cache: Path) -> str:
     root = tool_root(cache, INFERENCEX_TOOL, INFERENCEX_CLIENT_COMMIT)
     files = {}
     staged = ((GSM8K_TASK, "task: gsm8k\n"), (_CLIENT, _CLIENT_TEXT), (AGENTX_AGGREGATOR_FILE, ""), (AGENTX_PYTHON, ""))
+    staged += tuple((relative, "") for relative in _PATCHED)
     for relative, text in staged:
         (root / relative).parent.mkdir(parents=True, exist_ok=True)
         (root / relative).write_text(text)
@@ -795,6 +831,9 @@ def test_a_change_to_any_input_gives_a_new_key(publishing, client: FakeClient, m
     assert staging.staging_key() != key
     monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: "e" * 40})
     assert len({key, staging.staging_key()}) == 2
+    moved = staging.staging_key()
+    monkeypatch.setattr(staging.aiperf_patch, "PATCH_SHA256", "f" * 64)
+    assert staging.staging_key() != moved, "a changed patch of the client is staged anew"
 
 
 def _race(monkeypatch: pytest.MonkeyPatch, other_stager) -> None:

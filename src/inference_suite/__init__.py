@@ -25,7 +25,8 @@ the round in another process runs ``python -m inference_suite run``, which exits
 the config before the round starts. :func:`inferencex_root` is the staged InferenceX in a tool cache, and
 :data:`CLIENT_FILE` its benchmark client under that root; a harness that runs its client as a file runs
 :data:`CLIENT_SCRIPT` with :data:`CLIENT_ROOT_ENV` naming that root. A round's ``launch.json`` names the GPUs its server ran
-on under :data:`GPU_MASK_ENV`.
+on under :data:`GPU_MASK_ENV`. The AgentX client staging installs is patched to export the output token count of a
+reply it found nothing in under :data:`ERROR_OSL_METRIC` on that request's export line.
 
 A caller measuring a server outside a round as a fixed round does builds each pass with :func:`client_argv` under
 :func:`fixed_client_env`, the discarded :func:`warmup_pass` before the measured one.
@@ -33,6 +34,7 @@ A caller measuring a server outside a round as a fixed round does builds each pa
 
 from __future__ import annotations
 
+from inference_suite.aiperf_patch import ERROR_OSL_METRIC
 from inference_suite.cli import EXIT_REFUSED
 from inference_suite.compose import GPU_MASK_ENV
 from inference_suite.contracts.base_launch import LaunchQuery
@@ -65,6 +67,7 @@ __all__ = [
     "ClientPass",
     "ClientTarget",
     "ClientTool",
+    "ERROR_OSL_METRIC",
     "EXIT_REFUSED",
     "GPU_MASK_ENV",
     "INFERENCEX_CLIENT_COMMIT",
