@@ -517,7 +517,9 @@ def _published_identity(published: Path) -> NormalisedManifest:
 def publish(stagings: Path, source: Path | None) -> Path:
     """The staging of the inputs in force, published as ``stagings/<staging_key()>``; staged here when absent.
 
-    ``stagings`` is made ``2775`` (:func:`~hyperloom_common.shared_storage.make_shared_dirs`). The staging is built in
+    ``stagings`` is made as :func:`~hyperloom_common.shared_storage.make_shared_dirs` makes it: ``2775`` below storage
+    set up to be shared (a runner cache the deployment made setgid in the group of its accounts), as the umask leaves
+    it anywhere else. The staging is built in
     ``stagings/.staging-<key>-<uuid>``, synced and renamed into place; when another host renamed its own first, this
     one's directory is removed and the winner used once its normalised manifest is the one staged here.
 

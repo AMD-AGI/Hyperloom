@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 import inference_suite
+from hyperloom_common.shared_storage import current_umask
 from inference_suite import cli, staging
 from inference_suite.contracts import FailedStep
 from inference_suite.pins import (
@@ -799,9 +800,23 @@ def test_publish_renames_a_verified_staging_into_its_key_and_leaves_no_private_d
 
     assert published == stagings / staging.staging_key()
     assert verify(published, staging.manifest_sha256(published)).failed_step is None
-    assert stat.S_IMODE(stagings.stat().st_mode) == 0o2775
+    assert stat.S_IMODE(stagings.stat().st_mode) == 0o775 & ~current_umask(), "not shared storage: the umask decides"
     assert _publishing_dirs(stagings) == []
     assert (inferencex_root(published) / AGENTX_PYTHON).is_file()
+
+
+def test_below_shared_storage_the_stagings_directory_is_the_groups(publishing, tmp_path: Path) -> None:
+    repo, _stagings = publishing
+    cache = tmp_path / "shared-cache"
+    cache.mkdir()
+    cache.chmod(0o2775)
+    if not cache.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    stagings = cache / "inference-suite"
+
+    staging.publish(stagings, repo)
+
+    assert stat.S_IMODE(stagings.stat().st_mode) == 0o2775
 
 
 def test_publish_uses_a_published_staging_as_it_is(publishing, client: FakeClient) -> None:
