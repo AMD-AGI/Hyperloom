@@ -383,11 +383,15 @@ def test_start_up_of_a_hosted_run_that_cannot_isolate_warns_that_every_agent_wou
     ]
 
 
-def test_a_launch_that_runs_unconfined_after_start_up_found_bubblewrap_warns_once_and_the_report_counts_it(caplog):
+def test_a_launch_that_runs_unconfined_after_start_up_found_bubblewrap_warns_once_and_the_report_counts_it(
+    caplog, probe: Probes
+):
     """A probe that passed at start-up and gave no answer in time at a launch: nothing said agents run unconfined."""
     with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
-        report = announce_agent_isolation(probe=Probes(ON_PATH))
-        later = choose_agent_isolation(probe=Probes(NO_ANSWER))
+        probe.answer = ON_PATH
+        report = announce_agent_isolation()
+        probe.answer = NO_ANSWER
+        later = choose_agent_isolation()
         assert isinstance(later, NoIsolation)
         unconfined_launch(later)
         unconfined_launch(later)
@@ -402,10 +406,11 @@ def test_a_launch_that_runs_unconfined_after_start_up_found_bubblewrap_warns_onc
     )
 
 
-def test_a_launch_after_start_up_warned_that_agents_run_unconfined_adds_no_second_warning(caplog):
+def test_a_launch_after_start_up_warned_that_agents_run_unconfined_adds_no_second_warning(caplog, probe: Probes):
+    probe.answer = MISSING
     with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
-        report = announce_agent_isolation(probe=Probes(MISSING))
-        unconfined_launch(choose_agent_isolation(probe=Probes(MISSING)))
+        report = announce_agent_isolation()
+        unconfined_launch(choose_agent_isolation())
     assert [r.levelno for r in caplog.records].count(logging.WARNING) == 1
     assert session_isolation_lines() == (
         report.line(),
@@ -413,8 +418,9 @@ def test_a_launch_after_start_up_warned_that_agents_run_unconfined_adds_no_secon
     )
 
 
-def test_a_process_that_announced_nothing_and_launched_nothing_unconfined_reports_nothing():
-    choose_agent_isolation(probe=Probes(ON_PATH))
+def test_a_process_that_announced_nothing_and_launched_nothing_unconfined_reports_nothing(probe: Probes):
+    probe.answer = ON_PATH
+    choose_agent_isolation()
     assert session_isolation_lines() == ()
 
 
