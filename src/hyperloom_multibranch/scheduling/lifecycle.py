@@ -996,9 +996,8 @@ class Session:
         integration = integration_row(progress)
         if integration is None:
             raise RuntimeError("the blackboard has no integration branch after PRELUDE recorded its root")
-        return await choose_candidates(
-            progress, integration.head_commit, integration.head_value, self._settings.workload.metric, self._repo
-        )
+        root = (await self._blackboard.baseline()).root_commit
+        return await choose_candidates(progress, integration, self._settings.workload.metric, self._repo, root)
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
         if ending.stop_reason is SessionStopReason.ABORTED:
