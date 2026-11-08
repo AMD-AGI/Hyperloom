@@ -125,6 +125,8 @@ async def test_no_framework_agent_root(tmp_path, monkeypatch):
     res = await ex(_make_ctx("t", {"specialist_task_id": "spec"}))
     assert res["status"] == "apply_failed"
     assert res["error_class"] == "no_framework_agent_root"
+    assert "$FRAMEWORK_REPO_PATH" in res["error"]
+    assert "INFERENCEX_PATH" not in res["error"]
 
 
 @pytest.mark.asyncio

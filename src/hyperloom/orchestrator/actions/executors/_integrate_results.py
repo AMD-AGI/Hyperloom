@@ -272,8 +272,8 @@ def _unresolved_root_rejection(explicit_root: str | None, patch_paths: list[Path
         return {
             "error_class": "no_framework_agent_root",
             "error": "no framework_source_root resolved; cannot apply "
-            "patches. Configure $INFERENCEX_PATH or pass "
-            "params.framework_source_root.",
+            "patches. Set $FRAMEWORK_REPO_PATH to the framework checkout "
+            "or pass params.framework_source_root.",
         }
     declared_root = resolved_explicit_root(explicit_root)
     if declared_root is None:

@@ -154,19 +154,22 @@ python -m inference_suite.staging check --tool-cache <dir>
 
 ## Command line
 
-`python -m inference_suite` has three commands:
+`python -m inference_suite` has five commands:
 
 | Command | Behavior |
 |---|---|
 | `run --config <config.yaml> --run-dir <dir>` | Runs one round into an absent or empty directory and prints the `report.json` path. SIGTERM and SIGINT cancel the round, which still reaps what it started and writes its report. |
 | `stop --pid-dir <dir>` | Reaps the server the directory's `server.pid` records and prints `{"reaped": [...], "survivors": [...]}`. |
 | `resolve --query <query.json> --gpus <n> --out <base_launch.json> [--user-file <file>]` | Reads the sources once and writes the base they give, printing its digest. |
+| `stage --tool-cache <dir> [--source <InferenceX checkout>]` | Stages the pinned tools into the tool cache unless it holds them intact, fetching InferenceX at its pin without `--source`, and prints the manifest's sha256. |
+| `publish --stagings <dir> [--source <InferenceX checkout>]` | Publishes the staging of the pins in force as `<dir>/<staging key>`, staging it there when absent, and prints its path. |
 
-Exit codes: `0` when the round completed (or nothing survived `stop`, or a base was
-written); `1` when the round did not complete, or a process outlived `stop`; `2`
-when the config, query or pidfile breaks its contract, the run directory is not
-empty, or no source holds a base, in which case each source's reason is printed to
-stderr.
+Exit codes: `0` when the round completed (or nothing survived `stop`, a base was
+written, or a staging is in place); `1` when the round did not complete, or a
+process outlived `stop`; `2` when the config, query or pidfile breaks its contract,
+the run directory is not empty, no source holds a base, in which case each
+source's reason is printed to stderr, or a staging cannot be built or verified,
+printed as `staging_missing: <reason>`.
 
 ## Run directory
 
