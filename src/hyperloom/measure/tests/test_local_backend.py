@@ -36,7 +36,7 @@ from hyperloom.orchestrator.actions.executors import (
     VariantResult,
 )
 from hyperloom.orchestrator.actions.executors._server_lifecycle import REUSE_PORT_DEFAULT
-from inference_suite.contracts import RunLayout
+from inference_suite.contracts import FailedStep, RunLayout
 
 
 def _point(directory: Path, name: str, *, conc: int = 4, run_eval: object = "false", **counts: object) -> Path:
@@ -500,6 +500,30 @@ def test_a_round_whose_client_could_not_fetch_its_dependencies_is_an_infrastruct
 
     assert outcome.failure_class == "infra", outcome.failure_reason
     assert outcome.failure_reason.startswith("git_fetch_timeout: subprocess.TimeoutExpired")
+
+
+@pytest.mark.parametrize(
+    ("step", "failure_class", "reason"),
+    [
+        (FailedStep.PORT_IN_USE, "infra", "port_in_use"),
+        (FailedStep.GPUS_UNAVAILABLE, "infra", "host_gpus_unavailable"),
+        (FailedStep.SERVER_SILENT_BEFORE_READY, "infra", "hung_before_ready"),
+        (FailedStep.SERVER_STALLED, "unclear", "server_stalled"),
+    ],
+)
+def test_the_step_a_rounds_report_failed_at_classifies_the_test_its_logs_cannot(
+    grid, server, tmp_path, step, failure_class, reason
+):
+    """The suite refuses a taken port itself, so no bind error reaches ``server.log``; a traceback there is no cause."""
+    workspace = write_run_dir(grid.tmp_path / "ws" / "warmup", failed_step=step)
+    (workspace / "server.log").write_text("Traceback (most recent call last):\nRuntimeError: boom\n", encoding="utf-8")
+    grid.answers["warmup"] = grid.result(
+        "warmup", status="failed", returncode=1, error=step.value, server_log_path=str(workspace / "server.log")
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
 
 
 @pytest.mark.parametrize("round_name", ["warmup", "test", "eval"])
