@@ -1,4 +1,4 @@
-"""The image the current machine runs, and the tool commits callers outside this branch still ask for.
+"""The image the current machine runs.
 
 The image digest has no file or environment variable the platform fills in, so it comes
 from the caller (the pod status read through the Kubernetes API) or from two environment
@@ -17,11 +17,8 @@ from hyperloom.measure.docs import PREFIXED_SHA256_RE
 __all__ = [
     "ActiveImage",
     "ImagePinError",
-    "ToolCommits",
-    "ToolPinError",
     "active_image",
     "image_from_pod_status",
-    "pinned_tool_commits",
 ]
 
 IMAGE_REF_VAR = "HYPERLOOM_ACTIVE_IMAGE_REF"
@@ -34,45 +31,6 @@ _ID_SCHEMES = ("docker-pullable://", "docker://", "containerd://")
 
 class ImagePinError(ValueError):
     """The active image cannot be named by a real digest."""
-
-
-# ToolPinError, ToolCommits and pinned_tool_commits are a compatibility layer for main's toolbox GPU tests, which this
-# branch does not migrate; removed once they are gone. The two commits are the last ones Hyperloom pinned for Magpie
-# and its InferenceX checkout, kept here for those callers alone.
-_TOOL_REFS = (
-    ("MAGPIE_REF", "06b7cf6e185fdd49483a512e350cb3964ba3bf68"),
-    ("INFERENCEX_REF", "3d5581562f643f9bdeb8410cd924e2c70906c966"),
-)
-_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
-
-
-class ToolPinError(ValueError):
-    """A tool commit is not a 40-hex commit."""
-
-
-@dataclass(frozen=True)
-class ToolCommits:
-    """The last Magpie and InferenceX commits Hyperloom pinned, as the compatibility callers above still read them."""
-
-    magpie: str
-    inferencex: str
-
-
-def pinned_tool_commits(env: Mapping[str, str] | None = None) -> ToolCommits:
-    """The Magpie and InferenceX commits, a non-empty ``MAGPIE_REF`` / ``INFERENCEX_REF`` overriding each.
-
-    Raises:
-        ToolPinError: When a commit, overridden or not, is not a 40-hex commit; a runner fetches by commit.
-    """
-
-    env = os.environ if env is None else env
-    commits = []
-    for var, default in _TOOL_REFS:
-        value, origin = (env[var], "the environment") if env.get(var) else (default, "the shipped pin")
-        if not _COMMIT_RE.fullmatch(value):
-            raise ToolPinError(f"{var} from {origin} is {value!r}, not a 40-hex commit; a runner pins by commit")
-        commits.append(value)
-    return ToolCommits(magpie=commits[0], inferencex=commits[1])
 
 
 @dataclass(frozen=True)
