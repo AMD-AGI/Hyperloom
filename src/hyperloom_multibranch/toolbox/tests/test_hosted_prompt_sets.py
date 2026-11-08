@@ -110,9 +110,9 @@ def _rig(tmp_path: Path, cache_in_sandbox: Path) -> Rig:
     return make_rig(tmp_path, templates=[template])
 
 
-def _hosted_acceptance(host: Host, point: Path) -> AcceptanceSetup:
+def _hosted_acceptance(host: Host, point: Path, workload: WorkloadKind = WorkloadKind.AGENTX) -> AcceptanceSetup:
     """The acceptance setup ``build_hosted_toolbox`` makes from the default options and the host's environment."""
-    base = AcceptanceSetup(FakeRepo(), PointPlanner(point), IMAGE, WorkloadKind.AGENTX)
+    base = AcceptanceSetup(FakeRepo(), PointPlanner(point), IMAGE, workload)
     return hosted_toolbox._acceptance_with_prompts(base, HostedOptions(), host.environ, None)
 
 
@@ -150,7 +150,8 @@ async def test_a_hosted_test_runs_both_checks_with_the_model_sets_the_host_stage
     rig = _rig(tmp_path, _sandbox_view(tmp_path, host))
     point = point_yaml(tmp_path, "planned.yaml", **_RUNS_BOTH)
     try:
-        acceptance = _hosted_acceptance(host, point)
+        # A fixed workload: an AgentX campaign runs no long-context check, its servers are not held up for one.
+        acceptance = _hosted_acceptance(host, point, WorkloadKind.INFERENCEX)
         short, served = acceptance.short_prompts, acceptance.long_context
         assert short is not None and isinstance(served, ServedLongContext), "both checks are on with the model's sets"
         assert (host.cache / EVALSETS_DIR / short.prompt_set).is_dir(), "the short set is staged at the build"
