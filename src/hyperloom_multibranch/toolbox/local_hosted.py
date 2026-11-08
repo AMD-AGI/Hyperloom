@@ -542,18 +542,15 @@ class _LinkRule:
                     yield f"in {hidden}, a hidden entry of a home where tools keep their logins", hidden
 
 
-def _link_rule(
-    model_dir: Path, hub: Path | None, envs: Mapping[str, str], environ: Mapping[str, str] | None
-) -> _LinkRule:
-    """The rule for the links of the model at ``model_dir``: the homes of the app (``environ``, this process's by
-    default, and its passwd entry) and of the runner (``envs``), every credential location of either
-    (:func:`~hyperloom.common.confinement.credential_paths` with nothing allowed names each, whole), and the model's
-    directory and the hub cache ``hub``, which the plan reads whole."""
-    app = os.environ if environ is None else environ
-    homes = (app.get("HOME"), envs.get("HOME"), _passwd_home())
+def _link_rule(model_dir: Path, hub: Path | None, envs: Mapping[str, str]) -> _LinkRule:
+    """The rule for the links of the model at ``model_dir``: the homes of the app (this process's environment, the one
+    place the masks read it from, and its passwd entry) and of the runner (``envs``), every credential location of
+    either (:func:`~hyperloom.common.confinement.credential_paths` with nothing allowed names each, whole), and the
+    model's directory and the hub cache ``hub``, which the plan reads whole."""
+    homes = (os.environ.get("HOME"), envs.get("HOME"), _passwd_home())
     return _LinkRule(
         homes=tuple(dict.fromkeys(_real(home) for home in homes if home and os.path.isabs(home))),
-        locations=credential_paths(envs, app_environ=app),
+        locations=credential_paths(envs),
         bound=tuple(_real(tree) for tree in (model_dir, hub) if tree is not None),
     )
 
@@ -591,23 +588,22 @@ def runner_plan(
     model_dir: Path | None,
     envs: Mapping[str, str],
     python: str,
-    environ: Mapping[str, str] | None = None,
 ) -> RunnerPlan:
     """What a confined runner of the session at ``session_dir`` reads besides its toolchain (its launcher's
     interpreter's, this process's), its own tree and its key: the interpreter ``python`` its template starts it with,
     the trees its template's variables ``envs`` name (:data:`RUNNER_READS`; a repository named by URL names none), the
     session's model and what its entries link to (:func:`_model_trees`), and this host's Hugging Face hub cache
-    (:func:`hub_cache` of ``environ``, this process's by default), and the shared tuned tables the framework snapshot
+    (:func:`hub_cache` of this process's environment), and the shared tuned tables the framework snapshot
     was taken from (:func:`_snapshot_source`), which each test hashes to show it changed none of them, read-only as
     every other tree here. No bind may show the session's directory whole: it
     holds the blackboard, every sandbox and key, and the leases. A model link into a credential location is refused
     (:attr:`~hyperloom.sandbox.local.RunnerPlan.refused`), so no test sandbox of the plan runs confined with it."""
     named = [_named_path(envs.get(name, "")) for name in RUNNER_READS]
-    hub = hub_cache(environ)
+    hub = hub_cache()
     model: tuple[Path, ...] = ()
     refused: tuple[str, ...] = ()
     if model_dir is not None:
-        model, refused = _model_trees(model_dir, _link_rule(model_dir, hub, envs, environ))
+        model, refused = _model_trees(model_dir, _link_rule(model_dir, hub, envs))
     found = (_named_path(python), *named, *_snapshot_source(envs), *model, hub)
     return RunnerPlan(
         readable=tuple(dict.fromkeys(path for path in found if path is not None)),

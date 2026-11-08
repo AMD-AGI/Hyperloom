@@ -69,8 +69,7 @@ def isolation(monkeypatch) -> Isolation:
     monkeypatch.setattr(confinement, "PRIVATE_PATHS", confinement.PrivatePaths())
     monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
     stand_in = Isolation()
-    require = agent_isolation.require_agent_isolation
-    monkeypatch.setattr(entry, "require_agent_isolation", lambda *, bwrap: require(bwrap=bwrap, probe=stand_in.probe))
+    monkeypatch.setattr(agent_isolation, "bwrap_probe", stand_in.probe)
     return stand_in
 
 
@@ -854,7 +853,7 @@ def test_the_state_directory_is_masked_wherever_an_agent_sandbox_would_show_it(r
     assert entry.main(["run"]) == 0
     assert Var.STATE_DIR not in os.environ
     shown = run.state.parent
-    masked = confinement.credential_paths({}, app_environ={}, allowed=(shown,))
+    masked = confinement.credential_paths({}, allowed=(shown,))
     policy = confinement.Confinement(readable=(shown,), masked=masked).policy()
     assert str(run.state) in policy.masked, policy.masked
 
@@ -867,7 +866,7 @@ def _image_bwrap(tmp_path: Path, monkeypatch) -> None:
     (image_bin / "bwrap").write_text("#!/bin/sh\necho 'not the layer bubblewrap' >&2\nexit 1\n")
     (image_bin / "bwrap").chmod(0o755)
     monkeypatch.setenv("PATH", f"{image_bin}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setattr(entry, "require_agent_isolation", agent_isolation.require_agent_isolation)
+    monkeypatch.setattr(agent_isolation, "bwrap_probe", bwrap.bwrap_probe)
     monkeypatch.setattr(bwrap, "_PROBES", {})
 
 

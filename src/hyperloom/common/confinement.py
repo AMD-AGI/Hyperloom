@@ -524,7 +524,6 @@ def _masks_for(path: Path, visible: tuple[Path, ...], later: frozenset[Path]) ->
 def credential_paths(
     environ: Mapping[str, str],
     *,
-    app_environ: Mapping[str, str] | None = None,
     given: Iterable[Path] = (),
     allowed: Iterable[Path] = (),
     writable: Iterable[Path] = (),
@@ -532,8 +531,8 @@ def credential_paths(
     """The paths to mask in a child of this process, from this process's configuration and the child's: the home
     (``HOME``, else the passwd entry's; and this process's passwd entry's either way), the XDG directories, the value
     of every variable that names a credential location (``:``-separated entries split, only absolute existing paths)
-    and Hugging Face's login files (made yet or not, in its directory), each read from ``app_environ`` (default: this
-    process's environment) and from ``environ`` (the child's), and the files registered in :data:`PRIVATE_PATHS`. A
+    and Hugging Face's login files (made yet or not, in its directory), each read from this process's environment and
+    from ``environ`` (the child's), and the files registered in :data:`PRIVATE_PATHS`. A
     location of the child's in a tree it writes (``writable``, its scratch too when that is on the host: a home or
     tool directory re-pointed there) is its own, and is not masked; one in a tree only in doubt (:func:`_agent_trees`,
     not bound) is.
@@ -545,7 +544,7 @@ def credential_paths(
     counts for nothing here: the agent decides where it points (a link to a credential in a readable tree, left for
     the next launch), and the tree shows it already.
     """
-    app = os.environ if app_environ is None else app_environ
+    app = os.environ
     own, agent = _agent_trees(writable, None)
     written = _resolved_trees(own)
     sources = [*_sources(app, _app_home(app), PRIVATE_PATHS.paths()), _passwd_home()]

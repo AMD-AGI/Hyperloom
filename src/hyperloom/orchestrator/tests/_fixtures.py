@@ -66,10 +66,25 @@ def _isolate_agent_isolation(monkeypatch) -> None:
     from hyperloom.orchestrator.specialists import launch_env
 
     absent = BwrapProbe(None, None, ("bubblewrap: not found on PATH",))
-    choose = functools.partial(agent_isolation.choose_agent_isolation, probe=lambda _path: absent)
-    monkeypatch.setattr(launch_env, "choose_agent_isolation", choose)
-    announce = functools.partial(agent_isolation.announce_agent_isolation, probe=lambda _path: absent)
-    monkeypatch.setattr(agent_isolation, "announce_agent_isolation", announce)
+
+    def without_bwrap(decide):
+        """``decide`` as the module runs it, with its ``bwrap_probe`` finding no bubblewrap while it does."""
+
+        @functools.wraps(decide)
+        def decided(*args, **kwargs):
+            probe = agent_isolation.bwrap_probe
+            agent_isolation.bwrap_probe = lambda *_args: absent
+            try:
+                return decide(*args, **kwargs)
+            finally:
+                agent_isolation.bwrap_probe = probe
+
+        return decided
+
+    monkeypatch.setattr(launch_env, "choose_agent_isolation", without_bwrap(agent_isolation.choose_agent_isolation))
+    monkeypatch.setattr(
+        agent_isolation, "announce_agent_isolation", without_bwrap(agent_isolation.announce_agent_isolation)
+    )
     monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process())
 
 

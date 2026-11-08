@@ -43,11 +43,11 @@ import logging
 import os
 import select
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hyperloom_common.bwrap import NESTED_SAFE, BwrapPolicy, BwrapPolicyError, BwrapProbe, Holder, Scratch, bwrap_probe
+from hyperloom_common.bwrap import NESTED_SAFE, BwrapPolicy, BwrapPolicyError, Holder, Scratch
 
 from hyperloom.common.agent_isolation import (
     BWRAP,
@@ -88,7 +88,6 @@ SHELL = "/bin/sh"
 #: What is said once when the tests of this host run unconfined.
 UNCONFINED_TESTS = "tests run unconfined on this host, as before: they can read this account's files and credentials"
 
-ProbeBwrap = Callable[[str | None], BwrapProbe]
 
 _said: set[str] = set()
 _said_lock = threading.Lock()
@@ -256,7 +255,7 @@ class SandboxConfiner:
         scratch.remove()
         failed = dataclasses.replace(isolation.probe, problems=found)
         try:
-            unconfined = choose_test_isolation(probe=lambda _path: failed)
+            unconfined = choose_test_isolation(known=failed)
         except IsolationRefused as refused:
             raise SandboxDenied(f"a hosted run's test sandbox must run confined: {refused}") from None
         why = unconfined.why if isinstance(unconfined, NoIsolation) else "; ".join(found)
@@ -320,7 +319,7 @@ def sandbox_confiner(plan: RunnerPlan, *, base: Path, python: str) -> SandboxCon
     return SandboxConfiner(isolation, plan, base, python)
 
 
-def local_test_isolation(*, probe: ProbeBwrap = bwrap_probe) -> tuple[str, tuple[str, ...]]:
+def local_test_isolation() -> tuple[str, tuple[str, ...]]:
     """How a local test sandbox no account is named for is launched now, as a session's record names it, and why it is
     not isolated: :data:`~hyperloom.common.agent_isolation.BWRAP`; :data:`~hyperloom.common.agent_isolation.NONE`
     (unconfined, as before) with the reasons of both tiers; or :data:`~hyperloom.common.agent_isolation.REFUSED` with
@@ -330,7 +329,7 @@ def local_test_isolation(*, probe: ProbeBwrap = bwrap_probe) -> tuple[str, tuple
     (:meth:`SandboxConfiner.confine`) runs as before even where this says
     :data:`~hyperloom.common.agent_isolation.BWRAP`, which its own WARNING says; a hosted run refuses it."""
     try:
-        found = choose_test_isolation(probe=probe)
+        found = choose_test_isolation()
     except IsolationRefused as refused:
         return REFUSED, refused.reasons
     if isinstance(found, BwrapIsolation):

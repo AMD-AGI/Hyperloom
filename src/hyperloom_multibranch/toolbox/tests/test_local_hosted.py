@@ -130,7 +130,19 @@ def test_only_the_named_tool_repositories_are_taken_from_the_host() -> None:
     assert host_tool_repos({}) == {}
 
 
-def test_the_runner_plan_names_what_a_runner_reads_and_never_the_session_whole(tmp_path: Path) -> None:
+def _app_environ(monkeypatch: pytest.MonkeyPatch, environ: dict[str, str]) -> None:
+    """This process's environment is ``environ`` and ``PATH`` alone: the plan reads the app's homes, credential
+    locations and hub cache from the process, the one place the masks read them from."""
+    for name in list(os.environ):
+        if name != "PATH":
+            monkeypatch.delenv(name)
+    for name, value in environ.items():
+        monkeypatch.setenv(name, value)
+
+
+def test_the_runner_plan_names_what_a_runner_reads_and_never_the_session_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A confined runner reads its interpreter, the trees its template's variables name, the model with what its links
     point into, and the hub cache; a repository named by URL and the image's own settings name nothing it binds."""
     session, blobs, hf = tmp_path / "session", tmp_path / "hf" / "hub" / "models--m" / "blobs", tmp_path / "hf"
@@ -150,7 +162,8 @@ def test_the_runner_plan_names_what_a_runner_reads_and_never_the_session_whole(t
         "MAGPIE_REPO": "https://github.com/AMD-AGI/Magpie.git",
         "ROCM_PATH": "/opt/rocm",
     }
-    plan = runner_plan(session, model, envs, "/usr/bin/python3", {"HF_HOME": str(hf)})
+    _app_environ(monkeypatch, {"HF_HOME": str(hf)})
+    plan = runner_plan(session, model, envs, "/usr/bin/python3")
 
     assert plan.readable == (
         Path("/usr/bin/python3"),
@@ -169,7 +182,7 @@ def test_the_runner_plan_names_what_a_runner_reads_and_never_the_session_whole(t
 
 
 def test_a_model_entry_linking_out_of_the_hub_binds_what_it_links_to_and_never_the_directory_it_is_in(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A link to a file or directory in the home binds that file or directory, never the home with every login in it,
     and a link to a directory elsewhere never binds that directory's parent."""
@@ -181,7 +194,8 @@ def test_a_model_entry_linking_out_of_the_hub_binds_what_it_links_to_and_never_t
     (model / "config.json").symlink_to(home / "config.json")
     (model / "tokenizer").symlink_to(home / "tokdir")
     (model / "weights").symlink_to(data / "weights")
-    plan = runner_plan(tmp_path / "session", model, {}, "/usr/bin/python3", {"HOME": str(home)})
+    _app_environ(monkeypatch, {"HOME": str(home)})
+    plan = runner_plan(tmp_path / "session", model, {}, "/usr/bin/python3")
 
     linked = set(plan.readable) - {Path("/usr/bin/python3"), model}
     assert linked == {home / "config.json", home / "tokdir", data / "weights"}, plan.readable
@@ -206,7 +220,7 @@ _HIDDEN = "a hidden entry of a home where tools keep their logins"
     ],
 )
 def test_a_model_entry_linking_into_a_credential_location_binds_nothing_and_the_plan_says_why(
-    tmp_path: Path, name: str, target: str, environ: dict[str, str], why: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, target: str, environ: dict[str, str], why: str
 ) -> None:
     """A mask hides a credential location below a bound path, never one the bound path is in: a link to the home's
     ``.ssh``, ``.claude``, ``.config``, ``.aws`` or ``.netrc``, to the home, to a login file a variable names, or below
@@ -224,7 +238,8 @@ def test_a_model_entry_linking_into_a_credential_location_binds_nothing_and_the_
     (model / name).symlink_to(root / target)
     (model / "tokenizer").symlink_to(home / "tokdir")
     named = {"HOME": str(home), **{key: value.format(root=root) for key, value in environ.items()}}
-    plan = runner_plan(root / "session", model, {}, "/usr/bin/python3", named)
+    _app_environ(monkeypatch, named)
+    plan = runner_plan(root / "session", model, {}, "/usr/bin/python3")
 
     assert plan.readable == (Path("/usr/bin/python3"), model, home / "tokdir")
     assert plan.refused == (
@@ -232,7 +247,9 @@ def test_a_model_entry_linking_into_a_credential_location_binds_nothing_and_the_
     )
 
 
-def test_a_model_in_the_hub_cache_below_the_home_binds_its_blobs_and_the_hub(tmp_path: Path) -> None:
+def test_a_model_in_the_hub_cache_below_the_home_binds_its_blobs_and_the_hub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The default hub cache is in the home's ``.cache``, which the plan binds anyway: a snapshot's links to their
     blobs, and a model elsewhere linking into the hub, bind as they do anywhere else."""
     home = tmp_path.resolve() / "home"
@@ -245,8 +262,9 @@ def test_a_model_in_the_hub_cache_below_the_home_binds_its_blobs_and_the_hub(tmp
     elsewhere = tmp_path.resolve() / "model"
     elsewhere.mkdir()
     (elsewhere / "weights").symlink_to(blobs / "w")
+    _app_environ(monkeypatch, {"HOME": str(home)})
     for model in (snapshot, elsewhere):
-        plan = runner_plan(tmp_path / "session", model, {}, "/usr/bin/python3", {"HOME": str(home)})
+        plan = runner_plan(tmp_path / "session", model, {}, "/usr/bin/python3")
 
         assert plan.refused == ()
         assert plan.readable == (Path("/usr/bin/python3"), model, blobs, hub)
@@ -337,8 +355,8 @@ def test_a_model_link_into_a_credential_location_binds_nothing_however_it_gets_t
     model = _link_area(root, monkeypatch)
     (model / "x").symlink_to(root / link)
     (model / "tokenizer").symlink_to(root / "hop" / "tok")
-    environ = {"HOME": str(root / "home"), **_named(named, root)}
-    plan = runner_plan(root / "session", model, _named(envs, root), "/usr/bin/python3", environ)
+    _app_environ(monkeypatch, {"HOME": str(root / "home"), **_named(named, root)})
+    plan = runner_plan(root / "session", model, _named(envs, root), "/usr/bin/python3")
 
     reason = f"{model / 'x'} links to {root / tree}, {why.format(root=root)}, which its bind would show unmasked"
     assert plan.refused == (reason,)
@@ -365,8 +383,8 @@ def test_a_model_link_to_a_home_s_other_entries_or_into_a_hub_cache_in_a_home_bi
     root = tmp_path.resolve()
     model = _link_area(root, monkeypatch)
     (model / "x").symlink_to(root / link)
-    environ = {"HOME": str(root / "home"), **_named(named, root)}
-    plan = runner_plan(root / "session", model, _named(envs, root), "/usr/bin/python3", environ)
+    _app_environ(monkeypatch, {"HOME": str(root / "home"), **_named(named, root)})
+    plan = runner_plan(root / "session", model, _named(envs, root), "/usr/bin/python3")
 
     assert plan.refused == ()
     assert root / tree in plan.readable, plan.readable
@@ -511,7 +529,7 @@ def test_the_live_output_is_never_read_through_a_link_the_sandbox_made_out_of_it
 
 
 def test_a_runner_reads_the_shared_tables_its_framework_snapshot_was_taken_from_and_none_without_one(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Each test hashes the shared tables against the snapshot, to show it changed none: a confined runner reads them,
     read-only as every tree of its plan, and the session's directory, which holds the snapshot, never whole."""
@@ -519,8 +537,9 @@ def test_a_runner_reads_the_shared_tables_its_framework_snapshot_was_taken_from_
     snapshot = tmp_path / "session" / "framework"
     take_snapshot(configs, snapshot)
 
-    taken = runner_plan(tmp_path / "session", None, {SNAPSHOT_ENV: str(snapshot)}, "/usr/bin/python3", {})
-    none = runner_plan(tmp_path / "session", None, {SNAPSHOT_ENV: str(tmp_path / "absent")}, "/usr/bin/python3", {})
+    _app_environ(monkeypatch, {})
+    taken = runner_plan(tmp_path / "session", None, {SNAPSHOT_ENV: str(snapshot)}, "/usr/bin/python3")
+    none = runner_plan(tmp_path / "session", None, {SNAPSHOT_ENV: str(tmp_path / "absent")}, "/usr/bin/python3")
 
     assert configs in taken.readable and snapshot in taken.readable
     assert configs not in none.readable
