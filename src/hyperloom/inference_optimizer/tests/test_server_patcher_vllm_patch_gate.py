@@ -26,6 +26,15 @@ def _write_graph_capture(tmp_path, *, markers=sp._VLLM_GRAPH_CAPTURE_MARKERS):
     return path
 
 
+def _write_relocated_markers(tmp_path, *, capture_traces=True):
+    """Create a patched 0.32+ tree: ``capture_traces`` lives in ``wrapper.py``, not ``graph_capture.py``."""
+    graph_capture = tmp_path / "vllm" / "profiler" / "graph_capture.py"
+    graph_capture.parent.mkdir(parents=True, exist_ok=True)
+    graph_capture.write_text("graph_capture_profiler\n", encoding="utf-8")
+    wrapper = tmp_path / "vllm" / "profiler" / "wrapper.py"
+    wrapper.write_text("capture_traces\n" if capture_traces else "unrelated\n", encoding="utf-8")
+
+
 def _fake_tracelens(monkeypatch, tmp_path, versions):
     """Point ``$TRACELENS_ROOT`` at a root carrying patch files for ``versions``."""
     root = tmp_path / "tracelens"
@@ -154,3 +163,45 @@ def test_markers_present_requires_every_marker(tmp_path):
     assert laying._markers_present(path, ("alpha",)) is True
     assert laying._markers_present(path, ("alpha", "beta")) is False
     assert laying._markers_present(tmp_path / "missing.py", ("alpha",)) is False
+
+
+def test_patched_relocated_marker_install_is_detected(tmp_path, monkeypatch):
+    # From 0.32 the patch writes ``capture_traces`` into ``wrapper.py`` and only the context manager stays in
+    # ``graph_capture.py``; a correctly patched tree must read as patched.
+    _fake_install(monkeypatch, tmp_path, "0.33.0+rocm100")
+    _write_relocated_markers(tmp_path)
+    _fake_tracelens(monkeypatch, tmp_path, ["0.33.0"])
+    plan = sp._discover_vllm_plan(install=("0.33.0+rocm100", tmp_path))
+    assert plan is not None
+    assert laying._is_patched(plan) is True
+
+
+def test_relocated_marker_missing_from_wrapper_is_not_patched(tmp_path, monkeypatch):
+    _fake_install(monkeypatch, tmp_path, "0.33.0+rocm100")
+    _write_relocated_markers(tmp_path, capture_traces=False)
+    _fake_tracelens(monkeypatch, tmp_path, ["0.33.0"])
+    plan = sp._discover_vllm_plan(install=("0.33.0+rocm100", tmp_path))
+    assert plan is not None
+    assert laying._is_patched(plan) is False
+
+
+def test_stock_relocated_marker_install_is_not_mistaken_for_patched(tmp_path, monkeypatch):
+    _fake_install(monkeypatch, tmp_path, "0.33.0+rocm100")
+    wrapper = tmp_path / "vllm" / "profiler" / "wrapper.py"
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text("unrelated\n", encoding="utf-8")
+    _fake_tracelens(monkeypatch, tmp_path, ["0.33.0"])
+    plan = sp._discover_vllm_plan(install=("0.33.0+rocm100", tmp_path))
+    assert plan is not None
+    assert laying._is_patched(plan) is False
+
+
+def test_graph_capture_sentinel_relocates_at_0_32(tmp_path):
+    legacy = sp._vllm_graph_capture_sentinel("0.31.0", tmp_path)
+    assert legacy == ((tmp_path / "vllm" / "profiler" / "graph_capture.py", sp._VLLM_GRAPH_CAPTURE_MARKERS),)
+    for version in ("0.32.0", "0.33.0", "0.33.0+rocm100"):
+        got = sp._vllm_graph_capture_sentinel(version, tmp_path)
+        assert got == (
+            (tmp_path / "vllm" / "profiler" / "graph_capture.py", ("graph_capture_profiler",)),
+            (tmp_path / "vllm" / "profiler" / "wrapper.py", ("capture_traces",)),
+        )
