@@ -326,14 +326,16 @@ def _user_args(point: _Point) -> tuple[tuple[str, ...], tuple[str, ...]]:
     return (*added, *extra), removed
 
 
-def _gpus(point: _Point, tp: int) -> tuple[int, ...]:
+def _gpus(point: _Point, cards: int) -> tuple[int, ...]:
+    """The first ``cards`` GPUs of the point's mask: the mask may be the whole session's, not the round's."""
     mask = point.text(_GPU_MASK_ENV)
-    if mask is None:
-        return tuple(range(tp))
     try:
-        return tuple(int(gpu) for gpu in mask.split(","))
+        gpus = tuple(range(cards)) if mask is None else tuple(int(gpu) for gpu in mask.split(","))
     except ValueError:
         raise ConfigError(f"the point's {_GPU_MASK_ENV} is not a list of GPU indices: {mask!r}") from None
+    if len(gpus) < cards:
+        raise ConfigError(f"the point's {_GPU_MASK_ENV}={mask!r} holds {len(gpus)} GPUs; the launch needs {cards}")
+    return gpus[:cards]
 
 
 @dataclass(frozen=True)
@@ -372,7 +374,7 @@ def _server(
         served_model_name=point.model,
         host=SERVER_HOST if external is None else external.host,
         port=point.integer(_PORT_ENV, _LAUNCHER_PORT) if external is None else external.port,
-        gpus=_gpus(point, base.topology.tp),
+        gpus=_gpus(point, base.cards),
         framework_python=settings.framework_python,
         user=user,
         env_inherit=settings.env_inherit,

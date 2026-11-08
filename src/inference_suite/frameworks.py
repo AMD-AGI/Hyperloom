@@ -9,8 +9,11 @@ expert-parallel answers from here and keeps only what is Hyperloom's own.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+
+from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
 
 
 class Framework(str, Enum):
@@ -43,6 +46,25 @@ class ExpertParallelFlag:
 
 
 @dataclass(frozen=True)
+class DataParallelFlag:
+    """The server option that sets the data-parallel size, every argparse spelling of it.
+
+    Each replica takes ``tp`` cards of its own unless a ``shares_tp`` switch is on: then the replicas split the TP
+    ranks' cards (sglang's DP attention).
+    """
+
+    aliases: tuple[str, ...]
+    shares_tp: tuple[str, ...] = ()
+
+    def replicas(self, args: Sequence[str]) -> int:
+        """How many sets of ``tp`` cards ``args`` occupy."""
+        occurrences = argv_flag_occurrences(args)
+        if {name for name, _ in occurrences} & set(map(canonical_flag_name, self.shares_tp)):
+            return 1
+        return int(last_alias_value(occurrences, frozenset(map(canonical_flag_name, self.aliases))) or 1)
+
+
+@dataclass(frozen=True)
 class ServerFlags:
     """The flags that carry a round's runtime facts to the server; ``None`` when the server takes no such flag.
 
@@ -61,7 +83,8 @@ class FrameworkFacts:
     """What one framework fixes about a launch.
 
     ``python_package`` is the importable package it installs as, ``None`` when it ships none. A scriptable
-    framework has no ``server_flags``; a framework with no ``expert_parallel`` option runs no expert parallelism.
+    framework has no ``server_flags``; a framework with no ``expert_parallel`` option runs no expert parallelism,
+    and one with no ``data_parallel`` option runs one replica.
     ``parser_source`` is Python source defining ``_build_parser()``, run in the serving interpreter so an argv is
     judged by the parser that would refuse it; ``None`` when no server parser can be reached. ``metrics_flag`` is the
     switch without which the server serves no ``/metrics``; ``None`` when it serves them by default.
@@ -71,6 +94,7 @@ class FrameworkFacts:
     python_package: str | None
     server_flags: ServerFlags | None = None
     expert_parallel: ExpertParallelFlag | None = None
+    data_parallel: DataParallelFlag | None = None
     parser_source: str | None = None
     metrics_flag: str | None = None
 
@@ -127,6 +151,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         python_package="sglang",
         server_flags=ServerFlags("--model-path", _HOST_FLAG, "--port", "--served-model-name", "--context-length"),
         expert_parallel=ExpertParallelFlag("--ep-size", ("--ep-size", "--expert-parallel-size", "--ep"), True),
+        data_parallel=DataParallelFlag(("--data-parallel-size", "--dp-size"), shares_tp=("--enable-dp-attention",)),
         parser_source=_SGLANG_PARSER_SOURCE,
         metrics_flag="--enable-metrics",
     ),
@@ -135,6 +160,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         python_package="vllm",
         server_flags=ServerFlags("--model", _HOST_FLAG, "--port", "--served-model-name", "--max-model-len"),
         expert_parallel=ExpertParallelFlag(_VLLM_STYLE_EP_SWITCH, (_VLLM_STYLE_EP_SWITCH, "-ep"), False),
+        data_parallel=DataParallelFlag(("--data-parallel-size", "-dp")),
         parser_source=_VLLM_PARSER_SOURCE,
     ),
     Framework.ATOM: FrameworkFacts(
@@ -155,6 +181,7 @@ def framework_facts(framework: Framework) -> FrameworkFacts:
 
 
 __all__ = [
+    "DataParallelFlag",
     "ExpertParallelFlag",
     "Framework",
     "FrameworkFacts",
