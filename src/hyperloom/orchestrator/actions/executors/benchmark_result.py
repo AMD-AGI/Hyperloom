@@ -946,10 +946,13 @@ def _find_server_logs(slot: Path) -> list[Path]:
     return sorted(logs, key=_size, reverse=True)
 
 
-def double_run_requested(params: dict | None) -> bool:
-    """Whether baseline double-run is enabled; defaults to True when not in params."""
+def double_run_requested(params: dict | None, config_path: Path) -> bool:
+    """Whether a discarded warmup round precedes the measured one; ``baseline_double_run`` decides, on by default,
+    except for a point measured once (an AgentX replay), which never has one."""
     from hyperloom_common.env import is_truthy
 
+    if read_benchmark_point(config_path).measured_once:
+        return False
     if params and "baseline_double_run" in params:
         return is_truthy(params["baseline_double_run"])
     return True

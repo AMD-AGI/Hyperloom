@@ -122,9 +122,8 @@ class Rounds:
         return {"warmup": self._warmup, "test": self._measured, "eval": self._evaluation}
 
     def agentx(self) -> dict[str, Script]:
-        """An AgentX test: a warmup round that boots and warms up, then a measured round whose client has phases of its
-        own."""
-        return {"warmup": self._agentx_warmup, "test": self._agentx_measured}
+        """An AgentX test: one measured round that boots, and whose client has phases of its own."""
+        return {"test": self._agentx_measured}
 
     def failing_boot(self) -> dict[str, Script]:
         """A test whose server never got ready: nothing is stamped, the round that was to boot it fails."""
@@ -148,15 +147,9 @@ class Rounds:
         self._spend(2.0)
         return result("eval", slot, note="evaluation_only")
 
-    def _agentx_warmup(self, slot: Path, kwargs: dict[str, Any]) -> VariantResult:
-        self._spend(10.0)
-        Run(self.clock, slot).boot(80.0 * self.scale, log=READY_ONLY_LOG).end(40.0 * self.scale)
-        self._spend(30.0)
-        return result("warmup", slot)
-
     def _agentx_measured(self, slot: Path, kwargs: dict[str, Any]) -> VariantResult:
         self._spend(5.0)
-        measured = Run(self.clock, slot).found_ready()
+        measured = Run(self.clock, slot).boot(80.0 * self.scale, log=READY_ONLY_LOG)
         measured.mark("warmup", 15.0 * self.scale).mark("measured", 30.0 * self.scale)
         measured.mark("finished", 200.0 * self.scale).end(15.0 * self.scale)
         self._spend(30.0)
