@@ -14,7 +14,8 @@ import yaml
 
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
-from hyperloom.orchestrator.actions.executors import _agentx_checkpoint, _suite_config
+from hyperloom.orchestrator.actions.executors import _agentx_checkpoint
+from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors._agentx_checkpoint import (
     CHECKPOINT_ARTIFACT_NAME,
     AgentxCheckpoint,
@@ -27,8 +28,8 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
 )
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
-from hyperloom.orchestrator.actions.executors._suite_config import MEASURED_SEED, WARMUP_SEED
-from hyperloom.orchestrator.actions.executors._suite_config import (
+from hyperloom.orchestrator.actions.executors._suite.config import MEASURED_SEED, WARMUP_SEED
+from hyperloom.orchestrator.actions.executors._suite.rounds import (
     RUN_DIR_PREFIX,
     TOOL_CACHE_ENV,
     SuiteRound,
@@ -55,8 +56,8 @@ def session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     cache.mkdir()
     (cache / "staging_manifest.json").write_bytes(_STAGED)
     monkeypatch.setenv(TOOL_CACHE_ENV, str(cache))
-    monkeypatch.setattr(_suite_config, "_resolve_probe_python", lambda framework: f"/venv/{framework}/python")
-    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: None)
+    monkeypatch.setattr(suite_rounds, "_resolve_probe_python", lambda framework: f"/venv/{framework}/python")
+    monkeypatch.setattr(suite_rounds, "client_only_server_url", lambda: None)
     return session_dir
 
 
@@ -99,9 +100,9 @@ def test_every_point_of_a_session_with_a_frozen_base_runs_on_the_suite(session) 
 
 
 def test_a_client_only_session_runs_external_rounds_against_its_server(session, tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: "http://10.0.0.2:30000")
+    monkeypatch.setattr(suite_rounds, "client_only_server_url", lambda: "http://10.0.0.2:30000")
     rounds = _rounds()
-    monkeypatch.setattr(_suite_config, "run_round", rounds.run_round)
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
     point = _write_point(tmp_path / "slot" / "point.yaml")
     route = suite_route(session)
     assert route is not None and route.server_url == "http://10.0.0.2:30000"
@@ -128,7 +129,7 @@ def test_a_lone_round_owns_its_server_and_a_cold_start_pair_shares_one_through_t
 
 def test_each_round_writes_a_fresh_run_dir_so_a_retry_in_the_same_directory_runs(session, tmp_path, monkeypatch):
     rounds = _rounds(2)
-    monkeypatch.setattr(_suite_config, "run_round", rounds.run_round)
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
     route = suite_route(session)
     point = _write_point(tmp_path / "slot" / "point.yaml")
     request = SuiteRound(point, tmp_path / "slot", round_lifecycle(tmp_path, LifecycleMode.OWN))
@@ -143,7 +144,7 @@ def test_each_round_writes_a_fresh_run_dir_so_a_retry_in_the_same_directory_runs
 @pytest.mark.parametrize(("warmup", "seed"), [(False, MEASURED_SEED), (True, WARMUP_SEED)])
 def test_a_discarded_warmup_round_draws_its_prompts_with_the_warmup_seed(session, tmp_path, monkeypatch, warmup, seed):
     rounds = _rounds()
-    monkeypatch.setattr(_suite_config, "run_round", rounds.run_round)
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
     point = _write_point(tmp_path / "slot" / "point.yaml")
     lifecycle = round_lifecycle(point.parent / "warmup_round", LifecycleMode.BOOT if warmup else LifecycleMode.OWN)
 
@@ -163,7 +164,7 @@ def test_a_point_without_a_gpu_mask_runs_on_the_first_cards_of_the_sessions_mask
     else:
         monkeypatch.setenv("ROCR_VISIBLE_DEVICES", session_mask)
     rounds = _rounds()
-    monkeypatch.setattr(_suite_config, "run_round", rounds.run_round)
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
     request = _maskless_round(tmp_path / "slot" / "point.yaml")
 
     run_suite_round(suite_route(session), request, on_poll=lambda: None)
@@ -223,7 +224,7 @@ def test_a_point_that_does_not_translate_refuses_the_round_as_config_invalid(ses
 
 def test_the_actions_cancel_scope_cancels_the_round_and_each_poll_is_heard(session, tmp_path, monkeypatch) -> None:
     rounds = _rounds()
-    monkeypatch.setattr(_suite_config, "run_round", rounds.run_round)
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
     point = _write_point(tmp_path / "slot" / "point.yaml")
     lifecycle = round_lifecycle(point.parent, LifecycleMode.OWN)
     scope = CancelScope()
@@ -278,7 +279,7 @@ def due_checkpoint(monkeypatch: pytest.MonkeyPatch) -> Callable[[float], None]:
 def test_a_round_trailing_its_checkpoint_is_stopped_and_exits_as_an_early_stop(
     session, tmp_path, monkeypatch, due_checkpoint
 ) -> None:
-    monkeypatch.setattr(_suite_config, "run_round", _rounds().run_round)
+    monkeypatch.setattr(suite_rounds, "run_round", _rounds().run_round)
     due_checkpoint(90.0)
     point = _write_point(tmp_path / "slot" / "point.yaml")
 
@@ -298,7 +299,7 @@ def test_a_round_trailing_its_checkpoint_is_stopped_and_exits_as_an_early_stop(
 def test_a_shadow_checkpoint_records_the_ruling_and_lets_the_round_finish(
     session, tmp_path, monkeypatch, due_checkpoint
 ) -> None:
-    monkeypatch.setattr(_suite_config, "run_round", _rounds().run_round)
+    monkeypatch.setattr(suite_rounds, "run_round", _rounds().run_round)
     due_checkpoint(90.0)
     point = _write_point(tmp_path / "slot" / "point.yaml")
 
@@ -318,7 +319,7 @@ def test_a_shadow_checkpoint_records_the_ruling_and_lets_the_round_finish(
 def test_an_earlier_rounds_stop_ruling_does_not_turn_a_cancel_into_an_early_stop(
     session, tmp_path, monkeypatch, due_checkpoint
 ) -> None:
-    monkeypatch.setattr(_suite_config, "run_round", _rounds().run_round)
+    monkeypatch.setattr(suite_rounds, "run_round", _rounds().run_round)
     due_checkpoint(100.0)
     point = _write_point(tmp_path / "slot" / "point.yaml")
     (point.parent / CHECKPOINT_ARTIFACT_NAME).write_text(json.dumps({"stopped": True}), encoding="utf-8")

@@ -3,7 +3,7 @@
 
 """Shared helper for the ``explore`` executor's grid runs.
 
-Every round runs on inference_suite with the base launch its session froze (:func:`._suite_config.suite_route`).
+Every round runs on inference_suite with the base launch its session froze (:func:`._suite.rounds.suite_route`).
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ from .benchmark_result import (
 )
 from ._gpu_metrics import write_gpu_metrics_from_report
 from ._round_folder import RoundFolder, is_round_folder, round_report_path
-from ._suite_config import SuiteRoundRefused, suite_route
+from ._suite.rounds import SuiteRoundRefused, suite_route
 from hyperloom.orchestrator.state.base_launch import session_cards
 from .benchmark_config import composed_benchmark_timeout_sec
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence

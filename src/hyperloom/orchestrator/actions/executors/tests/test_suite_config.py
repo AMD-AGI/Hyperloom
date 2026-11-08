@@ -16,12 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._suite_config import (
-    RoundSettings,
-    fixed_workload,
-    point_server,
-    suite_config,
-)
+from hyperloom.orchestrator.actions.executors._suite.config import RoundSettings, fixed_workload, suite_config
+from hyperloom.orchestrator.actions.executors._suite.rounds import point_server
 from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv
 from inference_suite.compose import RoundFacts, compose

@@ -3,9 +3,9 @@
 
 """Shared value types and helpers for the ``explore`` executor's grid runs.
 
-A grid round of a session that froze a base launch (:func:`._suite_config.suite_route`) runs through
+A grid round of a session that froze a base launch (:func:`._suite.rounds.suite_route`) runs through
 :func:`run_grid_suite_round`, which holds the server as the point's ``server_lifecycle`` block says
-(:func:`._suite_config.point_server`) and hands the round back the way the grid reads a finished benchmark process: a
+(:func:`._suite.rounds.point_server`) and hands the round back the way the grid reads a finished benchmark process: a
 round the session deadline or a cancel stopped exits with the sentinel the grid reads as the run's own stop, any other
 failed step exits ``1``, and the grid records it under that step's error class (:func:`failed_step_class`).
 """
@@ -47,7 +47,7 @@ from ._subprocess_kill import (
     sync_agentx_phase_wait,
 )
 from ._ray_serving import ServingLease
-from ._suite_config import SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, point_server, run_suite_round
+from ._suite.rounds import SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, point_server, run_suite_round
 
 log = logging.getLogger(__name__)
 

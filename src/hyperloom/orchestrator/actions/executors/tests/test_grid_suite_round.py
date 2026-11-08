@@ -21,11 +21,13 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
-from hyperloom.orchestrator.actions.executors import _grid_base, _grid_runner, _suite_config
+from hyperloom.orchestrator.actions.executors import _grid_base, _grid_runner
+from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch, GridRecipe, GridVariant, run_grid
-from hyperloom.orchestrator.actions.executors._suite_config import MEASURED_SEED, RUN_DIR_PREFIX, TOOL_CACHE_ENV
-from hyperloom.orchestrator.actions.executors._suite_config import WARMUP_SEED
+from hyperloom.orchestrator.actions.executors._suite.config import MEASURED_SEED
+from hyperloom.orchestrator.actions.executors._suite.rounds import RUN_DIR_PREFIX, TOOL_CACHE_ENV
+from hyperloom.orchestrator.actions.executors._suite.config import WARMUP_SEED
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _MODEL, _base
 from hyperloom.orchestrator.rehearsal import READY, STAGE_FAILED, LaunchAttempt, LaunchScenario, ScriptedRounds
 from hyperloom.orchestrator.rehearsal import VirtualClock
@@ -70,8 +72,8 @@ def suite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(tmp_path / "leaks"))
     monkeypatch.setenv(_SCRUBBED_ENV, "1")
     monkeypatch.setattr(_grid_runner, "_resolve_session_dir", lambda: session)
-    monkeypatch.setattr(_suite_config, "_resolve_probe_python", lambda framework: sys.executable)
-    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: None)
+    monkeypatch.setattr(suite_rounds, "_resolve_probe_python", lambda framework: sys.executable)
+    monkeypatch.setattr(suite_rounds, "client_only_server_url", lambda: None)
     stopped: list[Path] = []
 
     def record_stop(pid_dir):
@@ -85,7 +87,7 @@ def suite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 def _play(monkeypatch, suite: SimpleNamespace, *attempts: LaunchAttempt, launch: GridLaunch, **variant):
     rounds = ScriptedRounds(scenario=LaunchScenario(attempts=attempts), clock=VirtualClock(), launch=_launch())
-    monkeypatch.setattr(_suite_config, "run_round", rounds.run_round)
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
     grid = [GridVariant("vA", **variant)]
     results = asyncio.run(run_grid(grid=grid, output_root=suite.out, recipe=GridRecipe(suite.point), launch=launch))
     return results[0], rounds.calls, suite.out / "variant_00_vA"
@@ -181,7 +183,7 @@ def test_a_round_stopped_at_a_step_fails_the_variant_under_that_steps_class(monk
 
 
 def test_a_cancelled_round_is_the_runs_own_stop(monkeypatch, suite):
-    monkeypatch.setattr(_suite_config, "cancel_scope_listener", _cancelled_scope)
+    monkeypatch.setattr(suite_rounds, "cancel_scope_listener", _cancelled_scope)
     row, _, _ = _play(
         monkeypatch, suite, LaunchAttempt(outcome=READY, metrics=_HOT), launch=GridLaunch(warmup_before_measure=False)
     )
@@ -242,7 +244,7 @@ def test_a_multi_node_variant_restarts_the_cluster_and_measures_it_externally_af
 ):
     from hyperloom.orchestrator.actions.executors import _multi_node_env
 
-    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: "http://10.0.0.2:30000")
+    monkeypatch.setattr(suite_rounds, "client_only_server_url", lambda: "http://10.0.0.2:30000")
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
     monkeypatch.setattr(_multi_node_env, "mn_bench_warmup_enabled", lambda: True)
     restarts: list[str] = []
@@ -315,7 +317,7 @@ def test_an_agentx_round_holds_the_server_its_caller_asked_for(monkeypatch, suit
         played.append(config)
         raise ScenarioError("the round is not played")
 
-    monkeypatch.setattr(_suite_config, "run_round", run_round)
+    monkeypatch.setattr(suite_rounds, "run_round", run_round)
     held = {"cleanup": False, "pid_dir": str(tmp_path / "held"), "port": 30001}
     launch = GridLaunch(server_lifecycle=held, server_already_ready=ready, warmup_before_measure=False)
 

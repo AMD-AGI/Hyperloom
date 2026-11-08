@@ -1295,7 +1295,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
             file=sys.stderr,
         )
         sys.exit(2)
-    # Re-export so the rounds _suite_config composes serve the resolved model, not the path the operator typed.
+    # Re-export so the rounds _suite.config composes serve the resolved model, not the path the operator typed.
     from hyperloom.common.model_paths import resolve_serving_model_path
 
     os.environ["MODEL_PATH"] = resolve_serving_model_path(str(args.model)) or str(args.model)
