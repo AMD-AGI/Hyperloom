@@ -175,7 +175,9 @@ __all__ = [
     "CacheEntry",
     "WheelSource",
     "WheelTarget",
+    "RunnableEntry",
     "ensure_runner_cache",
+    "ensure_runner_cache_with_suite",
     "exclusive",
     "main",
     "runner_wheel_target",
@@ -335,6 +337,14 @@ class CacheEntry:
     path: Path
     manifest_sha256: str
     reused: bool
+
+
+@dataclass(frozen=True)
+class RunnableEntry:
+    """A finished entry and the inference_suite staging its runners run, published below the same cache."""
+
+    entry: CacheEntry
+    inference_suite: Path
 
 
 def _run(command: Sequence[str], what: str, env: Mapping[str, str] | None = None) -> str:
@@ -1072,6 +1082,22 @@ def ensure_runner_cache(repo: Path, sha: str, cache_root: Path, options: BuildOp
         return _reuse(repo, sha, tree, final, options) or _build(repo, sha, tree, final, options)
 
 
+def ensure_runner_cache_with_suite(
+    repo: Path, sha: str, cache_root: Path, options: BuildOptions = BuildOptions()
+) -> RunnableEntry:
+    """:func:`ensure_runner_cache`, then the commit's inference_suite staging published below ``cache_root`` by the
+    entry's own source (:func:`~hyperloom.measure.runner.suite_publish.publish_inference_suite`): a runner of the entry
+    finds its staging by the key of that source, and starts without network.
+
+    Raises:
+        CacheConflict: As :func:`ensure_runner_cache`.
+        CacheBuildError: As :func:`ensure_runner_cache`.
+        SuitePublishError: When the staging cannot be published.
+    """
+    entry = ensure_runner_cache(repo, sha, cache_root, options)
+    return RunnableEntry(entry, publish_inference_suite(entry.path / SOURCE_DIR, cache_root))
+
+
 def _repeatable(parser: argparse.ArgumentParser, flag: str, help_text: str) -> None:
     parser.add_argument(flag, action="append", default=[], help=help_text)
 
@@ -1110,20 +1136,20 @@ def _target(args: argparse.Namespace) -> WheelTarget:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """The command line: build the entry, publish its commit's inference_suite staging
-    (:func:`~hyperloom.measure.runner.suite_publish.publish_inference_suite`), print one JSON line about both and exit
+    (:func:`ensure_runner_cache_with_suite`), print one JSON line about both and exit
     0, or say why not on stderr and exit 1."""
     args = _arguments(argv)
     try:
         options = BuildOptions(
             _target(args), WheelSource(args.index_url, tuple(args.find_links), args.no_index), args.lock_timeout_sec
         )
-        entry = ensure_runner_cache(args.repo, args.sha, args.out, options)
-        suite = publish_inference_suite(entry.path / SOURCE_DIR, args.out)
+        runnable = ensure_runner_cache_with_suite(args.repo, args.sha, args.out, options)
     except (CacheError, SuitePublishError, OSError) as exc:
         print(f"runner cache not built: {exc}", file=sys.stderr)
         return 1
+    entry = runnable.entry
     document = {"path": str(entry.path), "manifest_sha256": entry.manifest_sha256, "reused": entry.reused}
-    print(json.dumps({**document, "inference_suite": str(suite)}))
+    print(json.dumps({**document, "inference_suite": str(runnable.inference_suite)}))
     return 0
 
 
