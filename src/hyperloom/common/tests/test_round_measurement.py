@@ -174,6 +174,27 @@ def test_an_invalid_agentx_round_is_not_a_measurement(result: AgentxResult) -> N
     assert measurement["diagnostic_only"] is False
 
 
+def test_an_agentx_round_whose_error_records_carry_no_error_osl_says_so() -> None:
+    unexported = _agentx_result(_counts(error_osl_exported=0))
+    measurement = round_measurement(_agentx(unexported), None)
+    assert measurement["nonfatal_warnings"] == ["agentx_error_osl_not_exported:10"]
+    assert measurement["valid_measurement"] is True, "the warning does not judge the round"
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [
+        pytest.param(_counts(), id="exported"),
+        pytest.param(_counts(error_osl_exported=1), id="some-exported"),
+        pytest.param(
+            _counts(error_dropped=0, error_osl_exported=0, dropped_total=14, records_total=104), id="no-error-records"
+        ),
+    ],
+)
+def test_an_agentx_round_with_error_osl_on_an_error_record_or_no_error_record_warns_nothing(counts) -> None:
+    assert round_measurement(_agentx(_agentx_result(counts)), None)["nonfatal_warnings"] == []
+
+
 def test_an_error_rate_at_the_threshold_is_still_valid() -> None:
     at_threshold = _agentx_result(_counts(error_dropped=10, successful=90, dropped_total=24, records_total=114))
     measurement = round_measurement(_agentx(at_threshold), None)
