@@ -27,6 +27,7 @@ from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.arbor_adapter import ARBOR_PYTHON, BRANCH_RUN
 from hyperloom_multibranch.specialist.gate_client import GateClient
 from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
+from inference_suite.contracts import FixedWorkload
 
 
 class Process:
@@ -428,7 +429,22 @@ MODEL = "/models/Qwen3-14B-FP8"
 
 
 #: The gate's client as MB builds it; it names the model by its hub name, which the server must answer to.
-CLIENT = GateClient("/opt/InferenceX", "Qwen/Qwen3-14B-FP8", 1024, 1024, 8, 0.8, None, False)
+CLIENT = GateClient(
+    "/opt/InferenceX/inferencex-e2e",
+    "Qwen/Qwen3-14B-FP8",
+    FixedWorkload(
+        concurrency=8,
+        isl=1024,
+        osl=1024,
+        random_range_ratio=0.8,
+        num_prompts=80,
+        num_warmups=16,
+        seed=0,
+        warmup_seed=1,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+    ),
+)
 
 
 PORT = 31110

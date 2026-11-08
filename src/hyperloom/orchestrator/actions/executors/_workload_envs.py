@@ -3,7 +3,7 @@
 
 """Shared workload-env materialization (single source of truth).
 
-This module is the single source of truth for rendering a Magpie YAML with the
+This module is the single source of truth for rendering a point YAML with the
 user's actual process-env workload contract, so the baseline and grid-runner
 paths render identical YAML:
 
@@ -30,7 +30,9 @@ from typing import Any, Mapping, NamedTuple
 
 import yaml
 
-from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
+from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
+from hyperloom.common.outside_facts import ENV_EVAL_LIMIT, ENV_EVAL_TASKS, ENV_EVAL_TOKENIZED_REQUESTS
+from hyperloom.common.agentx_workload import is_agentx_client_key, pin_mlperf_round_concurrency
 from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
@@ -54,13 +56,11 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_ISL,
     DEFAULT_OSL,
 )
-from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS, GENERIC_FRAMEWORK_ROOT_ENV
-from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
+from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs, operator_benchmark_script
 from hyperloom.inference_optimizer.grid_server_args import (
     WorkloadTokenWindow,
-    compact_json_server_args,
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
     inject_sglang_context_length,
@@ -68,11 +68,11 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
-from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
+from inference_suite.argv import compact_json_server_args, remove_server_args
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-from ._recipe_script import launcher_overwritten_envs
+from hyperloom.orchestrator.state.base_launch import session_server_base
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
 from ._profile_setup import fit_capture_to_speculative
@@ -104,7 +104,7 @@ _SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
 # The ``XDIT_`` pair predates ``--framework custom`` and is still both read and
 # written because operator bench scripts live outside this repo and cannot be
 # renamed in lockstep; drop it once those scripts have moved over.
-_QUALITY_REF_ENVS = ("HYPERLOOM_QUALITY_REF", "XDIT_QUALITY_REF")
+QUALITY_REF_ENVS = ("HYPERLOOM_QUALITY_REF", "XDIT_QUALITY_REF")
 _QUALITY_REF_WRITE_ENVS = ("HYPERLOOM_QUALITY_REF_WRITE", "XDIT_QUALITY_REF_WRITE")
 
 
@@ -147,15 +147,6 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     if conc and conc > 0:
         env["CONC"] = str(conc)
     return env
-
-
-def _is_agentx_client_key(key: str, env: "Mapping[str, str]") -> bool:
-    """True for a knob :func:`apply_agentx_switch` forwards to the AgentX client."""
-    from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
-
-    if key.startswith("AGENTX_"):
-        return True
-    return is_mlperf_backend(env) and (key.startswith(("MLPERF_", "AGENTIC_")) or key == BACKEND_ENV)
 
 
 # GEAK's own names for the axes Hyperloom hands it: ``E2E_METRIC`` selects one
@@ -368,7 +359,7 @@ def apply_agentx_switch(
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
     for key, value in _agentx_env.items():
-        if _is_agentx_client_key(key, _agentx_env):
+        if is_agentx_client_key(key, _agentx_env):
             envs[key] = value
     envs[BACKEND_ENV] = "mlperf"
     # The harness dials a fixed port and model name. Pinning both here is the
@@ -392,52 +383,6 @@ def apply_agentx_switch(
         pinned_by=("--served-model-name", "--served_model_name"),
     )
     bench["workload_spec"] = build_agentx_workload_spec(envs, env=_agentx_env, grading=grading)
-
-
-def prepare_agentx_runtime(
-    *,
-    env: dict[str, str] | None = None,
-    inferencex_path: str | None = None,
-    config_path: Path | str | None = None,
-    active: bool | None = None,
-) -> str | None:
-    """Deploy and preflight AgentX assets for baseline/profile runs."""
-    from hyperloom.common.agentx_workload import is_mlperf_backend
-
-    runtime_env = env or os.environ
-    if not is_mlperf_backend(runtime_env):
-        return None
-    if active is None:
-        active = agentx_enabled(runtime_env)
-        if not active and config_path:
-            try:
-                materialized = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-                benchmark = materialized.get("benchmark") if isinstance(materialized, dict) else {}
-                from hyperloom.common.agentx_workload import is_agentx_client_script
-
-                active = isinstance(benchmark, dict) and is_agentx_client_script(
-                    str(benchmark.get("benchmark_script") or "")
-                )
-            except (OSError, ValueError, TypeError):
-                active = False
-    if not active:
-        return None
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return None
-    try:
-        from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
-        from hyperloom.inference_optimizer.agentx.runtime import maybe_prepare_agentx
-
-        maybe_prepare_agentx(
-            env=runtime_env,
-            inferencex_path=str(inferencex_path or ""),
-            config_path=Path(config_path) if config_path else "",
-        )
-    except AgentXPreflightError as exc:
-        return f"AgentX preflight failed: {exc}"
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError) as exc:
-        return f"AgentX runtime preparation failed: {type(exc).__name__}: {exc}"
-    return None
 
 
 def _scriptable_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
@@ -576,42 +521,11 @@ def _apply_vllm_source_runtime(bench: dict[str, Any], envs: dict[str, Any]) -> N
     envs["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(entries))
 
 
-def _custom_script_path(runner_type: str) -> str:
-    """Locate the operator's entrypoint inside ``$HYPERLOOM_BYPASS_SCRIPTS_DIR``.
-
-    Prefers the ``custom_{runner_type}.sh`` convention, then a lone ``.sh`` in
-    the directory, which is what an operator who wrote one script for one
-    machine actually has. Returns ``""`` when neither applies, leaving the
-    resolution chain in ``bypass_scriptable`` to report the miss.
-    """
-    raw = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip()
-    if not raw:
-        return ""
-    scripts_dir = Path(raw)
-    if not scripts_dir.is_dir():
-        return ""
-    preferred = scripts_dir / f"custom_{runner_type}.sh"
-    if preferred.is_file():
-        return str(preferred)
-    candidates = sorted(p for p in scripts_dir.glob("*.sh") if p.is_file())
-    return str(candidates[0]) if len(candidates) == 1 else ""
-
-
 def _operator_extra_env() -> dict[str, str]:
     """Return the ``--extra-env`` pins the CLI serialized, or ``{}``."""
     from hyperloom.common.env_safety import operator_extra_env
 
     return {key: value for key, value in operator_extra_env().items() if key.strip().upper() != "RUN_EVAL"}
-
-
-def resolve_reference_launch() -> tuple[str, dict[str, str], dict[str, Any]]:
-    """Read the accepted reference recipe and its dedicated launch controls."""
-    from hyperloom.inference_optimizer.session.paths import session_dir
-
-    from ...state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir())
-    return state.reference_server_args.strip(), dict(state.reference_envs), dict(state.reference_launch_controls)
 
 
 def apply_scriptable_runtime_defaults(
@@ -623,11 +537,9 @@ def apply_scriptable_runtime_defaults(
 ) -> None:
     """Re-pin an operator's scriptable entrypoint and its runtime paths.
 
-    Every config path that re-derives ``benchmark_script`` from ``gpu_type``
-    must call this, otherwise the bare ``{framework}_{gpu_type}.sh`` it writes
-    replaces the resolved absolute path. Only the ``custom`` framework has such
-    an entrypoint: its repo and script arrive at launch, so this only wires what
-    was given and leaves anything missing to fail where it is diagnosable.
+    Only the ``custom`` framework has such an entrypoint: its repo and script
+    arrive at launch, so this only wires what was given and leaves anything
+    missing to fail where it is diagnosable.
 
     ``--extra-env`` is the only channel an operator has for the knobs their own
     script reads, so those pins are written into ``benchmark.envs`` rather than
@@ -642,7 +554,7 @@ def apply_scriptable_runtime_defaults(
     runner_type = _scriptable_runner_type(bench, gpu_type)
     bench["runner_type"] = runner_type
     if not explicit_benchmark_script:
-        script = _custom_script_path(runner_type)
+        script = operator_benchmark_script("custom", runner_type)
         if script:
             bench["benchmark_script"] = script
 
@@ -811,12 +723,12 @@ def _coerce_workload_int_env(env_key: str, raw: str) -> int:
 
 
 def default_baseline_config() -> Path:
-    """Resolve the shipped Magpie YAML for ``$FRAMEWORK``, or for the default framework when it is unset.
+    """Resolve the shipped point YAML for ``$FRAMEWORK``, or for the default framework when it is unset.
 
     Resolved at call time so ``$INFERENCE_OPTIMIZER_ASSET_ROOT`` is honoured.
 
     Returns:
-        Path: The shipped Magpie YAML config path for the resolved framework.
+        Path: The shipped point YAML config path for the resolved framework.
     """
     from hyperloom.common.benchmark_config import benchmark_config_path
 
@@ -882,7 +794,7 @@ def _finalize_framework_server_args(
         bench.get("framework"),
     )
     # 6. JSON-valued flags (--speculative-config / --compilation-config /
-    #    --hf-overrides ...): Magpie expands $EXTRA_VLLM_ARGS unquoted, so
+    #    --hf-overrides ...): $EXTRA_VLLM_ARGS travels unquoted, so
     #    compact each JSON blob to be space-free so it survives as one shell
     #    word. No-op for arg strings with no JSON.
     resolved_server_args = compact_json_server_args(resolved_server_args)
@@ -914,18 +826,11 @@ def _pin_benchmark_target(bench: dict[str, Any], target: BenchmarkTarget) -> Non
     precision = os.environ.get("PRECISION", "").strip()
     if precision:
         bench["precision"] = precision
-    if target.gpu_type:
-        bench["runner_type"] = gpu_runner_type(target.gpu_type)
-        framework = str(bench.get("framework") or "").lower()
-        if framework:
-            bench["benchmark_script"] = f"{framework}_{bench['runner_type']}.sh"
-        else:
-            bench.pop("benchmark_script", None)
     if target.benchmark_script:
         bench["benchmark_script"] = str(target.benchmark_script)
     effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     if effective_inferencex_path:
-        # Persist the resolved InferenceX checkout so Magpie's runtime checkout
+        # Persist the resolved InferenceX checkout so the round's checkout
         # matches Hyperloom's patch target.
         bench["inferencex_path"] = effective_inferencex_path
 
@@ -1088,39 +993,24 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     )
 
 
-def _seed_reference_launch(bench: dict[str, Any], framework_env: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def _seed_base_launch(bench: dict[str, Any], framework_env: str) -> None:
+    """Put the session's server base below the YAML and any per-task args (leftmost, so later merges win)."""
     envs = bench["envs"]
-    # Seed the framework server-args env + envs from a reference recipe below
-    # the YAML base and any per-task extra_server_args (reference flags leftmost,
-    # so last-wins lets later merges override them).
-    ref_args, reference_envs, reference_controls = resolve_reference_launch()
-    for name in reference_controls.get("unset_envs", []):
-        envs.pop(name, None)
-    if ref_args or reference_controls.get("remove_args") or reference_controls.get("args_mode") == "replace":
+    base = session_server_base()
+    if base.args:
         from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
         envs[framework_env] = compose_server_args(
-            base_extra_args=ref_args,
-            variant_extra_args=""
-            if reference_controls.get("args_mode") == "replace"
-            else str(envs.get(framework_env, "")),
-            remove_args=reference_controls.get("remove_args"),
-            args_mode="replace",
+            base_extra_args=base.args, variant_extra_args=str(envs.get(framework_env, "")), args_mode="replace"
         )
-    for _rk, _rv in reference_envs.items():
-        envs.setdefault(str(_rk), str(_rv))  # never clobber YAML/CLI envs
-    if reference_controls.get("overlay_pythonpath"):
-        from hyperloom.common.overlay import validate_overlay_pythonpath
-
-        prepend_launch_path(envs, "PYTHONPATH", validate_overlay_pythonpath(reference_controls["overlay_pythonpath"]))
-    return reference_envs, reference_controls
+    for name, value in base.env.items():
+        envs.setdefault(name, value)  # never clobber YAML/CLI envs
 
 
 def _merge_caller_overrides(
     bench: dict[str, Any], framework_env: str, server_args: str, replace_args: bool, extra_envs: dict[str, Any] | None
-) -> dict[str, Any]:
+) -> None:
     envs = bench["envs"]
-    recipe_overwritten = launcher_overwritten_envs(bench)
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's
         # graph-capture flags aren't dropped.
@@ -1134,7 +1024,7 @@ def _merge_caller_overrides(
                 # than relying on duplicate last-wins flags.
                 existing = remove_moe_runner_backend_arg(existing)
             envs[framework_env] = merge_server_args(existing, server_args)
-    # Magpie forwards only ``benchmark.envs``, so ``--extra-env`` lands there for
+    # Only ``benchmark.envs`` reaches the round, so ``--extra-env`` lands there for
     # every framework: vLLM Ray workers see MTP pins only this way.
     combined_extra: dict[str, Any] = dict(_operator_extra_env())
     from hyperloom.common.agentx_workload import is_agentx_client_script
@@ -1143,14 +1033,11 @@ def _merge_caller_overrides(
         # The AgentX switch already settled these from the same pins; the raw
         # pin would undo its CONC scaling of the warmup grace.
         agentx_env = agentx_env_for_conc()
-        combined_extra = {k: v for k, v in combined_extra.items() if not _is_agentx_client_key(k, agentx_env)}
+        combined_extra = {k: v for k, v in combined_extra.items() if not is_agentx_client_key(k, agentx_env)}
     if extra_envs:
         combined_extra.update(extra_envs)
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
-        combined_extra,
-        # A name the recipe re-exports unconditionally cannot be overridden
-        # here; carrying it into the YAML publishes a value the run never used.
-        allow_predicate=lambda key: is_allowed_variant_env_key(key) and key not in recipe_overwritten,
+        combined_extra, allow_predicate=is_allowed_variant_env_key
     )
     for _dk in dropped_extra_envs:
         log.warning("Dropping extra_envs key %s before benchmark materialization", _dk)
@@ -1170,7 +1057,6 @@ def _merge_caller_overrides(
     envs.setdefault("AITER_LOG_TUNED_CONFIG", "1")
     prefer_dir = "CUSTOM_DIR" in safe_extra_envs and "CUSTOM_REPO_PATH" not in safe_extra_envs
     _sync_repo_aliases(bench, envs, framework="custom", prefer_dir=prefer_dir)
-    return safe_extra_envs
 
 
 def _settle_merged_server_args(bench: dict[str, Any], framework_env: str) -> None:
@@ -1199,7 +1085,7 @@ def _settle_merged_server_args(bench: dict[str, Any], framework_env: str) -> Non
 
 def _publish_scriptable_wiring(bench: dict[str, Any], window: _RequestWindow, establish_quality_ref: bool) -> None:
     envs = bench["envs"]
-    # Magpie forwards only ``benchmark.envs`` to the wrapper subprocess, so
+    # Only ``benchmark.envs`` reaches the round's processes, so
     # re-inject the quality reference here (the single scriptable choke point)
     # or the shipped empty YAML default silently skips the gate. What the
     # reference holds is the workload's business — an xDiT image, an operator's
@@ -1209,7 +1095,7 @@ def _publish_scriptable_wiring(bench: dict[str, Any], window: _RequestWindow, es
     # ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``) so baseline + variants
     # resolve the same file.
     if not window.serves_requests:
-        _qref = _first_env(_QUALITY_REF_ENVS)
+        _qref = _first_env(QUALITY_REF_ENVS)
         if not _qref:
             from hyperloom.inference_optimizer.session.paths import session_dir
 
@@ -1220,7 +1106,7 @@ def _publish_scriptable_wiring(bench: dict[str, Any], window: _RequestWindow, es
             _ref_compare, _ref_write = "", (_first_env(_QUALITY_REF_WRITE_ENVS) or _qref)
         else:
             _ref_compare, _ref_write = _qref, ""
-        for _name in _QUALITY_REF_ENVS:
+        for _name in QUALITY_REF_ENVS:
             envs[_name] = _ref_compare
         for _name in _QUALITY_REF_WRITE_ENVS:
             envs[_name] = _ref_write
@@ -1275,7 +1161,7 @@ def _pin_model_launch_workarounds(bench: dict[str, Any], model_path: str | None)
         # vLLM registers this checkpoint under MiMoV2FlashForCausalLM but the HF
         # config declares MiMoV2ForCausalLM, which the pod-local vLLM build
         # rejects at boot. Remap the arch via --hf-overrides. vLLM-only; JSON
-        # kept space-free so it survives Magpie's unquoted splice.
+        # kept space-free so it survives the unquoted splice.
         if _mimo_is_vllm:
             add_server_arg_unless_pinned(
                 envs,
@@ -1287,8 +1173,8 @@ def _pin_model_launch_workarounds(bench: dict[str, Any], model_path: str | None)
     # Models like MiniMax-M3 (MSA) place the main K/V and the indexer side-cache
     # in one KV-cache group whose sparse backends only accept the model's
     # sparse_attention_config.sparse_block_size (e.g. 128). vLLM's default
-    # --block-size 16 (and the value Magpie bakes in when EXTRA_VLLM_ARGS is
-    # empty) has no common block size with it, so KV-cache init aborts with
+    # --block-size 16 (and the generic launcher's default when EXTRA_VLLM_ARGS
+    # is empty) has no common block size with it, so KV-cache init aborts with
     # "No common block size for 16" -- baseline, roofline, and every
     # explore variant crash at startup. Read the required size from the
     # model config and pin --block-size at this shared choke point so it rides
@@ -1318,8 +1204,7 @@ def _pin_client_model_access(bench: dict[str, Any], model_path: str | None, mode
     # same remote code or transformers raises mid-warmup. Mirror it onto every
     # client-trust env. setdefault never overrides an operator opt-out.
     for _trust_key in (
-        "MAGPIE_TRUST_REMOTE_CODE",  # Magpie sglang remote-direct client
-        "BENCH_TRUST_REMOTE_CODE",  # GEAK bench_e2e.sh inferencex client
+        "BENCH_TRUST_REMOTE_CODE",  # the benchmark client
         "HF_HUB_TRUST_REMOTE_CODE",  # transformers / HF hub tokenizer auto-load
     ):
         envs.setdefault(_trust_key, "1")
@@ -1344,9 +1229,8 @@ def _pin_accuracy_eval_envs(envs: dict[str, Any]) -> None:
     # Accuracy eval (GSM8K) is ON unless the round passes ``extra_envs["RUN_EVAL"]`` or the workload is AgentX.
     if "RUN_EVAL" not in envs:
         envs["RUN_EVAL"] = "true"
-    # Persist eval task/limit into the YAML so they become part of the
-    # fingerprint-able contract and bypass_runner reads them from a stable source.
-    for _eval_key in ("MAGPIE_EVAL_TASKS", "MAGPIE_EVAL_LIMIT"):
+    # Persist eval task/limit into the YAML: the measurement surface hashes them and the round reads them from there.
+    for _eval_key in (ENV_EVAL_TASKS, ENV_EVAL_LIMIT):
         _eval_value = os.environ.get(_eval_key, "").strip()
         if _eval_value and _eval_key not in envs:
             envs[_eval_key] = _eval_value
@@ -1355,14 +1239,14 @@ def _pin_accuracy_eval_envs(envs: dict[str, Any]) -> None:
     # accuracy eval. Force string prompts so the gate works. Explicit env /
     # extra_envs win; only disaggregated runs are touched (aggregated hits the
     # sglang server directly, which accepts token-id prompts).
-    _eval_tok_env = os.environ.get("MAGPIE_EVAL_TOKENIZED_REQUESTS", "").strip()
+    _eval_tok_env = os.environ.get(ENV_EVAL_TOKENIZED_REQUESTS, "").strip()
     if not _eval_tok_env:
         from ._multi_node_env import resolve_kb_topology
 
         if str(resolve_kb_topology().pd_mode or "").lower() == "disaggregated":
             _eval_tok_env = "false"
-    if _eval_tok_env and "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in envs:
-        envs["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = _eval_tok_env
+    if _eval_tok_env and ENV_EVAL_TOKENIZED_REQUESTS not in envs:
+        envs[ENV_EVAL_TOKENIZED_REQUESTS] = _eval_tok_env
 
 
 def _pin_runtime_build_envs(
@@ -1388,19 +1272,15 @@ def _pin_runtime_build_envs(
     if (
         "sglang" in str(bench.get("framework") or "").lower()
         and str(bench.get("precision") or "").strip().lower() == "fp8"
-        and _resolve_amd_gpu_type(gpu_type or bench.get("runner_type")) in _GFX942_GPU_TYPES
+        and _resolve_amd_gpu_type(gpu_type) in _GFX942_GPU_TYPES
         and _fp8_is_per_channel_per_token(str(model_path or os.environ.get("MODEL_PATH", "")))
     ):
         envs.setdefault("SGLANG_USE_AITER_FP8_PER_TOKEN", "1")
 
 
-def _apply_caller_removals(
-    envs: dict[str, Any], framework_env: str, remove_args: Any, unset_envs: Any, stale: list[str]
-) -> None:
+def _apply_caller_removals(envs: dict[str, Any], framework_env: str, remove_args: Any, unset_envs: Any) -> None:
     remove_list = to_str_list(remove_args)
     unset_list = to_str_list(unset_envs)
-    for key in stale:
-        envs.pop(key, None)
     if remove_list:
         envs[framework_env] = remove_server_args(envs.get(framework_env, ""), remove_list)
     for key in unset_list:
@@ -1520,11 +1400,9 @@ def prepare_grid_benchmark_config(
     A native workload YAML that was never materialized (the pre-baseline fallback) is
     materialized first, so the operator ``--server-args`` reach every candidate.
     """
-    from .magpie_agentx import load_benchmark, native_config
-
-    if native_config(config_path):
-        agentx = load_benchmark(config_path)["agentx"]
-        if isinstance(agentx, dict) and "append_args" in agentx.get("launch_overrides", {}):
+    point = read_benchmark_point(config_path)
+    if point.agentx:
+        if point.agentx_launch.composed:
             return config_path
         return materialize_benchmark_config(
             config_path, output_dir, launch=LaunchLayer(args_mode=launch.args_mode), target=target, options=options
@@ -1543,17 +1421,21 @@ def materialize_benchmark_config(
     """Resolve the workload owner before applying server candidate changes."""
     import yaml
 
-    from hyperloom.common.benchmark_config import is_magpie_agentx
     from hyperloom_common.coerce import to_str_list
-    from .magpie_agentx import LaunchChanges, apply_launch_changes, materialize_agentx, recipe_base_launch
+    from .agentx_point import (
+        LaunchChanges,
+        apply_launch_changes,
+        materialize_agentx,
+        seed_session_base,
+    )
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    if not is_magpie_agentx(config["benchmark"]):
+    if not BenchmarkPoint.from_document(config, source=str(config_path)).agentx:
         return materialize_config_with_envs(config_path, output_dir, launch=launch, target=target, options=options)
     replacing = launch.args_mode == "replace"
     inherited = "" if replacing else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
-    recipe = recipe_base_launch(config_path)
-    apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), recipe=recipe, accepted=True)
+    seed_session_base(config["benchmark"], session_server_base())
+    apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), accepted=True)
     from hyperloom_common.env import is_truthy
 
     unset_envs = to_str_list(launch.unset_envs)
@@ -1571,7 +1453,7 @@ def materialize_benchmark_config(
         log.warning("Dropping extra_envs key %s before AgentX materialization", key)
     server_env.update(launch.extra_envs or {})
     if is_truthy(server_env.pop("RUN_EVAL", False)):
-        raise ValueError("AgentX uses Magpie's replay validity; RUN_EVAL cannot enable GSM8K for this workload")
+        raise ValueError("AgentX uses the replay's validity; RUN_EVAL cannot enable GSM8K for this workload")
     changes = LaunchChanges(
         launch.extra_server_args,
         server_env,
@@ -1579,7 +1461,7 @@ def materialize_benchmark_config(
         unset_envs,
         replacing,
     )
-    apply_launch_changes(config["benchmark"], changes, recipe=recipe, accepted=True)
+    apply_launch_changes(config["benchmark"], changes, accepted=True)
     return materialize_agentx(
         config,
         output_dir / options.out_name,
@@ -1595,7 +1477,7 @@ def materialize_config_with_envs(
     target: BenchmarkTarget = BenchmarkTarget(),
     options: MaterializeOptions = MaterializeOptions(),
 ) -> Path:
-    """Render a per-run Magpie YAML with caller-provided overrides.
+    """Render a per-run point YAML with caller-provided overrides.
 
     The process env wins over the YAML defaults, and the body is the order the phases run
     in: what the run launches, the request shape it serves, the server arguments composed
@@ -1627,8 +1509,8 @@ def materialize_config_with_envs(
     _pin_workload_shape_envs(envs)
     framework_env = server_args_env_name(bench.get("framework"))
     window = _shape_request_window(bench)
-    reference_envs, reference_controls = _seed_reference_launch(bench, framework_env)
-    safe_extra_envs = _merge_caller_overrides(bench, framework_env, server_args, replace_args, launch.extra_envs)
+    _seed_base_launch(bench, framework_env)
+    _merge_caller_overrides(bench, framework_env, server_args, replace_args, launch.extra_envs)
     _settle_merged_server_args(bench, framework_env)
     _publish_scriptable_wiring(bench, window, options.establish_quality_ref)
     model_basename = _pin_model_launch_workarounds(bench, target.model_path)
@@ -1636,9 +1518,7 @@ def materialize_config_with_envs(
     _pin_client_model_access(bench, target.model_path, model_basename)
     _pin_accuracy_eval_envs(envs)
     _pin_runtime_build_envs(bench, target.model_path, target.gpu_type, options.flydsl_source_dirs)
-    unset_by_reference = reference_controls.get("unset_envs", [])
-    stale = [k for k in unset_by_reference if k not in reference_envs and k not in safe_extra_envs]
-    _apply_caller_removals(envs, framework_env, launch.remove_args, launch.unset_envs, stale)
+    _apply_caller_removals(envs, framework_env, launch.remove_args, launch.unset_envs)
     _restate_profile_capture(envs, framework_env, window, replace_args)
     _apply_vllm_source_runtime(bench, envs)
     if window.patched_copy is not None:

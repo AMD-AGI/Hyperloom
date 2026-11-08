@@ -20,6 +20,40 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A `custom` workload's entrypoint is named after the board itself.**
+  `--benchmark-scripts-dir` is searched for `custom_<gpu-type>.sh` with the
+  board as given, so `mi308x`, `mi325x` and `mi350x` now look for
+  `custom_mi308x.sh`, `custom_mi325x.sh` and `custom_mi350x.sh`; they were
+  folded into `custom_mi300x.sh` and `custom_mi355x.sh` before. **Upgrade
+  note:** on those boards, rename the script, or keep it the only `.sh` in
+  the directory; an unresolved entrypoint exits 2 at launch. See
+  [Optimize a custom workload](how-to/optimize-custom-workload.md#the-entrypoint).
+
+- **A fixed-workload session resolves its base launch once and freezes it
+  as `base_launch.json`.** The base comes from `--reference-script`, else
+  InferenceX `main`, else the framework's cookbook `main`, else a default
+  table (with a warning); omitted `--tp` / `--ep` follow the base. Resume
+  reads the frozen file and never refetches. A `--reference-script` flag set
+  from a shell variable, which used to be dropped silently, now exits 2, as
+  does a `# hyperloom-launch-controls:` line; `--host`, `--port`,
+  `--served-model-name` and `--result-*` are recorded as stripped. A JSON
+  `base_launch.json` from an earlier session is accepted as the launch file.
+  **Upgrade note:** a session whose state predates `base_launch.json`
+  cannot be resumed; start a new one. A `current_setting.sh` that records
+  launch controls no longer re-feeds as `--reference-script`. See
+  [Choose the base launch](how-to/optimize.md#choose-the-base-launch).
+
+- **Bump validated vLLM stack to 0.33.0 (ROCm 10 docker) and accept the relocated graph-capture marker.**
+  Switches the recommended vLLM image to `docker.io/vllm/vllm-openai-rocm:v0.33.0-rocm100`
+  (docs, examples, `models.tsv`, installer hint), bumps the bare-metal defaults
+  (`VLLM_VERSION=0.33.0`, `VLLM_ROCM_VARIANT=rocm72`, `VLLM_SOURCE_REF` at the `v0.33.0`
+  release commit), and clears the image entrypoint in the Slurm `docker run` branch.
+  The TraceLens patch check now looks for `capture_traces` in `vllm/profiler/wrapper.py`
+  from vLLM 0.32, where the patch writes it, so a correctly patched tree is no longer
+  rolled back. **Upgrade note:** move from
+  `rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0` to
+  `vllm/vllm-openai-rocm:v0.33.0-rocm100` (or match `VLLM_VERSION` and `VLLM_SOURCE_REF` on bare metal).
+
 - **Bump validated SGLang stack to 0.5.23 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
   `lmsysorg/sglang-rocm:v0.5.23-rocm10-*` image tags, `models.tsv`, the

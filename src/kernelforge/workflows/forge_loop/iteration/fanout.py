@@ -68,6 +68,9 @@ class LaneResult:
     # exists. The round deletes that copy on return, so the measuring iteration
     # and a later process read it from the queue rather than resuming the session.
     lesson: SummaryOutcome = field(default_factory=SummaryOutcome)
+    # The iteration that planned the round and the commit its lanes were copied from, which ``diff`` applies to.
+    round_iteration: int = 0
+    base_commit: str = ""
     # What this lane's teardown found, carried structured rather than folded
     # into ``error``. The two say different things to different readers: the
     # error is why THIS lane produced nothing, which costs the round one
@@ -95,11 +98,16 @@ class LaneResult:
             "agent_profile_id": self.agent_profile_id,
             "lesson": self.lesson.text,
             "lesson_reason": self.lesson.reason,
+            "round_iteration": self.round_iteration,
+            "base_commit": self.base_commit,
         }
 
     @classmethod
     def from_dict(cls, entry: dict) -> "LaneResult":
-        """One queued candidate. An entry holding neither a lesson nor its reason restores with a reason saying so."""
+        """One queued candidate. An entry holding neither a lesson nor its reason restores with a reason saying so.
+
+        A queue written before the round and base commit were recorded restores with neither.
+        """
         text, reason = str(entry.get("lesson") or ""), str(entry.get("lesson_reason") or "")
         if not text and not reason:
             reason = "the lane queue held no record for this lane"
@@ -109,6 +117,8 @@ class LaneResult:
             diff=str(entry["diff"]),
             agent_profile_id=str(entry.get("agent_profile_id") or ""),
             lesson=SummaryOutcome(text=text, reason=reason),
+            round_iteration=int(entry.get("round_iteration") or 0),
+            base_commit=str(entry.get("base_commit") or ""),
         )
 
 

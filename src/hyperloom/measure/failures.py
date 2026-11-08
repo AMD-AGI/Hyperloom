@@ -156,23 +156,16 @@ _PORT_IN_USE = re.compile(r"address already in use|\[Errno 98\]", re.IGNORECASE)
 # Sentinel return codes of the local flow (``orchestrator/actions/executors/_subprocess_kill.py``). The names stay
 # literal here because ``measure`` must not import another package's private module; ``test_failures`` pins every
 # value to its definition.
-_SERVER_STALLED_RC = -911
-_AGENTX_PREFLIGHT_RC = -912
-_EVAL_PROBE_UNPATCHABLE_RC = -914
 _SESSION_TIME_EXHAUSTED_RC = -915
 _ORCHESTRATOR_CANCELLED_RC = -917
 
 _INFRA_RETURNCODES = {
     HOSTED_RUNNER_UNAVAILABLE_RC: "runner_unavailable",
     HOSTED_INFRA_FAILURE_RC: "infra_failure",
-    # The AgentX client is missing or not the pinned build: an environment failure.
-    _AGENTX_PREFLIGHT_RC: "agentx_preflight",
 }
 _PROGRAM_ERROR_RETURNCODES = {
     HOSTED_SPEC_REJECTED_RC: "spec_rejected",
     HOSTED_RESULT_REJECTED_RC: "result_rejected",
-    # The eval probe cannot be installed although its target is present: a framework defect, deterministic.
-    _EVAL_PROBE_UNPATCHABLE_RC: "eval_probe_unpatchable",
 }
 _STOPPED_RETURNCODES = {
     _SESSION_TIME_EXHAUSTED_RC: "session_time_exhausted",
@@ -243,9 +236,6 @@ def classify_test_failure(
     named = _named_by_logs(text)
     if named is not None:
         return named
-    if returncode == _SERVER_STALLED_RC:
-        # The silence watchdog reaped a ready server that stopped writing; a crash it logged before going quiet names it.
-        return _unclear("server_stalled")
     if returncode == SERVER_BOOT_TIMEOUT_RC:
         return _candidate(f"{SERVER_BOOT_TIMEOUT_REASON}: {detail}" if detail else SERVER_BOOT_TIMEOUT_REASON)
     return _from_unnamed_logs(text)

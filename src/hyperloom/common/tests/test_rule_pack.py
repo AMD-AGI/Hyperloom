@@ -115,9 +115,9 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "ENV_EP": "EP",
     "ENV_EVAL_ONLY": "EVAL_ONLY",
     "ENV_ISL": "ISL",
-    "ENV_MAGPIE_EVAL_LIMIT": "MAGPIE_EVAL_LIMIT",
-    "ENV_MAGPIE_EVAL_TASKS": "MAGPIE_EVAL_TASKS",
-    "ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS": "MAGPIE_EVAL_TOKENIZED_REQUESTS",
+    "ENV_EVAL_LIMIT": "HYPERLOOM_EVAL_LIMIT",
+    "ENV_EVAL_TASKS": "HYPERLOOM_EVAL_TASKS",
+    "ENV_EVAL_TOKENIZED_REQUESTS": "HYPERLOOM_EVAL_TOKENIZED_REQUESTS",
     "ENV_MAX_MODEL_LEN": "MAX_MODEL_LEN",
     "ENV_NUM_PROMPTS": "NUM_PROMPTS",
     "ENV_NUM_WARMUPS": "NUM_WARMUPS",
@@ -138,6 +138,7 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "HIP_NO_KERNEL_IMAGE": "no kernel image is available",
     "HIP_UNDEFINED_SYMBOL": "undefined symbol",
     "HSA_STATUS_ERROR": "HSA_STATUS_ERROR",
+    "HUB_RATE_LIMITED": r"429 Too Many Requests(?:: you have reached your '[^']+' rate limit| for url: https://huggingface\.co/)",
     "INITIAL_PID_NAMESPACE": "pid:[4026531836]",
     "KFD_NODES": "topology/nodes",
     "KFD_NODE_GPU_ID": "gpu_id",
@@ -229,7 +230,7 @@ def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
     assert pack.version == str(yaml.safe_load(DEFAULT_PACK_PATH.read_text(encoding="utf-8"))["version"])
     assert Counter(entry.kind for entry in pack.entries.values()) == {
-        Kind.NAMES: 20,
+        Kind.NAMES: 19,
         Kind.LOG_REGEX: 15,
         Kind.ENV_DEFAULT: 1,
         Kind.COMPONENT_LAYOUT: 9,

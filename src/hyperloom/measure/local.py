@@ -21,7 +21,6 @@ import asyncio
 import contextlib
 import dataclasses
 import json
-import logging
 import os
 import shutil
 import sys
@@ -34,8 +33,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from inference_suite.contracts import FailedStep, RunLayout
 
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
 from hyperloom_common.env import is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.outside_facts import (
@@ -44,11 +44,9 @@ from hyperloom.common.outside_facts import (
     ENV_NUM_PROMPTS,
     ENV_RUN_EVAL,
     ENV_TP,
-    MAGPIE_AGENTX_CLIENT_LOG,
     ROCR_VISIBLE_DEVICES_ENV,
 )
 from hyperloom.contracts.measurement import PhaseTiming, SandboxFacts
-from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.attachments import AttachmentError, place_attachments, substitute
 from hyperloom.measure.accuracy import read_accuracy
 from hyperloom.measure import log_causes
@@ -82,7 +80,6 @@ from hyperloom.measure.long_context.held import (
     served_by,
 )
 from hyperloom.measure.long_context import staging as long_context_staging
-from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.phases import (
     JIT_CACHE,
     KERNEL_TABLES,
@@ -93,8 +90,7 @@ from hyperloom.measure.phases import (
     PhaseRecorder,
 )
 from hyperloom.measure.points import AMBIENT_SHAPE_ENVS, launch_carriers
-from hyperloom.measure.ports import DEV_SANDBOX_PORTS, pick_port_outside_dev_sandboxes
-from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
+from hyperloom.common.ports import pick_server_port
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces, round_has_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_TIMEOUT_RC
@@ -110,33 +106,28 @@ from hyperloom.measure.spec import Attachment
 from hyperloom.measure.spec import EnvRoot as SpecEnvRoot
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
-    REUSE_PORT_DEFAULT,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    RoundFolder,
     GridLaunch,
     GridRecipe,
     GridStop,
     GridVariant,
     LaunchLayer,
     VariantResult,
-    assign_free_port,
+    is_round_folder,
     resolve_lifecycle_params,
     run_grid,
     run_grid_warmup_enabled,
-    teardown_lifecycle_server,
+    teardown_variant_server,
 )
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, current_cancel_scope, use_cancel_scope
-from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_backend
-from hyperloom.orchestrator.actions.stop_attribution import (
-    ORCHESTRATOR_CANCELLED_CLASS,
-    SESSION_TIME_EXHAUSTED_CLASS,
-)
-
-log = logging.getLogger(__name__)
+from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, SESSION_TIME_EXHAUSTED_CLASS
+from hyperloom.orchestrator.state.base_launch import freeze_base
 
 __all__ = ["LocalMeasurementBackend", "SUPPORTED_KINDS", "TestCallRefused"]
 
 #: ``VariantResult.error_class`` of a round the per-round cap reaped.
-_TIMEOUT_CLASSES = frozenset({"magpie_timeout", "warmup_magpie_timeout"})
+_TIMEOUT_CLASSES = frozenset({FailedStep.ROUND_TIMEOUT.value})
 #: Return codes of rounds the run itself stopped, keyed by the class the result carries.
 _STOP_RETURNCODES = {
     SESSION_TIME_EXHAUSTED_CLASS: SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -172,21 +163,18 @@ _CONTRIBUTING = frozenset({_TEST, _ACCURACY})
 #: The old flow reads the process environment, so two tests in one process would see each other's settings.
 _PROCESS_LOCK = threading.Lock()
 
-#: What a boot round pins in its round's environment, on top of the point and of what the backend says a boot round is
-#: (``boot_phase_envs``). A boot round only brings a server up for the rounds that measure, yet Magpie runs the server
-#: phase and then a full client round whatever ``MAGPIE_RUN_PHASE`` says, so that round has to be made small: no
-#: evaluation (``RUN_EVAL``: 1319 questions on a GSM8K point) and one request, not the point's ``NUM_PROMPTS``. Both are
-#: in Magpie's ``CLIENT_ONLY_REUSE_ENV_KEYS``, which a persistent server's reuse check leaves out; a variable outside
-#: those keys would make the check refuse the rounds that measure. ``NUM_WARMUPS`` stays the point's (Magpie takes its
-#: warmups from the concurrency). An AgentX point has no evaluation round and no prompt count; its boot round carries
-#: only what the backend says.
+#: What a boot round pins in its round's environment, on top of the point. A boot round only brings a server up for the
+#: rounds that measure, and pins it small in case it runs a load: no evaluation (``RUN_EVAL``: 1319 questions on a
+#: GSM8K point) and one request, not the point's ``NUM_PROMPTS``. Both are client-only knobs, so the rounds that measure
+#: reuse the server the boot round started. ``NUM_WARMUPS`` stays the point's. An AgentX point has no evaluation round
+#: and no prompt count; its boot round pins nothing.
 _BOOT_CLIENT_ENVS = {ENV_RUN_EVAL: "false", ENV_NUM_PROMPTS: "1"}
 _WARMUP, _EVAL = ROLE_WARMUP, ROLE_EVAL  # a held test's rounds other than the measured one are named for their roles
-#: No bench of a graded test evaluates, although its point does. ``RUN_EVAL`` is one of Magpie's
-#: ``CLIENT_ONLY_REUSE_ENV_KEYS``, so the server the first round booted is the one each later round reuses.
+#: No bench of a graded test evaluates, although its point does. ``RUN_EVAL`` is a client-only knob, so the server the
+#: first round booted is the one each later round reuses.
 _BENCH_ENVS = {ENV_RUN_EVAL: "false"}
-#: The evaluation round runs no bench: InferenceX's ``run_benchmark_serving`` returns before it on ``EVAL_ONLY``, which
-#: Magpie's reuse check leaves out (an ``EVAL_*`` name).
+#: The evaluation round runs no bench: InferenceX's ``run_benchmark_serving`` returns before it on ``EVAL_ONLY``, a
+#: client-only knob (an ``EVAL_*`` name).
 _EVAL_ENVS = {ENV_RUN_EVAL: "true", ENV_EVAL_ONLY: "true"}
 #: What ``run_grid`` writes on a point whose warmup round it discarded, with the throughput of that round.
 _WARMUP_DISCARDED = "run_grid_warmup_discarded_first"
@@ -303,12 +291,8 @@ def _measure(call: TestCall, phases: PhaseRecorder, tracer: ruppell.Tracer | Non
         _framework_tables(call) as private,
         _patched_server(private.call) as call,
     ):
-        if call.kind == _PROFILE:
-            _patch_profile_client(call)
         with _test_environment(call) as unset_envs:
             call, tracer = _traced(call, tracer, notes)
-            if resolve_backend().name == "magpie":
-                install_launchers(call.points)
             run = _Run(call, [name for name in unset_envs if name not in private.redirected], phases=phases)
             run.traced = tracer
             with _watch_output(call), _guard_boot(run):
@@ -333,8 +317,11 @@ def _point_config(point: Path) -> dict[str, Any]:
     return yaml.safe_load(Path(point).read_text(encoding=_UTF8)) or {}
 
 
-def _point_envs(point: Path) -> dict[str, Any]:
-    return dict((_point_config(point).get("benchmark") or {}).get("envs") or {})
+def _point(point: Path) -> BenchmarkPoint:
+    try:
+        return read_benchmark_point(Path(point))
+    except BenchmarkPointError as exc:
+        raise TestCallRefused(str(exc)) from exc
 
 
 def _validate(call: TestCall) -> None:
@@ -371,10 +358,9 @@ def _validate_profile(call: TestCall) -> None:
         raise TestCallRefused("a profile test profiles one point; it is not a sweep")
     if call.accuracy:
         raise TestCallRefused("a profile test does not run accuracy")
-    benchmark = _point_config(call.points[0]).get("benchmark") or {}
-    torch_profiler = (benchmark.get("profiler") or {}).get("torch_profiler") or {}
-    client_profiling = str((benchmark.get("envs") or {}).get("PROFILE", "")).strip() == "1"
-    if torch_profiler.get("enabled") is not True or not (client_profiling or is_magpie_agentx(benchmark)):
+    point = _point(call.points[0])
+    client_profiling = str(point.envs.get("PROFILE", "")).strip() == "1"
+    if not point.torch_profiler or not (client_profiling or point.agentx):
         raise TestCallRefused(
             f"{call.points[0]} does not turn the torch profiler on (torch_profiler, and PROFILE=1 unless AgentX)"
         )
@@ -410,7 +396,7 @@ def _validate_repro(call: TestCall) -> None:
 
 def _check_run_eval(point: Path, accuracy: bool) -> None:
     """The point must say, explicitly, whether it runs accuracy; an unset ``RUN_EVAL`` means on in the old flow."""
-    raw = _point_envs(point).get(ENV_RUN_EVAL)
+    raw = _point(point).envs.get(ENV_RUN_EVAL)
     if raw is None:
         raise TestCallRefused(f"{point} does not set RUN_EVAL; an unset value runs accuracy")
     if is_truthy(raw, default=True) != accuracy:
@@ -418,30 +404,13 @@ def _check_run_eval(point: Path, accuracy: bool) -> None:
 
 
 def _levels(points: Sequence[Path]) -> list[int]:
-    return [int(_point_envs(point).get(ENV_CONC) or 0) for point in points]
+    return [int(_point(point).envs.get(ENV_CONC) or 0) for point in points]
 
 
 def _check_sweep_levels(points: Sequence[Path]) -> None:
     levels = _levels(points)
     if any(level <= 0 for level in levels) or len(set(levels)) != len(levels):
         raise TestCallRefused(f"every sweep point names its own CONC, got {levels}")
-
-
-def _patch_profile_client(call: TestCall) -> None:
-    """Make the InferenceX checkout a profile point runs honour the point's capture window, or refuse the test.
-
-    The checkout is the one the point names, else the session's; a test with neither (an AgentX point, whose client is
-    Magpie's, or a framework with no InferenceX script) has none to patch.
-    """
-    benchmark = _point_config(call.points[0]).get("benchmark") or {}
-    facts = call.session_facts
-    root = benchmark.get("inferencex_path") or (facts.inferencex_path if facts is not None else None)
-    if not root or is_magpie_agentx(benchmark) or framework_registry.is_scriptable(benchmark.get("framework")):
-        return
-    try:
-        patch_profile_client(root)
-    except ProfileClientError as exc:
-        raise TestCallRefused(str(exc)) from exc
 
 
 @contextlib.contextmanager
@@ -537,11 +506,9 @@ def _builds(environment: CompiledEnvironment) -> SheetBuilds | None:
 
 @contextlib.contextmanager
 def _test_environment(call: TestCall) -> Iterator[list[str]]:
-    """Set the process environment ``run_grid`` reads for this test, and put it back afterwards.
-
-    Yields the variables the test's rounds unset. The session directory is a fresh empty one, so the reference launch
-    the old flow keeps there reads as empty whatever else is on this machine.
-    """
+    """Set the process environment ``run_grid`` reads for this test, and put it back afterwards; yields the variables
+    the test's rounds unset. The session directory is a fresh one holding only the base the call carries, frozen as a
+    session freezes it, so the rounds never read the asking application's session."""
     facts = call.session_facts
     session = Path(tempfile.mkdtemp(prefix="hl-session-"))
     settings = {
@@ -553,7 +520,7 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
         settings["INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC"] = str(call.silence_timeout_sec)
     if facts is not None and facts.inferencex_path:
         settings["INFERENCEX_PATH"] = facts.inferencex_path
-    if call.kind == _PROFILE and (body := _point_envs(call.points[0]).get(_PROFILE_BODY_ENV)):
+    if call.kind == _PROFILE and (body := _point(call.points[0]).envs.get(_PROFILE_BODY_ENV)):
         settings[_PROFILE_BODY_ENV] = str(body)
     settings.update({str(key): str(value) for key, value in call.env_overrides.items()})
     saved = {key: os.environ.get(key) for key in (*AMBIENT_SHAPE_ENVS, *settings)}
@@ -561,13 +528,13 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
         os.environ.pop(key, None)
     os.environ.update(settings)
     try:
+        if facts is not None and facts.base_launch is not None:
+            freeze_base(session, facts.base_launch)
         yield list(dict.fromkeys([*(facts.reference_unset_envs if facts else ()), *call.unset_envs]))
     finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+        os.environ.update({key: value for key, value in saved.items() if value is not None})
+        for key in [key for key, value in saved.items() if value is None]:
+            os.environ.pop(key, None)
         shutil.rmtree(session, ignore_errors=True)
 
 
@@ -620,16 +587,11 @@ def _booting(run: _Run, point: int, round_args: dict[str, Any]) -> contextlib.Ab
     call = run.call
     if run.boot is None or round_args.get("server_already_ready") or call.serving_lease is not None:
         return contextlib.nullcontext()
-    limit = boot_limit_sec(_point_config(call.points[point]).get("benchmark") or {}, call.timeout_sec)
+    limit = boot_limit_sec(_point(call.points[point]), call.timeout_sec)
     return contextlib.nullcontext() if limit is None else run.boot.watching(limit)
 
 
 # --- running ------------------------------------------------------------------------------------------------------
-
-
-def _free_port() -> int:
-    """A free port, picked the way the lifecycle picks its own, but never one a dev sandbox serves on."""
-    return pick_port_outside_dev_sandboxes(lambda: assign_free_port(REUSE_PORT_DEFAULT))
 
 
 @contextlib.contextmanager
@@ -638,16 +600,16 @@ def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iter
 
     A round the server lifecycle does not hold (a profile round, a framework that cannot hold a server, a warmup that
     is not planned) has no port assigned, and its server listens on the default: two of them on one machine collide on
-    it. The InferenceX script and Magpie's AgentX server both read the port from ``benchmark.envs.PORT``, so it goes
+    it. The InferenceX script and the AgentX server both read the port from ``benchmark.envs.PORT``, so it goes
     there, into a copy: the point itself is shared by every test that runs it. The port is picked where the server is
-    launched (``_free_port``).
+    launched (:func:`~hyperloom.common.ports.pick_server_port`).
     """
     if server_lifecycle is not None:
         yield point  # ``inject_lifecycle`` pins PORT in every round the lifecycle builds
         return
     config = _point_config(point)
     benchmark = config.get("benchmark") or {}
-    benchmark["envs"] = {**(benchmark.get("envs") or {}), "PORT": _free_port()}
+    benchmark["envs"] = {**(benchmark.get("envs") or {}), "PORT": pick_server_port()}
     config["benchmark"] = benchmark
     with tempfile.TemporaryDirectory(prefix="hl-port-") as work:
         pinned = Path(work) / Path(point).name
@@ -665,7 +627,7 @@ async def _grid(run: _Run, point: int, name: str, **launch: Any) -> VariantResul
             grid=[GridVariant(name, unset_envs=run.unset_envs)],
             output_root=Path(call.output_dir),
             recipe=GridRecipe(base_yaml, base=LaunchLayer(extra_envs=envs)),
-            launch=GridLaunch(call.magpie_python or None, call.result_dir, call.serving_lease, **launch),
+            launch=GridLaunch(call.result_dir, call.serving_lease, **launch),
             stop=GridStop(session_deadline_sec=call.session_deadline_sec),
         )
         ended = time.time()
@@ -677,11 +639,10 @@ def _round_shape(run: _Run, point: int, name: str, kwargs: dict[str, Any], resul
     """What a round's call says about it, for reading the phases off the marks it left."""
     lifecycle = kwargs.get("server_lifecycle")
     role = ROLE_BOOT if kwargs.get("lifecycle_boot_only") else name if name in (_WARMUP, _EVAL) else ROLE_MEASURE
-    benchmark = _point_config(run.call.points[point]).get("benchmark") or {}
     stays_up = lifecycle is not None and not lifecycle.get("cleanup", True)
     return RoundShape(
         role,
-        is_magpie_agentx(benchmark),
+        _point(run.call.points[point]).agentx,
         bool(kwargs.get("server_already_ready")),
         _is_failure(result),
         ROUND_COLLECT if stays_up else TEARDOWN,
@@ -808,11 +769,6 @@ def _is_failure(result: VariantResult) -> bool:
     return result.status in {"failed", "skipped"}
 
 
-def _outside_dev_sandboxes(port: int) -> int:
-    """``port``, or another free one when the lifecycle's own pick fell in the block the dev sandboxes serve on."""
-    return _free_port() if port in DEV_SANDBOX_PORTS else port
-
-
 class _Lifecycle:
     """The persistent server one sweep arm shares: where its pid files are and which port it listens on."""
 
@@ -822,17 +778,20 @@ class _Lifecycle:
         info = resolve_lifecycle_params(run.call.points[0])
         self.pid_dir = pid_dir
         self.eligible = bool(info.get("eligible"))
-        self.port = _outside_dev_sandboxes(int(info.get("port") or 0))
+        self.port = int(info.get("port") or 0)
         self.framework = str(info.get("framework") or "")
         self.reason = str(info.get("reason") or "")
         self._phases = run.phases
+        self._notes = run.notes
 
     def settings(self, *, cleanup: bool) -> dict[str, Any]:
         return {"cleanup": cleanup, "pid_dir": str(self.pid_dir), "port": self.port}
 
     def teardown(self) -> None:
         self._phases.begin(TEARDOWN)
-        teardown_lifecycle_server(pid_dir=self.pid_dir, framework=self.framework, port=self.port)
+        survivors = teardown_variant_server(self.pid_dir)
+        if survivors:
+            self._notes.append(f"server pids {survivors} outlived SIGKILL; {self.pid_dir} keeps their record")
         self._phases.begin(OTHER)
 
 
@@ -862,11 +821,8 @@ async def _sweep(run: _Run) -> None:
 
 
 def _boot_envs(point: Path) -> dict[str, str]:
-    """The environment a boot round of ``point`` is run with: the backend's boot phase, no evaluation, one request."""
-    phase = dict(resolve_backend().boot_phase_envs)
-    if is_magpie_agentx(_point_config(point).get("benchmark") or {}):
-        return phase
-    return {**phase, **_BOOT_CLIENT_ENVS}
+    """The environment a boot round of ``point`` is run with: no evaluation and one request, nothing for AgentX."""
+    return {} if _point(point).agentx else dict(_BOOT_CLIENT_ENVS)
 
 
 async def _boot_server(run: _Run, lifecycle: _Lifecycle, point: int, name: str) -> VariantResult:
@@ -969,7 +925,7 @@ def _run_case(run: _Run, port: int) -> None:
 
 
 def _model_of(call: TestCall) -> str:
-    return str((_point_config(call.points[0]).get("benchmark") or {}).get("model") or "")
+    return _point(call.points[0]).model
 
 
 async def _short_prompts(run: _Run) -> None:
@@ -1049,7 +1005,7 @@ def _set_aside(run: _Run) -> None:
 def _ranks(call: TestCall) -> int:
     """The worker processes ruppell's check expects: the point's tensor-parallel size."""
     try:
-        return max(1, int(_point_envs(call.points[0]).get(ENV_TP) or 1))
+        return max(1, int(_point(call.points[0]).envs.get(ENV_TP) or 1))
     except (TypeError, ValueError):
         return 1
 
@@ -1090,12 +1046,10 @@ def _result_returncode(result: VariantResult) -> int:
 
 
 def _eval_returncode(result: VariantResult) -> int:
-    """The accuracy pass's own exit code when the round recorded one, else the round's."""
-    marker = Path(result.workspace or "") / "eval_returncode"
-    try:
-        return int(marker.read_text(encoding=_UTF8).strip())
-    except (OSError, ValueError):
-        return _result_returncode(result)
+    """The accuracy pass's own exit code when its run_dir's report has one, else the round's."""
+    workspace = Path(result.workspace or "")
+    code = RoundFolder.read(workspace).report.codes.eval if is_round_folder(workspace) else None
+    return _result_returncode(result) if code is None else code
 
 
 def _warmup_round_outcome(point: int, result: VariantResult, workspace: Path) -> RoundOutcome:
@@ -1208,14 +1162,12 @@ def _failure_logs(failing: list[VariantResult]) -> list[str]:
 
 
 def _client_logs(failing: list[VariantResult]) -> list[str]:
-    """The tails of the AgentX replay client's own log beside the server log of every result with a failed round.
+    """The tails of the AgentX replay client's own log in the run_dir of every result with a failed round.
 
-    Magpie records only the client's exit code as the round's error; what the client was refused is in this log alone.
+    The round's report names only the client's exit code; what the client was refused is in this log alone.
     """
     return [
-        _read_tail(str(Path(result.server_log_path).parent / MAGPIE_AGENTX_CLIENT_LOG))
-        for result in failing
-        if result.server_log_path
+        _read_tail(str(RunLayout(Path(result.workspace)).agentx_client_log)) for result in failing if result.workspace
     ]
 
 

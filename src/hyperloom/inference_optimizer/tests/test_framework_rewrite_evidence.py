@@ -1430,7 +1430,7 @@ def _injected_pythonpath(tmp_path: Path, envs: dict[str, Any]) -> str:
 
 
 def test_probe_injection_keeps_the_inherited_pythonpath(tmp_path, monkeypatch):
-    """Magpie replaces the launch PYTHONPATH with the config's, so a config without one carries the inherited one."""
+    """The launch takes the config's PYTHONPATH in place of the inherited one, so a config without one carries the inherited one."""
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/a", "/b"]))
     shim = str(evidence.probe_asset_dir())
     assert _injected_pythonpath(tmp_path, {"TP": 8}) == os.pathsep.join([shim, "/a", "/b"])

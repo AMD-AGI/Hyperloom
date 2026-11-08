@@ -44,13 +44,13 @@ def _restore_recording_session_binding():
 
 @pytest.fixture(autouse=True)
 def _kfd_nodes_in_pci_order(monkeypatch):
-    """No test reaches a real ``amd-smi list``: card N is the Nth KFD node, so a mask number is its amd-smi index.
+    """No test reaches a real ``amd-smi list``: ROCm card N is amd-smi card N, so a mask number is its amd-smi index.
 
-    A test of the mapping itself patches ``_read_gpu_kfd_nodes`` again with a board where the two orders differ.
+    A test of the mapping itself patches ``gpus_in_rocm_order`` again with a board where the two orders differ.
     """
     from hyperloom.common import gpu_power_settings
 
-    monkeypatch.setattr(gpu_power_settings, "_read_gpu_kfd_nodes", lambda: {gpu: 8 + gpu for gpu in range(16)})
+    monkeypatch.setattr(gpu_power_settings, "gpus_in_rocm_order", lambda: list(range(16)))
 
 
 @pytest.fixture(autouse=True)
@@ -565,6 +565,9 @@ class RayDouble:
             pass
 
         class RayActorError(RayError):
+            pass
+
+        class OutOfMemoryError(RayError):
             pass
 
         class RayTaskError(RayError):

@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLI workloads and explicit YAML converge on one native Magpie contract."""
+"""CLI workloads and explicit YAML converge on one native AgentX point contract."""
+
+from pathlib import Path
 
 import pytest
+import yaml
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom.common.perf_metric import agentx_enabled
@@ -21,7 +24,11 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     LaunchLayer,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile, load_benchmark
+from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
+
+
+def load_benchmark(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]
 
 
 @pytest.fixture(autouse=True)
@@ -92,7 +99,7 @@ def test_standard_cli_generates_native_yaml_and_candidate_controls(tmp_path, mon
     assert bench["framework"] == framework
     assert bench["model"] == "Qwen/Qwen3-8B"
     assert bench["precision"] == "fp8"
-    assert bench["runner_type"] == "mi355x"
+    assert "runner_type" not in bench
     assert bench["docker_image"] == "example/serving:pinned"
     assert bench["run_mode"] == "local"
     assert bench["envs"] == {"TP": 4, "EP_SIZE": 4, "CONC": 8}
@@ -118,13 +125,6 @@ def test_standard_cli_generates_native_yaml_and_candidate_controls(tmp_path, mon
     assert load_benchmark(source)["profiler"]["torch_profiler"] == {"enabled": False}
 
 
-@pytest.mark.parametrize(("board", "runner"), [("mi308x", "mi300x"), ("mi325x", "mi300x"), ("mi355x", "mi355x")])
-def test_generated_yaml_pins_the_magpie_runner_label_not_the_board(tmp_path, monkeypatch, board, runner):
-    """Magpie ships no mi308x/mi325x launch script, so those boards must resolve to mi300x."""
-    _, source = _launch(tmp_path, monkeypatch, "--gpu-type", board)
-    assert load_benchmark(source)["runner_type"] == runner
-
-
 def test_cli_defaults_and_operator_workload_pins_use_existing_resolver(tmp_path, monkeypatch):
     monkeypatch.setenv("CONC", "32")
     _, source = _launch(tmp_path, monkeypatch, "--extra-env", "TP=2", "--extra-env", "EP=2")
@@ -148,12 +148,31 @@ def test_explicit_workload_values_write_the_yaml_the_cli_generates_and_bind_agre
     args, generated = _launch(tmp_path, monkeypatch, "--tp", "2", "--conc", "8", "--gpu-type", "mi308x")
     written = tmp_path / "explicit.yaml"
     flags = {"framework": "sglang", "model": "Qwen/Qwen3-8B", "precision": args.precision, "tp": 2, "conc": 8}
-    write_agentx_benchmark(written, AgentXWorkload(**flags, ep=1, gpu_type="mi308x"))
+    write_agentx_benchmark(written, AgentXWorkload(**flags, ep=1))
     assert load_benchmark(written) == load_benchmark(generated)
     monkeypatch.setenv(BENCHMARK_CONFIG_ENV, str(written))
     bound = _build_parser().parse_args(["optimize", *(f"--{name}={value}" for name, value in flags.items())])
     configure_benchmark(bound)
     assert (bound.ep, bound.docker_image, benchmark_config_path()) == (1, None, written.resolve())
+
+
+SHIPPED_AGENTX = Path(cli.__file__).parent.parent / "assets" / "configs" / "agentx_sglang.yaml"
+
+
+def test_the_shipped_agentx_yaml_starts_a_session(monkeypatch):
+    monkeypatch.setenv(BENCHMARK_CONFIG_ENV, str(SHIPPED_AGENTX))
+    configure_benchmark(_build_parser().parse_args(["optimize"]))
+    assert benchmark_config_path() == SHIPPED_AGENTX.resolve()
+
+
+def test_an_agentx_yaml_asking_for_several_captures_is_refused_before_the_session(tmp_path, monkeypatch):
+    document = yaml.safe_load(SHIPPED_AGENTX.read_text(encoding="utf-8"))
+    document["benchmark"]["profiler"]["torch_profiler"]["num_profiles"] = 3
+    written = tmp_path / "agentx.yaml"
+    written.write_text(yaml.safe_dump(document), encoding="utf-8")
+    monkeypatch.setenv(BENCHMARK_CONFIG_ENV, str(written))
+    with pytest.raises(ValueError, match="num_profiles 3; a profile round captures one window"):
+        configure_benchmark(_build_parser().parse_args(["optimize"]))
 
 
 def test_explicit_workload_values_are_validated_before_writing(tmp_path):
@@ -213,6 +232,18 @@ def test_unsupported_native_options_fail_before_session_creation(flags):
         configure_benchmark(args)
 
 
+def test_an_atom_agentx_session_is_refused_naming_the_frameworks_it_runs():
+    args = _build_parser().parse_args(["optimize", "--model", "/model", "--framework", "atom"])
+    with pytest.raises(ValueError, match="AgentX optimization supports SGLang or vLLM, not atom"):
+        configure_benchmark(args)
+
+
+def test_an_operator_launch_file_is_accepted_for_agentx(tmp_path):
+    args = _build_parser().parse_args(["optimize", "--model", "/model", "--reference-script", str(tmp_path / "x.sh")])
+    configure_benchmark(args)
+    assert args.reference_script == str(tmp_path / "x.sh")
+
+
 def test_operator_switch_uses_same_native_validation(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "")
     args = _build_parser().parse_args(["optimize", "--extra-env", "HYPERLOOM_AGENTX=1", "--nodes", "2"])
@@ -241,10 +272,10 @@ def test_yaml_input_can_use_recipe_image(tmp_path, monkeypatch):
     assert args.tp == 1
 
 
-def test_generated_snapshot_precedes_manifest(tmp_path, monkeypatch):
+def test_generated_snapshot_records_the_base_topology_and_precedes_manifest(tmp_path, monkeypatch):
     import asyncio
 
-    args = _build_parser().parse_args(["optimize", "--model", "Qwen/Qwen3-8B", "--tp", "2", "--conc", "8"])
+    args = _build_parser().parse_args(["optimize", "--model", "Qwen/Qwen3-8B", "--conc", "8"])
     configure_benchmark(args)
     launch_shape._resolve_run_topology(args)
     for name in (
@@ -260,12 +291,17 @@ def test_generated_snapshot_precedes_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "make_session_dir", lambda **kw: tmp_path)
     monkeypatch.setattr(cli, "_acquire_session_lock_or_exit", lambda path: None)
 
+    def resolve_base(session_dir, args, *, framework):
+        args.tp = 4
+
+    monkeypatch.setattr(cli, "resolve_session_base", resolve_base)
+
     class ManifestReached(Exception):
         pass
 
     def manifest(session_dir, *, args):
         assert benchmark_config_path() == session_dir / "benchmark.yaml"
-        assert load_benchmark(benchmark_config_path())["envs"]["TP"] == 2
+        assert load_benchmark(benchmark_config_path())["envs"]["TP"] == 4
         raise ManifestReached
 
     monkeypatch.setattr(cli, "write_manifest", manifest)
@@ -316,3 +352,13 @@ def test_nonpositive_topology_is_rejected_before_startup(flag, value, error):
     with pytest.raises(error):
         args = _build_parser().parse_args(["optimize", flag, value])
         configure_benchmark(args)
+
+
+def test_a_gpu_type_from_a_multibranch_dev_caller_is_accepted_and_writes_the_same_yaml(tmp_path):
+    workload = dict(framework="sglang", model="Qwen/Qwen3-8B", precision="fp8", tp=2, ep=1, conc=8)
+    with_board, without = tmp_path / "board.yaml", tmp_path / "plain.yaml"
+
+    write_agentx_benchmark(with_board, AgentXWorkload(**workload, gpu_type="mi355x"))
+    write_agentx_benchmark(without, AgentXWorkload(**workload))
+
+    assert with_board.read_bytes() == without.read_bytes()

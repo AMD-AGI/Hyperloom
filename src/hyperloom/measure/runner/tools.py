@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Clean checkouts of Magpie and InferenceX at the commits the instruction sheet names.
+"""The tools a test runs: a clean checkout of InferenceX at the commit the instruction sheet names, and the
+inference_suite staging of this runner's own pins.
 
 The runner never uses the session's checkouts: they are on storage the candidate's author can write. Each commit gets
 its own directory in the runner's cache, fetched by hash and checked out detached, so a directory that exists at the
-right commit is the one that was fetched.
+right commit is the one that was fetched. The inference_suite staging is never built here: ``cache_build`` publishes it
+as ``<runner cache>/inference-suite/<staging key>/`` (:func:`inference_suite.staging_key`) on a host with network, and
+the runner only verifies it and compares its normalised manifest with the one the sheet carries.
 """
 
 from __future__ import annotations
@@ -14,25 +17,47 @@ import os
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["ToolError", "ensure_inferencex", "ensure_magpie"]
+from inference_suite import (
+    CLIENT_FILE,
+    NormalisedManifest,
+    StagingError,
+    normalised_manifest,
+    staging_key,
+    verified_manifest_sha256,
+)
+
+__all__ = [
+    "INFERENCE_SUITE_DIR",
+    "StagedSuite",
+    "StagingMismatch",
+    "ToolError",
+    "ensure_inference_suite",
+    "ensure_inferencex",
+]
 
 INFERENCEX_REPO = "https://github.com/SemiAnalysisAI/InferenceX.git"
-MAGPIE_REPO = "https://github.com/AMD-AGI/Magpie.git"
 _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _FETCH_TIMEOUT_SEC = 900
-#: Where an InferenceX tree keeps its benchmark library: at the root, or below ``inferencex-e2e/``, the layout the
-#: pinned Magpie resolves for a native AgentX run.
+#: Where the published stagings live below the runner cache, one directory per staging key.
+INFERENCE_SUITE_DIR = "inference-suite"
+#: What marks an InferenceX tree: its benchmark library, at the root or below ``inferencex-e2e/``, or the client
+#: inference_suite stages a sheet's rounds from (the pinned commit has no library).
 _INFERENCEX_MARKERS = (
     Path("benchmarks") / "benchmark_lib.sh",
     Path("inferencex-e2e") / "benchmarks" / "benchmark_lib.sh",
+    Path("inferencex-e2e") / CLIENT_FILE,
 )
-_MAGPIE_MARKERS = (Path("Magpie") / "__init__.py",)
 
 
 class ToolError(Exception):
     """A checkout could not be prepared at the commit that was asked for."""
+
+
+class StagingMismatch(ToolError):
+    """The runner's published staging is not the software the sheet's normalised manifest names."""
 
 
 def _git(*args: str, cwd: Path | None = None, timeout: int = 120) -> str:
@@ -92,6 +117,36 @@ def ensure_inferencex(commit: str, cache_dir: Path) -> Path:
     )
 
 
-def ensure_magpie(commit: str, cache_dir: Path) -> Path:
-    """A clean Magpie checkout at ``commit``; ``MAGPIE_REPO`` overrides where it is fetched from."""
-    return _checkout("Magpie", os.environ.get("MAGPIE_REPO") or MAGPIE_REPO, commit, cache_dir, _MAGPIE_MARKERS)
+@dataclass(frozen=True)
+class StagedSuite:
+    """A published inference_suite staging in the runner cache: its directory (a tool cache) and its normalised
+    manifest, the one the test ran."""
+
+    tool_cache: Path
+    normalised: NormalisedManifest
+
+
+def ensure_inference_suite(runner_cache: Path, expected: NormalisedManifest) -> StagedSuite:
+    """The published staging of this runner's pins, ``<runner_cache>/inference-suite/<staging key>/``, once it verifies
+    and its normalised manifest, with this interpreter's lm-eval, is ``expected``, the sheet's.
+
+    Raises:
+        StagingMismatch: The staging is other software than the sheet's; the message names each package that differs.
+        ToolError: No staging of these pins is published, or the published one does not verify.
+    """
+    tool_cache = runner_cache / INFERENCE_SUITE_DIR / staging_key()
+    if verified_manifest_sha256(tool_cache) is None:
+        raise ToolError(
+            f"inference_suite: no published staging at {tool_cache} that verifies; cache_build publishes it"
+        )
+    try:
+        mine = normalised_manifest(tool_cache)
+    except StagingError as exc:
+        raise ToolError(f"inference_suite: the staging at {tool_cache} cannot be identified: {exc}") from exc
+    differences = mine.differences(expected)
+    if differences:
+        raise StagingMismatch(
+            f"inference_suite: the staging at {tool_cache} (here) is not the application's (there): "
+            + "; ".join(differences)
+        )
+    return StagedSuite(tool_cache, mine)

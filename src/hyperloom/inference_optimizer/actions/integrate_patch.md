@@ -70,14 +70,15 @@ delegate{
    changes nothing else, the action ends `already_present` here: no
    restart, no benchmark.
 4. Layer `config_changes` onto the server-launch env.
-5. Stop the server this session launched, by the pid and process group it
-   recorded; wait for VRAM to drain. No pattern-based kill runs.
-6. Launch via `$ARBOR_LAUNCH_SCRIPT` (or the installed scripts);
-   health-check until ready (≤ 20min for large MoE models).
-7. Run the Magpie throughput benchmark + GSM8K accuracy eval, graded via
-   the shared `_accuracy_gate.parse_eval_results(...)` +
+5. Run an inference_suite round on the session's base launch with those
+   changes: it boots the server, waits for it to be ready, runs the
+   throughput benchmark and the GSM8K accuracy eval, and stops the server
+   it booted. On native AgentX the eval is its own round, on a server
+   without the golden acceptance, once throughput clears the KEEP
+   threshold. Both are graded via the shared
+   `_accuracy_gate.parse_eval_results(...)` +
    `gain_math.accuracy_passed(...)` helpers.
-8. Decide:
+6. Decide:
    - KEEP — bench tput ≥ grading anchor * (1 + keep_threshold_pct/100) AND
      accuracy did not drop more than 0.05 absolute. Append the patch + config_changes to
      `SharedState.optimization_stack`, update `current_best`, restamp

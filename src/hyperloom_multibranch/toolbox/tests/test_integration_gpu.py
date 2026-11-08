@@ -61,7 +61,7 @@ def _probe(label: str, **fields: object) -> None:
 async def test_a_round_of_two_branches_with_real_measurements(monkeypatch: pytest.MonkeyPatch) -> None:
     root = Path(OUT) / f"integration-{uuid.uuid4().hex[:8]}"
     root.mkdir(parents=True, exist_ok=False)
-    set_workload_environment(monkeypatch, root / "user-data", MAGPIE_EVAL_LIMIT=EVAL_LIMIT)
+    set_workload_environment(monkeypatch, root / "user-data", HYPERLOOM_EVAL_LIMIT=EVAL_LIMIT)
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=INFERENCEX, capture_output=True, text=True, check=True
     ).stdout.strip()
@@ -70,8 +70,6 @@ async def test_a_round_of_two_branches_with_real_measurements(monkeypatch: pytes
         image_ref="local",
         image_digest=IMAGE,
         gpu_type="MI355X",
-        inferencex_commit=commit,
-        benchmark_backend="bypass",
     )
     canonical = default_canonical(
         root / "canonical", primary_concurrency=4, config_path=default_baseline_config(), model_path=MODEL

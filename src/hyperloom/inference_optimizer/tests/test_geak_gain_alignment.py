@@ -31,6 +31,10 @@ from ._geak_helpers import resume_pending, set_resume_pending
 # ── #3: same-harness (2b) revalidation decision ──────────────────────────────
 
 
+#: What the report mapper stamps on every AgentX round it accepts as evidence.
+_AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
+
+
 def test_revalidation_validated_when_identity_and_engagement_hold() -> None:
     assert (
         _geak_revalidation_decision(
@@ -247,6 +251,7 @@ def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
         "e2e_norm_intvty_p50": 5.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     state.current_best.update(
         {
@@ -256,6 +261,7 @@ def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
             "e2e_norm_intvty_p50": 6.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
         }
     )
     state.optimization_stack = [{"action": "explore", "variant_name": "prior-winner", "tput": 150.0}]
@@ -277,6 +283,7 @@ def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
         "e2e_norm_intvty_p50": 99.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     return coord
 
@@ -382,6 +389,7 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         "e2e_norm_intvty_p50": 8.0,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
+        **_AGENTX_EVIDENCE,
     }
     if case == "missing_axes":
         measurement.pop("e2e_norm_intvty_p90")
@@ -405,6 +413,7 @@ async def test_agentx_2b_uses_current_canonical_measurement(
             "e2e_norm_intvty_p50": 99.0,
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
+            **_AGENTX_EVIDENCE,
         }
     result = {"status": "succeeded", "output_throughput": measured, "best_variant": variant, "winners": []}
     await coord.writeback.promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="accepted"))

@@ -24,7 +24,7 @@ before, under the watchdog above.
 Given the card's CU count (``cu_num``), the build reads it as ``CU_NUM``, so aiter compiles the tables' rows of exactly
 that ``(gfx, cu_num)`` (it takes the count of ``GFX_CU_NUM_MAP`` otherwise, which a partitioned card does not have), and
 the built modules must pass the launch preflight's own coverage test for it
-(:func:`~hyperloom.orchestrator.actions.executors._aiter_jit.serving_modules_cover_csv`, over every table the image's
+(:func:`~hyperloom.orchestrator.actions.executors._aiter_jit.serving_modules_cover_rows`, over every table the image's
 launch loads) before anything is installed, or that preflight would move them aside again.
 
 The build runs under the environment a test's server has when nothing of the test sets a build variable
@@ -83,9 +83,10 @@ from hyperloom.orchestrator.actions.executors._aiter_jit import (
     AITER_ENV_TO_TUNED_FILE,
     AITER_PREWARM_MANIFEST,
     AITER_PREWARM_SCHEMA,
+    csv_jit_kernel_rows,
     csvs_aiter_will_load,
     read_prewarm_manifest,
-    serving_modules_cover_csv,
+    serving_modules_cover_rows,
     tuned_tables_sha256,
 )
 
@@ -104,7 +105,6 @@ _JIT_DIR = "jit"
 _SO = ".so"
 _CONFIGS_DIR = "configs"
 _MODULES = "modules"
-_INSTALLED_MODE = 0o644
 _UTF8 = "utf-8"
 _LOG_TAIL = 400
 #: Nothing is stored or signed: the build's key only names it within this process.
@@ -213,23 +213,30 @@ class _Build:
         return self.gfx if self.cu_num is None else f"{self.gfx}/{self.cu_num}"
 
 
+def _installed_mode(jit: Path) -> int:
+    """The mode of an installed module and of the manifest: the owner reads and writes, and whoever may read ``jit``
+    may read them, as the servers of the image that load them may run as another user."""
+    return stat.S_IRUSR | stat.S_IWUSR | (stat.S_IMODE(os.stat(jit).st_mode) & (stat.S_IRGRP | stat.S_IROTH))
+
+
 def _install(jit: Path, built: Mapping[str, Path], entries: Mapping[str, dict[str, Any]]) -> None:
     """Copy every built module beside its place first, then ``os.replace`` each into it and the manifest after them: a
     copy that fails leaves the image as it was, and a module installed without its manifest entry is only one the old
     flow's cleanup moves aside (it is then built at the first prefill)."""
     pending: list[tuple[Path, Path]] = []
+    mode = _installed_mode(jit)
     try:
         for name, source in sorted(built.items()):
             temporary = jit / f".{name}{_SO}.prewarm-{uuid.uuid4().hex}"
             pending.append((temporary, jit / f"{name}{_SO}"))
             shutil.copyfile(source, temporary)
-            os.chmod(temporary, _INSTALLED_MODE)
+            os.chmod(temporary, mode)
         manifest = jit / f".{AITER_PREWARM_MANIFEST}.{uuid.uuid4().hex}"
         pending.append((manifest, jit / AITER_PREWARM_MANIFEST))
         document = {"schema": AITER_PREWARM_SCHEMA, _MODULES: [entries[name] for name in sorted(entries)]}
         with open(manifest, "x", encoding=_UTF8) as out:
             json.dump(document, out, indent=2, sort_keys=True)
-        os.chmod(manifest, _INSTALLED_MODE)
+        os.chmod(manifest, mode)
     except OSError:
         for temporary, _ in pending:
             temporary.unlink(missing_ok=True)
@@ -334,7 +341,9 @@ def _uncovered(package: Path, built: Mapping[str, Path], target: tuple[str, int]
         if not tuned or not set(modules) & set(built):
             continue
         for table in csvs_aiter_will_load(package / _CONFIGS_DIR, tuned, ""):
-            if table.is_file() and not serving_modules_cover_csv(view, modules, table, frozenset({target})):
+            if table.is_file() and not serving_modules_cover_rows(
+                view, modules, csv_jit_kernel_rows(table, frozenset({target}))
+            ):
                 uncovered.append(table.name)
     return uncovered
 

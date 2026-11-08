@@ -39,6 +39,7 @@ from pathlib import Path
 
 import yaml
 
+from hyperloom.common.benchmark_config import BenchmarkPointError
 from hyperloom.contracts.long_context import (
     LONG_CONTEXT_COMPLETE,
     LONG_CONTEXT_INCOMPLETE,
@@ -214,10 +215,10 @@ def launch_served_context(point: Path) -> int | None:
     """The tokens of context the launch of the rendered point at ``point`` serves, read as the runner reads it (its context
     flag, else its ``MAX_MODEL_LEN``); ``None`` when it states neither or the point cannot be read."""
     try:
-        config = yaml.safe_load(Path(point).read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+        carriers = launch_carriers(yaml.safe_load(Path(point).read_text(encoding="utf-8")))
+    except (OSError, yaml.YAMLError, BenchmarkPointError):
         return None
-    return served_by(*launch_carriers(config)) if isinstance(config, Mapping) else None
+    return served_by(*carriers)
 
 
 def environment_long_context(

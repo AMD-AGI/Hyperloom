@@ -5,7 +5,7 @@
 
 ``python -m hyperloom.measure.consistency --checklist FILE --config FILE`` runs every test of the checklist twice, one
 after the other: with the local backend on this machine, then with the hosted backend in a fresh sandbox. Both sides are
-read with ``extract_benchmark_measurement``; the check compares output throughput, completed requests and error rate,
+read from their rounds' inference_suite run_dirs; the check compares output throughput, completed requests and error rate,
 and, for a test with a patched recipe, the hashes of the files the runner rebuilt against the locally compiled ones.
 Every test is one line of ``consistency.jsonl``; the last line is the summary against the pass criteria.
 
@@ -56,8 +56,10 @@ from typing import Any
 from hyperloom.measure.hosted import HOSTED_DIR_NAME
 from hyperloom.measure.returncodes import HOSTED_RESULT_REJECTED_RC
 from hyperloom.measure.runner.inventory import FARM_INVENTORY_FILE
-from hyperloom.measure.socket import MeasurementBackend, RoundOutcome, TestCall, TestOutcome
-from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
+from hyperloom.measure.socket import MeasurementBackend, SessionFacts, TestCall, TestOutcome
+from hyperloom.orchestrator.actions.executors import RoundFolder, is_round_folder, staged_tool_cache
+from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, frozen_base
+from inference_suite import StagingError, normalised_manifest
 
 __all__ = [
     "Criteria",
@@ -76,6 +78,8 @@ __all__ = [
     "load_checklist",
     "main",
     "run_checklist",
+    "SessionNotMeasurable",
+    "session_facts",
     "summarize",
 ]
 
@@ -83,7 +87,6 @@ log = logging.getLogger(__name__)
 
 #: The schema of the file the runner lists in its result bundle (``FARM_INVENTORY_FILE``) with what it rebuilt.
 FARM_INVENTORY_SCHEMA = "hyperloom.farm-inventory/v1"
-REPORT_NAME = "benchmark_report.json"
 REPORT_FILE = "consistency.jsonl"
 DEFAULT_REPORT_DIR = Path("reports/hosted")
 PASS, FAIL, NO_DATA = "PASS", "FAIL", "NO_DATA"
@@ -258,16 +261,14 @@ class Summary:
 # -- reading a side -------------------------------------------------------------------------------------------------
 
 
-def _report_of(round_: RoundOutcome) -> tuple[dict[str, Any] | None, Path]:
-    directory = Path(round_.output_dir)
-    for path in sorted(directory.rglob(REPORT_NAME)) if directory.is_dir() else []:
-        try:
-            document = json.loads(path.read_text(encoding=_UTF8))
-        except (OSError, ValueError):
-            continue
-        if isinstance(document, dict):
-            return document, directory
-    return None, directory
+def _measurement_of(directory: Path) -> dict[str, Any] | None:
+    """The round's measurement, from its inference_suite run_dir's report; ``None`` when it has none."""
+    if not is_round_folder(directory):
+        return None
+    try:
+        return RoundFolder.read(directory).measurement()
+    except (OSError, ValueError):
+        return None
 
 
 def _error_rate(measurement: Mapping[str, Any]) -> float | None:
@@ -295,10 +296,10 @@ def read_side(outcome: TestOutcome, log_dir: Path) -> Side:
         return Side(0, problem="no_measure_round", log_dir=log_dir_text)
     values = []
     for round_ in rounds:
-        report, workspace = _report_of(round_)
-        if report is None:
+        workspace = Path(round_.output_dir)
+        measurement = _measurement_of(workspace)
+        if measurement is None:
             return Side(0, problem=f"no_report: {workspace.name}", log_dir=log_dir_text)
-        measurement = extract_benchmark_measurement(report, workspace=workspace)
         if not measurement.get("valid_measurement") or measurement.get("output_throughput") is None:
             return Side(0, problem=f"invalid_measurement: {workspace.name}", log_dir=log_dir_text)
         if _error_rate(measurement) is None:
@@ -664,7 +665,6 @@ def _item_of(entry: Any, index: int, default_repeats: int = 1) -> ChecklistItem:
             output_dir=output_dir,
             timeout_sec=int(entry.get("timeout_sec", 3600)),
             cwd=str(output_dir),
-            magpie_python=sys.executable,
             task_id=task_id,
             kind=entry.get("kind", "test"),
             prep=entry.get("prep", "grid"),
@@ -705,8 +705,6 @@ def build_backends(config_path: Path) -> Backends:
         image_ref=cfg["image_ref"],
         image_digest=cfg["image_digest"],
         gpu_type=cfg["gpu_type"],
-        magpie_commit=cfg["magpie_commit"],
-        inferencex_commit=cfg["inferencex_commit"],
         blobs=LocalBlobStore(blobs_dir),
         power_cap_w=cfg.get("power_cap_w"),
         partition_mode=cfg.get("partition_mode"),
@@ -714,7 +712,6 @@ def build_backends(config_path: Path) -> Backends:
         shared_roots=tuple(Path(p) for p in cfg.get("shared_roots", ())),
         model_dir=Path(cfg["model_dir"]) if cfg.get("model_dir") else None,
         blob_root=str(blobs_dir),
-        **({"benchmark_backend": cfg["benchmark_backend"]} if cfg.get("benchmark_backend") else {}),
     )
     hosted_config = HostedConfig(
         session_dir=session,
@@ -750,12 +747,46 @@ def build_parser(prog: str = "python -m hyperloom.measure.consistency") -> argpa
     return parser
 
 
-def items_from_arguments(args: argparse.Namespace) -> list[ChecklistItem] | None:
-    """The checklist of the command line with ``--repeats`` applied; ``None`` (after a message) when it is unusable."""
+class SessionNotMeasurable(ValueError):
+    """The session froze no base launch, or the application's tool cache holds no staging this interpreter can identify."""
+
+
+def session_facts(session: Path) -> SessionFacts:
+    """What every test of the session at ``session`` carries: its frozen base launch, and the normalised manifest of the
+    inference_suite staging the application's tool cache holds. A v2 sheet needs both, so a session missing either is
+    refused before any test.
+
+    Raises:
+        SessionNotMeasurable: The session froze no base, or the tool cache holds no staging this interpreter can
+            identify: none, one that is not what its lock pins, or this interpreter's lm-eval is off the pin.
+        BaseLaunchMismatch: The session's ``base_launch.json`` is not the base it recorded.
+    """
+    frozen = frozen_base(session)
+    if frozen is None:
+        raise SessionNotMeasurable(f"the session {session} froze no base launch")
+    tool_cache = staged_tool_cache()
     try:
-        items = load_checklist(args.checklist)
-    except (OSError, ValueError) as exc:
-        print(f"checklist unusable: {exc}", file=sys.stderr)
+        staging = normalised_manifest(tool_cache)
+    except StagingError as exc:
+        raise SessionNotMeasurable(f"the inference_suite staging in {tool_cache} cannot be identified: {exc}") from exc
+    return SessionFacts(staging=staging, base_launch=frozen.launch)
+
+
+def _with_facts(item: ChecklistItem, facts: SessionFacts) -> ChecklistItem:
+    call = item.call
+    return dataclasses.replace(
+        item, call=lambda output_dir, task_id: dataclasses.replace(call(output_dir, task_id), session_facts=facts)
+    )
+
+
+def items_from_arguments(args: argparse.Namespace) -> list[ChecklistItem] | None:
+    """The checklist of the command line with ``--repeats`` and the session's facts applied; ``None`` (after a message)
+    when it is unusable."""
+    try:
+        facts = session_facts(Path(json.loads(args.config.read_text(encoding=_UTF8))["session_dir"]))
+        items = [_with_facts(item, facts) for item in load_checklist(args.checklist)]
+    except (OSError, ValueError, KeyError, BaseLaunchMismatch) as exc:
+        print(f"checklist or session unusable: {exc}", file=sys.stderr)
         return None
     if args.repeats is not None:
         if args.repeats < 1:

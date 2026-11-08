@@ -1,92 +1,75 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Single source of truth for inference-framework capabilities."""
+"""Single source of truth for inference-framework capabilities.
+
+The launch facts (kind, package, expert-parallel flag) are ``inference_suite.frameworks``'s; this registry derives
+them and holds only Hyperloom's own facts.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from inference_suite.frameworks import Framework, FrameworkFacts, FrameworkKind, framework_facts
+
 
 @dataclass(frozen=True)
 class FrameworkSpec:
-    """Static capabilities of one inference framework."""
+    """Hyperloom's own facts about one inference framework."""
 
     name: str
-    kind: str
     extra_args_env: str
     repo_url: str | None
-    # The importable package the framework installs as; ``None`` when it ships none.
-    python_package: str | None
     # The image's default checkout of the framework's source; ``None`` when it has none.
     source_root: str | None
     throughput_unit: str
 
 
-SERVING = "serving"
-SCRIPTABLE = "scriptable"
+SERVING = FrameworkKind.SERVING.value
+SCRIPTABLE = FrameworkKind.SCRIPTABLE.value
 
 
-# The single registry (one entry per framework).
+# The single registry (one entry per ``inference_suite.frameworks.Framework``).
 FRAMEWORKS: dict[str, FrameworkSpec] = {
-    "sglang": FrameworkSpec(
-        name="sglang",
-        kind=SERVING,
+    Framework.SGLANG.value: FrameworkSpec(
+        name=Framework.SGLANG.value,
         extra_args_env="EXTRA_SGLANG_ARGS",
         repo_url="https://github.com/sgl-project/sglang.git",
-        python_package="sglang",
         source_root="/sgl-workspace/sglang/",
         throughput_unit="tok/s",
     ),
-    "vllm": FrameworkSpec(
-        name="vllm",
-        kind=SERVING,
+    Framework.VLLM.value: FrameworkSpec(
+        name=Framework.VLLM.value,
         extra_args_env="EXTRA_VLLM_ARGS",
         repo_url="https://github.com/ROCm/vllm.git",
-        python_package="vllm",
         source_root="/sgl-workspace/vllm/",
         throughput_unit="tok/s",
     ),
-    "atom": FrameworkSpec(
-        name="atom",
-        kind=SERVING,
+    Framework.ATOM.value: FrameworkSpec(
+        name=Framework.ATOM.value,
         extra_args_env="EXTRA_ATOM_ARGS",
         repo_url="https://github.com/ROCm/ATOM.git",
-        python_package="atom",
         source_root="/app/ATOM/atom/",
         throughput_unit="tok/s",
     ),
-    "xdit": FrameworkSpec(
-        name="xdit",
-        kind=SCRIPTABLE,
+    Framework.XDIT.value: FrameworkSpec(
+        name=Framework.XDIT.value,
         extra_args_env="EXTRA_XDIT_ARGS",
         repo_url="https://github.com/xdit-project/xDiT.git",
-        python_package="xfuser",
         source_root="/app/xDiT/",
         throughput_unit="img/s",
     ),
-    # An operator's own workload.
-    "custom": FrameworkSpec(
-        name="custom",
-        kind=SCRIPTABLE,
+    Framework.CUSTOM.value: FrameworkSpec(
+        name=Framework.CUSTOM.value,
         extra_args_env="EXTRA_CUSTOM_ARGS",
         repo_url=None,
-        python_package=None,
         source_root=None,
         throughput_unit="unit/s",
     ),
 }
 
-DEFAULT_FRAMEWORK = "sglang"
-
-# Server option that turns on expert parallelism: (flag to write, every
-# argparse alias of it, whether it takes the EP size). vLLM and ATOM take a
-# switch and derive the size from TP x DP. Frameworks absent here have none.
-EXPERT_PARALLEL_FLAGS: dict[str, tuple[str, tuple[str, ...], bool]] = {
-    "sglang": ("--ep-size", ("--ep-size", "--expert-parallel-size", "--ep"), True),
-    "vllm": ("--enable-expert-parallel", ("--enable-expert-parallel", "-ep"), False),
-    "atom": ("--enable-expert-parallel", ("--enable-expert-parallel",), False),
-}
+DEFAULT_FRAMEWORK = Framework.SGLANG.value
 
 
 def names() -> tuple[str, ...]:
@@ -107,7 +90,7 @@ def _spec_or_default(framework: str | None) -> FrameworkSpec:
 
 def is_scriptable(framework: str | None) -> bool:
     """Return whether ``framework`` is a server-less scriptable workload."""
-    return _spec_or_default(framework).kind == SCRIPTABLE
+    return _facts(_spec_or_default(framework)).kind is FrameworkKind.SCRIPTABLE
 
 
 def tracelens_analysis_mode(framework: str | None) -> str:
@@ -121,9 +104,13 @@ def _registered_spec(framework: str) -> FrameworkSpec:
     return FRAMEWORKS[framework.strip().lower()]
 
 
+def _facts(spec: FrameworkSpec) -> FrameworkFacts:
+    return framework_facts(Framework(spec.name))
+
+
 def python_package(framework: str) -> str | None:
     """Return the package ``framework`` imports as, or ``None`` when it ships none."""
-    return _registered_spec(framework).python_package
+    return _facts(_registered_spec(framework)).python_package
 
 
 def source_root(framework: str) -> str | None:
@@ -142,12 +129,12 @@ def shipped_config_name(kind: str, framework: str) -> str:
 
 
 def extra_args_env(framework: str | None) -> str:
-    """Return the Magpie env var used to append backend args."""
+    """Return the point env var used to append backend args."""
     return _spec_or_default(framework).extra_args_env
 
 
 def server_args_env_name(framework: str | None) -> str:
-    """Return the Magpie env var used to append backend server args."""
+    """Return the point env var used to append backend server args."""
     name = str(framework or "").strip().lower()
     if is_supported(name):
         return extra_args_env(name)
@@ -158,12 +145,11 @@ def server_args_env_name(framework: str | None) -> str:
 
 
 def expert_parallel_flag(framework: str | None) -> tuple[str, tuple[str, ...], bool] | None:
-    """Return the :data:`EXPERT_PARALLEL_FLAGS` row for the server reading ``framework``'s server args."""
+    """Return ``(flag, aliases, takes_size)`` of the expert-parallel option of the server reading ``framework``'s args."""
     env_name = server_args_env_name(framework)
-    return next(
-        (row for name, row in EXPERT_PARALLEL_FLAGS.items() if FRAMEWORKS[name].extra_args_env == env_name),
-        None,
-    )
+    spec = next(spec for spec in FRAMEWORKS.values() if spec.extra_args_env == env_name)
+    flag = _facts(spec).expert_parallel
+    return None if flag is None else (flag.flag, flag.aliases, flag.takes_size)
 
 
 def throughput_unit(framework: str | None) -> str:
@@ -191,3 +177,7 @@ def format_primary_metric(framework: str | None, tput: float | int | None, *, pr
     if value is None:
         return f"n/a {unit}"
     return f"{value:.{precision}f} {unit}"
+
+
+# The old table, for multibranch-dev's specialist.arbor_adapter; removed with 5.12 once it is gone.
+EXPERT_PARALLEL_FLAGS = {name: row for name in FRAMEWORKS if (row := expert_parallel_flag(name)) is not None}

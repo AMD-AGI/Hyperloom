@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -27,8 +26,6 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import _with_cuda_graph_disabled
 from hyperloom.orchestrator.state.shared_state import SharedState
-
-from ._baseline_fakes import capture_launch, fake_workspace, run_baseline
 
 
 _CLI_STUB = SimpleNamespace(
@@ -137,7 +134,7 @@ def _write_yaml(
         yaml.safe_dump(cfg, f)
 
 
-def test_materialize_config_with_envs_pins_benchmark_script_after_gpu_pop(
+def test_materialize_config_with_envs_pins_the_explicit_benchmark_script(
     tmp_path,
 ):
     base = tmp_path / "base.yaml"
@@ -153,13 +150,12 @@ def test_materialize_config_with_envs_pins_benchmark_script_after_gpu_pop(
         ),
     )
     cfg = yaml.safe_load(materialized.read_text())
-    # Override re-pins benchmark_script after the gpu_type pop.
     assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
-    assert cfg["benchmark"]["runner_type"] == "mi300x"
+    assert "runner_type" not in cfg["benchmark"]
 
 
-def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
-    """Without an override, gpu_type force-pins the generic ``{framework}_{gpu_type}.sh`` so Magpie never falls through to the InferenceX native script."""
+def test_materialize_config_with_envs_keeps_the_point_script_without_override(tmp_path):
+    """The board names no script: without an override the point keeps the one it carries."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, benchmark_script="dsr1_fp8_mi300x.sh")
     out = tmp_path / "out"
@@ -171,8 +167,8 @@ def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
         target=BenchmarkTarget(gpu_type="mi300x"),
     )
     cfg = yaml.safe_load(materialized.read_text())
-    # framework in the _write_yaml fixture is "sglang".
-    assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
+    assert cfg["benchmark"]["benchmark_script"] == "dsr1_fp8_mi300x.sh"
+    assert "runner_type" not in cfg["benchmark"]
 
 
 def test_materialize_writes_operator_extra_env_but_not_its_credentials_into_vllm_yaml(tmp_path, monkeypatch):
@@ -206,7 +202,7 @@ def test_kimi_materialize_enables_remote_client_trust(tmp_path):
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
     assert envs["SGLANG_ROCM_FUSED_DECODE_MLA"] == "0"
-    assert envs["MAGPIE_TRUST_REMOTE_CODE"] == "1"
+    assert envs["BENCH_TRUST_REMOTE_CODE"] == "1"
     assert "--trust-remote-code" in envs["EXTRA_SGLANG_ARGS"]
 
 
@@ -236,7 +232,7 @@ def test_custom_tokenizer_auto_map_enables_client_and_server_trust(tmp_path):
         )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
-    assert envs["MAGPIE_TRUST_REMOTE_CODE"] == "1"
+    assert envs["BENCH_TRUST_REMOTE_CODE"] == "1"
     assert envs["BENCH_TRUST_REMOTE_CODE"] == "1"
     assert envs["HF_HUB_TRUST_REMOTE_CODE"] == "1"
     assert "--trust-remote-code" in envs["EXTRA_SGLANG_ARGS"]
@@ -260,7 +256,7 @@ def test_qwen36_materialize_enables_client_and_server_trust(tmp_path):
         )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
-    assert envs["MAGPIE_TRUST_REMOTE_CODE"] == "1"
+    assert envs["BENCH_TRUST_REMOTE_CODE"] == "1"
     assert "--trust-remote-code" in envs["EXTRA_VLLM_ARGS"]
 
 
@@ -457,95 +453,6 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_baseline_executor_forwards_override_to_yaml_and_env(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, benchmark_script="dsr1_fp8_mi300x.sh")
-    output_dir = tmp_path / "ws"
-    captured: dict = {}
-
-    def fake_run(cmd, *args, **kwargs):
-        cfg_idx = cmd.index("--benchmark-config")
-        out_idx = cmd.index("--output-dir")
-        cfg_path = Path(cmd[cfg_idx + 1])
-        slot = Path(cmd[out_idx + 1])
-        captured["cfg"] = yaml.safe_load(cfg_path.read_text())
-        captured["env"] = dict(kwargs.get("env") or {})
-        fake_workspace(slot)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "model_path": "/path/models/DeepSeek-R1",
-            "gpu_type": "mi300x",
-            "benchmark_script": "sglang_mi300x.sh",
-            "result_dir": str(tmp_path / "redirect_leak"),
-        }
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    bench = captured["cfg"]["benchmark"]
-    assert bench["benchmark_script"] == "sglang_mi300x.sh"
-    assert bench["runner_type"] == "mi300x"
-    assert captured["env"]["RESULT_DIR"] == str(tmp_path / "redirect_leak")
-
-
-def test_baseline_eager_fallback_records_effective_task_args(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_yaml(
-        base,
-        benchmark_script="vllm_mi300x.sh",
-        framework="vllm",
-    )
-    output_dir = tmp_path / "ws"
-    shared_state = SharedState(
-        baseline_eager_fallback=True,
-        model_path="/models/qwen",
-    )
-    shared_state.save(tmp_path)
-
-    def fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        fake_workspace(Path(cmd[out_idx + 1]))
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-        shared_state=shared_state,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "framework": "vllm",
-        }
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    assert "--compilation-config.cudagraph_mode NONE" in ctx.task.params["extra_server_args"]
-    assert shared_state.baseline_eager_fallback is False
-
-
 def test_baseline_eager_fallback_save_failure_is_not_reported_as_unarmed(tmp_path, monkeypatch):
     shared_state = SharedState(baseline_eager_fallback=True, model_path="/models/qwen")
 
@@ -554,168 +461,12 @@ def test_baseline_eager_fallback_save_failure_is_not_reported_as_unarmed(tmp_pat
 
     monkeypatch.setattr(shared_state, "save", _disk_full)
     executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
         default_config_path=tmp_path / "base.yaml",
         session_dir=tmp_path,
         shared_state=shared_state,
     )
     with pytest.raises(OSError, match="No space left on device"):
         executor._consume_eager_fallback(shared_state)
-
-
-def test_baseline_executor_falls_back_to_shared_state_model_path(tmp_path, monkeypatch):
-    # params has no model_path and MODEL_PATH is unset: without the SharedState fallback the bare YAML model name
-    # leaks into --model-path.
-    monkeypatch.delenv("MODEL_PATH", raising=False)
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, model="PrimeIntellect-Qwen3-1.7B")  # bare name in YAML
-    output_dir = tmp_path / "ws"
-    captured: dict = {}
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
-
-    result = run_baseline(
-        base,
-        tmp_path,
-        ctx,
-        capture_launch(captured),
-        shared_state=SimpleNamespace(model_path="/path/models/PrimeIntellect-Qwen3-1.7B"),
-    )
-
-    assert result["status"] == "succeeded"
-    assert captured["cfg"]["benchmark"]["model"] == "/path/models/PrimeIntellect-Qwen3-1.7B"
-
-
-def test_baseline_executor_falls_back_to_ctx_extra_shared_state_model_path(tmp_path, monkeypatch):
-    # Production form: the executor is a module-level singleton and live state arrives via ctx.extra; without reading
-    # it the bare YAML model name leaks.
-    monkeypatch.delenv("MODEL_PATH", raising=False)
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, model="PrimeIntellect-Qwen3-1.7B")  # bare name in YAML
-    output_dir = tmp_path / "ws"
-    captured: dict = {}
-    task = SimpleNamespace(
-        task_id="t-baseline-extra",
-        params={
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-        },
-    )
-    ctx = SimpleNamespace(
-        task=task,
-        extra={
-            "shared_state": SimpleNamespace(
-                model_path="/path/models/PrimeIntellect-Qwen3-1.7B",
-            ),
-        },
-    )
-
-    # The executor carries no shared_state: the singleton form.
-    result = run_baseline(base, tmp_path, ctx, capture_launch(captured))
-
-    assert result["status"] == "succeeded"
-    assert captured["cfg"]["benchmark"]["model"] == "/path/models/PrimeIntellect-Qwen3-1.7B"
-
-
-def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")
-    base = tmp_path / "base.yaml"
-    _write_yaml(base)
-    output_dir = tmp_path / "ws"
-    captured: dict = {}
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
-
-    result = run_baseline(base, tmp_path, ctx, capture_launch(captured))
-
-    assert result["status"] == "succeeded"
-    # Default RESULT_DIR is the per-task workspace: this fixture omits benchmark_script so the cold-start double-run
-    # is not eligible and the single-round path runs directly in output_dir.
-    assert captured["env"]["RESULT_DIR"] == str(output_dir)
-    assert "OPENAI_API_KEY" not in captured["env"]
-
-
-def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
-    """The baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout."""
-    inferencex = tmp_path / "InferenceX"
-    (inferencex / "benchmarks").mkdir(parents=True)
-    (inferencex / "benchmarks" / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
-    base = tmp_path / "base.yaml"
-    _write_yaml(base)
-    output_dir = tmp_path / "ws"
-    captured: dict = {}
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
-
-    with patch("hyperloom.orchestrator.actions.executors.baseline.failed_patch_anchors_in", return_value=[]):
-        result = run_baseline(base, tmp_path, ctx, capture_launch(captured))
-
-    assert result["status"] == "succeeded"
-    assert captured["env"].get("MAGPIE_INFERENCEX_PATH") == str(inferencex), (
-        "MAGPIE_INFERENCEX_PATH must equal $INFERENCEX_PATH so Magpie loads the patched checkout (#210 root cause)"
-    )
-
-
-def test_baseline_executor_rejects_bad_param(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_yaml(base)
-    output_dir = tmp_path / "ws"
-
-    def fake_run(cmd, *args, **kwargs):  # pragma: no cover — must not run
-        raise AssertionError("subprocess.run should not be invoked")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "benchmark_script": "../etc/passwd.sh",
-        }
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "failed"
-    assert result["error_class"] == "bad_param"
-    assert "benchmark_script" in result["error"]
-
-
-def test_baseline_executor_rejects_bad_result_dir(tmp_path):
-    base = tmp_path / "base.yaml"
-    _write_yaml(base)
-    output_dir = tmp_path / "ws"
-
-    def fake_run(cmd, *args, **kwargs):  # pragma: no cover
-        raise AssertionError("subprocess.run should not be invoked")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "result_dir": "/tmp/leak;rm -rf /",
-        }
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "failed"
-    assert result["error_class"] == "bad_param"
-    assert "result_dir" in result["error"]
 
 
 # reference-script base layer (precedence + 0-degrade)
@@ -725,16 +476,12 @@ def _fw_args(materialized: Path, env_name: str = "EXTRA_VLLM_ARGS") -> str:
 
 
 def _seed_reference(tmp_path, monkeypatch, *, server_args: str = "", envs: dict | None = None) -> None:
-    """Pin a session whose SharedState carries the reference recipe."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
+    """Pin a session whose frozen base launch carries the reference recipe."""
+    from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 
     sd = tmp_path / "session"
     sd.mkdir(parents=True, exist_ok=True)
-    SharedState(
-        session_id="ref-test",
-        reference_server_args=server_args,
-        reference_envs=dict(envs or {}),
-    ).save(sd)
+    freeze_session_base(sd, args=server_args.split(), env=envs)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sd))
 
 

@@ -174,3 +174,19 @@ class TestLoadTrace:
     def test_mul_not_miscounted_as_add(self):
         # A BinaryFunctor multiply must land in ``mul``, not ``add``.
         assert dg.categorize_kernel_name("vectorized_elementwise BinaryFunctor mul<bf16>") == "mul"
+
+
+class TestCollectives:
+    def test_collective_kernels_are_their_own_category_and_not_launch_bound(self):
+        """Collectives are not counted under the reduce or copy categories."""
+        names = {
+            "void aiter::reduce_scatter_cross_device_store<__hip_bfloat16, 4>": "collective",
+            "void aiter::allreduce_fusion_kernel_1stage<__hip_bfloat16, 4>": "collective",
+            "void aiter::cross_device_reduce_2stage<__hip_bfloat16, 4>": "collective",
+            "void quickreduce::quick_reduce_twoshot<__hip_bfloat16>": "collective",
+            "void aiter::local_device_load_rmsnorm<__hip_bfloat16, 4>": "collective",
+            "index_select_gather_kernel": "copy",
+            "vectorized_elementwise CUDAFunctor_add<bf16>": "add",
+        }
+        assert {name: dg.categorize_kernel_name(name) for name in names} == names
+        assert "collective" not in dg.LAUNCH_BOUND_CATEGORIES

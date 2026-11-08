@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 import yaml
 
+from hyperloom_common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.actions.executors import _ray_backend as rb
 from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 from hyperloom.orchestrator.actions.executors import _ray_serving as rs
@@ -92,21 +93,15 @@ def test_worker_uses_invoking_policy_and_reanchors_session(monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "out", "err")
 
     monkeypatch.setattr(sk, "run_with_session_kill", run)
-    result = rb._run_subprocess_worker(
-        rb.SessionKillRound(
-            cmd=["client"],
-            env={},
-            cwd=None,
-            timeout=7800,
-            silence_timeout_sec=600,
-            server_log_path="server.log",
-            server_already_ready=True,
-            session_remaining_sec=42,
-        )
-    )
+    result = rb.SessionKillRound(
+        cmd=["client"],
+        env={},
+        cwd=None,
+        timeout=7800,
+        session_remaining_sec=42,
+    ).run()
     assert result == (0, "out", "err")
     assert captured["timeout"] == 7800
-    assert captured["silence_timeout_sec"] == 600
     assert captured["session_deadline_sec"] == 5042
 
 
@@ -130,7 +125,7 @@ def test_specialist_close_forces_actor_kill_after_stop_attempt(monkeypatch, ack)
 @pytest.mark.parametrize("members", [[], [(10, 100, "Z")], [(10, 100, "S")]])
 def test_managed_exited_root_cannot_confirm_detached_descendants(monkeypatch, members):
     from types import SimpleNamespace
-    from hyperloom.common import proctree
+    from hyperloom_common import proctree
 
     proc = SimpleNamespace(pid=123456, poll=lambda: 0)
     mgr = ManagedServerProcess()
@@ -204,7 +199,7 @@ def test_specialist_close_is_idempotent_after_forced_kill(monkeypatch):
 @pytest.mark.parametrize("confirmed", [False, True])
 def test_managed_live_root_uses_enumerated_tree_ack(monkeypatch, confirmed):
     from types import SimpleNamespace
-    from hyperloom.common import proctree
+    from hyperloom_common import proctree
 
     waited = []
     proc = SimpleNamespace(pid=123456, poll=lambda: None, wait=lambda **kw: waited.append(kw))
@@ -551,7 +546,7 @@ def test_ray_exec_enabled_pytest_default_off(monkeypatch: pytest.MonkeyPatch):
     assert rb.ray_exec_enabled() is False
 
 
-# ── _run_magpie routing (P1/T1) ──────────────────────────────────────────────
+# ── serving-lease routing ────────────────────────────────────────────────────
 def test_num_gpus_for_config_reads_tp(tmp_path: Path):
     from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 
@@ -635,6 +630,9 @@ class _LeaseFakeRay:
         class RayActorError(RayError):
             pass
 
+        class OutOfMemoryError(RayError):
+            pass
+
         class GetTimeoutError(RayError):
             pass
 
@@ -647,10 +645,7 @@ class _LeaseFakeRay:
         return {"CPU": 64.0, "GPU": 8.0, "serving_slot": 1.0}
 
     def get(self, ref, **_kw):
-        if isinstance(
-            ref,
-            (_LeaseFakeRay.exceptions.RayTaskError, _LeaseFakeRay.exceptions.RayActorError),
-        ):
+        if isinstance(ref, _LeaseFakeRay.exceptions.RayError):
             raise ref
         return ref
 
@@ -672,7 +667,7 @@ def test_serving_lease_run_session_kill_success(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setitem(sys.modules, "ray", fake)
     lease = ServingLease(num_gpus=1)
     lease._actor = _FakeActor((0, "hi", ""))  # pre-set so ensure() is a no-op
-    rc, out, err = lease.run_session_kill(rb.SessionKillRound(["echo", "hi"], timeout=5))
+    rc, out, err = lease.run_session_kill(rb.SessionKillRound(["echo", "hi"], env={}, timeout=5))
     assert (rc, out, err) == (0, "hi", "")
 
 
@@ -683,7 +678,7 @@ def test_serving_lease_run_session_kill_timeout_reraises(monkeypatch: pytest.Mon
     lease = ServingLease(num_gpus=1)
     lease._actor = _FakeActor((rs._ACTOR_TIMEOUT_RC, "", "TimeoutExpired: 5s"))
     with pytest.raises(subprocess.TimeoutExpired):
-        lease.run_session_kill(rb.SessionKillRound(["sleep", "99"], timeout=5))
+        lease.run_session_kill(rb.SessionKillRound(["sleep", "99"], env={}, timeout=5))
 
 
 def test_serving_lease_run_session_kill_ray_error_degrades(monkeypatch: pytest.MonkeyPatch):
@@ -692,7 +687,7 @@ def test_serving_lease_run_session_kill_ray_error_degrades(monkeypatch: pytest.M
     monkeypatch.setitem(sys.modules, "ray", fake)
     lease = ServingLease(num_gpus=1)
     lease._actor = _FakeActor(fake.exceptions.RayTaskError("boom"))
-    rc, out, err = lease.run_session_kill(rb.SessionKillRound(["x"], timeout=5))
+    rc, out, err = lease.run_session_kill(rb.SessionKillRound(["x"], env={}, timeout=5))
     assert rc == 1
     assert "ray_worker_error" in err
 
@@ -703,11 +698,80 @@ def test_serving_lease_run_session_kill_actor_death_self_heals(monkeypatch: pyte
     monkeypatch.setitem(sys.modules, "ray", fake)
     lease = ServingLease(num_gpus=1)
     lease._actor = _FakeActor(fake.exceptions.RayActorError("worker died"))
-    rc, out, err = lease.run_session_kill(rb.SessionKillRound(["x"], timeout=5))
+    rc, out, err = lease.run_session_kill(rb.SessionKillRound(["x"], env={}, timeout=5))
     assert rc == 1
     assert "ray_actor_error" in err
     # Handle dropped so the next run re-creates the actor.
     assert lease._actor is None
+
+
+class _OrphaningRound(_FakeMethod):
+    """A round whose actor dies while the benchmark it started keeps running in its own session."""
+
+    def __init__(self, ret):
+        super().__init__(ret)
+        self.spawned: subprocess.Popen | None = None
+
+    def remote(self, *a, **kw):
+        self.spawned = subprocess.Popen(["sleep", "60"], env=a[0].env, start_new_session=True)
+        return super().remote(*a, **kw)
+
+
+@pytest.mark.parametrize("error_name", ["RayActorError", "OutOfMemoryError"])
+def test_a_round_left_running_by_a_dead_actor_is_stopped_before_the_lease_reports(
+    monkeypatch: pytest.MonkeyPatch, error_name: str
+):
+    fake = _LeaseFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    lease = ServingLease(num_gpus=1)
+    lease._actor = _FakeActor(getattr(fake.exceptions, error_name)("Task was killed due to low memory"))
+    orphaning = _OrphaningRound(lease._actor.run_blocking._ret)
+    lease._actor.run_blocking = orphaning
+
+    try:
+        rc, _out, err = lease.run_session_kill(rb.SessionKillRound(["x"], env=dict(os.environ), timeout=5))
+        assert (rc, err.split(":")[0]) == (1, "ray_actor_error")
+        assert orphaning.spawned is not None
+        assert orphaning.spawned.wait(timeout=5) is not None
+        assert lease._actor is None
+    finally:
+        if orphaning.spawned is not None and orphaning.spawned.poll() is None:
+            orphaning.spawned.kill()
+            orphaning.spawned.wait()
+
+
+class _RunsTheRound(_FakeMethod):
+    """The actor's real round body, run in this process."""
+
+    def remote(self, *a, **kw):
+        super().remote(*a, **kw)
+        return a[0].run()
+
+
+def test_a_server_a_round_leaves_running_outlives_the_round(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """A ``cleanup: false`` round leaves its setsid'd server up for the next round of the same arm to reuse."""
+    monkeypatch.setitem(sys.modules, "ray", _LeaseFakeRay())
+    lease = ServingLease(num_gpus=1)
+    lease._actor = _FakeActor(None)
+    lease._actor.run_blocking = _RunsTheRound(None)
+    pidfile = tmp_path / "server.pid"
+    launch = (
+        "import subprocess; p = subprocess.Popen(['sleep', '60'], start_new_session=True); "
+        f"open({str(pidfile)!r}, 'w').write(str(p.pid))"
+    )
+    env = {k: v for k, v in os.environ.items() if k != REAP_MARK_ENV}
+
+    rc, _out, _err = lease.run_session_kill(rb.SessionKillRound([sys.executable, "-c", launch], env=env, timeout=30))
+
+    server = int(pidfile.read_text())
+    try:
+        time.sleep(0.5)
+        assert rc == 0
+        stat = Path(f"/proc/{server}/stat")
+        assert stat.exists() and stat.read_text().split()[2] != "Z", "the round's teardown reaped the server"
+    finally:
+        with suppress(ProcessLookupError):
+            os.kill(server, signal.SIGKILL)
 
 
 def test_serving_lease_actor_death_marks_ray_backend_unhealthy(monkeypatch: pytest.MonkeyPatch):
@@ -720,7 +784,7 @@ def test_serving_lease_actor_death_marks_ray_backend_unhealthy(monkeypatch: pyte
 
     lease = ServingLease(num_gpus=1)
     lease._actor = _FakeActor(fake.exceptions.RayActorError("socket closed"))
-    rc, _out, err = lease.run_session_kill(rb.SessionKillRound(["x"], timeout=5))
+    rc, _out, err = lease.run_session_kill(rb.SessionKillRound(["x"], env={}, timeout=5))
 
     assert rc == 1
     assert "ray_actor_error" in err
@@ -789,7 +853,7 @@ def test_serving_lease_round_that_never_schedules_times_out(monkeypatch: pytest.
 
     started = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired) as excinfo:
-        lease.run_session_kill(rb.SessionKillRound(["sleep", "99"], timeout=5))
+        lease.run_session_kill(rb.SessionKillRound(["sleep", "99"], env={}, timeout=5))
 
     assert time.monotonic() - started < 30.0
     assert "ray_round_wait_timeout" in (excinfo.value.stderr or "")
@@ -827,7 +891,7 @@ def test_a_timed_out_lease_stays_quarantined_through_the_callers_teardown(monkey
     lease._actor = actor
 
     with pytest.raises(subprocess.TimeoutExpired):
-        lease.run_session_kill(rb.SessionKillRound(["sleep", "99"], timeout=5))
+        lease.run_session_kill(rb.SessionKillRound(["sleep", "99"], env={}, timeout=5))
 
     assert lease._quarantined  # the round's label, whatever it is
     # 1. The caller's teardown must not undo it.
@@ -835,7 +899,7 @@ def test_a_timed_out_lease_stays_quarantined_through_the_callers_teardown(monkey
     assert actor not in fake.killed
     assert lease._actor is actor
     # 2. A second round on the same lease is refused, not attempted.
-    rc, _, err = lease.run_session_kill(rb.SessionKillRound(["sleep", "1"], timeout=5))
+    rc, _, err = lease.run_session_kill(rb.SessionKillRound(["sleep", "1"], env={}, timeout=5))
     assert rc == 1
     assert "ray_lease_quarantined" in err
     assert actor not in fake.killed
@@ -863,7 +927,7 @@ def test_a_quarantined_actor_outlives_the_lease_that_declared_it(monkeypatch: py
     actor_ref = weakref.ref(actor)
 
     with pytest.raises(subprocess.TimeoutExpired):
-        lease.run_session_kill(rb.SessionKillRound(["sleep", "99"], timeout=5))
+        lease.run_session_kill(rb.SessionKillRound(["sleep", "99"], env={}, timeout=5))
     lease.close()
 
     # The owner drops its lease, as every real caller does.
@@ -932,115 +996,9 @@ def test_maybe_serving_lease_multi_node_none(monkeypatch: pytest.MonkeyPatch, tm
     assert maybe_serving_lease(num_gpus=2) is None
 
 
-# ── _run_magpie routing (P1/T1 + T2) ─────────────────────────────────────────
-class _RecordingLease:
-    """Stand-in ServingLease that records the round it was asked to run."""
-
-    def __init__(self, result=(0, "ok", "")):
-        self.result = result
-        self.calls: list[dict] = []
-
-    def run_session_kill(self, bench_round):
-        self.calls.append(dict(vars(bench_round)))
-        return self.result
-
-
-def test_run_magpie_routes_through_lease_and_strips_devices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """With a lease, _run_magpie runs in its actor on a device-stripped config."""
-    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-
-    cfg = tmp_path / "config.yaml"
-    cfg.write_text(
-        "benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n    ROCR_VISIBLE_DEVICES: '0'\n    FOO: bar\n",
-        encoding="utf-8",
-    )
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-
-    seen: dict = {}
-
-    def _fake_build(*, python_exe, config_path, output_dir):
-        seen["config_path"] = Path(config_path)
-        return ["magpie", "-m", "Magpie", "benchmark", str(config_path)]
-
-    monkeypatch.setattr(gr, "build_benchmark_command", _fake_build)
-
-    lease = _RecordingLease()
-    rc, out, err = gr._run_magpie(
-        gr.MagpieRound(magpie_python="python3", config_path=cfg, output_dir=out_dir, timeout_sec=10, cwd=str(tmp_path)),
-        serving_lease=lease,
-    )
-    assert (rc, out, err) == (0, "ok", "")
-    assert lease.calls, "the round must run inside the lease's actor"
-    # T2: the config handed to Magpie has the device list stripped.
-    used_cfg = seen["config_path"]
-    assert used_cfg.name.endswith(".ray.yaml")
-    envs = yaml.safe_load(used_cfg.read_text(encoding="utf-8"))["benchmark"]["envs"]
-    assert "ROCR_VISIBLE_DEVICES" not in envs
-    assert envs["TP"] == 1 and envs["FOO"] == "bar"
-    # server.log is pinned into the task slot for the watchdogs.
-    assert lease.calls[0]["server_log_path"] == str(out_dir / "server.log")
-    assert lease.calls[0]["timeout"] == 10
-
-
 # ── the session budget across the Ray process boundary ───────────────────────
 class TestTheSessionBudgetReachesTheRayWorker:
     """Production takes the Ray path on a single node; the local path is the test default."""
-
-    def test_run_magpie_converts_the_deadline_before_handing_it_over(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n", encoding="utf-8")
-        out_dir = tmp_path / "out"
-        out_dir.mkdir()
-        monkeypatch.setattr(gr, "build_benchmark_command", lambda **_kw: ["magpie"])
-        monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
-
-        lease = _RecordingLease()
-        gr._run_magpie(
-            gr.MagpieRound(
-                magpie_python="python3",
-                config_path=cfg,
-                output_dir=out_dir,
-                timeout_sec=10,
-                cwd=str(tmp_path),
-                session_deadline_sec=1250.0,
-            ),
-            serving_lease=lease,
-        )
-
-        assert lease.calls[0]["session_remaining_sec"] == pytest.approx(250.0)
-        assert "session_deadline_sec" not in lease.calls[0], (
-            "an absolute monotonic instant is meaningless in the actor's process"
-        )
-
-    def test_an_unbounded_budget_reaches_the_lease_as_none(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ):
-        from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n", encoding="utf-8")
-        out_dir = tmp_path / "out"
-        out_dir.mkdir()
-        monkeypatch.setattr(gr, "build_benchmark_command", lambda **_kw: ["magpie"])
-
-        lease = _RecordingLease()
-        gr._run_magpie(
-            gr.MagpieRound(
-                magpie_python="python3", config_path=cfg, output_dir=out_dir, timeout_sec=10, cwd=str(tmp_path)
-            ),
-            serving_lease=lease,
-        )
-
-        assert lease.calls[0]["session_remaining_sec"] is None
 
     def test_the_lease_forwards_the_budget_to_its_actor(self, monkeypatch: pytest.MonkeyPatch):
         """The lease is the last in-process hop; dropping it here loses the reaper."""
@@ -1048,41 +1006,31 @@ class TestTheSessionBudgetReachesTheRayWorker:
         lease = ServingLease(num_gpus=1)
         lease._actor = _FakeActor((0, "ok", ""))  # pre-set so ensure() is a no-op
 
-        lease.run_session_kill(rb.SessionKillRound(["echo", "hi"], timeout=5, session_remaining_sec=42.0))
+        lease.run_session_kill(rb.SessionKillRound(["echo", "hi"], env={}, timeout=5, session_remaining_sec=42.0))
 
         assert lease._actor.run_blocking.args[0][0].session_remaining_sec == pytest.approx(42.0)
 
     def test_the_worker_reaps_a_child_whose_budget_is_already_spent(self):
         """End of the chain: the duration becomes a deadline on the worker's own clock."""
         start = time.monotonic()
-        rc, _out, _err = rb._run_subprocess_worker(
-            rb.SessionKillRound(
-                cmd=[sys.executable, "-c", "import time; time.sleep(30)"],
-                env=None,
-                cwd=None,
-                timeout=60,
-                silence_timeout_sec=None,
-                server_log_path=None,
-                server_already_ready=False,
-                session_remaining_sec=-1.0,
-            )
-        )
+        rc, _out, _err = rb.SessionKillRound(
+            cmd=[sys.executable, "-c", "import time; time.sleep(30)"],
+            env=None,
+            cwd=None,
+            timeout=60,
+            session_remaining_sec=-1.0,
+        ).run()
         assert rc == SESSION_TIME_EXHAUSTED_RETURNCODE
         assert time.monotonic() - start < 10.0
 
     def test_the_worker_leaves_a_child_with_budget_left_alone(self):
-        rc, out, _err = rb._run_subprocess_worker(
-            rb.SessionKillRound(
-                cmd=["echo", "still-running"],
-                env=None,
-                cwd=None,
-                timeout=60,
-                silence_timeout_sec=None,
-                server_log_path=None,
-                server_already_ready=False,
-                session_remaining_sec=3600.0,
-            )
-        )
+        rc, out, _err = rb.SessionKillRound(
+            cmd=["echo", "still-running"],
+            env=None,
+            cwd=None,
+            timeout=60,
+            session_remaining_sec=3600.0,
+        ).run()
         assert rc == 0
         assert "still-running" in out
 
@@ -1151,6 +1099,9 @@ class _FakeRayP2:
             pass
 
         class RayActorError(RayError):
+            pass
+
+        class OutOfMemoryError(RayError):
             pass
 
     def __init__(self):
@@ -1399,47 +1350,6 @@ def test_gpu_specialist_lease_start_passes_serving_slot(monkeypatch: pytest.Monk
     assert seen == {"num_gpus": 8.0, "serving_slot": True, "max_concurrency": 1}
 
 
-def test_run_magpie_local_path_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """serving_lease=None keeps the local run_with_session_kill path + config."""
-    from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-
-    cfg = tmp_path / "config.yaml"
-    cfg.write_text(
-        "benchmark:\n  framework: sglang\n  envs:\n    TP: 1\n    ROCR_VISIBLE_DEVICES: '0'\n",
-        encoding="utf-8",
-    )
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-
-    seen: dict = {}
-
-    def _fake_build(*, python_exe, config_path, output_dir):
-        seen["config_path"] = Path(config_path)
-        return ["magpie", str(config_path)]
-
-    class _Proc:
-        returncode = 0
-        stdout = "local"
-        stderr = ""
-
-    def _fake_run(cmd, **kw):
-        seen["ran_local"] = True
-        return _Proc()
-
-    monkeypatch.setattr(gr, "build_benchmark_command", _fake_build)
-    monkeypatch.setattr(gr, "run_with_session_kill", _fake_run)
-
-    rc, out, err = gr._run_magpie(
-        gr.MagpieRound(magpie_python="python3", config_path=cfg, output_dir=out_dir, timeout_sec=10, cwd=str(tmp_path)),
-        serving_lease=None,
-    )
-    assert (rc, out) == (0, "local")
-    assert seen.get("ran_local") is True
-    # The local path uses the ORIGINAL config (no .ray.yaml rewrite).
-    assert seen["config_path"] == cfg
-    assert not (tmp_path / "config.ray.yaml").exists()
-
-
 # ── coverage: strip fallbacks ───────────────────────────────
 def test_strip_visible_devices_unparseable_yaml_returns_src(tmp_path: Path):
     """A YAML parse error returns the original path unchanged (fail-soft)."""
@@ -1452,6 +1362,13 @@ def test_strip_visible_devices_no_envs_dict_returns_src(tmp_path: Path):
     """When benchmark.envs is not a dict, return the original path."""
     cfg = tmp_path / "noenvs.yaml"
     cfg.write_text("benchmark:\n  envs: not_a_dict\n", encoding="utf-8")
+    assert rb.strip_visible_devices_from_config(cfg) == cfg
+
+
+def test_strip_visible_devices_no_benchmark_block_returns_src(tmp_path: Path):
+    """A YAML with no ``benchmark`` mapping is not a point; the original path is returned."""
+    cfg = tmp_path / "nobench.yaml"
+    cfg.write_text("other:\n  envs:\n    ROCR_VISIBLE_DEVICES: '0'\n", encoding="utf-8")
     assert rb.strip_visible_devices_from_config(cfg) == cfg
 
 
@@ -1478,6 +1395,9 @@ class _RaisingRay:
             pass
 
         class RayActorError(Exception):
+            pass
+
+        class OutOfMemoryError(Exception):
             pass
 
         class GetTimeoutError(Exception):
@@ -1819,6 +1739,9 @@ class _InfeasibleFakeRay:
         class RayActorError(Exception):
             pass
 
+        class OutOfMemoryError(Exception):
+            pass
+
         class GetTimeoutError(Exception):
             pass
 
@@ -1870,7 +1793,7 @@ def test_serving_lease_infeasible_no_slot_degrades(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(rr, "local_head_restartable", lambda: (False, "not a lone local head"))
 
     lease = rs.ServingLease(num_gpus=1)
-    rc, _out, err = lease.run_session_kill(rb.SessionKillRound(["echo", "hi"], timeout=5))
+    rc, _out, err = lease.run_session_kill(rb.SessionKillRound(["echo", "hi"], env={}, timeout=5))
     assert rc == 1
     assert "ray_ensure_error" in err
     assert "serving_slot" in err
@@ -1884,7 +1807,7 @@ def test_serving_lease_infeasible_no_gpu_degrades(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
 
     lease = rs.ServingLease(num_gpus=8)
-    rc, _out, err = lease.run_session_kill(rb.SessionKillRound(["echo", "hi"], timeout=5))
+    rc, _out, err = lease.run_session_kill(rb.SessionKillRound(["echo", "hi"], env={}, timeout=5))
     assert rc == 1
     assert "ray_ensure_error" in err
     assert "GPU" in err or "gpu" in err.lower()
@@ -1909,6 +1832,9 @@ class _PendingAcquireFakeRay:
             pass
 
         class RayActorError(Exception):
+            pass
+
+        class OutOfMemoryError(Exception):
             pass
 
     def __init__(self, result=(0, "ok", "")):
@@ -1945,7 +1871,7 @@ def test_serving_lease_pending_actor_has_resource_acquire_timeout(monkeypatch: p
     lease._actor = actor
 
     try:
-        result = lease.run_session_kill(rb.SessionKillRound(["echo", "ok"], timeout=5))
+        result = lease.run_session_kill(rb.SessionKillRound(["echo", "ok"], env={}, timeout=5))
     except subprocess.TimeoutExpired:
         result = (rs._ACTOR_TIMEOUT_RC, "", "benchmark timeout")
 
@@ -1956,7 +1882,7 @@ def test_serving_lease_pending_actor_has_resource_acquire_timeout(monkeypatch: p
     next_actor = _FakeActor((0, "next", ""))
     monkeypatch.setattr(rb, "get_ray_backend", lambda: _StubBackendP2())
     monkeypatch.setattr(rs, "make_serving_actor", lambda _num_gpus, **_kw: next_actor)
-    assert lease.run_session_kill(rb.SessionKillRound(["echo", "next"], timeout=5)) == (0, "next", "")
+    assert lease.run_session_kill(rb.SessionKillRound(["echo", "next"], env={}, timeout=5)) == (0, "next", "")
     assert lease._actor is next_actor
 
 
@@ -2048,4 +1974,4 @@ def test_serving_lease_actor_death_recovery_bug_propagates(monkeypatch: pytest.M
     lease._actor = _FakeActor(fake.exceptions.RayActorError("worker died"))
 
     with pytest.raises(ValueError, match="recovery bug"):
-        lease.run_session_kill(rb.SessionKillRound(["x"], timeout=5))
+        lease.run_session_kill(rb.SessionKillRound(["x"], env={}, timeout=5))

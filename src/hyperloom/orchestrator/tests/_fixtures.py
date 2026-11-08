@@ -103,11 +103,9 @@ def _isolate_framework_trees(monkeypatch) -> None:
 class NoLaunchBackendInstalled(BaseException):
     """A test launched a subprocess before installing a launch backend.
 
-    A ``BaseException`` on purpose. Several production launch sites sit inside
-    a bare ``except Exception`` -- the Magpie interpreter probe answers "this
-    interpreter cannot import Magpie" that way -- so an ordinary exception here
-    would be swallowed and the test would carry on against a wrong answer
-    instead of stopping.
+    A ``BaseException`` on purpose. A production launch site that sits inside a
+    bare ``except Exception`` would swallow an ordinary exception here, and the
+    test would carry on against a wrong answer instead of stopping.
     """
 
 
@@ -119,7 +117,7 @@ def launch_backend(monkeypatch):
     the definition and the names the eager importers bound are patched, so a
     launch made on a worker thread the test never sees is covered too.
     """
-    from hyperloom.orchestrator.actions.executors import _grid_runner, _subprocess_kill, baseline
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill
 
     installed: list = []
 
@@ -128,8 +126,7 @@ def launch_backend(monkeypatch):
             raise NoLaunchBackendInstalled(f"no launch backend is installed for this test; cmd={list(cmd)[:3]}")
         return installed[-1].run(cmd, **kwargs)
 
-    for module in (_subprocess_kill, _grid_runner, baseline):
-        monkeypatch.setattr(module, "run_with_session_kill", _run)
+    monkeypatch.setattr(_subprocess_kill, "run_with_session_kill", _run)
 
     def _install(backend):
         installed.append(backend)

@@ -198,9 +198,7 @@ LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
 log = logging.getLogger(__name__)
-#: The GPU types a session runs on: those Magpie has a benchmark script of their own for, and mi350x, which runs
-#: mi355x's (the same gfx950 die) through ``gpu_runner_type``, as the toolbox's environment sets ``GPU_TYPE``.
-#: ``hyperloom optimize`` also runs mi308x and mi325x on mi300x's script; a session does not accept them yet.
+#: The GPU types a session runs on; the toolbox's environment exports the board itself as ``GPU_TYPE``.
 MAGPIE_RUNNER_GPU_TYPES = ("mi300x", "mi350x", "mi355x")
 #: The options an inferencex workload requires and an agentx one refuses.
 SEQUENCE_LENGTHS = ("isl", "osl")

@@ -141,7 +141,7 @@ def _declared_path(root: Path) -> str | None:
 
 
 def _init_submodule(root: Path, path: str) -> None:
-    """Fetch the client's submodule the way Magpie does before a native AgentX run, so it can be patched first."""
+    """Fetch the client's submodule before a native AgentX run, so it can be patched first."""
     try:
         done = subprocess.run(
             ["git", "-C", str(root), "submodule", "update", "--init", "--recursive", "--", path],

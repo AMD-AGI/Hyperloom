@@ -48,19 +48,8 @@ def test_the_literal_sentinels_in_failures_equal_their_definitions() -> None:
     kill = importlib.import_module("hyperloom.orchestrator.actions.executors._subprocess_kill")
     from hyperloom.measure import failures
 
-    assert failures._AGENTX_PREFLIGHT_RC == kill.AGENTX_PREFLIGHT_RETURNCODE
-    assert failures._EVAL_PROBE_UNPATCHABLE_RC == kill.EVAL_PROBE_UNPATCHABLE_RETURNCODE
     assert failures._SESSION_TIME_EXHAUSTED_RC == kill.SESSION_TIME_EXHAUSTED_RETURNCODE
     assert failures._ORCHESTRATOR_CANCELLED_RC == kill.ORCHESTRATOR_CANCELLED_RETURNCODE
-    assert failures._SERVER_STALLED_RC == kill.DETOKENIZER_STALL_RETURNCODE
-
-
-def test_a_server_that_went_silent_is_an_unclear_stall_unless_its_log_names_the_failure() -> None:
-    stalled = _classify(returncode=-911, logs=["server ready but log went silent\n"])
-    crashed = _classify(returncode=-911, logs=[IMPORT_ERROR_LOG])
-
-    assert (stalled.failure_class, stalled.failure_reason) == (FailureClass.UNCLEAR, "server_stalled")
-    assert (crashed.failure_class, crashed.failure_reason) == (FailureClass.CANDIDATE, IMPORT_ERROR_REASON)
 
 
 def test_a_server_that_was_not_ready_in_time_is_the_candidates_failure_unless_its_log_names_another_cause() -> None:
@@ -104,10 +93,9 @@ def test_a_full_disk_in_the_runners_or_the_servers_output_is_an_infrastructure_f
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, f"{failures.DISK_FULL}: {line}")
 
 
-#: What a variant aborted in Magpie's AgentX dependency set-up records as its error: the git fetch of the replay
-#: client timed out, before any server started.
+#: What a variant aborted in its AgentX dependency set-up records as its error: the git fetch of the replay client
+#: timed out, before any server started.
 GIT_FETCH_STALL = (
-    'File "Magpie/modes/benchmark/agentx.py", line 806, in ensure_agentx_dependencies\n'
     "subprocess.TimeoutExpired: Command ['git', '-C', '/w/scratch/cache/InferenceX-e625d03f', 'submodule', 'update', "
     "'--init', '--recursive', '--', 'inferencex-e2e/utils/aiperf'] timed out after 300 seconds\n"
 )
@@ -244,8 +232,6 @@ def test_an_error_class_nobody_handles_is_a_program_error_not_a_candidate_failur
         (returncodes.HOSTED_INFRA_FAILURE_RC, Disposition.FAILED, FailureClass.INFRA, "infra_failure"),
         (returncodes.HOSTED_SPEC_REJECTED_RC, Disposition.PROGRAM_ERROR, None, "spec_rejected"),
         (returncodes.HOSTED_RESULT_REJECTED_RC, Disposition.PROGRAM_ERROR, None, "result_rejected"),
-        (-912, Disposition.FAILED, FailureClass.INFRA, "agentx_preflight"),
-        (-914, Disposition.PROGRAM_ERROR, None, "eval_probe_unpatchable"),
         (-915, Disposition.STOPPED, None, "session_time_exhausted"),
         (-917, Disposition.STOPPED, None, "orchestrator_cancelled"),
     ],

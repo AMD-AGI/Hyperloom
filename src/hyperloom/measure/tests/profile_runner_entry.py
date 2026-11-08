@@ -4,7 +4,7 @@
 """The real runner and the real local backend, with only ``run_grid`` replaced: no server, but a torch trace on disk.
 
 Started as a local sandbox template's command. ``run_grid`` is where the GPU run would happen; the stand-in writes what
-a profiled Magpie round leaves (a workspace with ``torch_trace/<rank>.pt.trace.json.gz``), so the local backend's
+a profiled round leaves (a run_dir with ``profile/torch_trace/<rank>.pt.trace.json.gz``), so the local backend's
 collection of the traces, the runner's inventory and the signed manifest are all the shipped code.
 """
 
@@ -18,14 +18,15 @@ from typing import Any
 from hyperloom.measure import local
 from hyperloom.measure.runner import run as runner_flow
 from hyperloom.orchestrator.actions.executors import VariantResult
+from inference_suite.contracts import RunLayout
 
 TRACE_NAME = "rank0.pt.trace.json.gz"
 
 
 async def fake_run_grid(*, grid: list[Any], output_root: Path, **_: Any) -> list[VariantResult]:
     name = grid[0].name
-    workspace = Path(output_root) / name / "benchmark_stub_20000101_000000"
-    trace = workspace / "torch_trace" / TRACE_NAME
+    workspace = Path(output_root) / name / "suite_run_0"
+    trace = RunLayout(workspace).profile_torch_trace / TRACE_NAME
     trace.parent.mkdir(parents=True)
     trace.write_bytes(b"stub trace bytes")
     return [

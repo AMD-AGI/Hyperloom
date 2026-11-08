@@ -8,6 +8,7 @@ from __future__ import annotations
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
+from hyperloom.orchestrator.state.base_launch import ServerBase
 
 # Env names that leak process state into the materialized YAML.
 _LEAKY_ENV = (
@@ -43,7 +44,7 @@ def _isolate(monkeypatch):
     # session state), keeping the golden output byte-stable.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
-    monkeypatch.setattr(we, "resolve_reference_launch", lambda: ("", {}, {}))
+    monkeypatch.setattr(we, "session_server_base", ServerBase)
 
 
 def _write(path, bench):
@@ -62,7 +63,6 @@ benchmark:
     NUM_WARMUPS: 8
     EXTRA_SGLANG_ARGS: --variant 4 --watchdog-timeout 1800
     AITER_LOG_TUNED_CONFIG: '1'
-    MAGPIE_TRUST_REMOTE_CODE: '1'
     BENCH_TRUST_REMOTE_CODE: '1'
     HF_HUB_TRUST_REMOTE_CODE: '1'
     RUN_EVAL: 'true'
@@ -79,7 +79,6 @@ benchmark:
     NUM_WARMUPS: 8
     EXTRA_VLLM_ARGS: --max-num-seqs 256
     AITER_LOG_TUNED_CONFIG: '1'
-    MAGPIE_TRUST_REMOTE_CODE: '1'
     BENCH_TRUST_REMOTE_CODE: '1'
     HF_HUB_TRUST_REMOTE_CODE: '1'
     RUN_EVAL: 'true'
@@ -103,7 +102,6 @@ benchmark:
     NUM_WARMUPS: 8
     AITER_LOG_TUNED_CONFIG: '1'
     EXTRA_SGLANG_ARGS: --watchdog-timeout 1800
-    MAGPIE_TRUST_REMOTE_CODE: '1'
     BENCH_TRUST_REMOTE_CODE: '1'
     HF_HUB_TRUST_REMOTE_CODE: '1'
     RUN_EVAL: 'true'

@@ -24,7 +24,7 @@ from hyperloom_common.tests._bwrap_host import usable_bwrap
 from hyperloom.common import agent_isolation, confinement
 from hyperloom.common.agent_isolation import BwrapIsolation, session_isolation_lines
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.proctree import REAP_MARK_ENV
+from hyperloom_common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
 from hyperloom.orchestrator.specialists import agent_runner, launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss

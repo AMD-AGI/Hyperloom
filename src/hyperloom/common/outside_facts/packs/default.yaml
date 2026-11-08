@@ -24,7 +24,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "19"
+version: "20"
 facts:
   aiter_merged_view:
     kind: names
@@ -326,8 +326,9 @@ facts:
     project: InferenceX
     reason: >-
       The names of the workload, the request and the evaluation in benchmark.envs, as InferenceX's benchmark scripts read
-      them; a renamed variable is silently ignored by the script and the point measures another workload. EVAL_ONLY is
-      the switch benchmark_lib.sh's run_benchmark_serving returns on before the bench, so a round only evaluates.
+      them and, for the evaluation, as Hyperloom's round translation reads them; a renamed variable is silently ignored
+      and the point measures another workload. EVAL_ONLY is the switch benchmark_lib.sh's run_benchmark_serving returns
+      on before the bench, so a round only evaluates.
     names:
       isl: ISL
       osl: OSL
@@ -340,9 +341,9 @@ facts:
       max_model_len: MAX_MODEL_LEN
       tp: TP
       ep: EP
-      magpie_eval_tasks: MAGPIE_EVAL_TASKS
-      magpie_eval_limit: MAGPIE_EVAL_LIMIT
-      magpie_eval_tokenized_requests: MAGPIE_EVAL_TOKENIZED_REQUESTS
+      eval_tasks: HYPERLOOM_EVAL_TASKS
+      eval_limit: HYPERLOOM_EVAL_LIMIT
+      eval_tokenized_requests: HYPERLOOM_EVAL_TOKENIZED_REQUESTS
     examples:
       - "hyperloom.measure.surface: SURFACE_ENV_KEYS, POINT_ENV_KEYS and REQUEST_ENV_KEYS group these names by who may set them"
       - "hyperloom.common.env_safety: BLOCKED_EXTERNAL_ENV_NAMES refuses these names in an env export from an untrusted source"
@@ -690,7 +691,7 @@ facts:
     project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX)
     reason: >-
       InferenceX carries the client as the git submodule named utils/aiperf (at utils/aiperf at the commit Hyperloom pins,
-      at inferencex-e2e/utils/aiperf at later commits Magpie pins; the patch finds it by name), and its benchmark
+      at inferencex-e2e/utils/aiperf at later commits; the patch finds it by name), and its benchmark
       library installs it editable into an environment made for each job, so the source of that submodule is what a round
       runs. The released client keeps only the input token count of a reply it converts to an error record
       (inference_result_parser.py, the branch of a parsed record that is invalid), and computes only the metrics flagged
@@ -718,19 +719,6 @@ facts:
                 [submodule "inferencex-e2e/utils/srt-slurm"]
                     path = inferencex-e2e/utils/srt-slurm
                     url = https://github.com/NVIDIA/srt-slurm.git
-
-  magpie_agentx_client_log:
-    kind: names
-    project: Magpie (native AgentX runtime at the commit Hyperloom pins)
-    reason: >-
-      A native AgentX round boots its server and then runs the InferenceX replay client with its output written to this
-      file in the round's workspace, beside server.log (agentx_runtime.py, _execute_local). The client's own failures (a
-      Hugging Face download refused, say) are only in this file: Magpie records the client's exit code as the round's
-      error and keeps the client's words out of benchmark_stderr.log.
-    names:
-      file: agentx_client.log
-    examples:
-      - "hyperloom.measure.local: a failed round's client log is read from this file beside its server.log, for the infrastructure causes the client states"
 
   hub_rate_limited:
     kind: log_regex

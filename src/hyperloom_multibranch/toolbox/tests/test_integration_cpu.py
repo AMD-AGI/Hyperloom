@@ -114,7 +114,6 @@ def _variant(root: Path, planners: list[FakeRunnerPlanner]) -> tuple[Variant, Re
         root,
         image_ref="local",
         image_digest=IMAGE,
-        benchmark_backend="bypass",
         blob_root=str(blobs.root),
         blobs=blobs,
     )

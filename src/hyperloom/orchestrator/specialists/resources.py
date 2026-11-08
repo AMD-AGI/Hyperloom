@@ -24,7 +24,7 @@ from pathlib import Path
 from stat import S_ISDIR
 from typing import Any, Mapping
 
-from hyperloom.common.proctree import descendants
+from hyperloom_common.proctree import descendants
 
 __all__ = [
     "ContainerSnapshot",
@@ -60,7 +60,7 @@ def _clock_ticks() -> int:
 class ProcessTreeSampler:
     """Track the memory peak and CPU time of one process tree.
 
-    The tree is the root and its descendants as :func:`hyperloom.common.proctree.descendants`
+    The tree is the root and its descendants as :func:`hyperloom_common.proctree.descendants`
     finds them in ``/proc``; ``proc_root`` is where each member's readings are read.
 
     A process that exits stops counting towards memory the moment it is gone. Its CPU

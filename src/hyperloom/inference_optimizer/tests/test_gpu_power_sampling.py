@@ -13,13 +13,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import _gpu_power, _subprocess_kill
+from hyperloom_common import gpu_telemetry
+from hyperloom_common.gpu_telemetry import GpuPowerRecorder, _read_node_power, parse_power_sample
+from inference_suite.server_log import LogCursor
 from hyperloom.orchestrator.actions.executors._gpu_power import (
     GPU_POWER_ARTIFACT_NAME,
-    GpuPowerRecorder,
-    _read_node_power,
     build_gpu_power_recorder,
-    parse_power_sample,
     read_measured_gpu_power,
     read_measured_gpu_power_by_gpu,
 )
@@ -101,7 +100,7 @@ def _no_node_power_sysfs(monkeypatch):
 
     A test of the node reading patches ``_read_node_power`` again, or calls the reader with its own board glob.
     """
-    monkeypatch.setattr(_gpu_power, "_read_node_power", lambda: None)
+    monkeypatch.setattr(gpu_telemetry, "_read_node_power", lambda: None)
 
 
 def _board(root, card: int, **files: str) -> None:
@@ -113,7 +112,7 @@ def _board(root, card: int, **files: str) -> None:
 
 def test_the_node_power_is_read_from_the_npm_master_cards_board(tmp_path, monkeypatch):
     """Every card has a board directory; only the cards that publish the node's files have them in it."""
-    monkeypatch.setattr(_gpu_power, "_BOARD_GLOB", str(tmp_path / "card*" / "device" / "board"))
+    monkeypatch.setattr(gpu_telemetry, "_BOARD_GLOB", str(tmp_path / "card*" / "device" / "board"))
     no_boards = _read_node_power()
     _board(tmp_path, 1)
     _board(tmp_path, 57, npm_status="enabled\n", node_power="3492\n", cur_node_power_limit="2600\n")
@@ -127,7 +126,7 @@ def test_the_node_power_is_read_from_the_npm_master_cards_board(tmp_path, monkey
 
 
 def _node_summary(monkeypatch, read_node) -> dict:
-    monkeypatch.setattr(_gpu_power, "_read_node_power", read_node)
+    monkeypatch.setattr(gpu_telemetry, "_read_node_power", read_node)
     query = _Replay(_tp4_on_eight(800.0))
     recorder = GpuPowerRecorder(output_path=None, query=query, interval_sec=0.5)
     recorder._interval = 0.01
@@ -160,7 +159,7 @@ def test_a_limit_that_changed_during_the_phase_is_unread(monkeypatch):
 
 
 def test_npm_enabled_with_no_limit_is_a_failed_read(tmp_path, monkeypatch):
-    monkeypatch.setattr(_gpu_power, "_BOARD_GLOB", str(tmp_path / "card*" / "device" / "board"))
+    monkeypatch.setattr(gpu_telemetry, "_BOARD_GLOB", str(tmp_path / "card*" / "device" / "board"))
     _board(tmp_path, 57, npm_status="enabled\n", node_power="900\n", cur_node_power_limit="0\n")
     out = _node_summary(monkeypatch, _read_node_power)
     assert out["node"] is None and out["node_query_errors"] > 0
@@ -256,56 +255,6 @@ def test_visible_mask_limits_the_cards_considered(tmp_path):
     assert out["serving_gpus"] == [2, 3]
 
 
-def test_native_power_uses_client_boundaries_and_waits_for_responses(tmp_path, monkeypatch):
-    from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
-    from hyperloom.orchestrator.actions.executors import _gpu_power
-
-    config = tmp_path / "native.yaml"
-    config.write_text("benchmark:\n  agentx: true\n")
-    server = tmp_path / "server.log"
-    server.write_text("Application startup complete\n")
-    client = tmp_path / "aiperf_artifacts" / "logs" / "aiperf.log"
-    client.parent.mkdir(parents=True)
-    query = _Replay(_tp4_on_eight(800.0))
-    monkeypatch.setattr(_gpu_power, "gpu_power_sampling_unavailable", lambda: "")
-    monkeypatch.setattr(_gpu_power, "_query_amd_smi", lambda run, *metrics: query(*metrics))
-    monkeypatch.setattr(_gpu_power, "_MIN_INTERVAL_SEC", 0.01)
-    monkeypatch.setenv("HYPERLOOM_GPU_POWER_INTERVAL_S", "0.01")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KV_METRICS", "0")
-    recorders = _subprocess_kill._build_round_recorders(str(server), {BENCHMARK_CONFIG_ENV: str(config)})
-    cursor = _subprocess_kill._LogCursor()
-
-    def advance(line):
-        with client.open("a") as stream:
-            stream.write(line + "\n")
-        scan = cursor.advance(str(server))
-        if scan.saw_ready:
-            recorders.note_phase("ready", time.monotonic())
-        recorders.note_client_phases(scan, time.monotonic())
-
-    try:
-        advance("Phase warmup (warmup) started")
-        time.sleep(0.03)
-        assert query.calls == 0
-        advance("Phase profiling (profiling) started")
-        deadline = time.monotonic() + 2.0
-        while query.calls < 2 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert query.calls >= 2
-        advance("Phase profiling (profiling) sending complete")
-        before = query.calls
-        time.sleep(0.05)
-        assert query.calls > before, "outstanding responses still belong to the measured window"
-        advance("Phase profiling (profiling) complete")
-        time.sleep(0.03)
-        after = query.calls
-        time.sleep(0.03)
-        assert query.calls == after
-    finally:
-        recorders.close()
-    assert read_measured_gpu_power_by_gpu(tmp_path) == (True, {str(g): 800.0 for g in range(4)})
-
-
 def test_query_failures_leave_the_round_unmeasured_not_zero(tmp_path):
     query = _Replay(RuntimeError("amd-smi exited 1"))
     recorder = GpuPowerRecorder(output_path=str(tmp_path / GPU_POWER_ARTIFACT_NAME), query=query, interval_sec=0.5)
@@ -341,24 +290,24 @@ def test_reader_ignores_an_artifact_from_an_earlier_round(tmp_path):
     assert read_measured_gpu_power(tmp_path, subprocess_started_unix=2000.0) == (False, None)
 
 
-_MAGPIE_REPORT = {"gpu_monitor": {"sample_count": 157, "power_watts": {"min": 225.0, "max": 790.0, "avg": 313.7}}}
+_V1_REPORT = {"gpu_monitor": {"sample_count": 157, "power_watts": {"min": 225.0, "max": 790.0, "avg": 313.7}}}
 
 
-def test_measurement_prefers_the_measured_phase_over_magpies_whole_process_reading(tmp_path):
+def test_measurement_prefers_the_measured_phase_over_a_v1_whole_process_reading(tmp_path):
     _write_artifact(tmp_path, avg=780.0, started_unix=time.time())
-    measurement = extract_benchmark_measurement(_MAGPIE_REPORT, workspace=tmp_path)
+    measurement = extract_benchmark_measurement(_V1_REPORT, workspace=tmp_path)
     assert measurement["gpu_power_avg_w"] == 780.0
 
 
 def test_measurement_keeps_a_sampled_but_unmeasured_round_unmeasured(tmp_path):
     _write_artifact(tmp_path, avg=None, started_unix=time.time())
-    assert extract_benchmark_measurement(_MAGPIE_REPORT, workspace=tmp_path)["gpu_power_avg_w"] is None
+    assert extract_benchmark_measurement(_V1_REPORT, workspace=tmp_path)["gpu_power_avg_w"] is None
 
 
 def test_measurement_falls_back_to_the_report_when_no_recorder_ran(tmp_path):
-    measurement = extract_benchmark_measurement(_MAGPIE_REPORT, workspace=tmp_path)
+    measurement = extract_benchmark_measurement(_V1_REPORT, workspace=tmp_path)
     assert measurement["gpu_power_avg_w"] == 313.7
-    assert measurement["gpu_power_by_gpu_w"] is None, "Magpie's host-wide mean cannot be split per card"
+    assert measurement["gpu_power_by_gpu_w"] is None, "a v1 host-wide mean cannot be split per card"
 
 
 def test_a_sampled_round_with_no_serving_card_has_no_by_gpu_reading(tmp_path):
@@ -380,58 +329,6 @@ def test_builder_follows_amd_smi_and_the_switch(tmp_path, monkeypatch):
     assert build_gpu_power_recorder(None, {}) is None
 
 
-class _Recorder:
-    def __init__(self, *, fail: bool = False) -> None:
-        self.fail = fail
-        self.calls: list[str] = []
-
-    def note_phase(self, phase, mono):
-        self.calls.append(f"phase:{phase}")
-        if self.fail:
-            raise RuntimeError("boom")
-
-    def tick(self, mono):
-        self.calls.append("tick")
-
-    def close(self, *, aborted=False):
-        self.calls.append("close")
-        if self.fail:
-            raise RuntimeError("boom")
-
-
-def test_fanout_propagates_a_failing_recorder():
-    broken, healthy = _Recorder(fail=True), _Recorder()
-    fanout = _subprocess_kill._RecorderFanout([broken, healthy])
-    with pytest.raises(RuntimeError, match="^boom$"):
-        fanout.note_phase("measured", 0.0)
-    assert broken.calls == ["phase:measured"]
-    assert healthy.calls == []
-
-
-def test_fanout_closes_every_recorder_before_raising_the_first_failure():
-    broken, healthy = _Recorder(fail=True), _Recorder()
-    fanout = _subprocess_kill._RecorderFanout([broken, healthy])
-    with pytest.raises(RuntimeError, match="^boom$"):
-        fanout.close(aborted=False)
-    assert broken.calls == ["close"]
-    assert healthy.calls == ["close"]
-
-
-def test_round_recorders_combine_kv_and_power(monkeypatch, tmp_path):
-    kv, power = _Recorder(), _Recorder()
-    monkeypatch.setattr(_subprocess_kill, "_build_kv_recorder", lambda *a: kv)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._gpu_power.build_gpu_power_recorder", lambda *a: power
-    )
-    combined = _subprocess_kill._build_round_recorders(str(tmp_path / "server.log"), {})
-    combined.note_phase("measured", 0.0)
-    assert kv.calls == power.calls == ["phase:measured"]
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._gpu_power.build_gpu_power_recorder", lambda *a: None)
-    lone = _subprocess_kill._build_round_recorders(str(tmp_path / "server.log"), {})
-    lone.note_phase("measured", 0.0)
-    assert kv.calls == ["phase:measured", "phase:measured"]
-
-
 class _PhaseLog:
     def __init__(self) -> None:
         self.phases: list[str] = []
@@ -441,9 +338,9 @@ class _PhaseLog:
 
 
 def _ready_line() -> str:
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import _SERVER_READY_MARKERS
+    from inference_suite.server_log import READY_MARKERS
 
-    return _SERVER_READY_MARKERS[0] + "\n"
+    return READY_MARKERS[0] + "\n"
 
 
 def test_replay_logs_drive_boot_and_measured_per_replica(tmp_path):
@@ -452,9 +349,7 @@ def test_replay_logs_drive_boot_and_measured_per_replica(tmp_path):
     from hyperloom.orchestrator.actions.executors._geak_sweep import _replay_server_logs
 
     phases = _PhaseLog()
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import _LogCursor
-
-    driver = ServerLogPhaseDriver(phases, lambda: _replay_server_logs(tmp_path), cursor=_LogCursor())
+    driver = ServerLogPhaseDriver(phases, lambda: _replay_server_logs(tmp_path), cursor=LogCursor())
     first = tmp_path / "replica_0" / "attempt_0" / "server.log"
     first.parent.mkdir(parents=True)
     first.write_text("loading weights\n")
@@ -529,7 +424,7 @@ def _unlistable_logs() -> list[str]:
 def test_an_unreadable_replay_log_is_warned_once_and_polling_continues(caplog):
     from hyperloom.orchestrator.actions.executors._gpu_power import ServerLogPhaseDriver
 
-    driver = ServerLogPhaseDriver(_PhaseLog(), _unlistable_logs, cursor=_subprocess_kill._LogCursor())
+    driver = ServerLogPhaseDriver(_PhaseLog(), _unlistable_logs, cursor=LogCursor())
     with caplog.at_level("DEBUG", logger="hyperloom.orchestrator.actions.executors._gpu_power"):
         driver._poll_logs()
         driver._poll_logs()
@@ -540,7 +435,7 @@ def test_an_unreadable_replay_log_is_warned_once_and_polling_continues(caplog):
 def test_a_phase_driver_bug_is_not_swallowed():
     from hyperloom.orchestrator.actions.executors._gpu_power import ServerLogPhaseDriver
 
-    class _BrokenCursor(_subprocess_kill._LogCursor):
+    class _BrokenCursor(LogCursor):
         def advance(self, server_log_path):
             raise KeyError("scan bug")
 
@@ -601,7 +496,7 @@ def _throttle(ticks: float, ppt: float, gpus=(4, 5)) -> dict:
 
 
 def test_parse_clock_sample_averages_the_xcds_and_reads_the_limit():
-    from hyperloom.orchestrator.actions.executors._gpu_power import parse_clock_sample
+    from hyperloom_common.gpu_telemetry import parse_clock_sample
 
     parsed = parse_clock_sample({"gpu_data": [_clocked(4, 700.0, 250_000, [1700, 1800], limit=2000)]})
     assert parsed[4] == (1750.0, frozenset({2000.0}))
@@ -616,7 +511,7 @@ def _partitioned(gpu: int, watts: float, filled: int, mhz: float = 1700.0) -> di
 
 
 def test_the_unfilled_xcd_slots_amd_smi_prints_leave_the_limit_read():
-    from hyperloom.orchestrator.actions.executors._gpu_power import parse_clock_sample
+    from hyperloom_common.gpu_telemetry import parse_clock_sample
 
     assert parse_clock_sample({"gpu_data": [_partitioned(4, 700.0, filled=1)]})[4] == (1700.0, frozenset({2400.0}))
     assert parse_clock_sample({"gpu_data": [_partitioned(4, 700.0, filled=0)]})[4] == (None, frozenset())
@@ -647,7 +542,7 @@ def test_a_clock_limit_that_changed_during_the_round_is_left_unread(tmp_path):
 
 
 def test_parse_throttle_sample_needs_both_counters():
-    from hyperloom.orchestrator.actions.executors._gpu_power import parse_throttle_sample
+    from hyperloom_common.gpu_telemetry import parse_throttle_sample
 
     assert parse_throttle_sample(_throttle(1000, 40, gpus=(4,))) == {4: (1000.0, 40.0)}
     assert parse_throttle_sample({"gpu_data": [{"gpu": 4, "throttle": {"accumulation_counter": "N/A"}}]}) == {}
@@ -667,7 +562,7 @@ def _throttled_round(tmp_path, *, end_ppt: float, sclk: float = 1730.0) -> dict:
 
 def test_a_power_throttled_round_names_the_cards_and_their_clock(tmp_path, caplog):
     """30% of the measured ticks power limited: the round names the cards, their share and the clock they held."""
-    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.actions.executors._gpu_power"):
+    with caplog.at_level("WARNING", logger="hyperloom_common.gpu_telemetry"):
         out = _throttled_round(tmp_path, end_ppt=4_000)
     assert out["per_gpu"]["4"]["power_throttle_fraction"] == pytest.approx(0.3)
     assert out["per_gpu"]["4"]["sclk_mean_mhz"] == pytest.approx(1730.0)
@@ -683,14 +578,14 @@ def test_a_power_throttled_round_names_the_cards_and_their_clock(tmp_path, caplo
 
 
 def test_a_throttled_card_whose_clock_was_never_read_awake_is_named_unread(tmp_path, caplog):
-    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.actions.executors._gpu_power"):
+    with caplog.at_level("WARNING", logger="hyperloom_common.gpu_telemetry"):
         out = _throttled_round(tmp_path, end_ppt=4_000, sclk=38.0)
     assert out["per_gpu"]["4"]["sclk_mean_mhz"] is None
     assert "at a mean clock of unread, unread" in caplog.text
 
 
 def test_an_unthrottled_round_reports_no_throttling(tmp_path, caplog):
-    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.actions.executors._gpu_power"):
+    with caplog.at_level("WARNING", logger="hyperloom_common.gpu_telemetry"):
         out = _throttled_round(tmp_path, end_ppt=1_100)
     assert out["per_gpu"]["4"]["power_throttle_fraction"] == pytest.approx(0.01)
     assert out["power_throttled_gpus"] == []
@@ -778,13 +673,11 @@ def test_a_sampler_still_blocked_in_amd_smi_at_close_leaves_every_share_unread()
 
 
 def test_a_card_unread_at_one_end_of_a_window_or_whose_counters_went_back_is_left_unread():
-    from hyperloom.orchestrator.actions.executors import _gpu_power
-
     recorder = GpuPowerRecorder(output_path=None, query=_with_counters(_Replay({}), dict))
     recorder._window_open = {4: (1_000.0, 0.0), 5: (1_000.0, 0.0), 6: (5_000.0, 100.0), 7: (5_000.0, 100.0)}
     closed = {4: (2_000.0, 300.0), 6: (500.0, 0.0), 7: (6_000.0, 50.0)}
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(_gpu_power, "parse_throttle_sample", lambda payload: closed)
+        mp.setattr(gpu_telemetry, "parse_throttle_sample", lambda payload: closed)
         recorder._close_window()
     assert recorder._complete_throttle_totals() == {4: (1_000.0, 300.0)}
 
@@ -801,7 +694,7 @@ def test_throttle_counters_sum_over_every_measured_window(tmp_path):
 
 def test_deep_sleep_clocks_do_not_pull_the_sustained_clock_down():
     """Idle stretches inside the measured phase read ~38 MHz; averaging them in would understate the loaded clock."""
-    from hyperloom.orchestrator.actions.executors._gpu_power import parse_clock_sample
+    from hyperloom_common.gpu_telemetry import parse_clock_sample
 
     asleep = parse_clock_sample({"gpu_data": [_clocked(4, 230.0, 250_000, [38.0] * 8)]})
     assert asleep[4] == (None, frozenset({2400.0}))
@@ -834,3 +727,37 @@ def test_the_sampler_closes_a_window_when_the_round_leaves_the_measured_phase(tm
         time.sleep(0.01)
     assert recorder._window_open is None and recorder._throttle_totals[4] == [10_000.0, 3_000.0, 1]
     recorder.close()
+
+
+def test_the_gpu_monitor_block_is_read_whole_by_the_gpu_metrics_reader(tmp_path):
+    from hyperloom.orchestrator.actions.executors._gpu_metrics import gpu_metrics_from_report
+
+    row = {
+        **_clocked(4, 700.0, 250_000, [1730.0] * 8),
+        "temperature": {"edge": "N/A", "hotspot": {"value": 62, "unit": "C"}},
+        "usage": {"gfx_activity": {"value": 98, "unit": "%"}},
+    }
+    query = _Replay([row])
+    recorder = GpuPowerRecorder(output_path=None, query=query, interval_sec=0.5)
+    recorder._interval = 0.01
+    _run_measured(recorder, query, samples=2)
+    recorder.close()
+
+    metrics = gpu_metrics_from_report({"gpu_monitor": [block.as_dict() for block in recorder.gpu_monitor()]})
+    assert all(value is not None for value in metrics.values()), metrics
+    assert (metrics["avg_power_w"], metrics["max_temp_c"], metrics["avg_gpu_util_pct"]) == (700.0, 62.0, 98.0)
+
+
+def test_the_power_wiring_uses_only_the_samplers_public_names():
+    import ast
+    import inspect
+
+    from hyperloom.orchestrator.actions.executors import _gpu_power
+
+    imported = [
+        alias.name
+        for node in ast.walk(ast.parse(inspect.getsource(_gpu_power)))
+        if isinstance(node, ast.ImportFrom) and node.module == "hyperloom_common.gpu_telemetry"
+        for alias in node.names
+    ]
+    assert imported and not [name for name in imported if name.startswith("_")]

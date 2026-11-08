@@ -59,9 +59,9 @@ __all__ = [
     "ENV_EP",
     "ENV_EVAL_ONLY",
     "ENV_ISL",
-    "ENV_MAGPIE_EVAL_LIMIT",
-    "ENV_MAGPIE_EVAL_TASKS",
-    "ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS",
+    "ENV_EVAL_LIMIT",
+    "ENV_EVAL_TASKS",
+    "ENV_EVAL_TOKENIZED_REQUESTS",
     "ENV_MAX_MODEL_LEN",
     "ENV_NUM_PROMPTS",
     "ENV_NUM_WARMUPS",
@@ -77,6 +77,7 @@ __all__ = [
     "HIP_NO_KERNEL_IMAGE",
     "HIP_UNDEFINED_SYMBOL",
     "HSA_STATUS_ERROR",
+    "HUB_RATE_LIMITED",
     "INITIAL_PID_NAMESPACE",
     "KFD_NODES",
     "KFD_NODE_GPU_ID",
@@ -236,9 +237,9 @@ _inferencex = _PACK.names(
     "max_model_len",
     "tp",
     "ep",
-    "magpie_eval_tasks",
-    "magpie_eval_limit",
-    "magpie_eval_tokenized_requests",
+    "eval_tasks",
+    "eval_limit",
+    "eval_tokenized_requests",
 )
 ENV_ISL = _inferencex["isl"]
 ENV_OSL = _inferencex["osl"]
@@ -251,9 +252,9 @@ ENV_NUM_WARMUPS = _inferencex["num_warmups"]
 ENV_MAX_MODEL_LEN = _inferencex["max_model_len"]
 ENV_TP = _inferencex["tp"]
 ENV_EP = _inferencex["ep"]
-ENV_MAGPIE_EVAL_TASKS = _inferencex["magpie_eval_tasks"]
-ENV_MAGPIE_EVAL_LIMIT = _inferencex["magpie_eval_limit"]
-ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS = _inferencex["magpie_eval_tokenized_requests"]
+ENV_EVAL_TASKS = _inferencex["eval_tasks"]
+ENV_EVAL_LIMIT = _inferencex["eval_limit"]
+ENV_EVAL_TOKENIZED_REQUESTS = _inferencex["eval_tokenized_requests"]
 
 _aiperf_export = _PACK.names(
     "aiperf_request_export",
@@ -284,7 +285,6 @@ AIPERF_SUBMODULE = _aiperf_source["submodule"]
 AIPERF_PARSER_FILE = _aiperf_source["parser_file"]
 AIPERF_OUTPUT_LENGTH_FILE = _aiperf_source["output_length_file"]
 
-MAGPIE_AGENTX_CLIENT_LOG = _PACK.names("magpie_agentx_client_log", "file")["file"]
 HUB_RATE_LIMITED = _PACK.pattern("hub_rate_limited")
 
 

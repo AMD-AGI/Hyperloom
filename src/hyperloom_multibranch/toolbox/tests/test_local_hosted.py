@@ -45,7 +45,14 @@ from hyperloom_multibranch.toolbox.local_hosted import (
 )
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req, lineage_blackboard
+from hyperloom_multibranch.toolbox.tests.helpers import (
+    IMAGE,
+    FakeRepo,
+    freeze_base_at,
+    lineage_blackboard,
+    req,
+    staged_runner_cache,
+)
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 
 
@@ -85,37 +92,31 @@ def test_runner_envs_add_to_the_image_variables_rather_than_replace_them(
 
 
 def test_the_host_tool_repositories_reach_the_runner_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A local runner starts from an emptied environment, so the repositories it clones InferenceX and Magpie from are
-    carried from the host's: both when the host sets both."""
+    """A local runner starts from an emptied environment, so the repository it clones InferenceX from is carried from
+    the host's."""
     monkeypatch.setenv("INFERENCEX_REPO", "/mirrors/inferencex.git")
-    monkeypatch.setenv("MAGPIE_REPO", "/mirrors/magpie.git")
     template = _runner_template(LocalSession(tmp_path, "run-1", [0]), LocalOptions())
     assert template.envs["INFERENCEX_REPO"] == "/mirrors/inferencex.git"
-    assert template.envs["MAGPIE_REPO"] == "/mirrors/magpie.git"
 
 
 def test_runner_envs_win_over_the_host_tool_repositories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INFERENCEX_REPO", "/mirrors/inferencex.git")
-    monkeypatch.setenv("MAGPIE_REPO", "/mirrors/magpie.git")
     options = LocalOptions(runner_envs={"INFERENCEX_REPO": "/explicit/inferencex"})
     template = _runner_template(LocalSession(tmp_path, "run-1", [0]), options)
     assert template.envs["INFERENCEX_REPO"] == "/explicit/inferencex"
-    assert template.envs["MAGPIE_REPO"] == "/mirrors/magpie.git", "the name runner_envs does not give is the host's"
 
 
 def test_a_host_tool_repository_that_is_not_set_is_not_in_the_runner_template(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("INFERENCEX_REPO", raising=False)
-    monkeypatch.setenv("MAGPIE_REPO", "  ")
+    monkeypatch.setenv("INFERENCEX_REPO", "  ")
     template = _runner_template(LocalSession(tmp_path, "run-1", [0]), LocalOptions())
-    assert "INFERENCEX_REPO" not in template.envs, "unset is absent, not empty"
-    assert "MAGPIE_REPO" not in template.envs, "a blank value is absent too"
+    assert "INFERENCEX_REPO" not in template.envs, "a blank value is absent, not empty"
 
 
 def test_only_the_named_tool_repositories_are_taken_from_the_host() -> None:
-    environ = {"INFERENCEX_REPO": "/a", "MAGPIE_REPO": "/b", "GITHUB_TOKEN": "t", "INFERENCEX_REF": "main"}
-    assert host_tool_repos(environ) == {"INFERENCEX_REPO": "/a", "MAGPIE_REPO": "/b"}
+    environ = {"INFERENCEX_REPO": "/a", "OTHER_REPO": "/b", "GITHUB_TOKEN": "t", "INFERENCEX_REF": "main"}
+    assert host_tool_repos(environ) == {"INFERENCEX_REPO": "/a"}
     assert host_tool_repos({}) == {}
 
 
@@ -172,18 +173,19 @@ def _require_tool_checkout(repo: Path, commit: str, home: Path, monkeypatch: pyt
 def _toolbox_of(
     blackboard: LocalBlackboard, tmp_path: Path, session: Path, commit: str, **extra: Any
 ) -> LocalHostedToolbox:
+    freeze_base_at(session, commit)
+    runner_envs = {**staged_runner_cache(tmp_path), **extra.pop("runner_envs", {})}
     return build_local_toolbox(
         LocalSession(session, "run-1", range(8)),
         blackboard,
         AcceptanceSetup(FakeRepo(), PointPlanner(_point(tmp_path)), IMAGE, WorkloadKind.AGENTX),
-        spec_context(
-            tmp_path, inferencex_commit=commit, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")
-        ),
+        spec_context(tmp_path, blob_root=str(session / "hosted" / "blobs")),
         options=LocalOptions(
             policy=QueuePolicy(per_branch_k=2, global_concurrency=64),
             python=idle_cards_python(tmp_path),
             poll_interval_sec=0.1,
             timeout_sec=120,
+            runner_envs=runner_envs,
             **extra,
         ),
     )

@@ -1069,7 +1069,7 @@ async def test_a_sandboxed_codex_runs_with_its_own_sandbox_off_in_a_single_node_
     bubblewrap's, opened by a shell that hands it the status file."""
     from hyperloom_common.bwrap import BwrapProbe
     from hyperloom.common.agent_isolation import BwrapIsolation
-    from hyperloom.common.proctree import REAP_MARK_ENV
+    from hyperloom_common.proctree import REAP_MARK_ENV
 
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "workspace-write")

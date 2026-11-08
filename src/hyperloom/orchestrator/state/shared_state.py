@@ -47,6 +47,7 @@ from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harne
 
 from .kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
 from .failure_evidence import tail_excerpt
+from .retest_view import write_retest_view
 from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.budget import _BudgetStateMixin
 from ._shared_state.enablement_round import EnablementRound
@@ -364,13 +365,13 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     conc_sweep_enabled: bool = True
     # Which benchmark workload this session measures: "agentx" (agentic trace replay) or "synthetic" (ISL/OSL).
     benchmark_mode: str = ""
-    # Generation counter for AgentX measurements.
-    agentx_epoch: int = 0
-    # Which AgentX client measured this session: "aiperf" or "mlperf". Empty on
-    # sessions that predate the field; resume treats those as aiperf. Compared
-    # on resume so the two workloads cannot anchor each other without bumping
-    # the measurement epoch (which would invalidate unchanged aiperf sessions).
+    # Generation of the measurement path this session was measured on; resume refuses one below the build's epoch.
+    measurement_epoch: int = 0
+    # Which AgentX client measured this session: "inferencex" or "mlperf"; empty outside AgentX. Compared on resume so
+    # the two workloads cannot anchor each other without bumping the measurement epoch (which would invalidate
+    # unchanged sessions of the other client).
     agentx_backend: str = ""
+    agentx_accuracy: bool = True  # Native AgentX GSM8K round; off only by ``--no-agentx-accuracy`` at seed.
     # The grading configuration this session was seeded with: {"objective": GRADED_INTVTY|GRADED_OUTPUT,
     # "noise_pct": float}. Recorded rather than re-derived because the derivation reads HYPERLOOM_PERF_METRIC /
     # HYPERLOOM_PERF_NOISE_PCT, and a resume is a new process: a shell that lost the variable would flip the axis
@@ -399,6 +400,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # reported axes the summary renders.
     baseline_perf: dict[str, Any] = field(default_factory=dict)
     baseline_accuracy: float = 0.0
+    # The eval definition digest ``baseline_accuracy`` was taken under; "" for a score no inference_suite round took.
+    baseline_accuracy_definition_digest: str = ""
     baseline_failure_streak: int = 0
     # The live leg's share of ``baseline_failure_streak``; ``begin_leg`` and every reset of the streak zero it.
     baseline_failures_this_leg: int = 0
@@ -433,8 +436,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     warm_replay_outcome: dict = field(default_factory=dict)
     # Crash-safe rollback/bookkeeping state for the combined Recipe + Kernel PRELUDE validation.
     warm_replay_pending: dict = field(default_factory=dict)
-    # Session-authoritative InferenceX checkout.
-    active_inferencex_path: str = ""
     # Durable post-save handoffs for section KB staging.
     kb_stage_outbox: list = field(default_factory=list)
     # Owner sections dropped because their persisted artifacts disappeared.
@@ -462,12 +463,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     current_best: dict[str, Any] = field(default_factory=dict)
     # Immutable measurement evidence captured with the current-best promotion.
     current_best_measurement: dict[str, Any] = field(default_factory=dict)
-    # Reference launch recipe from the operator's --reference-script: lowest-priority base server args/envs seeding
-    # every baseline.
-    reference_server_args: str = ""
-    reference_envs: dict[str, str] = field(default_factory=dict)
-    reference_launch_controls: dict[str, Any] = field(default_factory=dict)
-    reference_model: str = ""
+    # Digest of the session's frozen ``base_launch.json``; empty when the session froze none.
+    base_launch_digest: str = ""
     # Operator launch shape, persisted so a bare --resume serves the same contract.
     operator_server_args: str = ""
     # Operator-defined specialist (``--custom-specialist-*``); empty prompt means not configured.
@@ -482,8 +479,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     framework_repo_path: str = ""
     # xDiT model registry name (``--xdit-model-name``).
     xdit_model_name: str = ""
-    # ``HYPERLOOM_BENCHMARK_BACKEND`` at seed time (``bypass`` for custom).
-    benchmark_backend: str = ""
     # The card's compute-partition shape this session was measured in, as observed at launch: mode, partition count,
     # CU and memory per partition, streams per partition.
     compute_partition: dict[str, Any] = field(default_factory=dict)
@@ -979,7 +974,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
 
     @classmethod
     def _validate_resume_fields(cls, raw: Mapping[str, Any]) -> None:
-        """Reject damaged crash evidence before migrating a persisted state."""
+        """Reject damaged crash evidence."""
         if "crash_count" in raw:
             count = raw["crash_count"]
             if not isinstance(count, int) or isinstance(count, bool):
@@ -1079,7 +1074,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         """The complete server args the current best was launched with, as a serving recipe.
 
         Read from the promoted measurement's launch evidence: what the launch path composed from every layer --
-        reference recipe, operator ``--server-args``, the optimizer's delta -- where ``extra_server_args`` holds the
+        session base, operator ``--server-args``, the optimizer's delta -- where ``extra_server_args`` holds the
         delta alone. ``None`` when that launch was not recorded.
         """
         evidence = ((self.current_best or {}).get("measurement") or {}).get("launch_evidence") or {}
@@ -1089,30 +1084,28 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     def save(self, session_dir: Path) -> None:
         """Atomically write ``state.json`` (tmp file + ``os.replace``).
 
-        Serializes via :meth:`to_dict` and writes to a temp file in the
-        same directory before an atomic rename, so concurrent readers never
-        observe a partial blob. The temp file is cleaned up on failure.
+        Serializes via :meth:`to_dict` and writes to a temp file in the same directory before an atomic rename, so
+        concurrent readers never observe a partial blob; also writes the group-readable ``retest_view.json``.
 
         Charges the elapsed budget first, so every save is a durable record of
         spend and a leg that dies abruptly loses only the time since the last.
 
         Args:
-            session_dir (Path): The session root directory; created if it
-                does not already exist.
+            session_dir (Path): The session root directory; created if it does not already exist.
         """
         self.charge_elapsed()
         # Backfill scriptable/diffusion (xDiT) ``e2el_mean_ms`` from ``tput`` so current_best has the latency metric.
         self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
         atomic_write_json(path, self.to_dict())
+        write_retest_view(session_dir, self)
         # Author-time breakdown capture: snapshot state-owned sections into the recorder spool right after persisting.
         self._session_dir = Path(session_dir)
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
         instrument.snapshot_state_sections(session_dir, self)
         _progress.emit_budget(self)
-        # Derived artifact: re-render current_setting.sh from the current best route so the operator can audit /
-        # re-feed it via --reference-script.
+        # Derived artifact: the current best route as a current_setting.sh that --reference-script takes back.
         try:
             cb = self.current_best or {}
             if cb:
@@ -1130,16 +1123,13 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
                         args_mode=str(cb.get("args_mode") or "append"),
                     ),
                     target=reference_script.ServingTarget(
-                        model=self.reference_model or os.environ.get("MODEL_PATH"),
+                        model=os.environ.get("MODEL_PATH"),
                         tp=int(self.tp or 0) or None,
                         max_model_len=int(self.max_model_len or 0) or None,
                         gpu_type=str(self.gpu_type or os.environ.get("GPU_TYPE", "")) or None,
                     ),
                 )
-                (Path(session_dir) / "current_setting.sh").write_text(
-                    text,
-                    encoding="utf-8",
-                )
+                (Path(session_dir) / "current_setting.sh").write_text(text, encoding="utf-8")
         except (OSError, ValueError):
             # Never leave a stale launcher or export a subset of the retained
             # configuration. The complete settings remain in durable state.

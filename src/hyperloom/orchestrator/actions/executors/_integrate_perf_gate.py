@@ -12,14 +12,22 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.coerce import first_text
-from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
-from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
-from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
+from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero, graded_gate_row
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, GradingAnchor
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 
+from ...knowledge.kb_writeback import (
+    OUTCOME_INTEGRATED,
+    OUTCOME_KEPT_INERT,
+    OUTCOME_REVERTED_PARITY_INCONCLUSIVE,
+    OUTCOME_REVERTED_SMOKE_FAIL,
+    OUTCOME_REVERTED_SWITCH_OFF_PARITY,
+)
+from ...state.failure_evidence import FAILURE_ATTRIBUTION_ENVIRONMENT, classify_failure_attribution
 from ...state.shared_state import SharedState, resolve_anchor_with_drift, resolve_graded_comparison
 from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import accuracy_keep_block, eval_probe_summary
+from .benchmark_run.accuracy import accuracy_round_due
 from ._enablement_config import DEFAULT_SWITCH_OFF_PARITY_BAND_PCT
 from ._git import _git_head_sha
 from ._integrate_attempt import IntegrateAttempt
@@ -39,7 +47,9 @@ from ._integrate_results import (
     _perf_revert,
     _revert_status,
 )
+from ._integrate_vocabulary import BENCH_UNMEASURED_CLASS
 from ._patch_git import _uncommitted_revert
+from ._proposal_identity import content_fingerprint
 from ._patch_sources import _done_field
 
 log = logging.getLogger(__name__)
@@ -56,29 +66,21 @@ class PerfGateMixin:
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
     ) -> dict[str, Any]:
-        """Throughput KEEP / REVERT decision, or no verdict when the run stopped it."""
-        specialist_task_id = attempt.specialist_task_id
+        """Throughput KEEP / REVERT decision, or no verdict when the run stopped it or the environment left it unmeasured."""
         shared_state = attempt.shared_state
         assert attempt.output_root is not None
         base_tput = _live_base_tput(params, shared_state)
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
 
-        stopped = stopped_by_the_run_class(bench_result.get("error_class"))
-        if stopped is not None:
-            return {
-                "status": "failed",
-                "error_class": stopped.error_class,
-                "error": stopped.interrupted,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "artifacts_reverted": [],
-                "bench_result": bench_result,
-                "workspace": str(attempt.output_root),
-            }
+        unrated = _unrated_verdict(attempt, bench_result)
+        if unrated is not None:
+            return unrated
 
-        verdict = _weigh_gate(attempt, params, bench_result, gate_evidence, _GateBasis(base_tput, keep_threshold_pct))
+        throughput = _grade_throughput(shared_state, bench_result, _GateBasis(base_tput, keep_threshold_pct))
+        if throughput.cleared and accuracy_round_due(shared_state):
+            await self._run_patch_accuracy_round(attempt, params, bench_result, gate_evidence)
+        verdict = _weigh_gate(attempt, params, bench_result, gate_evidence, throughput)
         measured = verdict.measured
 
         switch_manifest: list[dict[str, Any]] = list(attempt.switch_manifest)
@@ -127,7 +129,7 @@ class PerfGateMixin:
         if switch_manifest and attempt.applied:
             return await self._keep_inert_switches(attempt, measured, params=params, parity=parity)
         await self._maybe_write_framework_kb_record(
-            measured.lesson("reverted_smoke_fail"), attempt=attempt, params=params
+            measured.lesson(OUTCOME_REVERTED_SMOKE_FAIL), attempt=attempt, params=params
         )
         fix_refusals = verdict.fix_refusals
         reasons = _gate_failure_reasons(
@@ -142,7 +144,7 @@ class PerfGateMixin:
             attempt,
             measured,
             status=_revert_status(
-                measured,
+                perf_kept=verdict.perf_kept,
                 accuracy_blocks=verdict.accuracy_block,
                 accuracy_verdict=measured.accuracy_pass,
                 fix_refusals=fix_refusals,
@@ -163,7 +165,7 @@ class PerfGateMixin:
         measured = verdict.measured
         delta_pct = measured.delta_pct
         fix_finding = verdict.fix_finding
-        await self._maybe_write_framework_kb_record(measured.lesson("integrated"), attempt=attempt, params=params)
+        await self._maybe_write_framework_kb_record(measured.lesson(OUTCOME_INTEGRATED), attempt=attempt, params=params)
         commit_failure, keep_committed = self._commit_accepted_work(
             attempt, f"hyperloom KEEP {attempt.specialist_task_id} ({delta_pct:+.2f}%)"
         )
@@ -224,8 +226,6 @@ class PerfGateMixin:
         # An unmeasurable parity leg reverts under its own verdict: the patch was
         # never shown to break, so neither the log line nor the KB lesson may say
         # that it did.
-        from ...knowledge import kb_writeback as _kb
-
         inconclusive = bool(parity.get("inconclusive"))
         log.warning(
             "integrate_patch: switch-off parity %s task=%s: %s",
@@ -235,7 +235,7 @@ class PerfGateMixin:
         )
         await self._maybe_write_framework_kb_record(
             measured.lesson(
-                _kb.OUTCOME_REVERTED_PARITY_INCONCLUSIVE if inconclusive else _kb.OUTCOME_REVERTED_SWITCH_OFF_PARITY
+                OUTCOME_REVERTED_PARITY_INCONCLUSIVE if inconclusive else OUTCOME_REVERTED_SWITCH_OFF_PARITY
             ),
             attempt=attempt,
             params=params,
@@ -441,7 +441,9 @@ class PerfGateMixin:
         """
         delta_pct = measured.delta_pct
         switch_manifest = attempt.switch_manifest
-        commit_failure, _ = self._commit_accepted_work(attempt, f"hyperloom KEEP_INERT {attempt.specialist_task_id}")
+        commit_failure, committed = self._commit_accepted_work(
+            attempt, f"hyperloom KEEP_INERT {attempt.specialist_task_id}"
+        )
         if commit_failure:
             return _uncommitted_revert(
                 attempt,
@@ -452,9 +454,7 @@ class PerfGateMixin:
                 bench_result=measured.bench_result,
             )
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
-        await self._maybe_write_framework_kb_record(
-            measured.lesson("kept_inert_levers_registered"), attempt=attempt, params=params
-        )
+        await self._maybe_write_framework_kb_record(measured.lesson(OUTCOME_KEPT_INERT), attempt=attempt, params=params)
         log.info(
             "integrate_patch: KEEP_INERT task=%s delta=%s threshold=%.2f%% levers=%d enablers=%d",
             attempt.specialist_task_id,
@@ -481,14 +481,14 @@ class PerfGateMixin:
             "extra_server_args_applied": "",
             "extra_envs_applied": {},
             **measured.envelope(),
-            "reason": _inert_keep_reason(
-                delta_pct, measured.keep_threshold_pct, len(attempt.applied), switch_manifest, enablers
-            ),
+            "reason": _inert_keep_reason(delta_pct, len(attempt.applied), switch_manifest, enablers),
             "workspace": str(attempt.output_root),
             "framework_root": str(attempt.framework_root or ""),
             "framework_levers": switch_manifest,
             "framework_lever_outcome": "registered_off",
             "switch_off_parity": parity,
+            # The dormant code is replayed onto a fresh tree at resume like a KEEP's.
+            **self._capture_source_layer(attempt, params, committed=committed),
         }
 
 
@@ -501,12 +501,37 @@ class _GateBasis:
 
 
 @dataclass(frozen=True)
+class _ThroughputGrade:
+    """How the bench's throughput graded against the base, before its accuracy is weighed."""
+
+    basis: _GateBasis
+    graded: GradedComparison
+    delta_pct: float | None
+
+    @property
+    def cleared(self) -> bool:
+        """Whether the graded comparison kept the bench."""
+        return self.graded.comparable and self.graded.verdict == VERDICT_KEEP
+
+
+def _grade_throughput(shared_state: SharedState, bench_result: dict[str, Any], basis: _GateBasis) -> _ThroughputGrade:
+    graded = resolve_graded_comparison(
+        shared_state,
+        bench_result,
+        keep_threshold_pct=basis.keep_threshold_pct,
+        anchor=GradingAnchor(tput=basis.base_tput),
+    )
+    return _ThroughputGrade(basis, graded, _graded_delta_pct(graded))
+
+
+@dataclass(frozen=True)
 class _GateVerdict:
     """The measurement the KEEP gate weighed, its verdict, and the accuracy and correctness-fix findings behind it."""
 
     measured: _PatchMeasurement
     graded: GradedComparison
     passed: bool
+    perf_kept: bool
     accuracy_block: bool
     accuracy_reason: str
     fix_finding: str
@@ -519,40 +544,37 @@ def _weigh_gate(
     params: dict[str, Any],
     bench_result: dict[str, Any],
     gate_evidence: dict[str, Any],
-    basis: _GateBasis,
+    throughput: _ThroughputGrade,
 ) -> _GateVerdict:
-    """Grade the bench against the base and weigh the accuracy gate and any correctness-fix claim."""
+    """Weigh the graded throughput, the accuracy gate and any correctness-fix claim."""
     shared_state = attempt.shared_state
-    base_tput, keep_threshold_pct = basis.base_tput, basis.keep_threshold_pct
-    graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
-    delta_pct = _graded_delta_pct(graded, bench_result, base_tput)
+    base_tput, keep_threshold_pct = throughput.basis.base_tput, throughput.basis.keep_threshold_pct
+    graded, delta_pct = throughput.graded, throughput.delta_pct
 
     accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
     acc_block, acc_reason = _accuracy_block(params, accuracy_pass, attempt.specialist_task_id)
-    acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
-
-    gate_pass = (
-        graded.comparable
-        and delta_pct is not None
-        and delta_pct >= keep_threshold_pct
-        and not graded.veto_reason
-        and not acc_block
+    # Only a score taken under the baseline's eval definition draws a verdict, and only it compares with the baseline.
+    acc_delta_pct = (
+        None
+        if accuracy_pass is None
+        else _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
     )
+
+    perf_kept = throughput.cleared
+    gate_pass = perf_kept and not acc_block
     fix_finding = first_text(_done_field(attempt.done_payload, "resolves_finding"))
     fix_refusals: list[str] = []
     correctness_fix = False
     if not gate_pass and fix_finding:
-        fix_delta_pct = gain_pct(graded.candidate, graded.reference) if graded.graded_on_intvty else delta_pct
         fix_refusals = _correctness_fix_refusals(
             fix_finding,
             shared_state=shared_state,
             bench_result=bench_result,
             graded=graded,
-            delta_pct=fix_delta_pct,
+            delta_pct=delta_pct,
         ) + _fix_accuracy_refusals(accuracy_pass)
         if not fix_refusals:
             gate_pass = correctness_fix = True
-            delta_pct = fix_delta_pct
     measured = _PatchMeasurement(
         bench_result=bench_result,
         new_tput=bench_result.get("output_throughput"),
@@ -561,19 +583,63 @@ def _weigh_gate(
         keep_threshold_pct=keep_threshold_pct,
         accuracy_pass=accuracy_pass,
         acc_delta_pct=acc_delta_pct,
-        cfg_fingerprint=canonical_fingerprint(params.get("extra_server_args"), params.get("extra_envs")),
+        cfg_fingerprint=content_fingerprint(params),
         measured_against=_measured_against(params, base_tput=base_tput),
+        gates=(
+            (graded_gate_row(graded, keep_threshold_pct, graded.veto_reason or graded.refused_by),)
+            if bench_result.get("status") == "succeeded"
+            else ()
+        ),
     )
     return _GateVerdict(
         measured=measured,
         graded=graded,
         passed=gate_pass,
+        perf_kept=perf_kept,
         accuracy_block=acc_block,
         accuracy_reason=acc_reason,
         fix_finding=fix_finding,
         fix_refusals=fix_refusals,
         correctness_fix=correctness_fix,
     )
+
+
+def _unrated_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) -> dict[str, Any] | None:
+    """The failed verdict of a bench the run stopped or the environment kept from measuring; ``None`` otherwise."""
+    bench_class = str(bench_result.get("error_class") or "")
+    stopped = stopped_by_the_run_class(bench_class)
+    if stopped is not None:
+        fields: dict[str, Any] = {"error_class": stopped.error_class, "error": stopped.interrupted}
+    elif _environment_unmeasured(bench_result):
+        fields = {
+            "error_class": BENCH_UNMEASURED_CLASS,
+            "bench_error_class": bench_class,
+            "failure_attribution": FAILURE_ATTRIBUTION_ENVIRONMENT,
+            "error": str(bench_result.get("error") or ""),
+        }
+    else:
+        return None
+    return {
+        "status": "failed",
+        **fields,
+        "specialist_task_id": attempt.specialist_task_id,
+        "patches_applied": [],
+        "patches_reverted": [],
+        "artifacts_reverted": [],
+        "bench_result": bench_result,
+        "workspace": str(attempt.output_root),
+    }
+
+
+def _environment_unmeasured(bench_result: dict[str, Any]) -> bool:
+    """Whether the bench produced no throughput and its error is evidence of an environment fault."""
+    tput = bench_result.get("output_throughput")
+    if isinstance(tput, (int, float)) and tput > 0:
+        return False
+    attribution = classify_failure_attribution(
+        error_class=bench_result.get("error_class"), error_excerpt=bench_result.get("error")
+    )
+    return attribution == FAILURE_ATTRIBUTION_ENVIRONMENT
 
 
 def _empty_source_evidence() -> dict[str, Any]:
@@ -632,23 +698,20 @@ def _parity_verdict(
     }
 
 
-def _graded_delta_pct(graded: GradedComparison, bench_result: dict[str, Any], base_tput: float) -> float | None:
-    """The delta the KEEP gate weighs; ``None`` when graded on interactivity and that did not clear the gate."""
+def _graded_delta_pct(graded: GradedComparison) -> float | None:
+    """The measured change on the graded axis, whatever the verdict; ``None`` when nothing was measured."""
     if not graded.comparable:
         log.info("integrate_patch: performance comparison unavailable (%s)", graded.degrade_reason)
-    if not graded.graded_on_intvty:
-        return gain_pct(bench_result.get("output_throughput"), base_tput)
-    if graded.verdict == VERDICT_KEEP:
-        return gain_pct(graded.candidate, graded.reference)
-    log.info(
-        "integrate_patch: %s intvty %.1f->%.1f tput %.1f->%.1f",
-        graded.verdict,
-        graded.reference,
-        graded.candidate,
-        graded.tput_reference,
-        graded.tput_candidate,
-    )
-    return None
+    elif graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
+        log.info(
+            "integrate_patch: %s intvty %.1f->%.1f tput %.1f->%.1f",
+            graded.verdict,
+            graded.reference,
+            graded.candidate,
+            graded.tput_reference,
+            graded.tput_candidate,
+        )
+    return gain_pct(graded.candidate, graded.reference)
 
 
 def _live_base_tput(params: dict[str, Any], shared_state: SharedState | None) -> float:

@@ -19,10 +19,10 @@ import pytest
 from hyperloom.contracts.measurement import TestKind, TestResult, Validity
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
-from hyperloom.measure.tests.test_hosted_real_runner import _rigs
+from hyperloom.measure.tests.test_hosted_real_runner import _head, _rigs
 from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
-from hyperloom_multibranch.toolbox.tests.helpers import req
+from hyperloom_multibranch.toolbox.tests.helpers import freeze_base_at, req
 
 PHASED_RUNNER = (*IDLE_CARDS_PYTHON, "-m", "hyperloom.measure.tests.phased_runner_entry")
 AFTER_THE_RUNNER = ["result_signing", "runner_handoff", "result_landing", "sandbox_release", "result_read"]
@@ -49,6 +49,7 @@ def _point(tmp_path: Path, *, run_eval: str = "false", agentx: bool = False) -> 
 
 async def _attempt(tmp_path: Path, make, scenario: str, scale: float, point: Path, **fields: object) -> TestResult:
     r = make(envs={"HL_PHASE_SCENARIO": scenario, "HL_PHASE_SCALE": str(scale)})
+    freeze_base_at(tmp_path / "session", _head(tmp_path / "inferencex"))
     executor = HostedExecutor(r.backend, tmp_path / "session", timeout_sec=120)
     request = req(kind=TestKind.TEST, **fields).accepted("req-1")
     return await executor.run(TestJob(request, 1, (), 2, 1, AcceptedMeasurement(None, (point,))))  # type: ignore[arg-type]

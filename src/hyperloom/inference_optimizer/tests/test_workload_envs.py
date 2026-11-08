@@ -93,34 +93,34 @@ def test_materialize_pd_forces_string_prompts_for_lm_eval(tmp_path, monkeypatch)
     # PD-disaggregated: force lm_eval string prompts so the sglang_router's /v1/completions (StringOrArray) does not
     # 422 on token-id prompts.
     clear_env(monkeypatch)
-    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "resolve_kb_topology", lambda: KbTopology(pd_mode="disaggregated"))
     src = tmp_path / "base.yaml"
     write_config(src)
     bench = materialize(src, tmp_path / "out")
-    assert bench["envs"].get("MAGPIE_EVAL_TOKENIZED_REQUESTS") == "false"
+    assert bench["envs"].get("HYPERLOOM_EVAL_TOKENIZED_REQUESTS") == "false"
 
 
 def test_materialize_aggregated_leaves_lm_eval_default(tmp_path, monkeypatch):
     # Aggregated hits the sglang server directly (accepts token-id prompts), so the env is left unset and the default
     # tokenized path is preserved.
     clear_env(monkeypatch)
-    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "resolve_kb_topology", lambda: KbTopology(pd_mode="aggregated"))
     src = tmp_path / "base.yaml"
     write_config(src)
     bench = materialize(src, tmp_path / "out")
-    assert "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in bench["envs"]
+    assert "HYPERLOOM_EVAL_TOKENIZED_REQUESTS" not in bench["envs"]
 
 
 def test_materialize_fails_when_the_pd_topology_cannot_be_resolved(tmp_path, monkeypatch):
     # An unresolved topology must not leave a PD run's lm_eval on token-id prompts, which reads accuracy 0.
     clear_env(monkeypatch)
-    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_EVAL_TOKENIZED_REQUESTS", raising=False)
     from hyperloom.inference_optimizer.multi_node._internal.topology_file import TopologyHandoffError
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
@@ -172,34 +172,17 @@ def test_visible_gpu_count_rocm_smi_error(monkeypatch):
     assert we._visible_gpu_count() == 0
 
 
-def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
+def test_precision_pins_and_the_board_keeps_the_point_script(monkeypatch, tmp_path):
     clear_env(monkeypatch)
     monkeypatch.setenv("PRECISION", "fp8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     src = tmp_path / "cfg.yaml"
-    # framework empty -> gpu_type branch pops benchmark_script
     src.write_text(
         yaml.safe_dump({"benchmark": {"model": "/m", "envs": {}, "benchmark_script": "old.sh"}}), encoding="utf-8"
     )
     bench = materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi300x"))
     assert bench["precision"] == "fp8"
-    assert "benchmark_script" not in bench
-
-
-def test_bypass_scriptable_prefers_absolute_benchmark_script(tmp_path):
-    from hyperloom.orchestrator.actions.executors import bypass_scriptable
-
-    script = tmp_path / "custom_mi355x.sh"
-    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-
-    resolved = bypass_scriptable.resolve_scriptable_script(
-        "custom",
-        "mi355x",
-        "",
-        {"benchmark_script": str(script)},
-    )
-
-    assert resolved == script
+    assert bench["benchmark_script"] == "old.sh"
 
 
 def test_rocr_derives_tp(monkeypatch, tmp_path):

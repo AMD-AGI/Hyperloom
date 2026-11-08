@@ -678,7 +678,12 @@ def test_the_command_prints_one_json_line_and_reads_the_cache_from_the_environme
     )
     assert done.returncode == 0, done.stderr
     answer = json.loads(done.stdout)
-    assert answer == {"path": str(cache / rig.cache.sha), "manifest_sha256": answer["manifest_sha256"], "reused": False}
+    assert answer == {
+        "path": str(cache / rig.cache.sha),
+        "manifest_sha256": answer["manifest_sha256"],
+        "reused": False,
+        "inference_suite": str(cache / "inference-suite" / "published"),
+    }
 
 
 def test_the_command_needs_a_cache_directory_and_says_why_a_build_failed(rig: Rig, tmp_path: Path) -> None:

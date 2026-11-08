@@ -36,7 +36,7 @@ from pathlib import Path
 from hyperloom_common.jsonio import read_jsonl
 from hyperloom_common.shared_storage import open_shared_append
 from hyperloom.common.owner_scope import local_owner_scope, process_started_at, same_environment
-from hyperloom.common.proctree import collect_tree, descendants, group_members, kill_tree, proc_identity, running
+from hyperloom_common.proctree import collect_tree, descendants, group_members, kill_tree, proc_identity, running
 from hyperloom_multibranch.blackboard.codec import decode
 from hyperloom_multibranch.scheduling.clock import Clock
 

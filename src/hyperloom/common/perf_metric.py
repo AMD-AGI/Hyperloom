@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
+from hyperloom.common.benchmark_config import configured_benchmark, is_agentx
 from hyperloom_common.coerce import optional_positive_float
 
 from dataclasses import dataclass
@@ -73,9 +73,10 @@ ERROR_RATE_SLACK_PCT = 0.5
 # Duration and error rate are members because they are decision inputs, not decoration: ``incomparability_reason``
 # refuses a pair whose windows differ by more than ``DURATION_DRIFT_PCT`` or whose candidate dropped too many requests,
 # and a published verdict that omits them cannot be re-derived from the record. The objective and its two guards
-# are here for the same reason -- every input the verdict reads is recoverable from one block. The exception is the
+# are here for the same reason -- every input the verdict reads is recoverable from one block. The exceptions are the
 # unserved and total request counts the guard prefers when both sides carry them: they join once a ``main`` producer
-# stamps them, together with dropping the error-rate fallback in ``_failure_rates_pct``.
+# stamps them, together with dropping the error-rate fallback in ``_failure_rates_pct``. The checkpoint median is
+# record-only: it gates the early stop, which ``agentx_checkpoint.json`` and the REVERT reason record, not the verdict.
 GRADED_AXIS_KEYS = (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
@@ -97,18 +98,32 @@ _DEFAULT_INTVTY_NOISE_PCT = 5.0
 # The median bar is a property of the objective, so the session's decaying threshold does not apply to it.
 AGENTX_KEEP_P50_THRESHOLD_PCT = 3.0
 
+# Median interactivity over the first half hour of profiling. On 808 graded rounds no KEEP trailed its reference here
+# by more than 0.47%, so a candidate behind by more than the drop is stopped instead of measured to the end.
+GRADED_INTVTY_P50_CHECKPOINT = "e2e_norm_intvty_p50_1800s"
+AGENTX_CHECKPOINT_SEC = 1800.0
+AGENTX_CHECKPOINT_MAX_DROP_PCT = 2.0
+
 VERDICT_KEEP = "KEEP"
 VERDICT_REVERT = "REVERT"
 
 
 def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
     """Return whether CLI workload translation or a bound YAML selects AgentX."""
-    return is_magpie_agentx(configured_benchmark(env)) or env_bool(_AGENTX_ENV, env=env)
+    return is_agentx(configured_benchmark(env)) or env_bool(_AGENTX_ENV, env=env)
 
 
 def is_agentx_mode(benchmark_mode: Any) -> bool:
     """Whether a ``benchmark_mode`` names the agentic workload."""
     return str(benchmark_mode or "").strip().lower() == _AGENTX_MODE
+
+
+def agentx_replay_session(state: Any) -> bool:
+    """Whether *state* records an AgentX session whose rounds replay traces, i.e. not one on the MLPerf backend."""
+    from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
+
+    backend = str(getattr(state, "agentx_backend", "") or "")
+    return is_agentx_mode(getattr(state, "benchmark_mode", "")) and not is_mlperf_backend({BACKEND_ENV: backend})
 
 
 def agentx_active(*, benchmark_mode: Any = "") -> bool:
@@ -163,13 +178,13 @@ def _non_negative(value: Any) -> float | None:
     return coerced if coerced >= 0 else None
 
 
-_AGENTX_EVIDENCE = ("benchmark_backend", "benchmark_valid", "diagnostic_only", "workload_identity")
+_AGENTX_EVIDENCE = ("valid_measurement", "diagnostic_only", "workload_identity")
 
 
 def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, float] | None:
     """The graded axes from a measurement or a ``current_best``; None unless objective and guards are all positive."""
     # Requiring all of them is what stops a lane half-applying the objective. A total that is absent, null or
-    # non-positive coalesces to input plus output, the same fallback ``agentx.mapping`` applies.
+    # non-positive coalesces to input plus output.
     if not isinstance(source, Mapping):
         return None
     intvty = optional_positive_float(source.get(GRADED_INTVTY))
@@ -198,6 +213,7 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
         ("ttft_p90_ms", optional_positive_float(source.get("ttft_p90_ms"))),
         ("tpot_p50_ms", optional_positive_float(source.get("tpot_p50_ms"))),
         (GRADED_OUTPUT_PER_GPU, optional_positive_float(source.get(GRADED_OUTPUT_PER_GPU))),
+        (GRADED_INTVTY_P50_CHECKPOINT, optional_positive_float(source.get(GRADED_INTVTY_P50_CHECKPOINT))),
         (GRADED_DURATION, duration),
         (GRADED_ERROR_RATE, error_rate),
         (GRADED_UNSERVED_REQUESTS, _non_negative(source.get(GRADED_UNSERVED_REQUESTS))),
@@ -267,6 +283,7 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
         "tpot_p50_ms",
         "tpot_p90_ms",
         GRADED_INTVTY_P50,
+        GRADED_INTVTY_P50_CHECKPOINT,
         GRADED_OUTPUT_PER_GPU,
         GRADED_REQUESTS_TOTAL,
     ):
@@ -447,10 +464,14 @@ def power_veto_reason(
 
 
 def native_agentx_veto(source: Mapping[str, Any], state: Any) -> str:
-    """Refuse diagnostic, invalid or differently configured AgentX evidence."""
-    if getattr(state, "agentx_backend", "") != "magpie" and source.get("benchmark_backend") != "magpie_agentx":
+    """Refuse diagnostic, invalid or differently configured evidence in an AgentX session.
+
+    Validity is the report mapper's verdict, ``round_measurement`` for a round and ``agentx_measurement`` for a v1
+    archive. An MLPerf session's rounds are not AgentX trace replays and are not judged here.
+    """
+    if not agentx_replay_session(state):
         return ""
-    if source.get("benchmark_valid") is not True or source.get("diagnostic_only") is not False:
+    if source.get("valid_measurement") is not True or source.get("diagnostic_only") is not False:
         return "agentx_evidence_invalid"
     anchor = getattr(state, "current_best", None) or getattr(state, _BASELINE_PERF_ATTR, None) or {}
     identity = source.get("workload_identity")
@@ -479,8 +500,7 @@ CONSTRAINT_FIELDS = (
     "e2el_mean_ms",
     "gpu_power_avg_w",
     "gpu_power_by_gpu_w",
-    "benchmark_backend",
-    "benchmark_valid",
+    "valid_measurement",
     "diagnostic_only",
     "workload_identity",
 )
@@ -545,6 +565,8 @@ class GradingAnchor:
 
 
 __all__ = [
+    "AGENTX_CHECKPOINT_MAX_DROP_PCT",
+    "AGENTX_CHECKPOINT_SEC",
     "AGENTX_KEEP_P50_THRESHOLD_PCT",
     "CONSTRAINT_FIELDS",
     "DURATION_DRIFT_PCT",
@@ -556,6 +578,7 @@ __all__ = [
     "GRADED_ERROR_RATE",
     "GRADED_INTVTY",
     "GRADED_INTVTY_P50",
+    "GRADED_INTVTY_P50_CHECKPOINT",
     "GRADED_OUTPUT",
     "GRADED_OUTPUT_PER_GPU",
     "GRADED_REQUESTS_TOTAL",

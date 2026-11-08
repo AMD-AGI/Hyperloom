@@ -8,9 +8,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping
 
+from inference_suite.contracts import FailedStep
+
 from hyperloom_common.coerce import to_float
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
-from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
+from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON, HOST_GPUS_UNAVAILABLE
 
 from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
@@ -27,7 +29,7 @@ from ..bringup import ARGV_INVALID
 from ..bus.message_bus import Message
 from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_PRELUDE
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
-from ..state.failure_evidence import MAGPIE_NONZERO_INVALID_MEASUREMENT
+from ..state.failure_evidence import ROUND_NONZERO_INVALID_MEASUREMENT
 from ..state.shared_state import ActionAttempt
 from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
@@ -49,9 +51,13 @@ _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
     # The server booted and measured a cold cache. The next attempt launches the same server and no framework patch
     # changes the operator's flag; ``_authorable_launch_log`` keeps it out of enablement.
     PREFIX_CACHE_OFF_ERROR_CLASS: _BASELINE_FAILED_STOP_REASON,
-    # The round served its whole protocol and the harness around it still refused the result. The next
-    # attempt runs the same harness over the same workload, so it is refused the same way.
-    MAGPIE_NONZERO_INVALID_MEASUREMENT: _BASELINE_FAILED_STOP_REASON,
+    # The benchmark client, or the harness after serving its whole protocol, refused the result. The next
+    # attempt runs the same client over the same workload, so it is refused the same way.
+    ROUND_NONZERO_INVALID_MEASUREMENT: _BASELINE_FAILED_STOP_REASON,
+    FailedStep.CLIENT_FAILED.value: _BASELINE_FAILED_STOP_REASON,
+    # No server started: the host lacks the idle GPUs the round needs. Only the operator can free them, and
+    # ``_authorable_launch_log`` keeps it out of enablement.
+    HOST_GPUS_UNAVAILABLE: HOST_GPUS_UNAVAILABLE,
 }
 
 
@@ -72,6 +78,7 @@ def _authorable_launch_log(result_payload: dict[str, Any] | None, *, err_class: 
         "fast_exit_arg_error",
         AGENTX_PREFLIGHT_ERROR_CLASS,
         PREFIX_CACHE_OFF_ERROR_CLASS,
+        HOST_GPUS_UNAVAILABLE,
     ) or stopped_by_the_run_class(err_class):
         return ""
     parts: list[str] = []
@@ -147,7 +154,7 @@ class BaselineFailureMixin:
                 accuracy_floor=state.enablement.accuracy_floor,
                 observed_task=state.enablement.observed_task,
                 observed_metric=state.enablement.observed_metric,
-                eval_contract_fingerprint=state.enablement.eval_contract_fingerprint,
+                eval_definition_digest=state.enablement.eval_definition_digest,
                 probe_config_path=state.enablement.probe_config_path,
             ),
         )
@@ -451,6 +458,12 @@ class BaselineFailureMixin:
                 self.shared_state.baseline_failure_streak,
             )
         elif err_class in _STOPS_ON_FIRST_OCCURRENCE:
+            log.error(
+                "baseline %s failed with %s, which a retry cannot change; stopping the run: %s",
+                task.task_id,
+                err_class,
+                result_payload.get("error") or err_class,
+            )
             self.shared_state.set_stop_reason(_STOPS_ON_FIRST_OCCURRENCE[err_class])
         elif err_class == "fast_exit_arg_error":
             self.shared_state.baseline_arg_error_streak += 1
