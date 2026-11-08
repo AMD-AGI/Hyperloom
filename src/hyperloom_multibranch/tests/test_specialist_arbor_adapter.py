@@ -505,7 +505,9 @@ def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Pa
     assert all(rule.startswith(arbor_adapter.HOST_RULE) for rule in (*rules, *agentx_rules))
     fixed, kept, accuracy = rules
     assert "inferencex at concurrency 8, isl 1024, osl 1024" in fixed and "ISL" in fixed and "CONC" in fixed
-    assert "output_throughput" in kept
+    assert "output_throughput" in kept and "a second measurement confirms" in kept
+    agentx_kept = agentx_rules[1]
+    assert "in one measurement, which is final unless a guard" in agentx_kept and "second" not in agentx_kept
     assert "at least 0.5" in accuracy and "at most 0.05" in accuracy
     assert "the root it measures itself" in accuracy
     assert "error rate stays at or under 10%" in agentx_rules[-1]
