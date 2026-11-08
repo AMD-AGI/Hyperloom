@@ -112,7 +112,8 @@ class FakeServer(LocalServer):
                     time.sleep(delay)
                     prompt = body["prompt"]
                     if fail(prompt):
-                        return self._reply({"error": "boom"}, 500)
+                        self._reply({"error": "boom"}, 500)
+                        return
                     text = "unknown" if _family(prompt) in broken else _solve(prompt)
                     usage = {"prompt_tokens": len(encode(prompt)) + 1}
                     self._reply({"choices": [{"text": text, "finish_reason": "stop"}], "usage": usage})

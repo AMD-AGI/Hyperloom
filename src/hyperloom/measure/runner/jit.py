@@ -75,6 +75,7 @@ from hyperloom.orchestrator.actions.executors import is_patched_copy
 __all__ = [
     "FRAMEWORK_PYTHON_ENV",
     "JIT_CACHE_ENV",
+    "STAGING_DIR",
     "ColdStart",
     "Surroundings",
     "build_session",
