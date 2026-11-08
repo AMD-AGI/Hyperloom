@@ -87,8 +87,9 @@ first benchmark.
 
 The entrypoint is taken as `custom_<gpu-type>.sh`, or the single `.sh` in the
 directory. It **must** emit a `quality_gate` block in its report: for a
-server-less workload that gate is the only correctness signal, and a missing one
-scores zero accuracy, which rejects every candidate the run produces.
+server-less workload that gate is the only correctness signal. A baseline without
+it stops the run with `baseline_accuracy_failed`; a candidate without it scores
+zero accuracy and is rejected.
 
 `--extra-env` carries the knobs your script reads; Hyperloom interprets none of
 them. Whatever you pin there becomes part of the measurement contract — a

@@ -8,7 +8,8 @@ and its sha256 per distribution. :func:`fetch_inputs` downloads the interpreter 
 (:data:`~inference_suite.pins.AGENTX_PYTHON_BUILD`, refused unless its sha256 is the pin's) and those wheels by their
 hashes; :func:`install` unpacks the build into ``<root>/agentx-python`` and installs the wheels with ``--no-deps
 --require-hashes`` from those inputs alone, so two hosts that install from one lock hold the same distributions, then
-patches the harness's aiperf to export ``error_osl`` (:mod:`inference_suite.aiperf_patch`). The
+patches the harness's aiperf to export ``error_osl`` (:mod:`inference_suite.aiperf_patch`). :func:`pinned_python`
+unpacks the build alone, the interpreter a base resolution runs InferenceX's own code under. The
 build is relocatable and the client runs as ``agentx-python/bin/python3 -m ...``, never through a script's shebang,
 so the environment can be built in one directory and renamed into another.
 
@@ -174,6 +175,21 @@ def _unpack(archive: Path, destination: Path) -> Path:
     return python
 
 
+def pinned_python(into: Path) -> Path:
+    """The interpreter of the pinned build, downloaded, checked against its pin and unpacked into the new directory
+    ``into``.
+
+    Raises:
+        ClientEnvError: The build downloaded is not the pinned one, or its interpreter is not the pin's version.
+        OSError: The build cannot be downloaded.
+    """
+    with tempfile.TemporaryDirectory(dir=into.parent, prefix=".download-") as scratch:
+        archive = Path(scratch, INPUT_ARCHIVE)
+        _download(AGENTX_PYTHON_BUILD.url, archive)
+        _checked_archive(archive, AGENTX_PYTHON_BUILD)
+        return _unpack(archive, into)
+
+
 def _platform_args() -> list[str]:
     major_minor = ".".join(AGENTX_PYTHON_BUILD.version.split(".")[:2])
     abi = "cp" + major_minor.replace(".", "")
@@ -278,10 +294,7 @@ def staged_files(root: Path) -> Iterator[Path]:
 def _generate_lock(requirements: Path, label: str) -> str:
     with tempfile.TemporaryDirectory(prefix="agentx-lock-") as scratch:
         work = Path(scratch)
-        archive = work / INPUT_ARCHIVE
-        _download(AGENTX_PYTHON_BUILD.url, archive)
-        _checked_archive(archive, AGENTX_PYTHON_BUILD)
-        python = _unpack(archive, work / _ARCHIVE_ROOT)
+        python = pinned_python(work / _ARCHIVE_ROOT)
         report = work / "report.json"
         resolve = [str(python), *_PIP, "install", *_PIP_QUIET, "--dry-run", "--ignore-installed", _BINARY_ONLY]
         resolve += [
@@ -330,6 +343,7 @@ __all__ = [
     "install",
     "lock_text",
     "main",
+    "pinned_python",
     "read_lock",
     "staged_files",
 ]

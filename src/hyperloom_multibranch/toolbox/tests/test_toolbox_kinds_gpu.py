@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -53,7 +52,7 @@ from hyperloom_multibranch.toolbox.local_hosted import (
     build_local_toolbox,
 )
 from hyperloom_multibranch.toolbox.planner import HostedPlanner
-from hyperloom_multibranch.toolbox.tests.gpu_session import freeze_gpu_session_base
+from hyperloom_multibranch.toolbox.tests.gpu_session import freeze_gpu_session_base, gpu_inputs_missing
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, req
 from hyperloom_multibranch.toolbox.tools.op_shares import DEGRADED_NOTICE
@@ -64,8 +63,8 @@ OUT = os.environ.get("HL_GPU_OUT", "")
 CARDS = [int(card) for card in os.environ.get("HL_GPU_CARDS", "6,7").split(",")]
 USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("sglang") is None or not Path(MODEL).is_dir() or not Path(INFERENCEX, ".git").exists(),
-    reason="needs SGLang, HL_GPU_MODEL and HL_GPU_INFERENCEX (a git checkout)",
+    gpu_inputs_missing(MODEL, INFERENCEX, OUT),
+    reason="needs SGLang, HL_GPU_MODEL, HL_GPU_OUT and HL_GPU_INFERENCEX (a git checkout holding inference_suite.pins.INFERENCEX_CLIENT_COMMIT)",
 )
 
 LEVELS = (4, 16, 64)

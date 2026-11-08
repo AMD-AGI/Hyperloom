@@ -22,17 +22,23 @@ def run_dir_report(
     eval_code: int | None = None,
     task_version: str | None = "3",
     failed_step: FailedStep | None = None,
+    failure_detail: str | None = None,
 ) -> bytes:
     """The ``report.json`` of a round that measured ``fixed`` and, when ``scores`` is given, evaluated them.
 
-    With ``failed_step``, the round failed at that step before it measured anything.
+    With ``failed_step``, the round failed at that step before it measured anything, for ``failure_detail`` (by default
+    the step's name).
     """
     evaluation = None
     if scores is not None:
         evaluation = dataclasses.replace(_eval(), scores=dict(scores), task_version=task_version)
     codes = ExitCodes(client=0, eval=eval_code)
     if failed_step is not None:
-        failed = {"run_status": RunStatus.FAILED, "failed_step": failed_step, "failure_detail": failed_step.value}
+        failed = {
+            "run_status": RunStatus.FAILED,
+            "failed_step": failed_step,
+            "failure_detail": failure_detail or failed_step.value,
+        }
         report = _report(profile=None, fixed=FixedMetrics.of({}), eval=None, codes=ExitCodes(client=None), **failed)
     else:
         report = _report(profile=None, fixed=FixedMetrics.of(fixed), eval=evaluation, codes=codes)
@@ -45,8 +51,11 @@ def write_run_dir(
     scores: Mapping[str, float] | None = None,
     eval_code: int | None = None,
     failed_step: FailedStep | None = None,
+    failure_detail: str | None = None,
 ) -> Path:
     """A run_dir at ``directory`` holding :func:`run_dir_report` of the rest."""
     directory.mkdir(parents=True, exist_ok=True)
-    RunLayout(directory).report.write_bytes(run_dir_report(fixed, scores, eval_code, failed_step=failed_step))
+    RunLayout(directory).report.write_bytes(
+        run_dir_report(fixed, scores, eval_code, failed_step=failed_step, failure_detail=failure_detail)
+    )
     return directory

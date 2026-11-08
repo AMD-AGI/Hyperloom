@@ -17,7 +17,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _agentx_checkpoint, _ray_serving, _suite_config
+from hyperloom.orchestrator.actions.executors import _agentx_checkpoint, _ray_serving
+from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors._agentx_checkpoint import (
     CHECKPOINT_ARTIFACT_NAME,
     AgentxCheckpoint,
@@ -34,7 +35,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
 )
-from hyperloom.orchestrator.actions.executors._suite_config import (
+from hyperloom.orchestrator.actions.executors._suite.rounds import (
     LEASED_CONFIG_SUFFIX,
     RAY_ROUND_UNPLACED_CLASS,
     SuiteRound,
@@ -82,7 +83,7 @@ def _request(point: Path, lease: _Lease) -> SuiteRound:
 
 
 def test_a_leased_round_runs_in_the_lease_and_its_report_is_read_back(session, tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(_suite_config, "run_round", lambda *args, **kwargs: pytest.fail("ran outside the lease"))
+    monkeypatch.setattr(suite_rounds, "run_round", lambda *args, **kwargs: pytest.fail("ran outside the lease"))
     lease = _Lease(_rounds())
     point = _write_point(tmp_path / "slot" / "point.yaml")
 
@@ -132,7 +133,7 @@ def test_the_leased_round_is_reaped_only_past_its_own_session_deadline(session, 
         run_suite_round(suite_route(session), request, on_poll=lambda: None)
 
     (leased,) = lease.leased
-    assert leased.session_remaining_sec == pytest.approx(600 + _suite_config._LEASED_BACKSTOP_SLACK_SEC, abs=5)
+    assert leased.session_remaining_sec == pytest.approx(600 + suite_rounds._LEASED_BACKSTOP_SLACK_SEC, abs=5)
 
 
 def test_a_leased_round_sizes_its_server_by_tp_not_by_the_gpu_mask_the_point_carries(
@@ -215,7 +216,7 @@ def test_an_actor_placed_on_another_gpu_count_refuses_the_round(tmp_path, monkey
 
 
 class _Actor:
-    """A lease whose actor plays each round with whatever ``run_round`` the test installed in ``_suite_config``."""
+    """A lease whose actor plays each round with whatever ``run_round`` the test installed in ``_suite.rounds``."""
 
     def __init__(self) -> None:
         self.leased: list[SuiteLeasedRound] = []
@@ -224,7 +225,7 @@ class _Actor:
     def run_session_kill(self, leased: SuiteLeasedRound) -> tuple[int, str, str]:
         self.leased.append(leased)
         config = SuiteConfig.from_document(yaml.safe_load(Path(leased.config_path).read_text()))
-        _suite_config.run_round(replace(config, paths=replace(config.paths, run_dir=leased.run_dir)))
+        suite_rounds.run_round(replace(config, paths=replace(config.paths, run_dir=leased.run_dir)))
         return 0, "", ""
 
     def close(self) -> None:

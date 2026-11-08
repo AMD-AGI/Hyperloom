@@ -16,14 +16,12 @@ import pytest
 import yaml
 
 from hyperloom.common.agentx_workload import CANON_WARMUP_PER_LANE
-from hyperloom.orchestrator.actions.executors import _suite_config
-from hyperloom.orchestrator.actions.executors._suite_config import (
-    MEASURED_SEED,
+from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
+from hyperloom.orchestrator.actions.executors._suite.config import MEASURED_SEED, WARMUP_SEED, suite_config
+from hyperloom.orchestrator.actions.executors._suite.rounds import (
     TOOL_CACHE_ENV,
-    WARMUP_SEED,
     SuiteRound,
     run_suite_round,
-    suite_config,
     suite_route,
 )
 from hyperloom.orchestrator.actions.executors.agentx_point import LaunchChanges
@@ -58,8 +56,8 @@ def _stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cache.mkdir()
     (cache / "staging_manifest.json").write_text('{"schema": "inference-suite-staging/1", "tools": {}}\n')
     monkeypatch.setenv(TOOL_CACHE_ENV, str(cache))
-    monkeypatch.setattr(_suite_config, "_resolve_probe_python", lambda framework: f"/venv/{framework}/python")
-    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: None)
+    monkeypatch.setattr(suite_rounds, "_resolve_probe_python", lambda framework: f"/venv/{framework}/python")
+    monkeypatch.setattr(suite_rounds, "client_only_server_url", lambda: None)
 
 
 def _point(**changes) -> dict:
@@ -113,9 +111,7 @@ def test_an_agentx_server_runs_on_the_first_cards_of_the_sessions_mask(
     freeze_base(session, _base())
     _stage(tmp_path, monkeypatch)
     ran = []
-    monkeypatch.setattr(
-        _suite_config, "_run_config", lambda config, lease, on_poll, checkpoint=None: ran.append(config)
-    )
+    monkeypatch.setattr(suite_rounds, "_run_config", lambda config, lease, on_poll, checkpoint=None: ran.append(config))
     point = tmp_path / "slot" / "point.yaml"
     point.parent.mkdir()
     point.write_text(yaml.safe_dump(_point()), encoding="utf-8")
@@ -195,9 +191,7 @@ def test_a_discarded_warmup_replay_draws_its_trajectories_with_the_warmup_seed(
     freeze_base(session, _base())
     _stage(tmp_path, monkeypatch)
     ran = []
-    monkeypatch.setattr(
-        _suite_config, "_run_config", lambda config, lease, on_poll, checkpoint=None: ran.append(config)
-    )
+    monkeypatch.setattr(suite_rounds, "_run_config", lambda config, lease, on_poll, checkpoint=None: ran.append(config))
     point = tmp_path / "slot" / "point.yaml"
     point.parent.mkdir()
     point.write_text(yaml.safe_dump(_point()), encoding="utf-8")
@@ -319,7 +313,7 @@ def test_an_agentx_profile_setting_no_round_carries_is_refused(settings: dict, m
 
 
 def test_the_accuracy_round_serves_the_same_launch_as_the_measured_round() -> None:
-    from hyperloom.orchestrator.actions.executors._suite_config import accuracy_config
+    from hyperloom.orchestrator.actions.executors._suite.config import accuracy_config
 
     point = _point()
     point["benchmark"]["agentx"]["launch_overrides"]["executable"] = "/venv/candidate/bin/python"

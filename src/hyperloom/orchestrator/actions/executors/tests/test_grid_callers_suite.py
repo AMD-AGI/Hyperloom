@@ -19,7 +19,8 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.inference_optimizer.tests.test_conc_sweep import _make_state
-from hyperloom.orchestrator.actions.executors import _server_lifecycle, _suite_config
+from hyperloom.orchestrator.actions.executors import _server_lifecycle
+from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors import explore as explore_module
 from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
 from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import _HOT, suite  # noqa: F401
@@ -49,7 +50,7 @@ def eligible(monkeypatch: pytest.MonkeyPatch) -> None:
 def _rounds(monkeypatch: pytest.MonkeyPatch, count: int) -> ScriptedRounds:
     attempts = tuple(LaunchAttempt(outcome=READY, metrics=_HOT) for _ in range(count))
     rounds = ScriptedRounds(scenario=LaunchScenario(attempts=attempts), clock=VirtualClock(), launch=_launch())
-    monkeypatch.setattr(_suite_config, "run_round", rounds.run_round)
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
     return rounds
 
 
