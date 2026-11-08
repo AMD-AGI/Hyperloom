@@ -293,7 +293,7 @@ def test_dir_usage_counts_what_was_read_of_a_directory_that_fails_and_goes_on_wi
 
 
 def test_resource_log_appends_one_json_object_per_line(tmp_path: Path) -> None:
-    log = ResourceLog(tmp_path / "agents" / "resources.jsonl")
+    log = ResourceLog(tmp_path, ("agents", "resources.jsonl"))
     log.append({"kind": "a", "n": 1})
     log.append({"kind": "b", "n": 2})
     lines = (tmp_path / "agents" / "resources.jsonl").read_text(encoding="utf-8").splitlines()
