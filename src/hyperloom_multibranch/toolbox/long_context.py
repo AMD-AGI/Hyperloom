@@ -15,10 +15,12 @@ launch serves (the launch is not widened for it).
 environment's ``HYPERLOOM_LONG_CONTEXT`` (the key of the staged entry; ``off`` turns the check off) when it names none, and
 without either the model's own set (:class:`ServedLongContext`): the set ``measure.long_context.build --served-context``
 stages for the session model at the context the test's launch serves (its ``--context-length`` or ``--max-model-len``,
-else its ``MAX_MODEL_LEN``; no more than the model's own limit), with its tokenizer and the default seed
-(:func:`default_long_context`). The set is keyed by that length, so a launch served at 8192 tokens checks
-retrieval over that window instead of recording every prompt ``not_run``, and a launch at the model's full window (or one
-that states no context) keeps the set at the model's limit. Root and candidate share one launch shape and so one set. It is
+else its ``MAX_MODEL_LEN``; no more than the model's own limit, nor than ``LENGTH_BOUND``), with its tokenizer and the
+default seed (:func:`default_long_context`). The set is keyed by that length and the bound, so a launch served at 8192
+tokens checks retrieval over that window instead of recording every prompt ``not_run``, a launch at the model's full window
+(or one that states no context) keeps the set at the model's limit, and a 1M-token launch checks at the bound, not at 1M
+tokens a prompt. Root and candidate share one launch shape and so one set. An AgentX campaign runs no check: its tests'
+servers are not held up for one. It is
 read, and staged where the toolbox's runners read this host's cache, when acceptance first plans a test of that length. A
 named set is used whatever the launch serves; one built longer than the launch serves makes the check ``incomplete`` with
 the reason. A set that is asked for, or found and not readable, is refused, never run without.
@@ -51,7 +53,7 @@ from hyperloom.contracts.long_context import (
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.inference_optimizer.model_config_utils import load_model_max_position_embeddings
-from hyperloom.measure.long_context.build import DEFAULT_SEED, build_entry, set_length
+from hyperloom.measure.long_context.build import build_entry, entry_inputs, set_length
 from hyperloom.measure.long_context.grade import passes
 from hyperloom.measure.long_context.held import served_by
 from hyperloom.measure.long_context.outputs import OutputsError, OutputsFile, PromptEntry, clean_reason, read_outputs
@@ -60,7 +62,6 @@ from hyperloom.measure.long_context.prompts import GENERATOR, PromptSetError
 from hyperloom.measure.long_context.resolve import StagedSet, staged_set
 from hyperloom.measure.long_context.staging import KEY_PREFIX
 from hyperloom.measure.points import launch_carriers
-from hyperloom.measure.short_prompts.build import tokenizer_hashes
 from hyperloom.measure.short_prompts.staging import EVALSETS_DIR, cache_root, entry_key
 from hyperloom_multibranch.toolbox.submission_log import LogEntry
 from hyperloom_multibranch.toolbox.short_prompts import (
@@ -100,14 +101,15 @@ _CHECKED_KINDS = (TestKind.TEST, TestKind.SWEEP)
 _FORCED = "request long_context_check"
 _MAX_FAILED_SHOWN = 3
 #: What a check records that its bundle cannot show: why it ran, and the root's reading, made from other tests' bundles.
-_NOT_IN_BUNDLE = frozenset({"trigger", "root"})
+_NOT_IN_BUNDLE = frozenset({"trigger", "root", "bound"})
 _REBUILT = "rederived"
 
 
 @dataclass(frozen=True)
 class LongContextSetup:
     """The staged prompt set a deployment's checks use (``measure.long_context.build`` makes it): its key, the SHA-256 of its
-    prompts file and the token length of its prompts. A toolbox that is given none does not run the check.
+    prompts file, the token length of its prompts and the context bound it was built under (``None`` when its entry
+    records none). A toolbox that is given none does not run the check.
 
     Raises:
         ValueError: A value that no sheet could carry is refused here, not at the first test that would have run the check.
@@ -116,9 +118,10 @@ class LongContextSetup:
     prompt_set: str
     prompts_sha256: str
     length: int
+    bound: int | None = None
 
     def __post_init__(self) -> None:
-        LongContextPlan(self.prompt_set, self.prompts_sha256, self.length)
+        LongContextPlan(self.prompt_set, self.prompts_sha256, self.length, bound=self.bound)
 
 
 class LongContextNotStaged(ValueError):
@@ -132,7 +135,7 @@ def _setup_of(asked: str, read: Callable[[], StagedSet]) -> LongContextSetup:
         raise LongContextNotStaged(
             f"the long-context check is asked for with {asked}, which is not staged in the runner cache: {exc}"
         ) from exc
-    return LongContextSetup(staged.prompt_set, staged.prompts_sha256, staged.length)
+    return LongContextSetup(staged.prompt_set, staged.prompts_sha256, staged.length, staged.bound)
 
 
 def _model_directory(model_dir: Path | None, environ: Mapping[str, str]) -> Path | None:
@@ -144,10 +147,11 @@ def default_long_context(
 ) -> LongContextSetup | None:
     """The set ``measure.long_context.build --served-context`` stages for the model in ``model_dir`` (else the directory
     ``MODEL_PATH`` in ``environ`` names) for a launch that serves ``served_context`` tokens: the model's tokenizer, that
-    context (the model's own limit when it is ``None`` or more) and the default seed, read in the runner cache ``environ``
-    names. ``None``, and a log line that says why, when there is no model directory, its tokenizer cannot be read, neither
-    context is known, or the set is not staged; with ``stage`` (a toolbox whose runners read the same cache) a set that is
-    not staged is staged first, and the check is off with a warning when that fails.
+    context (the model's own limit when it is ``None`` or more; never more than ``LENGTH_BOUND``) and the default seed,
+    read in the runner cache ``environ`` names. ``None``, and a log line that says why, when there is no model directory,
+    its tokenizer cannot be read, neither context is known, or the set is not staged; with ``stage`` (a toolbox whose
+    runners read the same cache) a set that is not staged is staged first, and the check is off with a warning when that
+    fails.
 
     Raises:
         LongContextNotStaged: The set is there and cannot be read: a set that was found is not a check that is off.
@@ -158,7 +162,7 @@ def default_long_context(
         return None
     try:
         length = set_length(load_model_max_position_embeddings(str(directory)), served_context)
-        inputs = {"seed": DEFAULT_SEED, "length": length, "tokenizer": tokenizer_hashes(directory)}
+        inputs = entry_inputs(directory, length=length)
     except (PromptSetError, OSError) as exc:
         _LOG.warning("long-context check off: the model's tokenizer or context limit cannot be read: %s", exc)
         return None
@@ -277,7 +281,9 @@ def decide(
     reasons += lever_lines(parent, candidate, files)
     if not reasons:
         return None
-    return LongContextPlan(setup.prompt_set, setup.prompts_sha256, setup.length, trigger=bounded_reasons(reasons))
+    return LongContextPlan(
+        setup.prompt_set, setup.prompts_sha256, setup.length, trigger=bounded_reasons(reasons), bound=setup.bound
+    )
 
 
 # --- what is recorded ----------------------------------------------------------------------------------------------
@@ -301,6 +307,7 @@ def _unread(plan: LongContextPlan, reason: str) -> LongContextResult:
         seconds=0.0,
         prefill_tokens=0,
         trigger=plan.trigger,
+        bound=plan.bound,
     )
 
 
@@ -351,6 +358,7 @@ def _result(plan: LongContextPlan, found: OutputsFile) -> LongContextResult:
         prefill_tokens=sum(prompt.prompt_tokens for prompt in prompts),
         trigger=plan.trigger,
         outputs=f"{LONG_CONTEXT_DIR}/{OUTPUTS_FILE}",
+        bound=plan.bound,
     )
 
 
@@ -378,6 +386,7 @@ def rederive(recorded: LongContextResult, directory: Path) -> LongContextResult:
         max_new_tokens=recorded.max_new_tokens,
         concurrency=recorded.concurrency,
         trigger=recorded.trigger,
+        bound=recorded.bound,
     )
     try:
         found = read_outputs(directory)
