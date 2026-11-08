@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import CancelledError
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -414,6 +415,16 @@ async def test_ray_followup_ack_preserves_reap_outcome(monkeypatch, tmp_path, ph
         clock.now += 31.0
 
     monkeypatch.setattr(ss.asyncio, "sleep", advance)
+    real_create = ss.create_nofollow
+
+    def created_long_ago(base, rel):
+        """The launch's log, made fresh as the dispatcher makes it; this test's wall clock never moves, so it is dated
+        before it, as the empty log of a CLI that never wrote is once its heartbeat window has passed."""
+        handle = real_create(base, rel)
+        os.utime(Path(base, *rel), (0.0, 0.0))
+        return handle
+
+    monkeypatch.setattr(ss, "create_nofollow", created_long_ago)
     lease = Mock()
     lease.poll_started.return_value = 4242
     actor = SimpleNamespace(closed=False, alive=phase != "natural")
