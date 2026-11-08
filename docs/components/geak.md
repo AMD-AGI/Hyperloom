@@ -81,15 +81,18 @@ many GPUs does this process have", and widening that would change GPU accounting
 repo-wide — while this resolver answers "where is this run pinned", and a run
 pinned with a legacy spelling is really pinned.
 
-The process env comes first because the recipe's ROCR key is not evidence of a
-pin: `materialize_config_with_envs` autofills `ROCR_VISIBLE_DEVICES=0..tp-1`
-into every materialized recipe when the mask is absent or narrower than `TP`.
-A recipe ROCR value byte-identical to that default is therefore ignored, so a
-`HIP`-pinned or genuinely unpinned run is not silently re-pinned to cards
-`0..tp-1`. A recipe mask that differs from the default *is* honoured, and its ids are
-forwarded **absolute**: the measured round turned that mask into the card list
-its server ran on, and GEAK starts its servers from that round's `launch.json`
-under its own environment, so only a process-env ROCr mask renumbers them.
+The process env comes first because the recipe's ROCR key alone is not evidence
+of a pin: `materialize_config_with_envs` writes a mask into every materialized
+recipe, filling it from the process mask, or `0..tp-1` with none, when the point
+names none or fewer cards than `TP`, and records each fill under
+`HYPERLOOM_ROCR_AUTOFILL`. A recipe ROCR value equal to that record, or to
+`0..tp-1` in a recipe without one, is therefore ignored, so a `HIP`-pinned or
+genuinely unpinned run is not silently re-pinned to the fill, and a recipe
+re-materialized under another process mask is refilled from that mask. Any other
+recipe mask *is* honoured when the process sets none, and its ids are forwarded
+**absolute**: the measured round turned that mask into the card list its server
+ran on, and GEAK starts its servers from that round's `launch.json` under its own
+environment, so only a process-env ROCr mask renumbers them.
 
 `tp` in the handoff is read from the same resolved recipe as `gpu_ids`, so the
 two cannot disagree when the materializer clamps `TP` to the visible GPU count.

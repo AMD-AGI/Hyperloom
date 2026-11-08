@@ -294,11 +294,11 @@ def test_materialize_config_rocr_visible_devices_explicit_env_wins_when_enough(
     assert envs["ROCR_VISIBLE_DEVICES"] == "4,5,6,7"
 
 
-def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
+def test_materialize_config_rocr_visible_devices_stays_on_session_cards_when_under_tp(
     tmp_path,
     monkeypatch,
 ):
-    """When explicit ROCR_VISIBLE_DEVICES has fewer devices than TP requires, `_workload_envs` auto-expands to 0..TP-1."""
+    """A process mask narrower than an unclamped TP is not widened onto cards outside it."""
     import yaml
 
     monkeypatch.setenv("TP", "8")
@@ -307,7 +307,7 @@ def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
     out = materialize_benchmark_config(_PROFILE_SGLANG_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
-    assert envs["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
+    assert envs["ROCR_VISIBLE_DEVICES"] == "4,5,6,7"
 
 
 def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
