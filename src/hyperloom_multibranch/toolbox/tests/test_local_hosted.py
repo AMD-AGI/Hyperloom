@@ -52,7 +52,7 @@ from hyperloom_multibranch.toolbox.tests.helpers import (
     pin_inferencex_at,
     pinned_runner_python,
     req,
-    staged_runner_cache,
+    stage_runner_cache,
 )
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 
@@ -156,14 +156,15 @@ def test_the_live_output_is_read_from_the_sandbox_of_the_unfinished_attempt(tmp_
 
 
 def _require_tool_checkout(repo: Path, commit: str, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The precondition of the end-to-end test: the runner can check the stand-in repository out as it runs it, and
-    this install pins it.
+    """The precondition of the end-to-end test: the runner can check the stand-in repository out as it runs it, finds
+    a staging that verifies in this host's runner cache, and this install pins it.
 
     The runner fetches the tools by hash under an empty home, like a sandbox. Where that fails (no usable ``git``, a
     refused local fetch) the test would otherwise show only ``measurement_failed``, so it fails here and says why.
     """
     monkeypatch.setenv("INFERENCEX_REPO", str(repo))
     monkeypatch.setenv("HOME", str(home))
+    stage_runner_cache(home.parent, monkeypatch)
     pin_inferencex_at(commit, monkeypatch)
     try:
         ensure_inferencex(commit, home / "cache")
@@ -177,7 +178,6 @@ def _toolbox_of(
     blackboard: LocalBlackboard, tmp_path: Path, session: Path, commit: str, **extra: Any
 ) -> LocalHostedToolbox:
     freeze_base_at(session, commit)
-    runner_envs = {**staged_runner_cache(tmp_path), **extra.pop("runner_envs", {})}
     return build_local_toolbox(
         LocalSession(session, "run-1", range(8)),
         blackboard,
@@ -188,7 +188,6 @@ def _toolbox_of(
             python=pinned_runner_python(tmp_path, commit),
             poll_interval_sec=0.1,
             timeout_sec=120,
-            runner_envs=runner_envs,
             **extra,
         ),
     )
