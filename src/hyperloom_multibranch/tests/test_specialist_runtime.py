@@ -106,6 +106,10 @@ class _JudgeFails(LocalBlackboard):
         raise RuntimeError("the inbox is corrupt")
 
 
+#: How often a judge in these tests polls its inbox.
+POLL_SECONDS = 0.01
+
+
 class _Session:
     """The branch ``s1`` opened at the root, on the fake toolbox, which measures nothing until it is drained."""
 
@@ -133,12 +137,14 @@ class _Session:
         await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, BRANCH, from_commit=start))
         return start
 
-    def runtime(self, runs, *, blackboard=LocalBlackboard, clock=lambda: 0.0, claim_ttl=600.0) -> SpecialistRuntime:
+    def runtime(
+        self, runs, *, blackboard=LocalBlackboard, clock=lambda: 0.0, claim_ttl=600.0, sleep=asyncio.sleep
+    ) -> SpecialistRuntime:
         def blackboard_for(branch: str) -> LocalBlackboard:
             return blackboard(self.root, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
         judging = Judging(self.gate, self.toolbox, InferenceXRule(self.reader, 64))
-        pacing = RuntimePacing(poll_seconds=0.01, claim_ttl_seconds=claim_ttl, clock=clock)
+        pacing = RuntimePacing(poll_seconds=POLL_SECONDS, claim_ttl_seconds=claim_ttl, clock=clock, sleep=sleep)
         return SpecialistRuntime(blackboard_for, judging, runs, pacing=pacing)
 
     async def claim(self, key) -> ClaimStatus:
@@ -699,18 +705,60 @@ async def test_a_branch_has_one_specialist_and_keeps_room_for_a_test(session):
     assert await runtime.status(BRANCH) is None
 
 
+class _RenewalWaits:
+    """The runtime's ``sleep``: a judge's poll waits for real; every other wait is a renewal interval, which lasts until
+    the test lets it end, on the test's ``now``, so how fast the runner is decides nothing."""
+
+    def __init__(self, poll_seconds: float) -> None:
+        self.now = 0.0
+        self._poll = poll_seconds
+        self._waits: asyncio.Queue[tuple[float, asyncio.Future[None]]] = asyncio.Queue()
+
+    async def __call__(self, seconds: float) -> None:
+        if seconds == self._poll:
+            await asyncio.sleep(seconds)
+            return
+        ended = asyncio.get_running_loop().create_future()
+        self._waits.put_nowait((seconds, ended))
+        await ended
+
+    async def next(self) -> tuple[float, asyncio.Future[None]]:
+        """The renewal interval the runtime waits on next; it asks only once its previous round is over."""
+        return await asyncio.wait_for(self._waits.get(), 5)
+
+    def pending(self) -> bool:
+        return not self._waits.empty()
+
+
 async def test_the_claims_a_specialist_holds_are_renewed_until_its_branch_stops(session):
-    runtime = session.runtime(_Runs(), claim_ttl=0.3)
+    ttl = 0.3
+    waits = _RenewalWaits(POLL_SECONDS)
+
+    def blackboard(root, writer) -> LocalBlackboard:
+        return LocalBlackboard(root, writer, clock=lambda: waits.now)
+
+    runtime = session.runtime(_Runs(), blackboard=blackboard, claim_ttl=ttl, sleep=waits)
+    reader = blackboard(session.root, Writer(Role.OBSERVER, "observer"))
     start = await session.repo.head(BRANCH)
     await runtime.start(BRANCH, start)
-    holder = LocalBlackboard(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
-    claim = await holder.acquire(intent(BRANCH, start), SCRIPT[0].fingerprint(), ttl_seconds=0.3)
+    interval, ended = await waits.next()
+    holder = blackboard(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
+    claim = await holder.acquire(intent(BRANCH, start), SCRIPT[0].fingerprint(), ttl_seconds=ttl)
 
-    await asyncio.sleep(0.9)
-    assert await session.claim(claim.key) is ClaimStatus.HELD
+    async def status() -> ClaimStatus:
+        (found,) = [held for held in (await reader.snapshot()).claims if held.key == claim.key]
+        return found.status
+
+    assert interval < ttl
+    while waits.now + interval <= 3 * ttl:
+        waits.now += interval
+        ended.set_result(None)
+        interval, ended = await waits.next()
+        assert await status() is ClaimStatus.HELD, f"the claim lapsed at {waits.now}"
     await runtime.stop(BRANCH)
-    await asyncio.sleep(0.6)
-    assert await session.claim(claim.key) is ClaimStatus.EXPIRED
+    assert ended.cancelled() and not waits.pending()
+    waits.now += 2 * ttl
+    assert await status() is ClaimStatus.EXPIRED
 
 
 async def test_a_new_k_is_noted_once_in_the_branch_log(session):
