@@ -1066,10 +1066,13 @@ write_env_file() {
   # in such a .env), so none of them, another account's included, reached the file above. Readers that took them from
   # .env take them from that file instead (install.sh preflight_load_dotenv, preflight's _load_dotenv_fallback).
   # Asked before the first write below, which replaces .env with a file of this account's.
+  # Every other line such a .env would not lend goes with them (runtime_env_keep_lent_dotenv_lines): the writes below
+  # leave a file of this account's, which the next reader may find private, so a line another account planted
+  # (NODE_OPTIONS, OPENAI_BASE_URL) would be lent from then on.
   local dotenv_not_private
   dotenv_not_private="$(runtime_env_dotenv_not_private "$DOTENV")"
   if [ -n "$dotenv_not_private" ]; then
-    runtime_env_remove_dotenv_credentials "$DOTENV" ||
+    runtime_env_keep_lent_dotenv_lines "$DOTENV" ||
       die "the credentials in ${DOTENV} could not be removed, and another account can write it (${dotenv_not_private}); remove them by hand"
     log "credentials kept out of ${DOTENV}, which another account can write (${dotenv_not_private}): they are in ${env_file} alone"
   fi

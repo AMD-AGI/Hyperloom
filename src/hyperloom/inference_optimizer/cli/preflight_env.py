@@ -539,7 +539,7 @@ def _kernel_agent_env_path() -> Path:
     return env_path
 
 
-def _kernel_agent_env_problem(entry_stat: os.stat_result, *, is_dir: bool) -> str | None:
+def _kernel_agent_env_problem(entry_stat: os.stat_result, *, is_dir: bool, also_owner: int | None = None) -> str | None:
     """Why an entry with this status cannot be, or hold, the kernel-agent env file; None when it can.
 
     The file carries credentials and is sourced, so it is read only from a directory of this account's, not a link,
@@ -547,14 +547,14 @@ def _kernel_agent_env_problem(entry_stat: os.stat_result, *, is_dir: bool) -> st
     The rule's owner is ``runtime_env_private_kernel_agent_env`` in assets/runtime_env.sh (install.sh, the documented
     ``source`` line, the slurm job); this is its copy for preflight, in the same words, and
     ``test_install_session_paths.py`` holds every reader to the same refusals. ``_dotenv_not_private`` holds the
-    checkout's ``.env`` to the same rule.
+    checkout's ``.env`` to the same rule, with ``also_owner`` one more uid the entry may belong to.
     """
     uid = os.geteuid()
     if stat.S_ISLNK(entry_stat.st_mode):
         return "is a symbolic link"
     if not (stat.S_ISDIR if is_dir else stat.S_ISREG)(entry_stat.st_mode):
         return f"is not a {'directory' if is_dir else 'regular file'}"
-    if entry_stat.st_uid != uid:
+    if entry_stat.st_uid not in (uid, uid if also_owner is None else also_owner):
         return f"belongs to uid {entry_stat.st_uid}, not to this account (uid {uid})"
     if entry_stat.st_mode & 0o022:
         return f"can be written by its group or others (mode {stat.S_IMODE(entry_stat.st_mode):o})"
@@ -614,9 +614,22 @@ def _dotenv_not_private(env_file: Path) -> str | None:
     directory and for a regular file: a link, another account's, or writable by its group or others. A copy of
     ``runtime_env_dotenv_not_private`` in assets/runtime_env.sh, which install_kernel_tools.sh ``write_env_file`` asks
     before it writes credentials to ``.env``, in the same words; test_dotenv_credentials_private.py holds the two to the
-    same answer.
+    same answer. The checkout is judged where it resolves to, as the shell does (``cd -P``), so one reached through a
+    link gets one answer whether ``REPO_ROOT`` or this file named it; ``.env`` itself is never followed. Root accepts
+    the uid that owns the checkout as its own (a container's root on the user's bind-mounted checkout): root can
+    already write it, and that uid already writes the code root runs from it.
     """
-    for entry, is_dir in ((env_file.parent, True), (env_file, False)):
+    checkout = env_file.parent
+    also_owner = None
+    if checkout.is_dir():
+        checkout = Path(os.path.realpath(checkout))
+        env_file = checkout / env_file.name
+        if os.geteuid() == 0:
+            try:
+                also_owner = checkout.stat().st_uid
+            except OSError:
+                also_owner = None
+    for entry, is_dir in ((checkout, True), (env_file, False)):
         try:
             entry_stat = entry.lstat()
         except FileNotFoundError:
@@ -625,7 +638,7 @@ def _dotenv_not_private(env_file: Path) -> str | None:
             continue
         except OSError:
             return f"{entry} cannot be inspected"
-        problem = _kernel_agent_env_problem(entry_stat, is_dir=is_dir)
+        problem = _kernel_agent_env_problem(entry_stat, is_dir=is_dir, also_owner=also_owner)
         if problem is not None:
             return f"{entry} {problem}"
     return None

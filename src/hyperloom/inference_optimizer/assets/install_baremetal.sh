@@ -2318,6 +2318,15 @@ read_dotenv_var() {
   [ -z "$value" ] || printf '%s\n' "$value"
 }
 
+# Before each write of a .env another account can write (DOTENV_NOT_PRIVATE): remove what it would not lend
+# (runtime_env_keep_lent_dotenv_lines), so the write, which leaves a file of this account's that a later reader may
+# find private, never keeps a line another account planted. Writes nothing when there is nothing to remove.
+keep_lent_dotenv_lines() {
+  [ -n "${DOTENV_NOT_PRIVATE:-}" ] || return 0
+  runtime_env_keep_lent_dotenv_lines "$DOTENV" ||
+    die "${DOTENV}, which another account can write (${DOTENV_NOT_PRIVATE}), could not be rid of what it does not lend; remove those lines by hand"
+}
+
 # Upsert KEY=VALUE into .env, matching an optional leading-whitespace / export
 # prefix so a pre-existing line is replaced (never duplicated). Pure-bash.
 upsert_dotenv_var() {
@@ -2327,6 +2336,7 @@ upsert_dotenv_var() {
     warn "${key} is not written to ${DOTENV}, which another account can write (${DOTENV_NOT_PRIVATE}); export it in the shell that runs hyperloom"
     return 0
   fi
+  keep_lent_dotenv_lines
   tmp="$(mktemp)"
   if [ -f "$DOTENV" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
@@ -2345,6 +2355,8 @@ upsert_dotenv_var() {
 
 remove_dotenv_var() {
   local key="$1" tmp line stripped
+  [ -f "$DOTENV" ] || return 0
+  keep_lent_dotenv_lines
   [ -f "$DOTENV" ] || return 0
   tmp="$(mktemp)"
   while IFS= read -r line || [ -n "$line" ]; do
@@ -2653,6 +2665,7 @@ resolve_credentials() {
 # DUAL_PROTOCOL_GATEWAY and has_openai_side.
 persist_credentials_elsewhere() {
   [ -n "$KERNEL_AGENT_ENV_FILE" ] || die "no kernel-agent env file to keep the credentials in; set USER_DATA_PATH"
+  keep_lent_dotenv_lines
   runtime_env_remove_dotenv_credentials "$DOTENV" ||
     die "the credentials in ${DOTENV} could not be removed, and it keeps none (${DOTENV_CREDENTIALS_ELSEWHERE}); remove them by hand"
   runtime_env_write_kernel_agent_credentials "$KERNEL_AGENT_ENV_FILE" "ANTHROPIC_API_KEY=$1" "ANTHROPIC_BASE_URL=$2" \

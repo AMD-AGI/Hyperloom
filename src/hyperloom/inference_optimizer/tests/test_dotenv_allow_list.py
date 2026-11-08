@@ -26,6 +26,7 @@ import subprocess
 from pathlib import Path
 from unittest import mock
 
+import pytest
 
 from hyperloom.common import env_safety
 from hyperloom.inference_optimizer import framework_registry
@@ -40,7 +41,6 @@ from .test_dotenv_credentials_private import (
     _assignments,
     _credentials_in,
     _launch_env,
-    _private_dir,
     _run,
     _shared_root,
     _write_installer,
@@ -172,9 +172,43 @@ def test_the_shell_emits_the_credential_lines_write_env_file_emits():
     assert _shell('runtime_env_emit_credential_fallback "$@"', "ANTHROPIC_CUSTOM_HEADERS", value).stdout == theirs
 
 
-def _plant(root: Path) -> tuple[Path, Path, dict[str, str]]:
-    """A world-writable checkout whose .env and code another account (uid 65534) wrote; the directory each planted
-    program leaves a marker file in when it runs; and what was planted, by name."""
+# How a checkout is made one another account can write. By its mode alone -- a 0777 checkout of this account's, which
+# any account could have written into -- runs as any user, so CI's non-root run holds the allow list; by the other
+# account (uid 65534) itself writing the .env and code needs root and setpriv.
+_HOW = ("by-mode", "by-another-account")
+
+
+def _shared_place(how: str, tmp_path: Path) -> Path:
+    """Where the shared checkout goes: a directory every account can enter. The caller removes it."""
+    if how == "by-another-account":
+        return _shared_root()
+    root = tmp_path / "shared"
+    root.mkdir(mode=0o755)
+    return root
+
+
+def _our_dir(path: Path) -> Path:
+    """A directory of this account's only it can enter (the container's own temporary directory)."""
+    path.mkdir(mode=0o700)
+    return path
+
+
+def _append_as_planter(how: str, dotenv: Path, text: str) -> None:
+    """Append ``text`` to the shared ``dotenv`` as whoever planted it."""
+    if how == "by-mode":
+        with dotenv.open("a", encoding="utf-8") as handle:
+            handle.write(text)
+        return
+    subprocess.run(
+        ["setpriv", f"--reuid={_OTHER_UID}", f"--regid={_OTHER_UID}", "--clear-groups", "--", "sh", "-c"]
+        + [f'printf "%s" "$1" >> {dotenv}', "-", text],
+        check=True,
+    )
+
+
+def _plant(root: Path, how: str = "by-another-account") -> tuple[Path, Path, dict[str, str]]:
+    """A world-writable checkout whose .env and code another account wrote (``how``: see _HOW); the directory each
+    planted program leaves a marker file in when it runs; and what was planted, by name."""
     checkout = root / "hyperloom"
     checkout.mkdir()
     checkout.chmod(0o777)
@@ -223,15 +257,20 @@ def _plant(root: Path) -> tuple[Path, Path, dict[str, str]]:
         'cd "$1"; shift; while [ $# -gt 0 ]; do printf "%s" "$2" > "$1"; chmod 0755 "$1"; shift 2; done; '
         'printf "%s" "$DOTENV_TEXT" > "$CHECKOUT/.env"'
     )
-    argv = ["setpriv", f"--reuid={_OTHER_UID}", f"--regid={_OTHER_UID}", "--clear-groups", "--"]
-    argv += ["sh", "-c", writer, "-", str(planted)] + [part for item in files.items() for part in item]
+    argv = ["sh", "-c", writer, "-", str(planted)] + [part for item in files.items() for part in item]
+    if how == "by-another-account":
+        argv = ["setpriv", f"--reuid={_OTHER_UID}", f"--regid={_OTHER_UID}", "--clear-groups", "--", *argv]
     subprocess.run(
         argv,
         env={"PATH": os.environ["PATH"], "DOTENV_TEXT": dotenv_text, "CHECKOUT": str(checkout)},
         check=True,
         timeout=60,
     )
-    assert (checkout / ".env").stat().st_uid == _OTHER_UID
+    owner = _OTHER_UID if how == "by-another-account" else os.geteuid()
+    assert (checkout / ".env").stat().st_uid == owner
+    assert preflight_env._dotenv_not_private(checkout / ".env") == (
+        f"{checkout} can be written by its group or others (mode 777)"
+    )
     return checkout, markers, values
 
 
@@ -245,11 +284,12 @@ command -v node > /dev/null && node -e 0
 """
 
 
-def test_a_shared_dotenv_another_account_planted_lends_none_of_it_to_the_install(monkeypatch):
-    root = _shared_root()
+@pytest.mark.parametrize("how", _HOW)
+def test_a_shared_dotenv_another_account_planted_lends_none_of_it_to_the_install(monkeypatch, tmp_path, how):
+    root = _shared_place(how, tmp_path)
     try:
-        checkout, markers, values = _plant(root)
-        our_tmp = _private_dir(root / "our-tmp", 0)
+        checkout, markers, values = _plant(root, how)
+        our_tmp = _our_dir(root / "our-tmp")
         workspace = root / "our-workspace"
         dump = root / "install-env"
         monkeypatch.setenv("TMPDIR", str(our_tmp))
@@ -290,10 +330,11 @@ def test_a_shared_dotenv_another_account_planted_lends_none_of_it_to_the_install
         shutil.rmtree(root)
 
 
-def test_preflight_lends_none_of_a_planted_shared_dotenv(capsys):
-    root = _shared_root()
+@pytest.mark.parametrize("how", _HOW)
+def test_preflight_lends_none_of_a_planted_shared_dotenv(capsys, tmp_path, how):
+    root = _shared_place(how, tmp_path)
     try:
-        checkout, _, values = _plant(root)
+        checkout, _, values = _plant(root, how)
         with mock.patch.dict(os.environ, _launch_env(checkout, root / "workspace"), clear=True):
             for key in (*values, "HF_HUB_OFFLINE"):
                 os.environ.pop(key, None)
@@ -310,10 +351,11 @@ def test_preflight_lends_none_of_a_planted_shared_dotenv(capsys):
         shutil.rmtree(root)
 
 
-def test_a_shared_dotenv_never_names_the_workspace(tmp_path):
+@pytest.mark.parametrize("how", _HOW)
+def test_a_shared_dotenv_never_names_the_workspace(tmp_path, how):
     """A ``hyperloom setup`` .env (one with a HYPERLOOM_RUN_MODE line) names the workspace and drops the caller's; one
     another account can write does not, though the line and its value are lent."""
-    root = _shared_root()
+    root = _shared_place(how, tmp_path)
     try:
         checkout = root / "hyperloom"
         checkout.mkdir()
@@ -321,7 +363,8 @@ def test_a_shared_dotenv_never_names_the_workspace(tmp_path):
         planted = {"USER_DATA_PATH": "/planted/workspace", "KERNEL_AGENT_ENV": "/planted/kernel-agent.env.sh"}
         text = "HYPERLOOM_RUN_MODE=baremetal\n" + "".join(f"{k}={v}\n" for k, v in planted.items())
         (checkout / ".env").write_text(text, encoding="utf-8")
-        os.chown(checkout / ".env", _OTHER_UID, _OTHER_UID)
+        if how == "by-another-account":
+            os.chown(checkout / ".env", _OTHER_UID, _OTHER_UID)
         workspace = tmp_path / "our-workspace"
         env = _launch_env(checkout, workspace)
 
@@ -403,18 +446,14 @@ _BAREMETAL_CREDENTIALS = {key: _CREDENTIALS[key] for key in ("ANTHROPIC_BASE_URL
 _BAREMETAL_CREDENTIALS["CLAUDE_CODE_OAUTH_TOKEN"] = _CREDENTIALS["CLAUDE_CODE_OAUTH_TOKEN"]
 
 
-def test_install_baremetal_writes_no_credential_into_a_shared_dotenv(monkeypatch):
-    root = _shared_root()
+@pytest.mark.parametrize("how", _HOW)
+def test_install_baremetal_writes_no_credential_into_a_shared_dotenv(monkeypatch, tmp_path, how):
+    root = _shared_place(how, tmp_path)
     try:
-        checkout, _, _ = _plant(root)
+        checkout, _, _ = _plant(root, how)
         # Another account's gateway, which a key read from the shell must never be paired with.
-        planted_gateway = "ANTHROPIC_BASE_URL=https://planted-gateway.invalid\n"
-        subprocess.run(
-            ["setpriv", f"--reuid={_OTHER_UID}", f"--regid={_OTHER_UID}", "--clear-groups", "--", "sh", "-c"]
-            + [f'printf "%s" "$1" >> {checkout}/.env', "-", planted_gateway],
-            check=True,
-        )
-        tmp = _private_dir(root / "our-tmp", 0)
+        _append_as_planter(how, checkout / ".env", "ANTHROPIC_BASE_URL=https://planted-gateway.invalid\n")
+        tmp = _our_dir(root / "our-tmp")
         monkeypatch.setenv("TMPDIR", str(tmp))
         workspace = root / "our-workspace"
         script = _baremetal(root / "assets")
@@ -452,15 +491,17 @@ def test_install_baremetal_writes_no_credential_into_a_shared_dotenv(monkeypatch
         shutil.rmtree(root)
 
 
-def test_install_baremetal_pairs_no_shell_key_with_a_shared_dotenvs_gateway(monkeypatch):
-    root = _shared_root()
+@pytest.mark.parametrize("how", _HOW)
+def test_install_baremetal_pairs_no_shell_key_with_a_shared_dotenvs_gateway(monkeypatch, tmp_path, how):
+    root = _shared_place(how, tmp_path)
     try:
         checkout = root / "hyperloom"
         checkout.mkdir()
         checkout.chmod(0o777)
         (checkout / ".env").write_text("ANTHROPIC_BASE_URL=https://planted-gateway.invalid\n", encoding="utf-8")
-        os.chown(checkout / ".env", _OTHER_UID, _OTHER_UID)
-        tmp = _private_dir(root / "our-tmp", 0)
+        if how == "by-another-account":
+            os.chown(checkout / ".env", _OTHER_UID, _OTHER_UID)
+        tmp = _our_dir(root / "our-tmp")
         monkeypatch.setenv("TMPDIR", str(tmp))
 
         proc = _run_baremetal(
@@ -498,10 +539,11 @@ def test_install_baremetal_keeps_a_private_checkouts_credentials_in_dotenv(tmp_p
     assert not list(tmp.glob("hyperloom-*/kernel-agent.env.sh"))
 
 
-def test_install_baremetal_reads_from_a_shared_dotenv_only_what_the_loader_lends():
+@pytest.mark.parametrize("how", _HOW)
+def test_install_baremetal_reads_from_a_shared_dotenv_only_what_the_loader_lends(tmp_path, how):
     """Its own .env reads (the vLLM venv, the workspace, the backend order, the run mode) keep to runtime_env_dotenv_lent:
     a listed name with a listed value, nothing else."""
-    root = _shared_root()
+    root = _shared_place(how, tmp_path)
     try:
         checkout = root / "hyperloom"
         checkout.mkdir()
@@ -529,3 +571,137 @@ def test_install_baremetal_reads_from_a_shared_dotenv_only_what_the_loader_lends
         ]
     finally:
         shutil.rmtree(root)
+
+
+# What another account writes into a .env it can write in a checkout directory of this account's (0755, .env 0666):
+# a loader, an endpoint, a fetch source, a credential, and a planted line hidden in a quoted value's continuation, with
+# the comments and lent lines that stay.
+_PLANTED_IN_A_WRITABLE_DOTENV = (
+    "# kept: a comment\n"
+    "FRAMEWORK=vllm\n"
+    "NODE_OPTIONS=--require=/tmp/planted.js\n"
+    "export LD_PRELOAD=/tmp/planted-preload.so\n"
+    "OPENAI_BASE_URL=https://planted-gateway.invalid/v1\n"
+    "GEAK_REPO=https://planted-repo.invalid/geak.git\n"
+    "ANTHROPIC_API_KEY=sk-test-planted\n"
+    'GEAK_NOTES="first\nPYTHONPATH=/tmp/planted"\n'
+    "HF_HUB_OFFLINE='1'\n"
+    "not an assignment\n"
+)
+_PLANTED_NAMES = ("NODE_OPTIONS", "LD_PRELOAD", "OPENAI_BASE_URL", "GEAK_REPO", "GEAK_NOTES", "PYTHONPATH")
+
+
+def _writable_dotenv_in_a_private_checkout(tmp_path: Path) -> Path:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir(mode=0o755)
+    dotenv = checkout / ".env"
+    dotenv.write_text(_PLANTED_IN_A_WRITABLE_DOTENV, encoding="utf-8")
+    dotenv.chmod(0o666)
+    assert preflight_env._dotenv_not_private(dotenv) == f"{dotenv} can be written by its group or others (mode 666)"
+    return checkout
+
+
+def _assert_the_next_load_lends_none_of_it(checkout: Path, workspace: Path, framework: str = "vllm") -> None:
+    """The install made .env this account's, so the next readers find it private: none of the planted lines is there
+    for them to lend, in install.sh's loader or preflight's. ``framework`` is what the install left FRAMEWORK."""
+    dotenv = checkout / ".env"
+    assert preflight_env._dotenv_not_private(dotenv) is None
+    text = dotenv.read_text(encoding="utf-8")
+    assert not [word for word in ("planted", "not an assignment") if word in text]
+    assert text.startswith("# kept: a comment\n")
+    assert "HF_HUB_OFFLINE='1'\n" in text
+    assert [
+        key
+        for key, value in _assignments(checkout / ".env").items()
+        if not env_safety.is_lent_not_private_dotenv_assignment(key, value)
+    ] == []
+    env = _launch_env(checkout, workspace)
+    for key in (*_PLANTED_NAMES, "ANTHROPIC_API_KEY"):
+        env.pop(key, None)
+    report = 'load_dotenv_no_clobber; for k in "$@"; do printf "%s=%s\\n" "$k" "${!k-}"; done'
+    proc = _shell(report, *_PLANTED_NAMES, "FRAMEWORK", env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines() == [f"{key}=" for key in _PLANTED_NAMES] + [f"FRAMEWORK={framework}"]
+    with mock.patch.dict(os.environ, env, clear=True):
+        preflight_env._load_dotenv_fallback()
+        assert {key: os.environ.get(key) for key in _PLANTED_NAMES} == dict.fromkeys(_PLANTED_NAMES)
+        assert os.environ.get("FRAMEWORK", "") == framework
+
+
+def test_the_install_leaves_no_planted_line_in_the_dotenv_it_makes_this_accounts(tmp_path, monkeypatch):
+    """write_env_file replaces a .env another account could write with a 0600 file of this account's; what that
+    account planted there is gone first, so the private file it leaves lends none of it."""
+    checkout = _writable_dotenv_in_a_private_checkout(tmp_path)
+    workspace = tmp_path / "workspace"
+    monkeypatch.setenv("TMPDIR", str(_our_dir(tmp_path / "tmp")))
+
+    proc = _run(_write_installer(tmp_path / "assets"), checkout, {"USER_DATA_PATH": str(workspace), **_CREDENTIALS})
+
+    assert proc.returncode == 0, proc.stderr
+    assert _assignments(checkout / ".env")[_MARKER] == "kernel-agent-env"
+    assert _credentials_in(_kernel_env(workspace)) == _CREDENTIALS
+    _assert_the_next_load_lends_none_of_it(checkout, workspace)
+
+
+def test_install_baremetal_leaves_no_planted_line_in_the_dotenv_it_makes_this_accounts(tmp_path, monkeypatch):
+    checkout = _writable_dotenv_in_a_private_checkout(tmp_path)
+    workspace = tmp_path / "workspace"
+    tmp = _our_dir(tmp_path / "tmp")
+    monkeypatch.setenv("TMPDIR", str(tmp))
+
+    proc = _run_baremetal(_baremetal(tmp_path / "assets"), checkout, workspace, tmp, **_BAREMETAL_CREDENTIALS)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _assignments(checkout / ".env")[_MARKER] == "kernel-agent-env"
+    # Its own framework step, stubbed here, finds no framework and removes FRAMEWORK.
+    _assert_the_next_load_lends_none_of_it(checkout, workspace, framework="")
+
+
+# Lines of each shape the loader reads, lent or not: what the rewrite keeps must be what the loader lends.
+_SHAPES = (
+    "FRAMEWORK=vllm\n",
+    "  export HYPERLOOM_RUN_MODE=docker\n",
+    'HF_HUB_OFFLINE="1"\n',
+    "HF_DATASETS_OFFLINE='0'   \n",
+    "HYPERLOOM_LLM_MODE=openai\r\n",
+    "HYPERLOOM_FRAMEWORK_ENV = shared\n",
+    "FRAMEWORK=vllm # a comment\n",
+    "FRAMEWORK=../planted\n",
+    'HYPERLOOM_BENCHMARK_BACKEND="magpie\nbypass"\n',
+    "HF_HOME=/models/hf\n",
+    "# FRAMEWORK=sglang\n",
+    "\n",
+    "   \n",
+    "stray words\n",
+    "HYPERLOOM_BENCHMARK_BACKEND=bypass",
+)
+
+
+def test_the_rewrite_keeps_exactly_what_the_loader_lends_from_a_shared_dotenv(tmp_path):
+    """runtime_env_keep_lent_dotenv_lines over a .env another account can write: the loader lends the same from the
+    file before and after, the kept file lends every assignment it holds, and blank and comment lines stay byte for
+    byte."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    checkout.chmod(0o777)
+    dotenv = checkout / ".env"
+    dotenv.write_text("".join(_SHAPES), encoding="utf-8", newline="")
+    names = sorted(env_safety.DOTENV_NOT_PRIVATE_LENT_VALUES) + ["HF_HOME"]
+    env = {"PATH": os.environ["PATH"], "REPO_ROOT": str(checkout)}
+    report = (
+        'load_dotenv_no_clobber; for k in "$@"; do printf "%s=%s\\n" "$k" "${!k-}"; done; echo "[$DOTENV_REFUSED_KEYS]"'
+    )
+
+    before = _shell(report, *names, env=env)
+    rewrite = _shell('runtime_env_keep_lent_dotenv_lines "$1"', str(dotenv), env=env)
+    after = _shell(report, *names, env=env)
+
+    assert rewrite.returncode == 0, rewrite.stderr
+    assert before.returncode == after.returncode == 0, before.stderr + after.stderr
+    assert after.stdout.splitlines()[:-1] == before.stdout.splitlines()[:-1]
+    assert after.stdout.splitlines()[-1] == "[]"
+    assert dotenv.read_bytes() == (
+        b"FRAMEWORK=vllm\n  export HYPERLOOM_RUN_MODE=docker\n"
+        b"HF_HUB_OFFLINE=\"1\"\nHF_DATASETS_OFFLINE='0'   \nHYPERLOOM_LLM_MODE=openai\r\n"
+        b"HYPERLOOM_FRAMEWORK_ENV = shared\n# FRAMEWORK=sglang\n\n   \nHYPERLOOM_BENCHMARK_BACKEND=bypass"
+    )

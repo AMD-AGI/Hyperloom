@@ -201,6 +201,7 @@ _runtime_env_private_entry() {
 }
 
 # Why the entry $1, which should be a $2 (`directory` or `regular file`), fails that rule; nothing when it passes.
+# $3, when given, is one more uid the entry may belong to (runtime_env_dotenv_not_private: root on a user's checkout).
 _runtime_env_not_private() {
   local owner_mode uid
   uid="$(id -u)"
@@ -210,7 +211,7 @@ _runtime_env_not_private() {
     printf 'is not a %s' "$2"
   elif ! owner_mode="$(stat -c '%u %a' -- "$1")"; then
     printf 'cannot be inspected'
-  elif [ "${owner_mode% *}" != "$uid" ]; then
+  elif [ "${owner_mode% *}" != "$uid" ] && [ "${owner_mode% *}" != "${3:-$uid}" ]; then
     printf 'belongs to uid %s, not to this account (uid %s)' "${owner_mode% *}" "$uid"
   elif (( 8#${owner_mode#* } & 8#022 )); then
     printf 'can be written by its group or others (mode %s)' "${owner_mode#* }"
@@ -235,15 +236,26 @@ RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS="ANTHROPIC_AUTH_TOKEN DEEPSEEK_API_KE
 # Why another account can write the checkout's .env $1, or nothing when this account alone can: the checkout directory
 # is held to runtime_env_private_kernel_agent_env's rule for a directory and the file, when there is one, to its rule
 # for a regular file (_runtime_env_not_private: a link, another account's, or writable by its group or others).
+# The checkout is judged where it is (cd -P), so one reached through a link -- install.sh keeps the logical path,
+# preflight resolves its own -- gets the same answer from both; .env itself is never followed. Root acting on a
+# checkout one other uid owns (the documented Docker flow: a container's root on the user's bind-mounted checkout)
+# accepts that uid as its own: root can already write it, and that uid already writes the code root runs from it.
 # Preflight's copy is _dotenv_not_private in cli/preflight_env.py, with the same words.
 runtime_env_dotenv_not_private() {
-  local dotenv="$1" dir problem
+  local dotenv="$1" dir problem resolved owner=""
   dir="$(dirname -- "$dotenv")"
-  problem="$(_runtime_env_not_private "$dir" directory)"
+  if [ -d "$dir" ] && resolved="$(cd -P -- "$dir" 2>/dev/null && pwd -P)"; then
+    dir="$resolved"
+    dotenv="$dir/$(basename -- "$dotenv")"
+    if [ "$(id -u)" = 0 ]; then
+      owner="$(stat -c '%u' -- "$dir" 2>/dev/null)" || owner=""
+    fi
+  fi
+  problem="$(_runtime_env_not_private "$dir" directory "$owner")"
   if [ -n "$problem" ]; then
     printf '%s %s' "$dir" "$problem"
   elif [ -e "$dotenv" ] || [ -L "$dotenv" ]; then
-    problem="$(_runtime_env_not_private "$dotenv" 'regular file')"
+    problem="$(_runtime_env_not_private "$dotenv" 'regular file' "$owner")"
     [ -z "$problem" ] || printf '%s %s' "$dotenv" "$problem"
   fi
 }
@@ -272,8 +284,23 @@ runtime_env_dotenv_credentials_elsewhere() {
 # written when there is nothing to remove from a regular file. Status 1 and why on stderr when it cannot be done, a
 # .env this account cannot read or one that is not a regular file included.
 runtime_env_remove_dotenv_credentials() {
-  local dotenv="$1" keys mode=600 tmp line text key nl quote="" drop=0 removed=0 failed=0
-  shift
+  _runtime_env_rewrite_dotenv 0 "$@"
+}
+
+# runtime_env_remove_dotenv_credentials for a .env another account can write (runtime_env_dotenv_not_private), which
+# also removes every assignment load_dotenv_no_clobber would not lend from it (runtime_env_dotenv_lent), with the
+# continuation lines of a quoted value, and every other line but a blank one or a comment. The install's own writes
+# replace such a .env with a file of this account's, which a later reader may find private: what another account
+# planted there (NODE_OPTIONS, OPENAI_BASE_URL, LD_PRELOAD) must be gone before, or the rewrite lends it from then on.
+# Call it before the first write of such a .env.
+runtime_env_keep_lent_dotenv_lines() {
+  _runtime_env_rewrite_dotenv 1 "$@"
+}
+
+# The two above: $1 is 1 to keep only what a .env another account can write lends, 0 to remove the credentials alone.
+_runtime_env_rewrite_dotenv() {
+  local lent_only="$1" dotenv="$2" keys mode=600 tmp line text key value nl quote="" drop=0 removed=0 failed=0 REPLY
+  shift 2
   keys=" $RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS $RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS $* "
   if [ -L "$dotenv" ] && [ ! -f "$dotenv" ]; then
     rm -f -- "$dotenv" && return 0
@@ -298,15 +325,30 @@ runtime_env_remove_dotenv_credentials() {
     else
       drop=0
       text="${line#"${line%%[![:space:]]*}"}"
+      text="${text%$'\r'}"
       text="${text#export }"
       if [[ "$text" == *=* && "$text" != \#* ]]; then
         key="${text%%=*}"
-        [[ "$keys" != *" ${key%"${key##*[![:space:]]}"} "* ]] || drop=1
+        key="${key%"${key##*[![:space:]]}"}"
+        [[ "$keys" != *" $key "* ]] || drop=1
         text="${text#*=}"
         text="${text#"${text%%[![:space:]]*}"}"
+        value="${text%"${text##*[![:space:]]}"}"
         case "$text" in
-          \"* | \'*) _runtime_env_quote_ends "${text:0:1}" "${text:1}" || quote="${text:0:1}" ;;
+          \"* | \'*)
+            if _runtime_env_quote_ends "${text:0:1}" "${text:1}"; then
+              # The value as load_dotenv_no_clobber reads it; one it cannot read on this line alone is not lent.
+              value=$'\n'
+              if _runtime_env_read_quoted_value "$text" < /dev/null 2>/dev/null; then value="$REPLY"; fi
+            else
+              quote="${text:0:1}"
+            fi ;;
         esac
+        if [ "$lent_only" -eq 1 ] && { [ -n "$quote" ] || ! runtime_env_dotenv_lent "$key" "$value"; }; then
+          drop=1
+        fi
+      elif [ "$lent_only" -eq 1 ] && [ -n "$text" ] && [[ "$text" != \#* ]]; then
+        drop=1
       fi
     fi
     if [ "$drop" -eq 1 ]; then

@@ -28,6 +28,7 @@ from unittest import mock
 
 import pytest
 
+from hyperloom.common.env_safety import is_lent_not_private_dotenv_assignment as is_lent
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
 from hyperloom.inference_optimizer.cli import preflight_env
 
@@ -99,6 +100,7 @@ _CREDENTIAL_PREFLIGHT = (
     "preflight_validate_credentials",
 )
 _OTHER_UID = 65534
+_THIRD_UID = 65533
 _MARKER = "HYPERLOOM_DOTENV_CREDENTIALS"
 _PLANTED = ("https://planted.invalid", "sk-test-planted")
 
@@ -216,13 +218,20 @@ def _assert_every_reader_gets(checkout: Path, workspace: Path, expected: dict[st
         assert _sourced_credentials(checkout, workspace, where, line) == expected, where
 
 
-def _assert_no_credentials_and_the_rest_kept(dotenv: Path) -> None:
-    """No credential assignment and no credential value in ``.env``; its other lines are there, in order, unchanged."""
+# Of _OTHER_LINES, what a .env another account can write still holds once an install rewrote it: the comments. Every
+# assignment it would not lend (HF_HOME, the backend order, the OpenAI side) is gone with the credentials.
+_COMMENT_LINES = tuple(line for line in _OTHER_LINES if line.startswith(b"#"))
+
+
+def _assert_only_what_it_lends_is_kept(dotenv: Path) -> None:
+    """A shared ``.env`` an install rewrote: no credential, nothing it would not lend, its comments in order."""
     text = dotenv.read_bytes()
-    assert not set(_assignments(dotenv)) & {*_CREDENTIAL_KEYS, "ANTHROPIC_AUTH_TOKEN"}
+    assignments = _assignments(dotenv)
+    assert not set(assignments) & {*_CREDENTIAL_KEYS, "ANTHROPIC_AUTH_TOKEN"}
     assert not [secret for secret in _SECRETS if secret in text]
-    lines = iter(text.splitlines(keepends=True))
-    assert all(any(line.rstrip(b"\n") == other.rstrip(b"\n") for line in lines) for other in _OTHER_LINES)
+    assert {key: value for key, value in assignments.items() if not is_lent(key, value)} == {}
+    assert [line for line in text.splitlines(keepends=True) if line.startswith(b"#")] == list(_COMMENT_LINES)
+    assert not [line for line in _OTHER_LINES if line not in _COMMENT_LINES and line.rstrip(b"\r\n") in text]
 
 
 @pytest.fixture
@@ -253,8 +262,11 @@ def _make_shared(checkout: Path, kind: str) -> str:
         checkout.chmod(0o777)
         return f"{checkout} can be written by its group or others (mode 777)"
     if kind == "checkout-of-another-account":
+        # Root takes the checkout's owner for its own (root on the user's bind-mounted checkout), so the .env of a
+        # third account is what it must refuse there.
         os.chown(checkout, _OTHER_UID, _OTHER_UID)
-        return f"{checkout} belongs to uid {_OTHER_UID}, not to this account (uid {uid})"
+        os.chown(dotenv, _THIRD_UID, _THIRD_UID)
+        return f"{dotenv} belongs to uid {_THIRD_UID}, not to this account (uid {uid})"
     if kind == "other-writable-dotenv":
         dotenv.chmod(0o606)
         return f"{dotenv} can be written by its group or others (mode 606)"
@@ -296,7 +308,7 @@ def test_a_shared_checkouts_dotenv_keeps_no_credentials_and_every_reader_still_g
 
     assert f"credentials kept out of {checkout}/.env, which another account can write ({said})" in proc.stdout
     assert f"ignored 5 credential line(s) in {checkout}/.env, which keeps none" in proc.stderr
-    _assert_no_credentials_and_the_rest_kept(checkout / ".env")
+    _assert_only_what_it_lends_is_kept(checkout / ".env")
     assert _assignments(checkout / ".env")[_MARKER] == "kernel-agent-env"
     assert _credentials_in(_kernel_env(workspace)) == _CREDENTIALS
     if kind == "dotenv-is-a-link":
@@ -321,7 +333,7 @@ def test_credentials_left_in_a_shared_dotenv_are_neither_used_nor_copied(tmp_pat
     assert f"({said})" in proc.stderr
     assert _credentials_in(_kernel_env(workspace)) == dict.fromkeys(_CREDENTIAL_KEYS)
     assert not [secret for secret in _SECRETS if secret in _kernel_env(workspace).read_bytes()]
-    _assert_no_credentials_and_the_rest_kept(checkout / ".env")
+    _assert_only_what_it_lends_is_kept(checkout / ".env")
     assert not [secret for secret in _SECRETS if secret.decode() in proc.stdout + proc.stderr]
     with mock.patch.dict(os.environ, _launch_env(checkout, workspace), clear=True):
         detail = preflight_env._load_dotenv_fallback()["detail"]
@@ -453,7 +465,7 @@ def test_a_reinstall_in_the_same_container_takes_the_credentials_from_its_file(t
     env_file = _kernel_env(workspace)
     assert f"loaded 4 missing credential(s) from {env_file} (env wins)" in again.stdout
     assert _credentials_in(env_file) == _CREDENTIALS
-    _assert_no_credentials_and_the_rest_kept(checkout / ".env")
+    _assert_only_what_it_lends_is_kept(checkout / ".env")
     # A key exported for a rotation wins over the file's, in install.sh and in preflight alike.
     rotated = {"ANTHROPIC_API_KEY": "sk-test-rotated-key"}
     _install(installer, checkout, workspace, {**_no_credentials(), **rotated})
@@ -486,8 +498,10 @@ def test_no_later_write_copies_a_credential_line_of_a_shared_dotenv(tmp_path, co
         {**_openai_side_only(), "RECORD_FILE": str(record)},
     )
 
-    assert record.read_bytes().count(b"HF_HOME=/models/hf") > 5
+    # Each of those writes found .env (its first comment), and none found a credential or a line it does not lend.
+    assert record.read_bytes().count(_COMMENT_LINES[0]) > 5
     assert not [secret for secret in _SECRETS if secret in record.read_bytes()]
+    assert b"HF_HOME=" not in record.read_bytes()
 
 
 def test_a_dotenv_the_install_made_this_accounts_takes_them_from_the_next_install(tmp_path, container):
@@ -563,7 +577,15 @@ def test_a_planted_env_file_lends_no_credentials_to_a_shared_checkouts_readers(t
 
 @pytest.mark.parametrize(
     "kind",
-    ["private", "private-with-the-marker", "checkout-is-a-link", "dotenv-is-a-directory", *_SHARED_KINDS],
+    [
+        "private",
+        "private-with-the-marker",
+        "checkout-is-a-link",
+        "link-to-a-shared-checkout",
+        "root-on-the-users-checkout",
+        "dotenv-is-a-directory",
+        *_SHARED_KINDS,
+    ],
 )
 def test_shell_and_preflight_hold_a_checkout_to_the_same_rule(tmp_path, container, kind):
     checkout, _ = container
@@ -575,9 +597,21 @@ def test_shell_and_preflight_hold_a_checkout_to_the_same_rule(tmp_path, containe
         env[_MARKER] = "kernel-agent-env"
         said = f"it carries {_MARKER}=kernel-agent-env"
     elif kind == "checkout-is-a-link":
+        # This account's link to its own private checkout: judged where it leads, by both.
         (tmp_path / "via-link").symlink_to(checkout)
         dotenv = tmp_path / "via-link" / ".env"
-        said = f"another account can write it ({tmp_path / 'via-link'} is a symbolic link)"
+        said = None
+    elif kind == "link-to-a-shared-checkout":
+        (tmp_path / "via-link").symlink_to(checkout)
+        dotenv = tmp_path / "via-link" / ".env"
+        said = f"another account can write it ({_make_shared(checkout, 'world-writable-checkout')})"
+    elif kind == "root-on-the-users-checkout":
+        # A container's root on the checkout the user bind-mounted: the user's checkout and .env, no one else's write.
+        if os.geteuid() != 0:
+            pytest.skip("only root can give an entry to another account")
+        os.chown(checkout, _OTHER_UID, _OTHER_UID)
+        os.chown(dotenv, _OTHER_UID, _OTHER_UID)
+        said = None
     elif kind == "dotenv-is-a-directory":
         dotenv.unlink()
         dotenv.mkdir()
@@ -825,7 +859,7 @@ def test_a_bind_mounted_checkout_two_accounts_install_from(monkeypatch):
         (their_file,) = their_tmp.glob("hyperloom-*/kernel-agent.env.sh")
         assert their_file.stat().st_uid == _OTHER_UID
         assert _credentials_in(their_file) == theirs
-        _assert_no_credentials_and_the_rest_kept(dotenv)
+        _assert_only_what_it_lends_is_kept(dotenv)
         assert dotenv.stat().st_uid == _OTHER_UID
         their_bytes = their_file.read_bytes()
 
@@ -835,7 +869,7 @@ def test_a_bind_mounted_checkout_two_accounts_install_from(monkeypatch):
         _install(installer, checkout, our_workspace, _CREDENTIALS)
 
         assert _credentials_in(_kernel_env(our_workspace)) == _CREDENTIALS
-        _assert_no_credentials_and_the_rest_kept(dotenv)
+        _assert_only_what_it_lends_is_kept(dotenv)
         assert not [value for value in theirs.values() if value.encode() in dotenv.read_bytes()]
         assert their_file.read_bytes() == their_bytes
         assert _preflight_credentials(checkout, our_workspace) == _CREDENTIALS
@@ -899,3 +933,107 @@ def test_removal_fails_on_a_dotenv_it_cannot_read():
         assert sorted(entry.name for entry in checkout.iterdir()) == [".env"]
     finally:
         shutil.rmtree(root)
+
+
+def test_shell_and_preflight_load_the_same_from_a_private_checkout_reached_through_a_link(tmp_path, container):
+    """``~/hl -> /scratch/me/hl``: install.sh keeps the logical path (REPO_ROOT), preflight resolves its own; the same
+    .env, fed to both through the link, lends the same, everything a private .env lends, credentials included."""
+    checkout, workspace = container
+    link = tmp_path / "via-link"
+    link.symlink_to(checkout)
+    kept = {
+        "HF_HOME": "/models/hf",
+        "KERNEL_OPT_BACKEND_ORDER": "geak",
+        "OPENAI_BASE_URL": "https://gateway.invalid/v1",
+    }
+    names = [*kept, *_CREDENTIAL_KEYS]
+    env = _launch_env(link, workspace)
+    for key in names:
+        env.pop(key, None)
+    report = 'load_dotenv_no_clobber; for k in "$@"; do printf "%s\\0" "${!k-}"; done'
+    shell = subprocess.run(
+        ["bash", "-c", '. "$0"; ' + report, RUNTIME_ENV_SH.as_posix(), *names],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    with mock.patch.dict(os.environ, env, clear=True):
+        preflight_env._load_dotenv_fallback()
+        preflight = [os.environ.get(key, "") for key in names]
+
+    assert "not loaded from" not in shell.stderr
+    assert shell.stdout.split("\0")[:-1] == preflight
+    assert dict(zip(names, preflight, strict=True)) == {**kept, **_OLD_CREDENTIALS}
+
+
+def test_an_install_through_the_users_own_link_keeps_the_credentials_in_dotenv(tmp_path, container):
+    checkout, workspace = container
+    link = tmp_path / "via-link"
+    link.symlink_to(checkout)
+
+    proc = _install(_write_installer(tmp_path / "assets"), link, workspace, _CREDENTIALS)
+
+    assert "credentials kept out of" not in proc.stdout
+    assert "ignored" not in proc.stderr
+    persisted = ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+    assert {key: _assignments(checkout / ".env").get(key) for key in persisted} == {
+        key: _CREDENTIALS[key] for key in persisted
+    }
+    assert _MARKER not in _assignments(checkout / ".env")
+
+
+def test_root_in_a_container_on_the_users_bind_mounted_checkout_reads_its_dotenv_as_the_users(tmp_path, container):
+    """The documented Docker (source) flow: ``docker run -v "$REPO_ROOT:$REPO_ROOT"`` with no ``--user``, then
+    ``docker exec`` as root. The checkout and its 0600 .env are the user's; root, through the bind mount, loads them
+    and keeps the user's credentials in .env, as it did before the shared-checkout rule."""
+    if os.geteuid() != 0 or shutil.which("unshare") is None:
+        pytest.skip("a bind mount in a private mount namespace needs root and unshare")
+    checkout, workspace = container
+    os.chown(checkout, _OTHER_UID, _OTHER_UID)
+    os.chown(checkout / ".env", _OTHER_UID, _OTHER_UID)
+    mounted = tmp_path / "container-view" / "hyperloom"
+    mounted.mkdir(parents=True)
+    installer = _write_installer(tmp_path / "assets")
+    env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR") if key in os.environ}
+    env.update(REPO_ROOT=str(mounted), GEAK_REF=_PINNED_GEAK_REF, USER_DATA_PATH=str(workspace), **_no_credentials())
+    probe = 'stat -c %u "$REPO_ROOT/.env"'
+    argv = ["unshare", "-m", "--propagation", "private", "sh", "-c"]
+    argv += ['mount --bind "$1" "$2" && ' + probe + ' && cd "$2" && exec bash "$3"', "-", str(checkout), str(mounted)]
+    argv += [installer.as_posix()]
+
+    proc = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=120)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines()[0] == str(_OTHER_UID)
+    assert not (mounted / ".env").exists()
+    assert "not loaded from" not in proc.stderr
+    assert "ignored" not in proc.stderr
+    assert "credentials kept out of" not in proc.stdout
+    assert _credentials_in(_kernel_env(workspace)) == _OLD_CREDENTIALS
+    persisted = ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+    assert {key: _assignments(checkout / ".env").get(key) for key in persisted} == {
+        key: _OLD_CREDENTIALS[key] for key in persisted
+    }
+    assert _MARKER not in _assignments(checkout / ".env")
+    assert _preflight_credentials(checkout, workspace) == _OLD_CREDENTIALS
+
+
+def test_root_still_refuses_a_users_checkout_others_can_write(tmp_path, container):
+    """Root takes the checkout's owner for its own, never a third account's .env nor a checkout its group can write."""
+    if os.geteuid() != 0:
+        pytest.skip("only root can give an entry to another account")
+    checkout, _ = container
+    dotenv = checkout / ".env"
+    os.chown(checkout, _OTHER_UID, _OTHER_UID)
+    os.chown(dotenv, _OTHER_UID, _OTHER_UID)
+    checkout.chmod(0o775)
+    said = f"{checkout} can be written by its group or others (mode 775)"
+    shell = subprocess.run(
+        ["bash", "-c", '. "$0"; runtime_env_dotenv_not_private "$1"', RUNTIME_ENV_SH.as_posix(), str(dotenv)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert shell == said
+    assert preflight_env._dotenv_not_private(dotenv) == said
