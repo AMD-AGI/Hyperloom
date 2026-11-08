@@ -192,16 +192,24 @@ def test_a_cancelled_round_is_the_runs_own_stop(monkeypatch, suite):
     assert row.error_class == ORCHESTRATOR_CANCELLED_CLASS
 
 
-def test_a_round_refused_before_it_ran_fails_as_staging_missing(monkeypatch, suite, tmp_path):
+def test_a_round_refused_before_it_ran_fails_as_staging_missing_and_says_why_in_the_log(
+    monkeypatch, suite, tmp_path, caplog
+):
     monkeypatch.setenv(TOOL_CACHE_ENV, str(tmp_path / "unstaged"))
 
-    row, calls, _ = _play(
-        monkeypatch, suite, LaunchAttempt(outcome=READY, metrics=_HOT), launch=GridLaunch(warmup_before_measure=False)
-    )
+    with caplog.at_level("WARNING", logger=_grid_runner.log.name):
+        row, calls, _ = _play(
+            monkeypatch,
+            suite,
+            LaunchAttempt(outcome=READY, metrics=_HOT),
+            launch=GridLaunch(warmup_before_measure=False),
+        )
 
     assert row.status == "failed"
     assert row.error_class == FailedStep.STAGING_MISSING.value
     assert not calls
+    (refusal,) = [r for r in caplog.records if "refused before it ran" in r.getMessage()]
+    assert row.error in refusal.getMessage() and refusal.exc_info is not None
 
 
 def test_a_variants_unset_envs_are_not_inherited_by_its_round(monkeypatch, suite):
