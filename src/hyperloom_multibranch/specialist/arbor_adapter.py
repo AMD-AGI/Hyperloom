@@ -135,8 +135,13 @@ PYTHON = "python3"
 SITE_ENV = "ARBOR_SITE"
 #: The Arbor commits that read :data:`SITE_ENV`: on main, and the tag on its v0.9.2 line.
 SITE_SINCE = "545a850 (v0.9.2.1)"
-#: :data:`PYTHON` run as Arbor: given :data:`SITE_ENV` where the sandbox's pip installs out of reach.
-ARBOR_PYTHON = f'env ${{PIP_TARGET:+"{SITE_ENV}=$PIP_TARGET"}} {PYTHON}'
+#: The file Arbor (v0.9.4 on) reads its ``ARBOR_*`` defaults from, ``~/.arbor/settings.env`` when unset or empty.
+#: Pointed at an empty file, so a local run never takes the running user's settings (an ``ARBOR_ROLL``, a review gate,
+#: an agent backend) past the preflight that refuses them in the environment.
+SETTINGS_ENV = "ARBOR_SETTINGS"
+#: :data:`PYTHON` run as Arbor: with no site settings file, and given :data:`SITE_ENV` where the sandbox's pip installs
+#: out of reach.
+ARBOR_PYTHON = f'env {SETTINGS_ENV}=/dev/null ${{PIP_TARGET:+"{SITE_ENV}=$PIP_TARGET"}} {PYTHON}'
 #: Run once Arbor's imports failed, says so when the cause is an Arbor that does not read :data:`SITE_ENV`: it names a
 #: directory, which is not on the import path Arbor's import left.
 _SITE_UNREAD = (
@@ -937,6 +942,7 @@ __all__ = [
     "REVIEW_HOST",
     "REVIEW_KEY",
     "REVIEW_OFF",
+    "SETTINGS_ENV",
     "SITE_ENV",
     "SITE_SINCE",
     "ArborCheckout",
