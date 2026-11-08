@@ -145,8 +145,13 @@ install pins.
 
 **A site's settings** (from `v0.9.4`): when it is imported, Arbor reads `~/.arbor/settings.env`, or the file
 `ARBOR_SETTINGS` names, and sets each `ARBOR_*` value there that the environment does not set already; other keys are
-ignored. A site's own collector projects go in the file `ARBOR_PROJECTS` names. Under MB the environment MB passes
-wins, and a machine without the file runs as before.
+ignored. A site's own collector projects go in the file `ARBOR_PROJECTS` names. A machine without the file runs as
+before. Under MB:
+- **Hosted:** each branch has its own home, and its confined environment carries no `ARBOR_*` value, so no user's
+  file is read.
+- **Local and unconfined:** Arbor reads the running user's file, and MB sets only `ARBOR_SITE`, so a value there (a
+  roll, a review gate, an agent backend) reaches the branch. `ARBOR_SETTINGS=/dev/null` in Arbor's environment turns
+  the file off; an empty value does not.
 
 ## How it is updated
 
