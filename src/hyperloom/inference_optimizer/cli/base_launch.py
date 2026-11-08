@@ -19,6 +19,7 @@ import dataclasses
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
@@ -64,41 +65,82 @@ def _read_user_file(location: str, framework: str) -> UserFile:
     return parse_user_file(location, content, framework=framework)
 
 
-def _model_path(args: argparse.Namespace) -> str | None:
-    return str(getattr(args, "model", "") or "").strip() or None
+@dataclass(frozen=True)
+class SessionLaunch:
+    """What a session's base launch is resolved for: the model it serves (a path or a hub id) and the name recipes are
+    asked for it by when it was given one, the framework, the target board, the workload and its concurrencies, the
+    GPUs the launch may span, the TP and EP the operator fixed (``None`` leaves them to the source), a fixed workload's
+    sequence shape, and the operator's launch file (``""`` for none)."""
+
+    model: str
+    framework: str
+    board: str
+    workload: Workload
+    concurrencies: tuple[int, ...]
+    gpus: int
+    tp: int | None = None
+    ep: int | None = None
+    isl: int | None = None
+    osl: int | None = None
+    model_display_name: str = ""
+    reference: str = ""
+
+    @property
+    def model_path(self) -> str | None:
+        return self.model.strip() or None
+
+    @property
+    def model_id(self) -> str:
+        """The name every recipe source is asked for the model by: its Hugging Face id when it names one.
+
+        A display name the session was given (a quantized export's) names a model no recipe serves; so does a local
+        checkpoint that records no HF id, which is asked for by its directory name.
+        """
+        if self.model_display_name.strip():
+            return self.model_display_name.strip()
+        model = self.model.strip().rstrip("/")
+        return hf_repo_id(model) or Path(model).name or model
+
+    def query(self) -> LaunchQuery:
+        """The session's query; raises :class:`BaseLaunchError` when it is malformed."""
+        return LaunchQuery(
+            model_id=self.model_id,
+            framework=self.framework,
+            board=self.board,
+            workload=self.workload,
+            concurrencies=tuple(sorted(set(self.concurrencies))),
+            tp=self.tp,
+            ep=self.ep,
+            isl=self.isl,
+            osl=self.osl,
+        )
 
 
-def _model_id(args: argparse.Namespace) -> str:
-    """The name every recipe source is asked for the session's model by: its Hugging Face id when it names one.
-
-    A display name the session was given (a quantized export's) names a model no recipe serves; so does a local
-    checkpoint that records no HF id, which is asked for by its directory name.
-    """
-    display = (getattr(args, "model_display_name", "") or "").strip()
-    if display:
-        return display
-    model = str(getattr(args, "model", "") or "").strip().rstrip("/")
-    return hf_repo_id(model) or Path(model).name or model
+class BaseLaunchUnresolved(Exception):
+    """No base launch can be resolved for a session; the message says why."""
 
 
-def _query(
+def _session_launch(
     args: argparse.Namespace, *, framework: str, workload: Workload, concurrencies: Sequence[int]
-) -> LaunchQuery:
-    """The session's query; an AgentX trace replay and a script name no sequence shape."""
+) -> SessionLaunch:
+    """The command line's session; an AgentX trace replay and a script name no sequence shape."""
     board = (getattr(args, "gpu_type", None) or "").strip()
     if not board:
         _refuse("the base launch is resolved for the target GPU board, and none was detected; pass --gpu-type")
     fixed = workload is Workload.FIXED
-    return LaunchQuery(
-        model_id=_model_id(args),
+    return SessionLaunch(
+        model=str(getattr(args, "model", "") or ""),
         framework=framework,
         board=board,
         workload=workload,
-        concurrencies=tuple(sorted(set(concurrencies))),
+        concurrencies=tuple(concurrencies),
+        gpus=_session_gpus(args),
         tp=args.operator_tp,
         ep=args.operator_ep,
         isl=int(args.isl) if fixed else None,
         osl=int(args.osl) if fixed else None,
+        model_display_name=getattr(args, "model_display_name", "") or "",
+        reference=(getattr(args, "reference_script", None) or "").strip(),
     )
 
 
@@ -120,11 +162,12 @@ def _run_at_base_topology(args: argparse.Namespace, base: BaseLaunch) -> None:
 
 
 def _without_credentials(base: BaseLaunch) -> BaseLaunch:
-    """``base`` with its credential-named env frozen as sha256s; a credential it holds anywhere else exits 2."""
+    """``base`` with its credential-named env frozen as sha256s; raises :class:`BaseLaunchUnresolved` for a credential
+    it holds anywhere else."""
     redacted = redact_credential_env(base)
     found = credentials_in_the_clear(redacted)
     if found:
-        _refuse(
+        raise BaseLaunchUnresolved(
             f"the base launch holds a credential in {', '.join(found)}; pass it through the environment instead, "
             "which is frozen as its sha256 and read from the runner host's variable of the same name"
         )
@@ -136,15 +179,33 @@ def _announce(base: BaseLaunch) -> None:
     print(f"Base launch     : {base.source.kind.value} {where} ({len(base.args)} arg tokens, {len(base.env)} env(s))")
 
 
-def _scriptable_base(args: argparse.Namespace, *, framework: str, concurrencies: Sequence[int]) -> BaseLaunch:
+def _scriptable_base(launch: SessionLaunch, args: argparse.Namespace) -> BaseLaunch:
     """The base of a scriptable session: its script, at the TP and EP the session resolved."""
-    query = _query(args, framework=framework, workload=Workload.SCRIPTABLE, concurrencies=concurrencies)
-    script = operator_benchmark_script(framework, query.board.lower())
-    model = LaunchModel(_model_id(args), _model_path(args))
+    query = launch.query()
+    script = operator_benchmark_script(launch.framework, query.board.lower())
+    model = LaunchModel(launch.model_id, launch.model_path)
+    return scriptable_base(query, script, model, Topology(tp=int(args.tp), ep=int(args.ep)))
+
+
+def resolve_server_base(launch: SessionLaunch) -> BaseLaunch:
+    """The base launch of a server session: the operator's launch file when it names one, else the first recipe source
+    that serves it, else, for a fixed workload, the default table; its credential-named env frozen as sha256s.
+
+    Raises:
+        BaseLaunchUnresolved: The launch file cannot serve as the base, the query is malformed, or no source and no
+            default serves the session (an AgentX session has no default).
+    """
     try:
-        return scriptable_base(query, script, model, Topology(tp=int(args.tp), ep=int(args.ep)))
-    except BaseLaunchError as exc:
-        _refuse(f"the scriptable base could not be frozen: {exc}")
+        query = launch.query()
+        user_file = _read_user_file(launch.reference, launch.framework) if launch.reference else None
+        found = resolve_base(query, fetch_sources(query, user_file=user_file), gpus=launch.gpus)
+    except (OSError, SourceFetchError, UserFileError, BaseLaunchError) as exc:
+        raise BaseLaunchUnresolved(f"the base launch could not be resolved: {exc}") from exc
+    if isinstance(found, Miss):
+        raise BaseLaunchUnresolved("no source serves this session's base launch:\n  " + "\n  ".join(found.reasons()))
+    return _without_credentials(
+        dataclasses.replace(found, model=dataclasses.replace(found.model, path=launch.model_path))
+    )
 
 
 def resolve_base_launch(
@@ -161,25 +222,22 @@ def resolve_base_launch(
     operator's launch file cannot serve as the base, the query is malformed, no source and no default serves the
     session (an AgentX session has no default), or a scriptable session has no script to run.
     """
-    location = (getattr(args, "reference_script", None) or "").strip()
     if is_scriptable(framework):
-        if location:
+        launch = _session_launch(args, framework=framework, workload=Workload.SCRIPTABLE, concurrencies=concurrencies)
+        if launch.reference:
             _refuse(f"--reference-script is a server launch; a {framework} workload launches no server")
-        return _freeze(args, session_dir, _scriptable_base(args, framework=framework, concurrencies=concurrencies))
+        try:
+            script_base = _scriptable_base(launch, args)
+        except BaseLaunchError as exc:
+            _refuse(f"the scriptable base could not be frozen: {exc}")
+        return _freeze(args, session_dir, script_base)
     replay = is_agentx_mode(benchmark_mode) and not is_mlperf_backend()
+    workload = Workload.AGENTX if replay else Workload.FIXED
+    launch = _session_launch(args, framework=framework, workload=workload, concurrencies=concurrencies)
     try:
-        workload = Workload.AGENTX if replay else Workload.FIXED
-        query = _query(args, framework=framework, workload=workload, concurrencies=concurrencies)
-        gpus = _session_gpus(args)
-        user_file = _read_user_file(location, framework) if location else None
-        found = resolve_base(query, fetch_sources(query, user_file=user_file), gpus=gpus)
-    except (OSError, SourceFetchError, UserFileError, BaseLaunchError) as exc:
-        _refuse(f"the base launch could not be resolved: {exc}")
-    if isinstance(found, Miss):
-        _refuse("no source serves this session's base launch:\n  " + "\n  ".join(found.reasons()))
-    base = _without_credentials(
-        dataclasses.replace(found, model=dataclasses.replace(found.model, path=_model_path(args)))
-    )
+        base = resolve_server_base(launch)
+    except BaseLaunchUnresolved as exc:
+        _refuse(str(exc))
     return _freeze(args, session_dir, base)
 
 
@@ -190,4 +248,4 @@ def _freeze(args: argparse.Namespace, session_dir: Path, base: BaseLaunch) -> Ba
     return base
 
 
-__all__ = ["resolve_base_launch"]
+__all__ = ["BaseLaunchUnresolved", "SessionLaunch", "resolve_base_launch", "resolve_server_base"]

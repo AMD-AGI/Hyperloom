@@ -103,6 +103,11 @@ from hyperloom_multibranch.specialist.dev_sandbox import DEV_DIR, DevLeases
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox
 from hyperloom_multibranch.tests.fakes import RefusingCritic
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
+from hyperloom.inference_optimizer.cli import base_launch as cli_base_launch
+from hyperloom.measure.tests.bundle_factory import base_launch
+from hyperloom.orchestrator.state.base_launch import freeze_base, frozen_base
+from inference_suite import SourceSnapshot
+from inference_suite.recipe.resolve import UnreadSource
 from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
 from hyperloom_multibranch.specialist.gate_client import GateClient
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions
@@ -376,10 +381,12 @@ async def _peers(
     workload: Workload,
     host: MeasurementHost = HOST,
     dev_leases: int = 0,
+    freeze: bool = True,
 ) -> AsyncIterator[_Built]:
     """The real peers of a session of ``workload`` on ``host`` in ``tmp_path`` lending ``dev_leases`` dev sandboxes,
     with the wiring their specialist sessions were built on; a branch's worktree, holding no component, is served
-    only when the session lends dev sandboxes. Every variable the build exports is restored afterwards."""
+    only when the session lends dev sandboxes. The session froze its base launch unless ``freeze`` is false. Every
+    variable the build exports is restored afterwards."""
 
     for name in (*workload_environment(workload), BENCHMARK_CONFIG_ENV):
         monkeypatch.setenv(name, "")
@@ -387,6 +394,8 @@ async def _peers(
     monkeypatch.delenv("HYPERLOOM_KB_URL", raising=False)
     clock = Clock()
     layout = create_session(tmp_path, workload.model_basename, clock)
+    if freeze:
+        freeze_base(layout.toolbox, base_launch())
     desk = ForkDesk(Roster(RosterCaps(1, 1, 1), layout.roster, clock), DecisionLog(layout.decisions, clock), clock)
     blobs = LocalBlobStore(layout.blobs)
     setup = PeerSetup(
@@ -541,6 +550,24 @@ def test_the_specialists_recall_past_sessions_lessons_from_the_pool_beside_the_a
     recall = specialist_recall(tmp_path / "reports")
 
     assert recall.knows(lesson.lesson_id) and recall.past_revision() != ""
+
+
+async def test_a_fresh_session_freezes_its_base_launch_in_the_toolbox_directory_before_any_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    queries: list[object] = []
+
+    def offline(query: object, *, user_file: object = None) -> SourceSnapshot:
+        queries.append(query)
+        return SourceSnapshot(None, 1_793_000_000, user_file=user_file, unread=UnreadSource("InferenceX", "offline"))
+
+    monkeypatch.setattr(cli_base_launch, "fetch_sources", offline)
+
+    async with _peers(tmp_path, monkeypatch, WORKLOAD, freeze=False) as built:
+        frozen = frozen_base(built.layout.toolbox)
+        assert frozen is not None and [frozen.launch.query] == queries
+        assert frozen.launch.topology.tp == WORKLOAD.tp
 
 
 async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -> None:
