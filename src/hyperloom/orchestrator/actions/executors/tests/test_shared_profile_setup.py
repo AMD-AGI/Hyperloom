@@ -26,11 +26,6 @@ def load_benchmark(path: Path) -> dict:
 _PATCHED = PatchedServer(None)
 
 
-#: A patch laid where this host's server needs no copy of its framework, so the launch's ``PYTHONPATH`` is the one under
-#: test.
-_PATCHED = PatchedServer(None)
-
-
 @pytest.fixture(autouse=True)
 def profile_environment(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
