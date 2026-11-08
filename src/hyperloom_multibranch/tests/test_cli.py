@@ -89,6 +89,7 @@ from hyperloom_multibranch.scheduling.settings import (
     RunSettings,
     Workload,
 )
+from hyperloom_multibranch.scheduling.session_environment import hosted_runner_cache
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 
 #: What the session's launcher sets to name the image the session runs on.
@@ -1350,9 +1351,7 @@ def test_a_hosted_spec_whose_agents_cannot_run_ends_for_good_naming_why(
 
 
 def test_the_hosted_runner_cache_is_the_directory_the_variable_names() -> None:
-    assert cli.hosted_runner_cache({"HYPERLOOM_RUNNER_CACHE": " /data/hl/runner-cache "}) == Path(
-        "/data/hl/runner-cache"
-    )
+    assert hosted_runner_cache({"HYPERLOOM_RUNNER_CACHE": " /data/hl/runner-cache "}) == Path("/data/hl/runner-cache")
 
 
 def _no_local_cards() -> tuple[int, ...]:
