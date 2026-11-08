@@ -10,7 +10,7 @@ AgentX is NOT a synthetic fixed-token benchmark. It replays real multi-turn agen
 
 ## Measurement characteristics
 
-- Full run: ~3600s replay + ~30min warmup + ~5min aiperf install = ~70min total
+- Full run: a 3600 s replay, plus the client's warmup and the aiperf install
 - Fast mode (NUM_PROMPTS ≤ 50): 1200s replay, 1 warmup request per lane — for profiling only, not gating
 - Error rate must stay ≤ 10% for a valid measurement
 - KV cache hit rate from server metrics — relevant for HiCache and prefix caching optimizations

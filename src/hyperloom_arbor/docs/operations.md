@@ -5,44 +5,37 @@ component-mode GPU test. The loop itself: [how-it-works.md](how-it-works.md).
 
 ## Before a launch
 
-- **Arbor on the cluster.** Point launchers at a checkout the cluster can read with `ARBOR_URL`, and
-  set the branch: the launchers' defaults are not this copy's.
+- **Arbor on the cluster.** Point the launcher at a checkout the cluster can read, and at the branch
+  to run.
 - **Credentials.** The launchers source `~/.arbor/gateway.env` (mode 600) for the agents' gateway.
 - **The image and weights.** Launchers load the serving image from an archive and check its ID, and
   check the weights as the container sees them.
 - **Python.** The driver runs on the host with a Python that has PyYAML and `claude-agent-sdk`
   ([getting-started.md](getting-started.md)).
 
-## Model M campaigns on Cluster A (`scripts/model-m-campaign/`)
+## What a launcher does
 
-Cluster A: Slurm partition `<partition>`, 4-hour jobs, shared `/apps`, node-local `/scratch`.
+A launcher is specific to a cluster: its scheduler, partitions, paths and image. It clones or
+fetches Arbor at a ref and submits a job with the campaign's config. One job is one chunk:
 
-```bash
-ARBOR_URL=<a clone URL Cluster A can read> CAMPAIGN_BRANCH=main \
-  bash scripts/model-m-campaign/launch_model_m.sh <campaign> [ref]
-```
-
-`launch_model_m.sh` clones or fetches into `Arbor-<campaign>` at the ref and submits
-`campaign_model_m.sbatch` (`CAMPAIGN=<campaign>`; config `configs/mi350x/model-m-c32-<campaign>.json`
-unless `CAMPAIGN_CONFIG` names another). One job is one chunk:
-
-1. load the image and start the container (`common.sh`);
+1. load the image and start the container;
 2. lay the optional base tree (`base_vmu`) and check it file by file;
 3. make the vLLM site a git repository with a baseline commit;
 4. restore the session's `landed.patch`, `scratch.patch` and landed packages;
 5. nothing to build for the profiler (TraceLens comes with the environment);
 6. run `python3 -m arbor run --config ... --cooldown 30`.
 
-Inputs: `MAX_CHUNKS` (12), `ROUND_AB` (1: the round-end A/B hook on), `ROUND_AB_POINTS`,
-`CALIBRATE`, `PROFILES`. `round_ab.py` is the round-end A/B; `rebase_bar.py` rebases the bar on a
-new node (dossier campaigns only). `plan_campaign.sh` runs a document campaign on the host, with no
-GPU. The Cluster B variant (`launch_model_m_cluster_b.sh`, `campaign_model_m_cluster_b.sbatch`: Spur, `<account>`,
-24 h) does not chain and has no `CAMPAIGN_CONFIG` or `base_vmu`.
+A launcher's usual inputs are a cap on chunks, the round-end A/B hook (on or off, and its operating
+points), a calibration and profiles. The round-end A/B is a launcher's own script, set through
+`ARBOR_ROUND_AB` or the config's `round_ab.command`
+([how-it-works.md](how-it-works.md)); so is a rebase of the bar on a new node (dossier campaigns
+only). A document campaign runs on the host, with no GPU.
 
-## Rolling chunks (Cluster A)
+## Rolling chunks
 
-A campaign longer than one 4-hour job moves from node to node (`ARBOR_ROLL=1`, set by the
-launcher for the users in `CHUNK_ROLL_USERS`; `CHUNK_ROLL=1|0` forces it):
+On a cluster whose jobs have a short wall (the defaults assume four hours; `ARBOR_ROLL_WALL_MIN`
+and its siblings in `arbor/cluster/handoff.py` change them), a campaign longer than one job moves
+from node to node (`ARBOR_ROLL=1`, set by the launcher):
 
 - at 180 minutes the running chunk submits its successor (no dependency, excluding its node and
   `chain/bad_nodes`), which provisions and waits (`handoff wait`, up to 90 minutes);
@@ -55,8 +48,6 @@ PYTHONPATH=<arbor> python3 -m arbor.cluster.handoff status --session <session>
 touch <session>/chain/CHAIN_STOP   # this chunk finishes with no successor
 touch <session>/STOP               # stop after the iteration in flight
 ```
-
-`scripts/cluster/roll_smoke.sh` rolls four short jobs as a smoke test (set its repository and ref).
 
 ## Parallel mode
 
@@ -91,7 +82,7 @@ The dashboard binds 127.0.0.1 and reads a session over ssh through `arbor/collec
 
 ## Component mode's GPU test
 
-`scripts/component/` holds a one-job test of component mode on a Cluster A node, as Hyperloom runs
+`scripts/component/` holds a one-job test of component mode on one 8-GPU node, as Hyperloom runs
 Arbor: a lease of cards 4-7, a decoy server on 0-3, a docker shim, a deadline run and a SIGTERM
 run, and a PASS/FAIL summary ([scripts/component/README.md](../scripts/component/README.md)).
 
