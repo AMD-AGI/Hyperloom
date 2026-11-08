@@ -209,9 +209,14 @@ def _preference(launch: SourceLaunch) -> tuple[int, bool, bool]:
     return launch.topology.tp, launch.kv_offloading == _NO_KV_OFFLOADING, launch.exact
 
 
+def _fits(launch: SourceLaunch | BaseLaunch, gpus: int) -> bool:
+    """Whether ``launch`` can be the base of a session seeing ``gpus`` GPUs: it needs no more cards than that."""
+    return launch.cards <= gpus
+
+
 def _choose(launches: Sequence[SourceLaunch], gpus: int) -> _Choice | SourceMiss:
     """The launch to run of those one source holds, and the others that also fit ``gpus`` GPUs."""
-    fitting = [launch for launch in launches if launch.cards <= gpus]
+    fitting = [launch for launch in launches if _fits(launch, gpus)]
     if not fitting:
         sizes = sorted({launch.cards for launch in launches})
         return SourceMiss(launches[0].source.kind, f"its launches need {sizes} GPUs, more than the {gpus} here")
@@ -437,6 +442,23 @@ def _default_base(query: LaunchQuery, snapshot: SourceSnapshot, misses: tuple[So
     )
 
 
+def _fitted(
+    found: BaseLaunch | Miss,
+    kind: SourceKind,
+    gpus: int,
+    misses: tuple[SourceMiss, ...] = (),
+    unread: UnreadSource | None = None,
+) -> BaseLaunch | Miss:
+    """``found``, or a :class:`Miss` after ``misses`` when the launch ``kind`` gave needs more than ``gpus`` GPUs.
+
+    ``kind`` is passed rather than read from ``found`` because a frozen base keeps the source it was resolved from.
+    """
+    if isinstance(found, Miss) or _fits(found, gpus):
+        return found
+    oversized = SourceMiss(kind, f"its launch needs {found.cards} GPUs, more than the {gpus} here")
+    return Miss((*misses, oversized), unread)
+
+
 def _why_default(query: LaunchQuery, snapshot: SourceSnapshot) -> str:
     if snapshot.unread is None:
         return f"no recipe serves {query.model_id}"
@@ -451,15 +473,16 @@ def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> 
     """The base launch of a session asking ``query`` on ``gpus`` visible GPUs, read from ``snapshot`` alone.
 
     A :class:`Miss` names why each source holds no launch: always for an AgentX query no recipe serves or whose
-    snapshot could not read a source, and for a fixed one the default table has no row for either.
+    snapshot could not read a source, for a fixed one the default table has no row for either, and for a user file
+    or default row that needs more than ``gpus`` GPUs.
     """
     _FIELDS.integer(gpus, "the visible GPU count", minimum=1)
     if snapshot.unread is not None and query.workload is Workload.AGENTX:
         return Miss((), snapshot.unread)
     if snapshot.user_file is not None:
-        return _user_file_base(query, snapshot, snapshot.user_file)
+        return _fitted(_user_file_base(query, snapshot, snapshot.user_file), SourceKind.USER_FILE, gpus)
     if snapshot.unread is not None:
-        return _default_base(query, snapshot, ())
+        return _fitted(_default_base(query, snapshot, ()), SourceKind.DEFAULT_TABLE, gpus, (), snapshot.unread)
     misses: list[SourceMiss] = []
     for read in _readers(query.framework):
         found = read(query, snapshot)
@@ -473,7 +496,7 @@ def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> 
         return _recipe_base(query, snapshot, choice, misses)
     if query.workload is Workload.AGENTX:
         return Miss(tuple(misses))
-    return _default_base(query, snapshot, tuple(misses))
+    return _fitted(_default_base(query, snapshot, tuple(misses)), SourceKind.DEFAULT_TABLE, gpus, tuple(misses))
 
 
 __all__ = ["Miss", "SourceSnapshot", "UnreadSource", "resolve_base"]

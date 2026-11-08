@@ -192,6 +192,25 @@ def test_a_frozen_base_as_user_file_keeps_its_digest_under_the_new_query():
     assert base.source == frozen.source
 
 
+def test_a_shell_user_file_needing_more_gpus_than_the_session_sees_is_a_miss_naming_both():
+    user_file = parse_user_file("launch.sh", b"python3 -m sglang.launch_server --tp 4\n", framework="sglang")
+
+    miss = _miss(_fixed(), dataclasses.replace(_snapshot(), user_file=user_file), gpus=2)
+
+    assert miss.reasons() == ("user_file: its launch needs 4 GPUs, more than the 2 here",)
+
+
+def test_a_frozen_base_as_user_file_needing_more_gpus_than_the_session_sees_is_a_miss():
+    frozen = _base(_fixed(), gpus=8)
+    user_file = parse_user_file("base_launch.json", json.dumps(frozen.to_document()).encode(), framework="sglang")
+
+    miss = _miss(_fixed(), dataclasses.replace(_snapshot(), user_file=user_file), gpus=frozen.cards - 1)
+
+    assert miss.reasons() == (
+        f"user_file: its launch needs {frozen.cards} GPUs, more than the {frozen.cards - 1} here",
+    )
+
+
 def test_fixed_never_runs_speculative_decoding():
     mtp_only = _base(_fixed("amd/DeepSeek-R1-0528-MXFP4", concurrencies=(4,)))
     assert mtp_only.source.kind is SourceKind.DEFAULT_TABLE
@@ -483,6 +502,13 @@ def test_no_default_row_or_no_topology_is_a_miss():
 
     split_experts = _miss(_fixed("Qwen/Qwen3-8B", framework="vllm", isl=1024, osl=1024, tp=4, ep=2))
     assert "its experts span all 4 TP ranks, so it runs no ep 2" in split_experts.reasons()[-1]
+
+
+def test_a_default_row_needing_more_gpus_than_the_session_sees_is_a_miss_after_the_recipe_misses():
+    miss = _miss(_fixed("Qwen/Qwen3-8B", framework="vllm", isl=1024, osl=1024, tp=4), gpus=2)
+
+    assert len(miss.reasons()) > 1
+    assert miss.reasons()[-1] == "default_table: its launch needs 4 GPUs, more than the 2 here"
 
 
 def _unread_snapshot() -> SourceSnapshot:
