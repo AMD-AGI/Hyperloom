@@ -160,7 +160,7 @@ def _raised_line(line: str, seconds: int) -> str | None:
     if not found:
         return f"{line} {_FLAG} {seconds}".strip()
     last = found[-1]
-    value = _raised(last.group("value"), seconds)
+    value = _raised(last.group("value") or "", seconds)
     if value is None:
         return None
     return f"{line[: last.start('value')]}{value}{line[last.end('value') :]}"
