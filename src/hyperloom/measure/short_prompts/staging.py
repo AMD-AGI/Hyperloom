@@ -146,7 +146,9 @@ def stage_file(root: Path, raw: bytes, inputs: Mapping[str, Any], *, generator: 
         incoming = f".incoming-{uuid.uuid4().hex}"
         os.mkdir(incoming, _BUILDING, dir_fd=evalsets)
         try:
-            _build_entry(evalsets, incoming, {DATA_DIR: {PROMPTS_FILE: raw}, MANIFEST_NAME: manifest}, dir_mode, file_mode)
+            _build_entry(
+                evalsets, incoming, {DATA_DIR: {PROMPTS_FILE: raw}, MANIFEST_NAME: manifest}, dir_mode, file_mode
+            )
             try:
                 os.rename(incoming, name, src_dir_fd=evalsets, dst_dir_fd=evalsets)
             except OSError:
