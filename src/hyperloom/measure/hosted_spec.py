@@ -155,7 +155,9 @@ def _unset_envs(call: TestCall) -> tuple[str, ...]:
     return tuple(dict.fromkeys([*(facts.reference_unset_envs if facts else ()), *call.unset_envs]))
 
 
-def _warmup_rounds(call: TestCall) -> int:
+def _warmup_rounds(call: TestCall, first: BenchmarkPoint) -> int:
+    if first.measured_once:
+        return 0
     configured = call.rounds.warmup_rounds
     if configured is not None:
         return int(configured)
@@ -382,11 +384,11 @@ def _frozen_base(call: TestCall) -> BaseLaunch:
     return base
 
 
-def _procedure_section(call: TestCall, deadline_unix: float) -> dict[str, Any]:
+def _procedure_section(call: TestCall, first: BenchmarkPoint, deadline_unix: float) -> dict[str, Any]:
     section: dict[str, Any] = {
         "prep": call.prep,
         "base_launch": _frozen_base(call).to_document(),
-        "rounds": {"warmup": _warmup_rounds(call), "measure": int(call.rounds.measure_rounds)},
+        "rounds": {"warmup": _warmup_rounds(call, first), "measure": int(call.rounds.measure_rounds)},
         "accuracy": bool(call.accuracy),
         "timeout_sec": float(call.timeout_sec),
         "silence_timeout_sec": float(call.silence_timeout_sec or call.timeout_sec),
@@ -429,7 +431,7 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
         "tools": _tools_section(call),
         "environment": _environment_document(call.environment, ctx),
         "model_hashes": dict(ctx.model_hashes),
-        "procedure": _procedure_section(call, deadline_unix),
+        "procedure": _procedure_section(call, first, deadline_unix),
         "outputs": {"result_dir": split_result_dir(call)[0], **_max_bytes(ctx)},
     }
     try:

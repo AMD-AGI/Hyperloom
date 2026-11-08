@@ -4,8 +4,9 @@
 """The local measurement backend: one complete test on this machine, through the existing ``run_grid``.
 
 * a single-point test runs on one server the lifecycle holds up, one ``run_grid`` call per round, in one order whatever
-  the test: the warmup bench, the measured bench, then, for a graded test (accuracy asked for), the evaluation in a
-  round of its own that runs no bench, which the accuracy is read from. No bench evaluates, in a sweep arm either;
+  the test: the warmup bench (none for a point measured once, an AgentX replay), the measured bench, then, for a graded
+  test (accuracy asked for), the evaluation in a round of its own that runs no bench, which the accuracy is read from.
+  No bench evaluates, in a sweep arm either;
 * a single-point test whose server the lifecycle cannot hold (a profile, a framework it cannot hold) is ``run_grid``
   with one variant: measured round, the evaluation after its bench when the point asks for one, teardown;
 * one arm of a concurrency sweep boots the inference server once and benches the levels from high to low on it, the
@@ -658,7 +659,8 @@ def _stamp_round(run: _Run, point: int, shape: RoundShape, window: tuple[float, 
 
 async def _single(run: _Run) -> None:
     # A profiled round is not a statistic: it runs once, with no warmup before it.
-    warmup = 0 if run.call.kind == _PROFILE else run.call.rounds.warmup_rounds
+    once = run.call.kind == _PROFILE or _point(run.call.points[0]).measured_once
+    warmup = 0 if once else run.call.rounds.warmup_rounds
     lifecycle = _Lifecycle(run)
     if lifecycle.eligible:
         await _held_rounds(run, lifecycle, _warms(warmup))
@@ -676,10 +678,10 @@ def _checks_held(call: TestCall) -> bool:
 
 
 async def _held_rounds(run: _Run, lifecycle: _Lifecycle, warm: bool) -> None:
-    """The warmup bench, the measured bench and, for a graded test, the evaluation (``_evaluate``), on one server; then
-    the accuracy checks on it. A bench that followed the evaluation started on the KV pool it left full, and read lower.
-    The warmup draws prompts of its own (``_grid``); when it failed, was stopped or its logs name a cause that settles
-    the test (a crashed server, a refused request), nothing is measured."""
+    """The warmup bench when ``warm``, the measured bench and, for a graded test, the evaluation (``_evaluate``), on one
+    server; then the accuracy checks on it. A bench that followed the evaluation started on the KV pool it left full, and
+    read lower. The warmup draws prompts of its own (``_grid``); when it failed, was stopped or its logs name a cause
+    that settles the test (a crashed server, a refused request), nothing is measured."""
     run.evaluates_apart = True
     bench_envs = _BENCH_ENVS if run.call.accuracy else None  # an explore's point does not evaluate
     try:

@@ -275,7 +275,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         # Cold-start "warmup artifact" guard: the freshly-booted server's first benchmark window pays one-time cold
         # costs that inflate later gains into fictitious "improvements".
         lifecycle = _lifecycle.resolve_lifecycle_params(config_path)
-        double_run_wanted = double_run_requested(params)
+        double_run_wanted = double_run_requested(params, config_path)
         double_run = double_run_wanted and lifecycle["eligible"]
         defer_accuracy = is_truthy(params.get("defer_accuracy_until_after_measure"))
         if defer_accuracy and double_run:

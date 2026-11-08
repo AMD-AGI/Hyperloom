@@ -11,6 +11,7 @@ to its error class.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,9 +27,10 @@ from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _MODEL, _base
 from hyperloom.orchestrator.rehearsal import READY, STAGE_FAILED, LaunchAttempt, LaunchScenario, ScriptedRounds
 from hyperloom.orchestrator.rehearsal import VirtualClock
+from hyperloom.orchestrator.rehearsal.scenario import ScenarioError
 from hyperloom.orchestrator.state.failure_evidence import ARGV_INVALID, SERVER_INIT_DEAD
 from inference_suite.runtime.process import Reaped
-from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout
+from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout, WorkloadKind
 from inference_suite.tests.test_compose import _launch
 
 _COLD = {"output_throughput": 270.9, "completed_requests": 64}
@@ -201,3 +203,32 @@ def test_a_multi_node_round_restarts_the_cluster_and_measures_it_externally_afte
     assert (warm.fixed.seed, measured.fixed.seed) == (WARMUP_SEED, MEASURED_SEED)
     assert Path(warm.paths.run_dir).parent == suite.ws / "mn_warmup"
     assert not measured.telemetry.gpu.enabled
+
+
+def test_an_agentx_baseline_is_measured_once_on_a_server_it_owns(monkeypatch, suite):
+    """An AgentX replay is long and stable and warms its own client inside the round: no discarded round before it."""
+    document = yaml.safe_load(suite.point.read_text())
+    launch = {"replace_args": True, "append_args": list(_base("sglang").args)}
+    document["benchmark"]["agentx"] = {"enabled": True, "launch_overrides": launch}
+    document["benchmark"]["envs"]["WEKA_LOADER_OVERRIDE"] = "/traces"
+    suite.point.write_text(yaml.safe_dump(document), encoding="utf-8")
+    played = []
+
+    def run_round(config, *, cancel=None):  # ScriptedRounds plays no AgentX load: the round's shape is the contract
+        played.append(config)
+        raise ScenarioError("the round is not played")
+
+    monkeypatch.setattr(_suite_config, "run_round", run_round)
+    executor = _ThroughputOnly(
+        default_config_path=suite.point,
+        session_dir=suite.session,
+        shared_state=SimpleNamespace(session_budget_usable_sec=lambda: None),
+    )
+    params = {"output_dir": str(suite.ws), "timeout_sec": 10, "gpu_type": "mi300x", "baseline_double_run": True}
+    task = SimpleNamespace(task_id="t-baseline", params=params)
+
+    with contextlib.suppress(ScenarioError):
+        asyncio.run(executor(SimpleNamespace(task=task, extra={})))
+
+    assert [(config.workload, config.lifecycle.mode) for config in played] == [(WorkloadKind.AGENTX, LifecycleMode.OWN)]
+    assert not (suite.ws / "warmup_round").exists()

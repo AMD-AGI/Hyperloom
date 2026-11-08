@@ -955,7 +955,7 @@ class _ExploreRound:
         lifecycle = resolve_lifecycle_params(self.config_path)
         self.lifecycle_eligible = bool(lifecycle.get("eligible"))
         self.lifecycle_port = to_int(lifecycle.get("port"), 0) or 0
-        self.use_warm_decision = self.lifecycle_eligible and double_run_requested(self.params)
+        self.use_warm_decision = self.lifecycle_eligible and double_run_requested(self.params, self.config_path)
         # Stop testing further variants once the session wall-clock budget runs out; untested variants stay out of
         # the ledger so a resume can retry them.
         self.session_deadline_sec, session_expected_sec = session_grid_bounds(self.ss)
