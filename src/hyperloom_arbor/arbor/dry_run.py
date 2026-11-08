@@ -3,7 +3,7 @@
 Uses a local temp git repo as workspace, synthetic bench results, and real
 state management / escalation / gate logic. Completes in ~20 seconds.
 
-    python3 -m arbor run --config configs/agentx-glm52-mi355x.json --dry-run
+    python3 -m arbor run --config configs/<config>.json --dry-run
 
 The temp repo is local, so its commits run here (``@host``): no docker needed.
 """

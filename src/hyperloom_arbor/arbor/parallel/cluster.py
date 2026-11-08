@@ -1,8 +1,8 @@
 """The cluster as the controller sees it: Known, Unknown or Failed.
 
 `Unknown` is what a timed-out or unreadable `squeue`/`sacct` gives, and it
-never triggers an action. A restart guard that read "could not check" as
-"nothing running" once relaunched a driver into a point that was mid-
+never triggers an action. A restart guard that reads "could not check" as
+"nothing running" can relaunch a driver into a point that is mid-
 measurement; here the controller simply waits for the
 next tick.
 
@@ -12,10 +12,10 @@ before it submits again (`find_by_name`). Every job name a run submits is
 unique to its lane and chain (or map step, or A/B, and attempt), so a
 duplicate is visible.
 
-`SlurmCluster` runs the commands (Cluster A: sbatch only, nothing held). The
+`SlurmCluster` runs the commands (sbatch only, nothing held). The
 `FakeCluster` runs jobs in-process for the end-to-end tests.
 
-Ported from arbor/mesh3/cluster.py (<fork>/mesh3-confirm a691edc). Added:
+Ported from an earlier executor's cluster module. Added:
 `intervals` (sacct's start and end of finished jobs, for a lane's clocks),
 and a fake job may keep running across advances or be requeued. Not ported:
 the multi-site router.
@@ -114,7 +114,7 @@ def parse_sacct(out: str) -> dict[str, Status]:
 
 class SlurmCluster:
     """Slurm by its commands: here, on the login node (host None), or over ssh to `host` (a
-    controller on a workstation; plan B2). Over ssh only the job's own variables travel, set by
+    controller on a workstation). Over ssh only the job's own variables travel, set by
     `env` on the remote side: this machine's environment is never a job's."""
 
     def __init__(self, run: Callable = subprocess.run, *, timeout_s: float = 30.0,

@@ -26,19 +26,17 @@ knobs; select with a heuristic, never a brute-force sweep.
 > each behind `if envs.KNOB:` / `else:`, with the old path still live. There is
 > one git branch at the end, carrying every knob.
 >
-> This is worth stating because the other reading is natural and expensive. A
-> run of this skill produced one sibling git branch per contended candidate,
-> and had to fold them back together afterwards — during which knob
-> declarations were silently lost and the merged branch could not start a
-> server.
+> This is worth stating because the other reading is natural and expensive.
+> One git branch per contended candidate has to be folded back together
+> afterwards, and knob declarations are easily lost on the way, leaving a
+> merged branch that cannot start a server.
 
 ## Why this process exists
 
-The naive alternative has been tried and its output is unusable. A prior
-merge of two campaign trees skipped every contended file because "resolving them by hand
-would produce code neither campaign ever measured" — and shipped a tree whose
-own README begins **"NEVER BENCHMARKED"**. Skipping contention does not avoid
-risk; it converts a measurable result into a hypothesis.
+The naive alternative is unusable. A merge that skips every contended file,
+because resolving them by hand would produce code neither source ever
+measured, ships a tree nobody has benchmarked. Skipping contention does not
+avoid risk; it converts a measurable result into a hypothesis.
 
 Knobs are what make contention measurable instead of unresolvable.
 
@@ -83,15 +81,14 @@ Declare in `vllm/envs.py`, in **both** the annotation block and the lambda
 dict:
 
 ```python
-    VLLM_ROCM_FUSED_SWIGLU_CLAMP: bool = False
+    VLLM_ROCM_MY_FEATURE: bool = False
 ```
 
 ```python
-    # Runs SiluAndMulWithClamp through the fused Triton kernel on ROCm rather
-    # than the seven-launch forward_native chain. Off restores the previous
-    # behaviour without a rebuild.
-    "VLLM_ROCM_FUSED_SWIGLU_CLAMP": lambda: bool(
-        int(os.getenv("VLLM_ROCM_FUSED_SWIGLU_CLAMP", "0"))
+    # Runs <op> through the fused kernel on ROCm rather than its multi-launch
+    # native chain. Off restores the previous behaviour without a rebuild.
+    "VLLM_ROCM_MY_FEATURE": lambda: bool(
+        int(os.getenv("VLLM_ROCM_MY_FEATURE", "0"))
     ),
 ```
 
@@ -109,10 +106,10 @@ dict:
 after the same sentinel, so it conflicts every time, and keeping both sides
 produces malformed Python. Reset it to the integration branch's version and
 re-insert each knob deterministically — then **assert** that the resolver, the
-annotation, and the default are all present. A re-insert that silently did
-nothing left a branch whose code read `envs.<KNOB>` while `envs.py` no longer
-declared it: an `AttributeError` at first access, i.e. a server that cannot
-start, pushed in that state.
+annotation, and the default are all present. A re-insert that silently does
+nothing leaves a branch whose code reads `envs.<KNOB>` while `envs.py` no
+longer declares it: an `AttributeError` at first access, i.e. a server that
+cannot start.
 
 ---
 
@@ -133,24 +130,24 @@ Then **test the lean set as a whole, at every operating point, before treating
 it as a baseline.** This step is the one that gets skipped, and it is the one
 that pays.
 
-Measured here: a lean set of several knobs was published as "ready to run,
-nothing needs to be set". It ran at C8 and **killed the server at C32 on every
-attempt** — engine core dead, worker killed by a signal with no Python
-traceback, error text pointing nowhere near the cause.
+A lean set published as "ready to run, nothing needs to be set" can run at one
+operating point and **kill the server at another, every time** — engine core
+dead, worker killed by a signal with no Python traceback, error text pointing
+nowhere near the cause.
 
 ### A default-ON knob is a promise that the configuration works
 
 When a default turns out to crash, **move the default**. Documenting it is not
-enough. The crash signature was `Worker proc VllmWorker-N died unexpectedly
-(exit code: None)` — anyone hitting it would have spent hours before suspecting
-a knob they never set. The fix was one line in `envs.py`; leaving it ON with a
-warning in a README was not a fix.
+enough. A crash such as `Worker proc VllmWorker-N died unexpectedly (exit
+code: None)` does not point at a knob, and anyone hitting it spends hours
+before suspecting one they never set. The fix is one line in `envs.py`;
+leaving it ON with a warning in a README is not a fix.
 
 Verify a default change by **importing in the target environment**, not by
 reading the diff:
 
 ```bash
-docker exec $C python3 -c "import vllm.envs as e; print(e.VLLM_ROCM_USE_HIP_SPARSE_MLA)"
+docker exec $C python3 -c "import vllm.envs as e; print(e.VLLM_ROCM_MY_FEATURE)"
 ```
 
 ---
@@ -169,7 +166,7 @@ An illustrative sequence, several knobs, a few runs:
 | the known-active ones only | clean |
 | those + one more | died → **culprit found** |
 
-Note the second row. The first hypothesis was wrong and the bisect said so
+Note the second row. A first hypothesis can be wrong, and the bisect says so
 immediately — which is the point of bisecting rather than reasoning.
 
 ### Before blaming the code, rule out the environment
@@ -178,10 +175,10 @@ A bisect is only valid if the environment is constant. Two confounds to kill
 explicitly:
 
 1. **Re-run the CONTROL in the environment's current state**, not the state it
-   had before the failures. A container here degraded over a session from
-   passing every control run to failing most of them, and recreating it fixed
-   it. The control re-check passed at the current state, which is what
-   licensed blaming the knobs.
+   had before the failures. A container can degrade over a session from
+   passing every check to failing most of them, and recreating it fixes it.
+   Only a control re-check that passes at the current state licenses blaming
+   the knobs.
 2. **Confirm the knob you turned off is actually off** — read its marker
    (`knob=0`, feature marker absent) before drawing a conclusion from the run.
 
@@ -203,8 +200,9 @@ handles those. The question at this step is only "which side of this one
 conflict is better", and answering it for N sites costs N runs rather than
 2^N.
 
-Measure at **both C8 and C32**, with a discarded warmup before each measured
-run, same seed for both sides, each replay in its own output directory.
+Measure at **every operating point the target names**, with a discarded
+warmup before each measured run, same seed for both sides, each replay in its
+own output directory.
 Classify each side per axis as win / null / loss against the measured noise
 floor, and record both coordinates.
 
@@ -213,17 +211,18 @@ See [reference.md](reference.md) for what makes two numbers comparable.
 > #### A short single replay can REJECT a side. It cannot accept one.
 >
 > Query-to-query variance on an agentic benchmark swamps the effects being
-> chased. On one node, control screens of an identical config agreed
-> tightly, but the same knob on the same tree, measured twice, spread almost as
-> wide as the effects being chased.
+> chased. Control screens of an identical config can agree tightly while the
+> same knob on the same tree, measured twice, spreads almost as wide as the
+> effects being chased.
 >
-> A candidate measured on a repeat of the identical configuration — the same
-> request count and prefix-cache hit rate, so the workload was the same and the
-> machine was not — read lower the second time. The apparent gain was noise.
+> A candidate measured twice on the identical configuration, with the same
+> request count and the same prefix-cache hit rate (so the workload is the
+> same and the machine is not), can move by as much as the gain it seemed to
+> show. Such a gain is noise.
 >
-> **Do not take a tight control spread as the noise floor.** Controls
-> agreeing tightly say nothing about the tail. The honest estimate is a
-> *direct replicate* — the same configuration twice — and that was much wider.
+> **Do not take a tight control spread as the noise floor.** Controls that
+> agree say nothing about the tail. The honest estimate is a *direct
+> replicate* — the same configuration twice — and it can be much wider.
 >
 > Keep the short screens: they legitimately reject the many candidates that do
 > nothing. Anything that survives goes to a full-duration paired A/B at the
@@ -231,11 +230,11 @@ See [reference.md](reference.md) for what makes two numbers comparable.
 
 ### Attribute the gain to the right thing
 
-A treatment arm beating an *old* baseline does not mean the knobs did it. Here
-the lean tree measured well above a stock baseline and it was tempting to
-credit the knobs. The paired control — same tree, knobs off — measured the
-same. **The gain belonged to the merged tree, and the
-knobs were flat.** Only the paired arm isolates the knob.
+A treatment arm beating an *old* baseline does not mean the knobs did it. A
+lean tree can beat a stock baseline by a wide margin while its paired control
+— same tree, knobs off — measures the same as the treatment: **then the gain
+belongs to the merged tree, and the knobs are flat.** Only the paired arm
+isolates the knob.
 
 ### Prove "one tree, environment only" instead of assuming it
 
@@ -313,26 +312,25 @@ expensive option: it destroys the comparison and nobody re-derives it.
 
 ---
 
-## Traps that have cost real time
+## Traps
 
 - **`logger.info_once` hides everything after the first call.** A marker
-  reading `knob=1 batch=<large> -> base path` was read as "this feature never
-  runs at C32". It ran — on later, smaller batches — and crashed the server.
+  reading `knob=1 batch=<large> -> base path` does not mean "this feature never
+  runs here": it can run on later, smaller batches, and crash the server.
   For any knob whose behaviour depends on batch or shape, the first log line
   is the *least* informative one. Count dispatches, or log per distinct shape.
 - **Assert marker anchors against source before the campaign starts.** It is a
-  two-line test. A harness grepping for `SwiGLU` collected nothing for a knob
-  whose marker says `SiluAndMulWithClamp`; checking every anchor found several
-  that would never match, which would have discarded a large share of the
-  knobs while every run still reported success.
-- **A marker that fires either way proves nothing.** `SiluAndMulWithClamp
-  dispatch:` logs the bound method of an unrelated op and appears with the knob
-  on *or* off. The knob's own marker was a different string entirely.
+  two-line test. A harness grepping for `SwiGLU` collects nothing for a knob
+  whose marker says `SiluAndMulWithClamp`, and discards the knob while every
+  run still reports success.
+- **A marker that fires either way proves nothing.** A line such as
+  `SiluAndMulWithClamp dispatch:` that logs the bound method of an unrelated
+  op appears with the knob on *or* off. The knob needs a marker of its own.
 - **`.gitignore` can swallow the thing your build step builds.** A blanket
-  `*.hip` rule meant a hand-written kernel source was never committed, so the
-  documented init step failed for everyone who cloned — while working locally,
-  because the file was in the worktree. Check that new non-source-looking
-  artifacts are actually tracked.
+  `*.hip` rule can keep a hand-written kernel source out of every commit, so
+  the documented init step fails for everyone who clones — while working
+  locally, because the file is in the worktree. Check that new
+  non-source-looking artifacts are actually tracked.
 - **Editing a script while it runs** under `srun` from NFS corrupts it
   mid-execution; bash reads incrementally and the damage surfaces minutes
   later. Wait for the gap between runs.
@@ -347,14 +345,13 @@ expensive option: it destroys the comparison and nobody re-derives it.
 - **Deleting the losing side.** See step 6.
 - **Shipping a lean set you have not run at every operating point.**
 - **Merging instrumentation.** Timing hooks from a source tree are overhead,
-  not optimization. One campaign spent iterations removing exactly what
-  another had added.
+  not optimization, and a later campaign spends iterations removing them.
 - **Cross-axis credit.** A gain on tok/s/user at C4 is not evidence for
   tok/s/chip at C32.
-- **Comparing across nodes.** Internode differences as large as the effects
-  being chased have been measured on identical trees.
-- **Trusting a source's self-reported number.** One tree's published gain
-  was measured on a cross-contaminated checkout, per its own review.
+- **Comparing across nodes.** Internode differences on identical trees can be
+  larger than the effects being chased.
+- **Trusting a source's self-reported number.** A published gain may have been
+  measured on a cross-contaminated checkout; read the source's own review.
 
 ## Additional resources
 

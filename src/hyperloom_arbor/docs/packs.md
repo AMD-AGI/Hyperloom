@@ -91,14 +91,14 @@ agent only (not the server or bench agent); a skill named in a pack must exist.
 
 | Skill | What it is for | Enabled by |
 |---|---|---|
-| `dossier` | find or write the campaign's dossier and its map | serving, balanced, model-m-2, -2-mi355x, -c8, -c8-tp4, model-m-plan, parallel-dossier |
-| `profiler` | profile with TraceLens (the host's profile first), rocprofv3 | serving, balanced, model-m-2, -2-mi355x, -c8, -c8-tp4, parallel-dossier |
+| `dossier` | find or write the campaign's dossier and its map | serving, balanced, parallel-dossier |
+| `profiler` | profile with TraceLens (the host's profile first), rocprofv3 | serving, balanced, parallel-dossier |
 | `hardware` | MI350X, MI355X and MI300X facts and achieved limits | balanced |
 | `kernels` | whether to write a kernel, in which language, how to prove it (AITER first) | balanced |
 | `serving-playbook` | the rules for serving changes, and the knob catalog the harness reads | balanced |
-| `plan` | write a round plan | model-m-plan |
+| `plan` | write a round plan | a document campaign that writes one |
 | `knowledge-collector` | share and read campaign learnings | parallel-dossier |
-| `campaign-archive`, `dashboard`, `realtime-collector`, `merge-optimization-trees`, `geko-hipblaslt-tuning` | operator tools | none |
+| `dashboard`, `realtime-collector`, `merge-optimization-trees` | operator tools | none |
 
 Vendored: `kernels/reference` and `hardware/reference` from KernelForge (`src/kernelforge`) (MIT).
 
@@ -111,7 +111,7 @@ into the dossier rather than the pack: [dossier-and-profiler.md](dossier-and-pro
 |---|---|---|
 | `serving` | the serving template for any vLLM or SGLang model; `dossier` and `profiler` | `configs/serving-template.json` (example) |
 | `parallel-dossier` | parallel mode's map step | `configs/parallel/` (examples) |
-| `agentx` | GLM-5.2, InferenceX trace replay | `configs/agentx-glm52-mi355x.json` (the dry run's) |
+| `agentx` | GLM-5.2, InferenceX trace replay | its campaign's own |
 | `evolve-asm` | assembly kernel evolution (`kernel` workload), its own orchestrator | none |
 
 ## Writing a pack
@@ -135,7 +135,7 @@ workload: {kind: document}
 with `validator/bench.sh` writing `{"score": N}` to `$BENCH_OUTPUT`, `validator/correctness.sh`
 writing `{"passed": true, "score": 1.0}` to `$CORRECTNESS_OUTPUT`, and a `knowledge/` directory.
 Its config needs `pack`, `docker_container` (`"@host"`), `workspace_root`, `session_root`,
-`bench_script` and `correctness_script`. `model-m-plan` and `parallel-dossier` are small real ones.
+`bench_script` and `correctness_script`. `parallel-dossier` is a small real one.
 
 A serving pack starts from the serving template (below). Check a new pack with
 `python3 -m arbor run --config <cfg> --dry-run`.
