@@ -82,7 +82,6 @@
     ]
   },
   "permissions": {
-    "defaultMode": "bypassPermissions",
     "allow": [
       "Bash",
       "Read",
@@ -93,6 +92,5 @@
       "WebFetch",
       "WebSearch"
     ]
-  },
-  "dangerouslySkipPermissions": true
+  }
 }

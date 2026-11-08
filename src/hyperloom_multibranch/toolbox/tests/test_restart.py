@@ -163,6 +163,6 @@ async def test_nothing_is_dispatched_after_close(tmp_path: Path) -> None:
     await rig.toolbox.close()
     await settle()
     assert executor.started == [first], "closing cancelled the running test; its slot must not start the queued one"
-    await rig.toolbox.submit_test(req(server_args="--c"))
+    await rig.toolbox.submit_test(req(server_args="--f"))
     await settle()
     assert executor.started == [first], "a closed toolbox accepts into its log but dispatches nothing"

@@ -33,7 +33,7 @@ import sys
 BASE_PARTS = {
     "01": "model", "02": "system", "03": "code", "04": "target",
     "05": "workload", "06": "baseline", "07": "profile", "08": "kernels",
-    "09": "reference", "10": "history", "11": "directions",
+    "10": "history", "11": "directions",
 }
 OPTIONAL_PARTS = {"12": "fast bench"}  # the skill: may be in progress
 ROUND_PARTS = {"03": "code", "06": "baseline", "07": "profile",

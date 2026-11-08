@@ -107,6 +107,8 @@ jobs:
           --health-retries 12
     env:
       HYPERLOOM_KB_TEST_DATABASE_URL: ${{ matrix.python-version == '3.11' && 'postgresql://postgres@localhost:5432/postgres' || '' }}
+      # The agent isolation tests (real bubblewrap sandboxes) fail here instead of skipping when they cannot run.
+      HYPERLOOM_REQUIRE_ISOLATION_TESTS: "1"
     steps:
       - uses: actions/checkout@v7
 
@@ -168,6 +170,18 @@ jobs:
             exit 1
           fi
           printf 'Using test duration seed: %s\n' "$SEED_KEY"
+
+      # The agent isolation tests launch real bubblewrap sandboxes as the runner user: install bubblewrap (refreshing
+      # the apt index only when the cached one cannot), and let a user namespace an unprivileged process makes hold
+      # capabilities (kernel.apparmor_restrict_unprivileged_userns=1 on the image), or bubblewrap cannot write its id map.
+      - name: Bubblewrap and unprivileged user namespaces (agent isolation tests)
+        run: |
+          sudo apt-get install -y --no-install-recommends bubblewrap \
+            || { sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap; }
+          bwrap --version
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       - name: Run tests with coverage (shard ${{ matrix.shard }})
         id: pytest

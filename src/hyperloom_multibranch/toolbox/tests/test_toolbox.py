@@ -97,8 +97,8 @@ async def test_queued_tests_start_in_priority_order(tmp_path: Path) -> None:
     rig = build(tmp_path, executor=executor, policy=QueuePolicy(per_branch_k=9, global_concurrency=1))
     first = await rig.toolbox.submit_test(req("b1", server_args="--a"))
     explore = await rig.toolbox.submit_test(req("b2", server_args="--b"))
-    profile = await rig.toolbox.submit_test(req("b3", purpose=Purpose.PROFILE, server_args="--c"))
-    integ = await rig.toolbox.submit_test(req("b4", purpose=Purpose.INTEGRATION, server_args="--d"))
+    profile = await rig.toolbox.submit_test(req("b3", purpose=Purpose.PROFILE, server_args="--f"))
+    integ = await rig.toolbox.submit_test(req("b4", purpose=Purpose.INTEGRATION, server_args="--x"))
     confirm = await rig.toolbox.submit_test(req("b5", purpose=Purpose.CONFIRM, retest_of=first, server_args="--e"))
     for _ in range(5):
         executor.gate.set()  # type: ignore[union-attr]
@@ -118,7 +118,7 @@ async def test_a_branch_runs_at_most_k_and_a_confirm_retest_is_not_blocked_by_it
     assert executor.started == [first]
     state = await rig.toolbox.queue_state()
     assert (dict(state.running_by_branch), dict(state.queued_by_branch)) == ({"b1": 1}, {"b1": 1})
-    confirm = await rig.toolbox.submit_test(req(purpose=Purpose.CONFIRM, retest_of=first, server_args="--c"))
+    confirm = await rig.toolbox.submit_test(req(purpose=Purpose.CONFIRM, retest_of=first, server_args="--f"))
     await settle()
     assert executor.started == [first, confirm], "the confirm-retest must run although the branch is at K"
     assert second not in executor.started
@@ -135,10 +135,10 @@ async def test_backpressure_refuses_the_submit_and_writes_nothing(tmp_path: Path
     await rig.toolbox.submit_test(req(server_args="--a"))
     await settle()
     await rig.toolbox.submit_test(req(server_args="--b"))
-    await rig.toolbox.submit_test(req(server_args="--c"))
+    await rig.toolbox.submit_test(req(server_args="--f"))
     written = len(rig.blackboard._state().requests)
     with pytest.raises(Backpressure) as refused:
-        await rig.toolbox.submit_test(req(server_args="--d"))
+        await rig.toolbox.submit_test(req(server_args="--x"))
     assert (refused.value.queued, refused.value.limit) == (2, 2)
     assert len(rig.blackboard._state().requests) == written
     await rig.toolbox.submit_test(req("b2", server_args="--e"))  # another branch is unaffected
@@ -149,7 +149,7 @@ async def test_backpressure_refuses_the_submit_and_writes_nothing(tmp_path: Path
 async def test_a_new_policy_from_the_scheduler_takes_effect_on_the_queue(tmp_path: Path) -> None:
     executor = _gated()
     rig = build(tmp_path, executor=executor, policy=K1)
-    for name in ("--a", "--b", "--c"):
+    for name in ("--a", "--b", "--f"):
         await rig.toolbox.submit_test(req(server_args=name))
     await settle()
     assert len(executor.started) == 1

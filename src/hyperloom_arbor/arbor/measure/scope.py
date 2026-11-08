@@ -24,7 +24,7 @@ from typing import Callable
 
 KEYS = ("image", "concurrency", "isl", "osl", "tp")
 _TP_FLAGS = ("--tensor-parallel-size", "-tp", "--tp", "--tp-size")
-# bench_output.json spellings (the Model M packs write `conc`).
+# bench_output.json spellings (some packs write `conc`).
 _BENCH_KEYS = {"concurrency": ("concurrency", "conc"), "isl": ("isl",), "osl": ("osl",),
                "tp": ("tp", "tensor_parallel_size")}
 

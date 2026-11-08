@@ -69,16 +69,16 @@ node arbor/dashboard/server.mjs local --host <host with the session> \
 - `--host` is an ssh alias with key authentication. `--host local` runs the
   collector on this machine (it needs `python3` here: WSL, not Windows).
 - **Run it from WSL with a reused connection** when the host is slow to reach
-  (`<login node>`: seconds per ssh connection): `--ssh-opts "-o ControlMaster=auto
+  (several seconds per ssh connection): `--ssh-opts "-o ControlMaster=auto
   -o ControlPath=$HOME/.ssh/cm-%r@%h:%p -o ControlPersist=10m"`. Windows'
   OpenSSH cannot reuse connections. On Windows the server uses
   `C:\Windows\System32\OpenSSH\ssh.exe` when present, because Git for Windows'
-  ssh cuts a command at about 8 KB. The Model M campaigns' pair runs this way:
-  `scripts/model-m-campaign/dashboards.sh start|stop|status`.
-- On a Cluster B login node, use one that accepts remote commands (`<login node>`)
-  and keep the refresh at 15 s or more: every refresh is a
-  process on a host with a 4 GiB per-user cap, and when the host refuses a
-  session, the page keeps the last snapshot and says so.
+  ssh cuts a command at about 8 KB. A campaign launcher can keep its
+  dashboards up the same way, with a `start|stop|status` script.
+- On a shared login node, use one that accepts remote commands, and keep the
+  refresh at 15 s or more: every refresh is a process on a host that may cap
+  memory per user, and when the host refuses a session, the page keeps the
+  last snapshot and says so.
 - Several campaigns: one server each, with its own `--port` and `--label`.
 
 ## The campaign page
@@ -109,6 +109,5 @@ systemd-run --user --collect --unit=arbor-dash-global --setenv=PATH="$PATH" \
 ```
 
 WSL forwards `localhost`, so the Windows browser opens it. Where dashboards
-are collected in a hub, link it
-there instead of passing the port around:
-`hub-register --link <id> http://localhost:8767 "Arbor share"`.
+are collected in a hub, register `http://localhost:8767` there instead of
+passing the port around.
