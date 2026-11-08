@@ -15,8 +15,11 @@ build record, the lock and each installed distribution's ``RECORD``, which lists
 The file manifest names bytes, some of which hold the directory the staging was built in; what two hosts compare is
 :func:`normalised_manifest`, the staging's identity with every path left out, and the lm-eval this interpreter runs.
 
-``python -m inference_suite.staging stage --source <InferenceX checkout> --tool-cache <dir>`` stages, and ``check
---tool-cache <dir>`` reports whether the cache holds the current pins intact; Hyperloom's ``install.sh`` runs both.
+``python -m inference_suite.staging stage --source <InferenceX checkout> --tool-cache <dir>`` stages; without
+``--source`` it stages nothing and only completes a cache that already verifies. Either installs the pinned lm-eval
+into the interpreter running it. ``check --tool-cache <dir>`` reports whether a round could identify the staging: the
+cache holds the current pins intact and the interpreter running it has the pinned lm-eval. Hyperloom's ``install.sh``
+runs all three.
 :func:`ensure_staged`, behind ``python -m inference_suite stage`` and this package's ``install.sh``, stages only what
 a cache lacks.
 
@@ -363,9 +366,18 @@ def _distribution_version(name: str) -> str | None:
         return None
 
 
+def _lm_eval_off_pin() -> str | None:
+    """What this interpreter, the one a round runs its eval under, has instead of the pinned lm-eval; ``None`` when it
+    has the pinned release."""
+    installed = _distribution_version(LM_EVAL_DISTRIBUTION)
+    if installed == LM_EVAL_VERSION:
+        return None
+    return f"{sys.executable} has {LM_EVAL_DISTRIBUTION} {installed}, not {LM_EVAL_REQUIREMENT}"
+
+
 def _install_lm_eval() -> None:
-    """Install the pinned lm-eval into this interpreter, the one a round runs its eval under, unless it is there."""
-    if _distribution_version(LM_EVAL_DISTRIBUTION) == LM_EVAL_VERSION:
+    """Install the pinned lm-eval into this interpreter unless it is there."""
+    if _lm_eval_off_pin() is None:
         return
     install = [sys.executable, "-m", "pip", "install", "--no-input", "--disable-pip-version-check"]
     _run_staging_step([*install, LM_EVAL_REQUIREMENT], f"installing {LM_EVAL_REQUIREMENT}")
@@ -451,9 +463,9 @@ def normalised_manifest(tool_cache: Path) -> NormalisedManifest:
         StagingError: the staged client environment is not what its lock pins, or this interpreter's lm-eval is not
             the pinned release.
     """
-    installed = _distribution_version(LM_EVAL_DISTRIBUTION)
-    if installed != LM_EVAL_VERSION:
-        raise StagingError(f"{sys.executable} has {LM_EVAL_DISTRIBUTION} {installed}, not {LM_EVAL_REQUIREMENT}")
+    off_pin = _lm_eval_off_pin()
+    if off_pin is not None:
+        raise StagingError(off_pin)
     lm_eval = PackageIdentity(LM_EVAL_DISTRIBUTION, LM_EVAL_VERSION, LM_EVAL_WHEEL_SHA256)
     return _staged_identity(tool_cache).with_packages((lm_eval,))
 
@@ -545,29 +557,61 @@ def _publish(stagings: Path, source: Path | None) -> Path:
     return published
 
 
+def _cache_report(tool_cache: Path) -> StagingReport:
+    """:func:`verify` against whatever manifest ``tool_cache`` holds."""
+    digest = manifest_sha256(tool_cache)
+    if digest is None:
+        return StagingReport("", {}, (_absent_manifest(tool_cache / MANIFEST_FILE),))
+    return verify(tool_cache, digest)
+
+
+def _stage_command(tool_cache: Path, source: Path | None) -> str:
+    """:func:`stage` from ``source``, or with none, the digest of ``tool_cache`` as it verifies; either way with the
+    pinned lm-eval installed into this interpreter.
+
+    Raises:
+        StagingError: with no ``source``, the cache does not verify; or a tool cannot be staged or installed.
+    """
+    if source is None:
+        report = _cache_report(tool_cache)
+        if report.failed_step is not None:
+            raise StagingError(report.detail)
+        _install_lm_eval()
+        return report.manifest_sha256
+    _install_lm_eval()
+    tool_cache.mkdir(parents=True, exist_ok=True)
+    return stage(source, tool_cache)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """``stage`` prints the new manifest's sha256; ``check`` prints the cache's, or what is missing and exits 1."""
+    """``stage`` prints the manifest's sha256; ``check`` prints the cache's when a round could identify it. Either
+    prints what is missing as ``staging_missing`` and exits 1 otherwise."""
     parser = argparse.ArgumentParser(prog="python -m inference_suite.staging")
     commands = parser.add_subparsers(dest="command", required=True)
-    stage_parser = commands.add_parser("stage", help="stage the pinned tools from local checkouts")
-    stage_parser.add_argument("--source", type=Path, required=True, help="an InferenceX checkout at the pin")
+    stage_parser = commands.add_parser(
+        "stage", help="stage the pinned tools and install the pinned lm-eval into this interpreter"
+    )
+    stage_parser.add_argument(
+        "--source", type=Path, help="an InferenceX checkout at the pin; when omitted, the cache must already verify"
+    )
     stage_parser.add_argument("--tool-cache", type=Path, required=True)
-    check_parser = commands.add_parser("check", help="verify the tool cache against the pins in force")
+    check_parser = commands.add_parser(
+        "check", help="verify the tool cache against the pins in force and this interpreter's lm-eval against its pin"
+    )
     check_parser.add_argument("--tool-cache", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "stage":
-        args.tool_cache.mkdir(parents=True, exist_ok=True)
-        print(stage(args.source, args.tool_cache))
+        try:
+            print(_stage_command(args.tool_cache, args.source))
+        except StagingError as exc:
+            print(f"{FailedStep.STAGING_MISSING.value}: {exc}", file=sys.stderr)
+            return 1
         return 0
-    digest = manifest_sha256(args.tool_cache)
-    if digest is None:
-        print(
-            f"{FailedStep.STAGING_MISSING.value}: {_absent_manifest(args.tool_cache / MANIFEST_FILE)}", file=sys.stderr
-        )
-        return 1
-    report = verify(args.tool_cache, digest)
-    if report.failed_step is not None:
-        print(f"{report.failed_step.value}: {report.detail}", file=sys.stderr)
+    report = _cache_report(args.tool_cache)
+    off_pin = _lm_eval_off_pin()
+    missing = report.missing if off_pin is None else (*report.missing, off_pin)
+    if missing:
+        print(f"{FailedStep.STAGING_MISSING.value}: {'; '.join(missing)}", file=sys.stderr)
         return 1
     print(report.manifest_sha256)
     return 0

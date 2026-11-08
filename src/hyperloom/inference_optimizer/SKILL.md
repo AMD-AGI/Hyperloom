@@ -541,7 +541,7 @@ remember). Direct steps in `src/hyperloom/inference_optimizer/assets/install.sh`
 | Component | Provided by |
 |---|---|
 | `inference_optimizer` pkg + `claude_agent_sdk` extras (`pip install -e .[test]`) | `ensure_inference_optimizer` |
-| InferenceSuite tool cache: the InferenceX client at the commit `inference_suite.pins` pins, the GSM8K task and the AgentX harness, staged into `$INFERENCE_SUITE_TOOL_CACHE` (default `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/inference-suite-tools`). A round fetches nothing and refuses with `staging_missing` when the cache lacks a tool or holds one off its pin | `ensure_inference_suite_staging` |
+| InferenceSuite tool cache: the InferenceX client at the commit `inference_suite.pins` pins, the GSM8K task and the AgentX harness, staged into `$INFERENCE_SUITE_TOOL_CACHE` (default `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/inference-suite-tools`), and the pinned lm-eval installed into `$PYTHON`. A round fetches nothing and refuses with `staging_missing` when the cache lacks a tool or holds one off its pin, or `$PYTHON` lacks the pinned lm-eval | `ensure_inference_suite_staging` |
 | `INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` appended to `kernel-agent.env.sh` | `_probe_framework_source_roots` |
 
 Kernel-agent steps in `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` (run at the end
