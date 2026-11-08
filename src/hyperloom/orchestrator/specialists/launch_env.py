@@ -504,7 +504,8 @@ class PreparedLaunch:
             return self.local(cmd, env)
         policy = replace(self._policy(), die_with_parent=True)
         self.status = LaunchStatus.file()
-        argv, child_env = self._sandboxed(self.isolation, cmd, env, policy, _ACTOR_STATUS_FD, spawned_here=False)
+        isolation = replace(self.isolation, started_elsewhere=True)
+        argv, child_env = self._sandboxed(isolation, cmd, env, policy, _ACTOR_STATUS_FD)
         return Spawn(["/bin/sh", "-c", _OPEN_STATUS, str(self.status.path), *argv], child_env, {})
 
     def _policy(self) -> BwrapPolicy:
@@ -526,8 +527,6 @@ class PreparedLaunch:
         env: Mapping[str, str],
         policy: BwrapPolicy,
         status_fd: int,
-        *,
-        spawned_here: bool = True,
     ) -> tuple[list[str], dict[str, str]]:
         """bubblewrap's command line and environment for ``cmd``, started by the relay of the sandbox's network: the
         reap mark moves inside, and is kept for :meth:`started`."""
@@ -537,9 +536,7 @@ class PreparedLaunch:
             inside = self.network.relay(cmd)
             for name in SANDBOX_DROPPED:
                 env.pop(name, None)
-        return isolation.launch(
-            inside, policy, env, marks=(REAP_MARK_ENV,), status_fd=status_fd, spawned_here=spawned_here
-        )
+        return isolation.launch(inside, policy, env, marks=(REAP_MARK_ENV,), status_fd=status_fd)
 
     def started(self, process: Any) -> Any:
         """The process to supervise for ``process``, just started with :meth:`local` or :meth:`actor`."""

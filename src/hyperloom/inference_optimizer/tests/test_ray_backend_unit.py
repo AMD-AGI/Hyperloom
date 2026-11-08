@@ -1491,14 +1491,13 @@ def test_serving_actor_env_removes_secrets_and_preserves_ray_devices(
     captured: dict[str, Any] = {}
 
     class _CaptureProcess:
-        def start(self, cmd, *, env=None, cwd=None, log_path=None, stdin_path=None, log_identity=None):
+        def start(self, cmd, *, env=None, cwd=None, log_path=None, stdin_path=None):
             captured.update(
                 cmd=cmd,
                 env=dict(env or {}),
                 cwd=cwd,
                 log_path=log_path,
                 stdin_path=stdin_path,
-                log_identity=log_identity,
             )
             return 4321
 
@@ -1532,6 +1531,28 @@ def test_serving_actor_env_removes_secrets_and_preserves_ray_devices(
     assert "OPENAI_API_KEY" not in child_env
     assert "ACTOR_ONLY_SECRET" not in child_env
     assert captured["stdin_path"] == "/tmp/prompt.txt"
+
+
+def test_a_serving_actor_only_appends_to_a_log_its_launch_says_was_created_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A launch naming the log's identity hands the process manager that log to append to; one naming a path alone
+    keeps the path, which the manager creates."""
+    captured: list[Any] = []
+
+    class _CaptureProcess:
+        def start(self, cmd, *, env=None, cwd=None, log_path=None, stdin_path=None):
+            captured.append(log_path)
+            return 4321
+
+    monkeypatch.setitem(sys.modules, "ray", _PassthroughRay())
+    monkeypatch.setattr(rs, "ManagedServerProcess", _CaptureProcess)
+    actor = rs._serving_actor_body()()
+
+    actor.start(rs.ActorLaunch(["agent"], log_path="/w/process.log", log_identity=(7, 11)))
+    actor.start(rs.ActorLaunch(["server"], log_path="/w/server.log"))
+
+    assert captured == [rs.CreatedLog("/w/process.log", (7, 11)), "/w/server.log"]
 
 
 def test_serving_actor_run_blocking_timeout_sentinel(monkeypatch: pytest.MonkeyPatch):
