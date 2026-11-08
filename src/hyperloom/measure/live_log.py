@@ -29,7 +29,7 @@ LINE_CHARS = 300
 #: measured program swaps for a link, a pipe or a file after it was listed fails to open (a pipe opened to read would
 #: wait for a writer).
 _BELOW = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-#: How many levels below the top are walked: the logs lie a few down (Magpie's server in a directory of its own below
+#: How many levels below the top are walked: the logs lie a few down (a server's log in a directory of its own below
 #: the run's), and the walk holds a descriptor for each level of a tree the measured program may have made deep.
 _MAX_DEPTH = 16
 _ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
