@@ -30,9 +30,13 @@ def own_jit_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def measurable_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def measurable_session(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test call carries the session's frozen base and the application's staging, so ``<tmp>/session`` has a
-    frozen base and the tool cache holds a staging manifest, as after a fresh launch."""
+    frozen base and the tool cache holds a staging manifest, as after a fresh launch. A module that measures on real
+    cards keeps the host's staging and freezes its sessions' real base
+    (:func:`~hyperloom_multibranch.toolbox.tests.gpu_session.freeze_gpu_session_base`)."""
+    if getattr(request.module, USES_REAL_GPUS_FLAG, False):
+        return
     freeze_session_base(tmp_path / "session")
     staged_tool_cache(tmp_path, monkeypatch)
 
