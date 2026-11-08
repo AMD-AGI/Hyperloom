@@ -502,6 +502,7 @@ def _remove_each(out_fd: int, rels: Iterable[str], remove: Callable[..., None]) 
         try:
             remove(name, dir_fd=parent)
         except OSError:
+            # Best effort: a rollback step that fails must not mask the error that triggered the rollback.
             pass
         finally:
             os.close(parent)
