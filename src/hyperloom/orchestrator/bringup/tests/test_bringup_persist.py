@@ -63,6 +63,7 @@ def test_absent_path_and_missing_file_degrade_by_name(tmp_path) -> None:
     assert gone.path == str(tmp_path / "nothing.json")
 
 
-def test_the_artifact_is_664_for_the_next_account_of_the_group(tmp_path) -> None:
+def test_the_artifact_is_664_for_the_next_account_of_the_group_below_shared_storage(tmp_path) -> None:
+    tmp_path.chmod(0o2775)
     _, path = _persist(tmp_path)
     assert stat.S_IMODE(Path(path).stat().st_mode) == 0o664

@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs, open_shared
+from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs, open_shared, ownership
 
 from .schema import ensure_schema
 
@@ -92,22 +92,63 @@ def _apply_pragmas(conn: sqlite3.Connection, journal_mode: str) -> None:
 #: What SQLite keeps beside the database. It gives the ones it creates the database's mode, but it reuses ones a killed
 #: process left as they are, so they are narrowed with the database.
 _SIDE_FILES = ("-wal", "-shm", "-journal")
+#: The permission bits of the group and of others.
+_OTHERS = 0o077
+
+
+class DatabaseNotPrivate(PermissionError):
+    """The session holds a credential, so its database and the files beside it must be owner-only, and one of them cannot
+    be made so: the credential would be written to a file the group can read."""
+
+
+def _refusal(path: Path, file_mode: int, why: str) -> str:
+    message = f"{path}{ownership(path)} {why}"
+    if file_mode & _OTHERS:
+        return message
+    return (
+        f"{message}; the session holds a credential and its database must be {file_mode:04o}, or the credential would be "
+        "written to a file the group can read. Resume it as the account that owns the file, or start a new session"
+    )
+
+
+def _cannot_narrow(path: Path, file_mode: int, why: str) -> None:
+    """Say that ``path`` cannot be narrowed to ``file_mode``: an error when that mode is owner-only (nothing may be
+    written to a wider file), else a warning, as a session without a credential still resumes."""
+    if file_mode & _OTHERS:
+        log.warning("%s", _refusal(path, file_mode, why))
+    else:
+        raise DatabaseNotPrivate(_refusal(path, file_mode, why))
 
 
 def _narrow(descriptor: int, path: Path, file_mode: int) -> None:
-    """Narrow the open file to what it has in common with ``file_mode``, or say that it is not this account's."""
+    """Narrow the open file to what it has in common with ``file_mode``, or say that it cannot be."""
     current = stat.S_IMODE(os.fstat(descriptor).st_mode)
     if current & ~file_mode:
         try:
             os.fchmod(descriptor, current & file_mode)
-        except PermissionError:
-            log.warning("%s is %04o, wider than %04o, and not this account's: narrow it", path, current, file_mode)
+        except OSError as exc:
+            _cannot_narrow(
+                path, file_mode, f"is {current:04o}, wider than {file_mode:04o}, and not narrowed ({exc.strerror})"
+            )
+
+
+def _open_database_file(db_path: Path, file_mode: int) -> int:
+    """The database file, created ``file_mode`` when it is not there; a refusal to open it (another account's, a link)
+    is a :class:`DatabaseNotPrivate` when the mode is owner-only, else it is raised as it is."""
+    try:
+        return open_shared(db_path, os.O_RDWR, file_mode)
+    except OSError as exc:
+        if file_mode & _OTHERS:
+            raise
+        raise DatabaseNotPrivate(_refusal(db_path, file_mode, f"cannot be opened ({exc.strerror})")) from exc
 
 
 def _make_database_file(db_path: Path, file_mode: int) -> None:
     """Create the database ``file_mode`` before SQLite does, and narrow it and the side files a killed process left when
-    they are wider (a credential has come into the session since). Each is opened without following a link."""
-    descriptor = open_shared(db_path, os.O_RDWR, file_mode)
+    they are wider (a credential has come into the session since). Each is opened without following a link. When
+    ``file_mode`` is owner-only, a file that cannot be opened or narrowed (another account's, a link, a failed
+    ``fchmod``) is a :class:`DatabaseNotPrivate`, raised before SQLite opens anything: otherwise a warning."""
+    descriptor = _open_database_file(db_path, file_mode)
     try:
         _narrow(descriptor, db_path, file_mode)
     finally:
@@ -119,7 +160,7 @@ def _make_database_file(db_path: Path, file_mode: int) -> None:
         except FileNotFoundError:
             continue
         except OSError as exc:
-            log.warning("%s cannot be opened to narrow it to %04o (%s): narrow it", side, file_mode, exc.strerror)
+            _cannot_narrow(side, file_mode, f"cannot be opened to narrow it ({exc.strerror})")
             continue
         try:
             _narrow(descriptor, side, file_mode)
@@ -150,6 +191,8 @@ def open_connection(
     Raises:
         JournalModeError: When the mode is unknown, or the database did not
             enter it.
+        DatabaseNotPrivate: When ``file_mode`` is owner-only and the database
+            or a file beside it cannot be made so; nothing has been written.
     """
     mode = resolve_journal_mode(journal_mode)
     db_path = Path(db_path)

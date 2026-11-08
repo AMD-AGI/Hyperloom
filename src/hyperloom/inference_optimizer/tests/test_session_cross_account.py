@@ -8,6 +8,7 @@ one exception and stays owner-only."""
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -112,14 +113,15 @@ def test_a_first_leg_makes_every_directory_2775_and_every_file_664_whatever_the_
     }
     assert {name: _mode(workspace / name) for name in ("runtime", "runtime/recipe_kb", "logs")} == {
         "runtime": 0o2755,  # the installer's: the group enters it, only its owner changes what is in it
-        "runtime/recipe_kb": 0o2775,
+        # below ``runtime/``, which the group cannot write, nothing is shared: the umask decides (ops makes it 2775)
+        "runtime/recipe_kb": 0o2000 | (0o775 & ~umask),
         "logs": 0o2775,
     }
 
 
 def test_the_database_files_sqlite_makes_beside_a_664_database_are_664_too(tmp_path):
     workspace = _setgid_workspace(tmp_path / "claw")
-    storage = tmp_path / "storage"
+    storage = workspace / "storage"
     code = textwrap.dedent(
         f"""
         import json, os, stat
@@ -249,10 +251,10 @@ def test_a_session_made_below_a_parent_with_group_write_is_2775_all_the_way_up(t
     assert _mode(workspace / "runtime") == 0o2755
 
 
-def test_the_install_owned_runtime_and_the_workspace_root_are_not_group_writable_but_the_session_subtree_is(tmp_path):
-    """Two ``runtime/`` directories: the workspace's (the installer writes the env files a run sources there) and the
+def test_the_install_owned_runtime_is_not_group_writable_but_the_session_subtree_is(tmp_path):
+    """Two ``runtime/`` directories: the workspace's (the installer writes what a run sources and runs there) and the
     session's (the lock, the ledger and the breakdown spool): only the second one is shared for writing."""
-    workspace = tmp_path / "claw"
+    workspace = _setgid_workspace(tmp_path / "claw")  # as ops sets it up
     code = textwrap.dedent(
         """
         from hyperloom.inference_optimizer.session import paths
@@ -267,23 +269,32 @@ def test_the_install_owned_runtime_and_the_workspace_root_are_not_group_writable
     modes = {
         "workspace root": _mode(workspace),
         "workspace runtime/": _mode(workspace / "runtime"),
-        "workspace runtime/recipe_kb": _mode(workspace / "runtime" / "recipe_kb"),
         "workspace logs": _mode(workspace / "logs"),
         "model directory": _mode(session.parent),
         "session": _mode(session),
         "session runtime/": _mode(session / "runtime"),
     }
     assert modes == {
-        "workspace root": 0o2755,
+        "workspace root": 0o2775,  # ops's, left as it is
         "workspace runtime/": 0o2755,
-        "workspace runtime/recipe_kb": 0o2775,
         "workspace logs": 0o2775,
         "model directory": 0o2775,
         "session": 0o2775,
         "session runtime/": 0o2775,
     }
-    for name in ("workspace root", "workspace runtime/"):
-        assert not modes[name] & (stat.S_IWGRP | stat.S_IWOTH), name
+    assert not modes["workspace runtime/"] & (stat.S_IWGRP | stat.S_IWOTH)
+
+
+def test_a_workspace_the_app_makes_itself_is_2755_and_shares_nothing_below_it(tmp_path):
+    """A workspace root made by ``make_session_dir`` (not set up by ops) is not shared storage: it is ``2755``, and what
+    is made below it is as private as the umask leaves it."""
+    parent = _setgid_workspace(tmp_path / "shared")
+    workspace = parent / "claw"
+    code = "from hyperloom.inference_optimizer.session import paths\nprint(paths.make_session_dir('m'))\n"
+    session = Path(_as_this_account(code, umask=0o077, workspace=workspace).splitlines()[-1])
+    assert _mode(workspace) == 0o2755
+    assert {_mode(workspace / "runtime"), _mode(workspace / "logs"), _mode(session.parent), _mode(session)} == {0o2700}
+    assert not any(_mode(path) & (stat.S_IWGRP | stat.S_IWOTH) for path in [workspace, *workspace.rglob("*")])
 
 
 @pytest.mark.parametrize("name", ["manifest.json", "state.json"])
@@ -448,7 +459,7 @@ def test_the_operators_credential_reaches_no_file_the_group_can_read_and_the_dat
 def test_a_database_a_session_made_before_it_held_a_credential_is_narrowed_to_600_by_its_owner(tmp_path):
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
-    database = tmp_path / "storage" / "coordinator.db"
+    database = _setgid_workspace(tmp_path / "claw") / "storage" / "coordinator.db"
     SqliteConnection(database).raw.close()
     assert _mode(database) == 0o664
     SqliteConnection(database, file_mode=0o600).raw.close()
@@ -493,19 +504,107 @@ def test_the_wal_and_shm_a_killed_664_writer_left_are_narrowed_with_the_database
         connection.raw.close()
 
 
-def test_a_side_file_that_is_a_link_is_not_followed_and_is_named(tmp_path, caplog):
+def _database_made_664(tmp_path: Path) -> Path:
+    """A database a leg without a credential made below shared storage, closed cleanly, with a row in it."""
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+
+    database = _setgid_workspace(tmp_path / "claw") / "storage" / "coordinator.db"
+    connection = SqliteConnection(database)
+    connection.raw.execute("CREATE TABLE leftover (value TEXT)")
+    connection.raw.execute("INSERT INTO leftover VALUES ('before')")
+    connection.raw.close()
+    assert _mode(database) == 0o664
+    return database
+
+
+def _bytes(database: Path) -> dict[str, bytes]:
+    return {path.name: path.read_bytes() for path in sorted(database.parent.iterdir()) if path.is_file()}
+
+
+def _foreign_database(database: Path, monkeypatch) -> Path:
+    """The database is 664 and another account's: narrowing it fails ``EPERM``, as it would for this account."""
+
+    def refused(descriptor, mode):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fchmod", refused)
+    return database
+
+
+def _wal_is_a_link(database: Path, monkeypatch) -> Path:
+    victim = database.parent.parent / "somebody-elses-file"
+    victim.write_text("kept")
+    victim.chmod(0o664)
+    database.with_name("coordinator.db-wal").symlink_to(victim)
+    return database.with_name("coordinator.db-wal")
+
+
+def _shm_cannot_be_opened(database: Path, monkeypatch) -> Path:
+    side = database.with_name("coordinator.db-shm")
+    side.write_bytes(b"left by a killed leg")
+    side.chmod(0o664)
+    real_open = os.open
+
+    def opened(path, flags, *args, **kwargs):
+        if str(path).endswith("-shm"):
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", opened)
+    return side
+
+
+def _database_is_a_link(database: Path, monkeypatch) -> Path:
+    real = database.with_name("elsewhere.db")
+    database.rename(real)
+    database.symlink_to(real)
+    return database
+
+
+_CANNOT_BE_NARROWED = [
+    pytest.param(_foreign_database, "not narrowed", id="foreign-owned-fchmod-fails"),
+    pytest.param(_wal_is_a_link, "cannot be opened to narrow it", id="side-file-is-a-link"),
+    pytest.param(_shm_cannot_be_opened, "cannot be opened to narrow it", id="side-file-unopenable"),
+    pytest.param(_database_is_a_link, "cannot be opened", id="database-is-a-link"),
+]
+
+
+@pytest.mark.parametrize(("break_it", "why"), _CANNOT_BE_NARROWED)
+def test_a_database_that_must_be_private_and_cannot_be_made_so_is_not_opened_and_nothing_is_written(
+    tmp_path, monkeypatch, break_it, why
+):
     from hyperloom.orchestrator.bus.storage import connection as bus_connection
 
-    database = tmp_path / "storage" / "coordinator.db"
-    database.parent.mkdir()
-    target = tmp_path / "somebody-elses-file"
-    target.write_text("kept")
-    target.chmod(0o664)
-    database.with_name(database.name + "-wal").symlink_to(target)
+    database = _database_made_664(tmp_path)
+    named = break_it(database, monkeypatch)
+    before = _bytes(database)
+    monkeypatch.setattr(
+        bus_connection.sqlite3, "connect", lambda *args, **kwargs: pytest.fail("SQLite was opened on a wider file")
+    )
+    with pytest.raises(bus_connection.DatabaseNotPrivate) as raised:
+        bus_connection.SqliteConnection(database, file_mode=0o600)
+    assert isinstance(raised.value, PermissionError)
+    message = str(raised.value)
+    assert message.startswith(f"{named} (owner ") and why in message and "0600" in message, message
+    assert "Resume it as the account that owns the file" in message
+    assert _bytes(database) == before, "nothing was written, to the database or beside it"
+
+
+@pytest.mark.parametrize(
+    "break_it", [_foreign_database, _wal_is_a_link, _shm_cannot_be_opened], ids=["foreign-owned", "wal-link", "shm"]
+)
+def test_the_same_failures_only_warn_when_the_database_may_be_664(tmp_path, monkeypatch, caplog, break_it):
+    from hyperloom.orchestrator.bus.storage import connection as bus_connection
+
+    database = _database_made_664(tmp_path)
+    database.chmod(0o666)  # wider than the shared mode, so that narrowing it is asked
+    named = break_it(database, monkeypatch)
+    before = _bytes(database)
     with caplog.at_level("WARNING", logger=bus_connection.__name__):
-        bus_connection._make_database_file(database, 0o600)
-    assert _mode(target) == 0o664, "a link is never followed to narrow what it names"
-    assert [record.args[0] for record in caplog.records][:1] == [database.with_name("coordinator.db-wal")]
+        bus_connection._make_database_file(database, 0o664)
+    assert [record.getMessage().split(" (owner ")[0] for record in caplog.records][:1] == [str(named)]
+    assert "the session holds a credential" not in caplog.text
+    assert _bytes(database) == before
 
 
 def test_the_lock_a_foreign_account_left_unwritable_is_named_with_its_owner_and_mode(tmp_path, monkeypatch):

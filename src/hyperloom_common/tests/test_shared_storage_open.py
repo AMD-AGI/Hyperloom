@@ -43,15 +43,41 @@ def _open_then_close(path: Path, access: int) -> None:
     os.close(descriptor)
 
 
+def _shared(path: Path) -> Path:
+    """Storage set up to be shared: a directory that is setgid, group-writable and not writable by others."""
+    path.mkdir()
+    path.chmod(0o2775)
+    if not path.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    return path
+
+
 @pytest.mark.parametrize("umask", [0o077, 0o027, 0o002])
-def test_a_new_file_is_664_whatever_the_umask(tmp_path, umask):
+def test_a_new_file_below_shared_storage_is_664_whatever_the_umask(tmp_path, umask):
+    shared = _shared(tmp_path / "shared")
     _here(
         "import os\nfrom pathlib import Path\nfrom hyperloom_common.shared_storage import open_shared, open_shared_append\n"
-        f"os.close(open_shared(Path({str(tmp_path / 'lock')!r}), os.O_RDWR))\n"
-        f"os.close(open_shared_append(Path({str(tmp_path / 'ledger.jsonl')!r})))\n",
+        f"os.close(open_shared(Path({str(shared / 'lock')!r}), os.O_RDWR))\n"
+        f"os.close(open_shared_append(Path({str(shared / 'ledger.jsonl')!r})))\n",
         umask=umask,
     )
-    assert (_mode(tmp_path / "lock"), _mode(tmp_path / "ledger.jsonl")) == (0o664, 0o664)
+    assert (_mode(shared / "lock"), _mode(shared / "ledger.jsonl")) == (0o664, 0o664)
+
+
+@pytest.mark.parametrize(
+    ("umask", "mode", "expected"),
+    [(0o077, 0o664, 0o600), (0o022, 0o664, 0o644), (0o022, 0o600, 0o600), (0o002, 0o664, 0o664)],
+    ids=["strict-umask", "usual-umask", "narrower-than-shared-kept", "permissive-umask"],
+)
+def test_a_new_file_elsewhere_is_what_the_umask_leaves_and_a_narrower_mode_is_kept(tmp_path, umask, mode, expected):
+    plain = tmp_path / "plain"
+    plain.mkdir(mode=0o755)
+    _here(
+        "import os\nfrom pathlib import Path\nfrom hyperloom_common.shared_storage import open_shared\n"
+        f"os.close(open_shared(Path({str(plain / 'lock')!r}), os.O_RDWR, {mode:#o}))\n",
+        umask=umask,
+    )
+    assert _mode(plain / "lock") == expected
 
 
 def test_a_file_that_exists_is_opened_as_it_is(tmp_path):
@@ -140,6 +166,7 @@ def test_append_jsonl_is_unchanged(tmp_path):
 
 
 def test_shared_atomic_write_replaces_a_file_another_account_made_unwritable(tmp_path):
+    tmp_path = _shared(tmp_path / "shared")
     path = tmp_path / "state.json"
     path.write_text("{}")
     path.chmod(0o400)

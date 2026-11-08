@@ -14,7 +14,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import make_shared_dirs, open_shared, open_shared_append, ownership
+from hyperloom_common.shared_storage import make_shared_dirs, open_shared, ownership
 from hyperloom_common.timeutil import now_iso
 
 from . import session_paths
@@ -133,7 +133,7 @@ class SessionLock:
         try:
             path = session_paths.pod_history_path(self.session_dir)
             make_shared_dirs(path.parent)
-            with os.fdopen(open_shared_append(path), "a", encoding="utf-8") as fh:
+            with os.fdopen(open_shared(path, os.O_WRONLY | os.O_APPEND), "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, sort_keys=True) + "\n")
         except OSError:
             log.debug("session lock: pod history append failed", exc_info=True)

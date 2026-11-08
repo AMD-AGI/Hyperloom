@@ -19,10 +19,25 @@
 # capturing reachability + skip + failure_reason per branch. recipe_kb/ may be shared with other accounts of one group
 # (setgid, 2775): the marker is written 664 to a new file and renamed over the old one, so a marker another account
 # left there never blocks this one. runtime/ above it holds what the installer writes and later steps source, so it is
-# 2755: the group can enter it, only its owner can change what is in it.
+# 2755: the group can enter it, only its owner can change what is in it. Modes are asked for only where the storage is
+# set up to be shared (a setgid directory the group can write and others cannot): anywhere else the umask decides.
 
 set -u
-umask 002
+
+# Whether the nearest existing directory of $1 is set up to be shared: setgid, group-writable, not writable by others.
+shared_storage() {
+  local dir="$1" mode
+  while [ ! -d "${dir}" ] && [ "${dir}" != / ]; do dir="$(dirname "${dir}")"; done
+  mode="$(stat -c '%a' -- "${dir}" 2>/dev/null)" || return 1
+  [ "${#mode}" -eq 4 ] && [ $(( ${mode:0:1} & 2 )) -ne 0 ] && [ $(( ${mode:2:1} & 2 )) -ne 0 ] \
+    && [ $(( ${mode:3:1} & 2 )) -eq 0 ]
+}
+
+# Make $1 with mode $2 where the storage is shared, else as the umask leaves it.
+make_dir() {
+  if [ -d "$1" ]; then return 0; fi
+  if shared_storage "$1"; then mkdir -p -m "$2" -- "$1"; else mkdir -p -- "$1"; fi
+}
 
 # Legacy marker fields: kb_* are always skipped (no remote recipe-KB probe).
 kb_reachable="false"
@@ -47,8 +62,9 @@ fi
 : "${SKIP_PR_PROBE:=}"
 
 marker_dir="${USER_DATA_PATH}/runtime/recipe_kb"
-mkdir -p -m 2755 -- "${USER_DATA_PATH}/runtime"
-mkdir -p -m 2775 -- "${marker_dir}"
+make_dir "${USER_DATA_PATH}/runtime" 2755
+make_dir "${marker_dir}" 2775
+if shared_storage "${marker_dir}/.kb_preflight.json"; then umask 002; fi # the marker is 664 where it is shared
 marker="${marker_dir}/.kb_preflight.json"
 marker_tmp=""
 trap '[ -z "${marker_tmp}" ] || rm -f -- "${marker_tmp}"' EXIT

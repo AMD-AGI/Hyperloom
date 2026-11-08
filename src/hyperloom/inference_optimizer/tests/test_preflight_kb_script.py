@@ -56,22 +56,51 @@ def _setgid(path: Path) -> Path:
     return path
 
 
+def _ops_made(user_data: Path) -> Path:
+    """``recipe_kb/`` as ops sets it up for the accounts of a run: setgid and group-writable, below ``runtime/``."""
+    kb = user_data / "runtime" / "recipe_kb"
+    kb.mkdir(parents=True)
+    kb.chmod(0o2775)
+    return kb
+
+
 @pytest.mark.parametrize("umask", [0o077, 0o022])
-def test_the_directories_are_2775_and_the_marker_664_whatever_the_umask(tmp_path, umask):
+def test_the_marker_in_a_recipe_kb_set_up_to_be_shared_is_664_whatever_the_umask(tmp_path, umask):
     user_data = _setgid(tmp_path / "claw")
+    kb = _ops_made(user_data)
     done = _run(user_data, umask=umask)
     assert (done.returncode, done.stderr) == (0, "")
-    assert (_mode(user_data / "runtime"), _mode(user_data / "runtime" / "recipe_kb")) == (0o2755, 0o2775)
-    kb = user_data / "runtime" / "recipe_kb"
     assert sorted(path.name for path in kb.iterdir()) == [".kb_preflight.json"], "no temporary file is left behind"
     assert _mode(kb / ".kb_preflight.json") == 0o664
     assert json.loads((kb / ".kb_preflight.json").read_text()) == _SKIPPED
 
 
+@pytest.mark.parametrize("umask", [0o077, 0o022])
+def test_runtime_is_made_2755_below_shared_storage_and_what_is_below_it_follows_the_umask(tmp_path, umask):
+    user_data = _setgid(tmp_path / "claw")
+    done = _run(user_data, umask=umask)
+    assert (done.returncode, done.stderr) == (0, "")
+    kb = user_data / "runtime" / "recipe_kb"
+    # ``runtime/`` is the installer's, not group-writable: nothing below it is storage set up to be shared
+    assert (_mode(user_data / "runtime"), _mode(kb)) == (0o2755, 0o2000 | (0o777 & ~umask))
+    assert _mode(kb / ".kb_preflight.json") == 0o666 & ~umask
+    assert json.loads((kb / ".kb_preflight.json").read_text()) == _SKIPPED
+
+
+@pytest.mark.parametrize("umask", [0o077, 0o022])
+def test_outside_shared_storage_the_umask_alone_decides(tmp_path, umask):
+    plain = tmp_path / "plain"
+    plain.mkdir(mode=0o755)
+    done = _run(plain, umask=umask)
+    assert (done.returncode, done.stderr) == (0, "")
+    kb = plain / "runtime" / "recipe_kb"
+    assert (_mode(plain / "runtime"), _mode(kb)) == (0o777 & ~umask, 0o777 & ~umask)
+    assert _mode(kb / ".kb_preflight.json") == 0o666 & ~umask
+
+
 def test_a_marker_of_mode_0600_is_replaced_by_rename_not_written_in_place(tmp_path):
     user_data = _setgid(tmp_path / "claw")
-    kb = user_data / "runtime" / "recipe_kb"
-    kb.mkdir(parents=True)
+    kb = _ops_made(user_data)
     marker = kb / ".kb_preflight.json"
     marker.write_text('{"kb_reachable":true,"pr_reachable":true,"kb_skipped":false,"pr_skipped":false}')
     marker.chmod(0o400)
@@ -85,8 +114,7 @@ def test_a_marker_of_mode_0600_is_replaced_by_rename_not_written_in_place(tmp_pa
 
 def test_a_link_at_the_marker_is_replaced_and_nothing_is_written_through_it(tmp_path):
     user_data = _setgid(tmp_path / "claw")
-    kb = user_data / "runtime" / "recipe_kb"
-    kb.mkdir(parents=True)
+    kb = _ops_made(user_data)
     victim = tmp_path / "victim.txt"
     victim.write_text("not the marker")
     (kb / ".kb_preflight.json").symlink_to(victim)
@@ -100,9 +128,14 @@ def test_a_link_at_the_marker_is_replaced_and_nothing_is_written_through_it(tmp_
 def test_a_marker_the_next_account_of_the_group_cannot_write_is_still_replaced_by_it(tmp_path):
     with other_accounts() as accounts:
         script, user_data = _shared_copy(accounts), accounts.shared_dir("claw")
+        kb = user_data / "runtime" / "recipe_kb"  # as ops sets it up: the group's, below the installer's runtime/
+        kb.mkdir(parents=True)
+        for directory, mode in ((kb.parent, 0o2755), (kb, 0o2775)):
+            os.chown(directory, 0, accounts.group)
+            directory.chmod(mode)
         first = (accounts.first, accounts.group)
         assert _run(user_data, umask=0o077, script=script, account=first).returncode == 0
-        marker = user_data / "runtime" / "recipe_kb" / ".kb_preflight.json"
+        marker = kb / ".kb_preflight.json"
         assert (marker.stat().st_uid, _mode(marker.parent.parent), _mode(marker.parent)) == (
             accounts.first,
             0o2755,
