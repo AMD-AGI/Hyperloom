@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import importlib
 import json
 import os
 import shutil
@@ -32,7 +33,6 @@ from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import MeasurementSpec
-from hyperloom.measure.runner.tests import aiperf_source
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with
 from hyperloom.measure.runner import tools as runner_tools
 from hyperloom.measure.runner.cache_layout import CACHE_ENV
@@ -1031,63 +1031,18 @@ def _agentx_sheet() -> dict:
     return _sheet(config=[{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}])
 
 
-def _parser_when_the_test_runs(tmp_path, seen: list[str]):
-    """A backend that records the replay client's parser as it is when the test starts."""
-
-    def run(call):
-        seen.append((tmp_path / "ix" / "utils" / "aiperf" / aiperf_source.PARSER_FILE).read_text())
-        return _ok(call)
-
-    return _Backend(run)
-
-
-def test_an_agentx_tests_replay_client_is_patched_before_the_test_starts(tmp_path, env, monkeypatch):
-    aiperf_source.write_client(tmp_path / "ix")
-    seen: list[str] = []
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", _parser_when_the_test_runs(tmp_path, seen))
-
-    assert _go(tmp_path, env, _agentx_sheet()) == 0
-
-    assert len(seen) == 1 and "token_counts=record.token_counts or TokenCounts()," in seen[0]
-    assert _status(tmp_path) == {"state": "succeeded", "error_class": None, "message": ""}
-
-
-def test_a_test_that_is_not_an_agentx_one_leaves_the_replay_client_as_it_is(tmp_path, env, monkeypatch):
-    aiperf_source.write_client(tmp_path / "ix")
-    seen: list[str] = []
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", _parser_when_the_test_runs(tmp_path, seen))
-
-    assert _go(tmp_path, env, _sheet()) == 0
-
-    assert seen == [aiperf_source.PARSER]
-    assert _status(tmp_path)["message"] == ""
-
-
-@pytest.mark.parametrize(
-    ("parser", "why"),
-    [
-        (None, "has no utils/aiperf submodule"),
-        (aiperf_source.PARSER.replace("return as error record", "moved"), "inference_result_parser.py does not hold"),
-    ],
-    ids=["no-client", "other-client"],
-)
-def test_an_agentx_test_whose_client_cannot_be_patched_still_runs_and_the_status_says_it_ran_without(
-    tmp_path, env, monkeypatch, parser, why
-):
-    if parser is not None:
-        aiperf_source.write_client(tmp_path / "ix", parser=parser)
+def test_an_agentx_test_runs_on_the_staged_client_and_the_runner_patches_no_checkout(tmp_path, env, monkeypatch):
+    """Staging patches the client an AgentX test runs; the runner leaves the InferenceX checkout alone and adds no
+    note about it."""
     backend = _Backend(_ok)
     monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
 
     assert _go(tmp_path, env, _agentx_sheet()) == 0
 
-    assert len(backend.calls) == 1, "the patch only adds a field to a failed request's line: the test runs without it"
-    status = _status(tmp_path)
-    assert status["state"] == "succeeded"
-    assert status["message"].startswith(
-        "the replay client was not patched to export the output token count of a failed"
-    )
-    assert why in status["message"]
+    assert len(backend.calls) == 1
+    assert _status(tmp_path) == {"state": "succeeded", "error_class": None, "message": ""}
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("hyperloom.measure.runner.aiperf_patch")
 
 
 SHORT_PROMPTS = {

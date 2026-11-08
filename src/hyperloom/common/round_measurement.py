@@ -77,6 +77,10 @@ _MLPERF_FIELDS = (
     ("e2el_p99_ms", "p99_e2el_ms", to_float),
 )
 _SUBMISSION_VALID = "submission_valid"
+#: A warning of an AgentX round whose export has error records and none carrying ``error_osl``: its no-content
+#: failures cannot be told empty from short. Expected of a client staging did not patch; a patched one leaves it off
+#: only when every failure was a transport one.
+AGENTX_ERROR_OSL_NOT_EXPORTED = "agentx_error_osl_not_exported"
 
 
 def _agentx_error_rate_pct(counts: Mapping[str, int]) -> float | None:
@@ -122,6 +126,13 @@ def _agentx_metrics(result: AgentxResult) -> dict[str, Any]:
     metrics.update({f"e2e_norm_intvty_{stat}": value for stat, value in result.e2e_norm_intvty.items()})
     metrics["agentx_counts"] = dict(result.counts)
     return metrics
+
+
+def _agentx_warnings(result: AgentxResult) -> list[str]:
+    errors = result.counts["error_dropped"]
+    if errors and not result.counts["error_osl_exported"]:
+        return [f"{AGENTX_ERROR_OSL_NOT_EXPORTED}:{errors}"]
+    return []
 
 
 def _scriptable_metrics(result: ScriptableResult) -> dict[str, Any]:
@@ -204,6 +215,8 @@ def round_measurement(report: Report, launch: Launch | None) -> dict[str, Any]:
     only, or accuracy only), succeeds when it completes; a measuring round succeeds when it is valid.
     """
     measurement = {**_round_facts(report, launch), **_load_metrics(report)}
+    if report.agentx is not None:
+        measurement["nonfatal_warnings"] = _agentx_warnings(report.agentx)
     diagnostic = report.profile is not None
     valid = _load_valid(report, measurement) and not diagnostic
     measurement["valid_measurement"] = valid
@@ -213,4 +226,4 @@ def round_measurement(report: Report, launch: Launch | None) -> dict[str, Any]:
     return measurement
 
 
-__all__ = ["LATENCY_SOURCE", "round_measurement"]
+__all__ = ["AGENTX_ERROR_OSL_NOT_EXPORTED", "LATENCY_SOURCE", "round_measurement"]

@@ -7,7 +7,8 @@ The harness and its whole dependency tree are pinned in ``agentx-client.lock``, 
 and its sha256 per distribution. :func:`fetch_inputs` downloads the interpreter build
 (:data:`~inference_suite.pins.AGENTX_PYTHON_BUILD`, refused unless its sha256 is the pin's) and those wheels by their
 hashes; :func:`install` unpacks the build into ``<root>/agentx-python`` and installs the wheels with ``--no-deps
---require-hashes`` from those inputs alone, so two hosts that install from one lock hold the same distributions. The
+--require-hashes`` from those inputs alone, so two hosts that install from one lock hold the same distributions, then
+patches the harness's aiperf to export ``error_osl`` (:mod:`inference_suite.aiperf_patch`). The
 build is relocatable and the client runs as ``agentx-python/bin/python3 -m ...``, never through a script's shebang,
 so the environment can be built in one directory and renamed into another.
 
@@ -35,6 +36,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from inference_suite import aiperf_patch
 from inference_suite.contracts.normalised import NormalisedManifest, PackageIdentity, canonical_name
 from inference_suite.pins import AGENTX_PYTHON_BUILD, INFERENCEX_CLIENT_COMMIT, PinnedArchive
 
@@ -45,6 +47,9 @@ CLIENT_DIR = "agentx-python"
 CLIENT_PYTHON = f"{CLIENT_DIR}/bin/python3"
 BUILD_FILE = f"{CLIENT_DIR}/BUILD.json"
 STAGED_LOCK = f"{CLIENT_DIR}/{AGENTX_LOCK.name}"
+_SITE_PACKAGES = f"lib/python{'.'.join(AGENTX_PYTHON_BUILD.version.split('.')[:2])}/site-packages"
+#: The client's files staging patches, below a staged root.
+PATCHED_FILES = tuple(f"{CLIENT_DIR}/{_SITE_PACKAGES}/{relative}" for relative in aiperf_patch.PATCHED_FILES)
 #: Inside an inputs directory: the interpreter build and the lock's wheels.
 INPUT_ARCHIVE = "python-build.tar.gz"
 INPUT_WHEELS = "wheels"
@@ -202,16 +207,16 @@ def _installed(site: Path) -> dict[str, str]:
 
 
 def _site_packages(environment: Path) -> Path:
-    major_minor = ".".join(AGENTX_PYTHON_BUILD.version.split(".")[:2])
-    return environment / "lib" / f"python{major_minor}" / "site-packages"
+    return environment / _SITE_PACKAGES
 
 
 def install(inputs: Path, root: Path) -> None:
-    """Build the client environment in ``root/agentx-python`` from ``inputs`` alone, fetching nothing.
+    """Build the client environment in ``root/agentx-python`` from ``inputs`` alone, fetching nothing, and patch its
+    aiperf to export ``error_osl``.
 
     Raises:
-        ClientEnvError: The build in ``inputs`` is not the pinned one, or a wheel the lock pins is absent from it or
-            not at the lock's hash.
+        ClientEnvError: The build in ``inputs`` is not the pinned one, a wheel the lock pins is absent from it or
+            not at the lock's hash, or the installed aiperf is not the text the patch anchors on.
     """
     archive = inputs / INPUT_ARCHIVE
     _checked_archive(archive, AGENTX_PYTHON_BUILD)
@@ -230,6 +235,10 @@ def install(inputs: Path, root: Path) -> None:
     ]
     install_args += [*_LOCKED, "-r", str(root / STAGED_LOCK)]
     _run(install_args, "installing the AgentX client from its lock")
+    try:
+        aiperf_patch.patch_aiperf(_site_packages(environment))
+    except aiperf_patch.AiperfPatchError as exc:
+        raise ClientEnvError(f"the installed AgentX client cannot be patched to export error_osl: {exc}") from exc
     build = {"version": AGENTX_PYTHON_BUILD.version, "sha256": AGENTX_PYTHON_BUILD.sha256, "bundled": bundled}
     (root / BUILD_FILE).write_text(json.dumps(build, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
@@ -258,9 +267,9 @@ def client_identity(root: Path, inferencex: str) -> NormalisedManifest:
 
 
 def staged_files(root: Path) -> Iterator[Path]:
-    """The files of the client environment a staging manifest names: the interpreter, the build record, the lock and
-    every installed distribution's ``RECORD``."""
-    yield from (root / CLIENT_PYTHON, root / BUILD_FILE, root / STAGED_LOCK)
+    """The files of the client environment a staging manifest names: the interpreter, the build record, the lock,
+    every installed distribution's ``RECORD`` and the files staging patched."""
+    yield from (root / CLIENT_PYTHON, root / BUILD_FILE, root / STAGED_LOCK, *(root / f for f in PATCHED_FILES))
     yield from sorted(_site_packages(root / CLIENT_DIR).glob("*.dist-info/RECORD"))
 
 
@@ -310,6 +319,7 @@ __all__ = [
     "INPUT_ARCHIVE",
     "INPUT_WHEELS",
     "LOCK_PLATFORMS",
+    "PATCHED_FILES",
     "STAGED_LOCK",
     "ClientEnvError",
     "LockPin",

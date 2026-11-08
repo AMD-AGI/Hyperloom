@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from inference_suite.aiperf_patch import ERROR_OSL_METRIC
 from inference_suite.contracts.config import AGENTX_FAST_MODE_ENV, AgentxWorkload, ServerConfig, SuiteConfig
 from inference_suite.contracts.launch import ClientInvocation
 from inference_suite.contracts.layout import RunLayout
@@ -245,7 +246,7 @@ def export_counts(path: Path) -> dict[str, int]:
         counts["warmup_dropped"] += warmup
         counts["error_dropped"] += error
         counts["successful"] += not (warmup or error)
-        counts["error_osl_exported"] += error and isinstance(metrics, Mapping) and "error_osl" in metrics
+        counts["error_osl_exported"] += error and isinstance(metrics, Mapping) and ERROR_OSL_METRIC in metrics
     counts["dropped_total"] = counts["records_total"] - counts["successful"]
     return counts
 

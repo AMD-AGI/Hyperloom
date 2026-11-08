@@ -3,7 +3,8 @@
 
 """A fake interpreter build and wheel index for the AgentX client environment: the build's ``python3`` is a script
 that answers the version query and does pip's ``download``, ``install`` and ``install --dry-run --report`` against a
-directory of fake wheels, so staging runs its real subprocesses offline."""
+directory of fake wheels, so staging runs its real subprocesses offline. Installing the fake agentx-harness lays down
+the two aiperf files staging patches, recorded in its ``RECORD`` as pip records them."""
 
 from __future__ import annotations
 
@@ -17,13 +18,14 @@ import pytest
 
 from inference_suite import client_env
 from inference_suite.pins import PinnedArchive
+from inference_suite.tests import aiperf_source
 
 VERSION = "3.12.15"
 WHEELS = {"agentx-harness": "1.0.13", "aiohttp": "3.13.5", "datasets": "4.7.0"}
 INDEX_ENV = "FAKE_WHEEL_INDEX"
 
 _FAKE_PYTHON = r"""#!{python}
-import hashlib, json, os, pathlib, re, shutil, sys
+import base64, hashlib, json, os, pathlib, re, shutil, sys
 args = sys.argv[1:]
 if args[:2] == ["-I", "-c"]:
     print("{version}")
@@ -67,7 +69,17 @@ else:
         info = site / f"{{name.replace('-', '_')}}-{{version}}.dist-info"
         info.mkdir(parents=True)
         (info / "METADATA").write_text(f"Name: {{name}}\nVersion: {{version}}\n")
-        (info / "RECORD").write_text(f"../../../bin/{{name}},sha256={{prefix}},1\n")
+        rows = [f"../../../bin/{{name}},sha256={{prefix}},1"]
+        tree = index / f"{{name}}.tree"
+        for path in sorted(tree.rglob("*") if tree.is_dir() else ()):
+            if path.is_file():
+                relative = path.relative_to(tree).as_posix()
+                (site / relative).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(path, site / relative)
+                data = path.read_bytes()
+                digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+                rows.append(f"{{relative}},sha256={{digest}},{{len(data)}}")
+        (info / "RECORD").write_bytes("".join(row + "\r\n" for row in rows).encode())
 """
 
 
@@ -94,6 +106,14 @@ class FakeClient:
         self.archive = _archive(version)
         self.index = tmp_path / "index"
         self.index.mkdir()
+        #: What installing the fake agentx-harness lays down in site-packages, by path.
+        self.harness = self.index / "agentx-harness.tree"
+        for relative, text in (
+            (aiperf_source.PARSER_FILE, aiperf_source.PARSER),
+            (aiperf_source.METRIC_FILE, aiperf_source.OUTPUT_LENGTH_METRIC),
+        ):
+            (self.harness / relative).parent.mkdir(parents=True, exist_ok=True)
+            (self.harness / relative).write_text(text, encoding="utf-8")
         lines = []
         for name, wheel_version in WHEELS.items():
             path = self.index / f"{name.replace('-', '_')}-{wheel_version}-py3-none-any.whl"

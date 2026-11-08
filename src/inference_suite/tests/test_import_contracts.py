@@ -39,6 +39,7 @@ INTERNAL = (
     "framework_probe",
     "staging",
     "pins",
+    "aiperf_patch",
 )
 HOST_IMPORTERS = ("hyperloom.consumer", "hyperloom_multibranch.consumer")
 #: The cross-module imports the package design relies on (dev plan 2.1 and 2.3).
