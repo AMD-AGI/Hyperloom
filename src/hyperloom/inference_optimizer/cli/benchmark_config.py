@@ -161,9 +161,6 @@ class AgentXWorkload:
     conc: int
     model_path: str = ""
     docker_image: str | None = None
-    # Ignored: multibranch-dev's scheduling.local_peers still passes the board the YAML no longer names; removed once
-    # that caller moves.
-    gpu_type: str | None = None
     duration_sec: int | None = None
 
 

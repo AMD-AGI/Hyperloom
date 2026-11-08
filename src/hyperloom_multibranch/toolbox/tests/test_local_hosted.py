@@ -26,7 +26,6 @@ from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, Measurement
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex
 from hyperloom.measure.tests.framework_fixtures import make_framework
-from hyperloom.measure.tests.gpu_free_host import idle_cards_python
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack, reading_pack  # noqa: F401
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
@@ -50,6 +49,8 @@ from hyperloom_multibranch.toolbox.tests.helpers import (
     FakeRepo,
     freeze_base_at,
     lineage_blackboard,
+    pin_inferencex_at,
+    pinned_runner_python,
     req,
     staged_runner_cache,
 )
@@ -155,13 +156,15 @@ def test_the_live_output_is_read_from_the_sandbox_of_the_unfinished_attempt(tmp_
 
 
 def _require_tool_checkout(repo: Path, commit: str, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The precondition of the end-to-end test: the runner can check the stand-in repository out as it runs it.
+    """The precondition of the end-to-end test: the runner can check the stand-in repository out as it runs it, and
+    this install pins it.
 
     The runner fetches the tools by hash under an empty home, like a sandbox. Where that fails (no usable ``git``, a
     refused local fetch) the test would otherwise show only ``measurement_failed``, so it fails here and says why.
     """
     monkeypatch.setenv("INFERENCEX_REPO", str(repo))
     monkeypatch.setenv("HOME", str(home))
+    pin_inferencex_at(commit, monkeypatch)
     try:
         ensure_inferencex(commit, home / "cache")
     except ToolError as error:
@@ -182,7 +185,7 @@ def _toolbox_of(
         spec_context(tmp_path, blob_root=str(session / "hosted" / "blobs")),
         options=LocalOptions(
             policy=QueuePolicy(per_branch_k=2, global_concurrency=64),
-            python=idle_cards_python(tmp_path),
+            python=pinned_runner_python(tmp_path, commit),
             poll_interval_sec=0.1,
             timeout_sec=120,
             runner_envs=runner_envs,
@@ -192,11 +195,12 @@ def _toolbox_of(
 
 
 async def test_a_runner_that_cannot_start_says_why_and_leaves_no_log_traceback(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The runner fails before it writes ``out/files``: the result carries its message and saving logs stays quiet."""
     repo = tmp_path / "inferencex"
     commit = _git_repo(repo)
+    pin_inferencex_at(commit, monkeypatch)
     session = tmp_path / "session"
     blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     envs = {"INFERENCEX_REPO": str(repo) + "-missing"}

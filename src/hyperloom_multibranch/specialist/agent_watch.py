@@ -37,7 +37,7 @@ import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 
-from hyperloom.common.proctree import TERM_GRACE_SEC, proc_identity
+from hyperloom_common.proctree import TERM_GRACE_SEC, proc_identity
 from hyperloom.common.visible_devices import ROCR_LEVEL_VARS, effective_mask_tokens
 from hyperloom.sandbox.launcher import LAUNCHER_SOURCE
 

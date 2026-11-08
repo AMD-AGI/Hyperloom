@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
 from pathlib import Path
 
@@ -18,13 +19,15 @@ from hyperloom.orchestrator.state.base_launch import (
     BaseLaunchMismatch,
     FrozenBase,
     ServerBase,
+    frozen_base,
     frozen_session_base,
     session_server_base,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
-from inference_suite.contracts import GoldenAcceptance, GoldenCurve, Redacted
+from inference_suite import INFERENCEX_CLIENT_COMMIT
+from inference_suite.contracts import ClientLaunch, GoldenAcceptance, GoldenCurve, Redacted
 
-from ._session_base import freeze_session_base, session_base
+from ._session_base import freeze_base, freeze_session_base, session_base
 
 _SRC = Path(__file__).resolve().parents[4]
 _REFERENCE_FIELDS = {"reference_server_args", "reference_envs", "reference_launch_controls", "reference_model"}
@@ -195,3 +198,18 @@ def test_a_base_file_in_a_session_that_recorded_none_is_refused(session):
 
     with pytest.raises(BaseLaunchMismatch, match="recorded \\(none\\)"):
         session_server_base()
+
+
+def test_a_base_whose_client_is_the_pinned_one_is_accepted(session):
+    base = freeze_session_base(session)
+
+    assert base.client.commit == INFERENCEX_CLIENT_COMMIT
+    assert frozen_base(session) == FrozenBase(session / BASE_LAUNCH_FILE, base)
+
+
+def test_a_base_whose_client_is_off_the_pin_is_refused_naming_both_commits(session):
+    drifted = "e" * 40
+    freeze_base(session, dataclasses.replace(session_base(), client=ClientLaunch(tool="aiperf", commit=drifted)))
+
+    with pytest.raises(BaseLaunchMismatch, match=f"{drifted}.*{INFERENCEX_CLIENT_COMMIT}.*new session"):
+        frozen_base(session)
