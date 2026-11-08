@@ -36,9 +36,9 @@ class ImagePinError(ValueError):
     """The active image cannot be named by a real digest."""
 
 
-# ToolPinError, ToolCommits and pinned_tool_commits are a compatibility layer for main's toolbox GPU tests and
-# multibranch-dev's scheduling.local_peers, which this branch does not migrate; removed once they are gone. The two
-# commits are the last ones Hyperloom pinned for Magpie and its InferenceX checkout, kept here for those callers alone.
+# ToolPinError, ToolCommits and pinned_tool_commits are a compatibility layer for main's toolbox GPU tests, which this
+# branch does not migrate; removed once they are gone. The two commits are the last ones Hyperloom pinned for Magpie
+# and its InferenceX checkout, kept here for those callers alone.
 _TOOL_REFS = (
     ("MAGPIE_REF", "06b7cf6e185fdd49483a512e350cb3964ba3bf68"),
     ("INFERENCEX_REF", "3d5581562f643f9bdeb8410cd924e2c70906c966"),
