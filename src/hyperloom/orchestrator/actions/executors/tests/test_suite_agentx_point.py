@@ -103,6 +103,15 @@ def test_an_agentx_point_replays_on_its_launch_over_the_base_with_the_golden_lay
     assert SuiteConfig.from_document(json.loads(json.dumps(config.to_document()))) == config
 
 
+def test_an_agentx_server_runs_on_the_first_cards_of_the_process_mask(monkeypatch) -> None:
+    """The materialized AgentX point names no mask, so the session's mask places its server."""
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+    point = _point()
+    assert "ROCR_VISIBLE_DEVICES" not in point["benchmark"]["envs"]
+
+    assert suite_config(point, _base(), _settings()).server.gpus == tuple(range(4, 4 + _base().cards))
+
+
 def test_the_replay_takes_the_bases_client_knobs_under_the_points() -> None:
     base = _base()
     client = {"AIPERF_WARMUP_REQUESTS_PER_LANE": "4", "AIPERF_TRACE_IDLE_GAP_CAP_SECONDS": "300"}
