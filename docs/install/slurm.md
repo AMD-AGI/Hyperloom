@@ -141,11 +141,12 @@ clones `main` from GitHub at runtime, which requires GitHub egress on the node.
 
 A checkout on the shared mount is one another account can write when its
 directory or its `.env` is writable by a group or others, belongs to another
-account, or is a link. The installer then keeps the Anthropic-side credentials it
+account, or its `.env` is a link. The installer then keeps the Anthropic-side credentials it
 would persist there out of that `.env`, where those accounts could read or rewrite
 them: each job's `install.sh` writes the ones it gets from the job's environment
 (`proxy.env`) into the container's own `kernel-agent.env.sh` (`KERNEL_AGENT_ENV`)
-alone, and removes any an earlier install left in `.env`. Keep them in
+alone, and removes any an earlier install left in `.env`, with every other line
+that `.env` does not lend. Keep them in
 `proxy.env`, which every job exports. See [Credential precedence](../reference/authentication.md#credential-precedence).
 
 ## Step 4: Submit a job

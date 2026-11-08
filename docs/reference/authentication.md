@@ -84,16 +84,23 @@ The Anthropic-side credentials `install.sh` persists (`ANTHROPIC_BASE_URL`,
 `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and an `ANTHROPIC_CUSTOM_HEADERS`
 you put in `.env`) stay out of the checkout's `.env` when another account can
 write it: the checkout directory or `.env` is writable by a group or others,
-belongs to another account, or is a link. A source directory bind-mounted from
-shared storage, as the Slurm job's `--source-dir` is, is the usual case. There
-another account could read or rewrite them, so `install.sh` writes them into the
-container-local `kernel-agent.env.sh` (`KERNEL_AGENT_ENV`) alone. It also removes
-those an earlier install, you or another account left in `.env`, with their
-retired spellings (`ANTHROPIC_AUTH_TOKEN`, `DEEPSEEK_*`, `SAFE_API_KEY`,
-`AMD_LLM_API_KEY`, `LLM_GATEWAY_KEY`, `GEAK_API_KEY`), and keeps every other line
-byte for byte: the rest is written beside `.env` with its mode and renamed over
-it, a link to a file is replaced rather than written through, and a link to
-anything else is removed.
+belongs to another account, or `.env` is a link. A source directory bind-mounted
+from shared storage, as the Slurm job's `--source-dir` is, is the usual case. The
+checkout is judged where it is, so one you reach through your own link (`~/hl ->
+/scratch/you/hl`) is as private as the directory it leads to. Root (a container
+started without `--user` on your bind-mounted checkout, as in
+[Docker (source)](../install/install.md#docker-source)) takes the account that owns
+the checkout as its own. There another account could read or rewrite them, so
+`install.sh` writes them into the container-local `kernel-agent.env.sh`
+(`KERNEL_AGENT_ENV`) alone. It also removes those an earlier install, you or
+another account left in `.env`, with their retired spellings
+(`ANTHROPIC_AUTH_TOKEN`, `DEEPSEEK_*`, `SAFE_API_KEY`, `AMD_LLM_API_KEY`,
+`LLM_GATEWAY_KEY`, `GEAK_API_KEY`), and every other line such a `.env` does not
+lend (below), keeping its comments and blank lines byte for byte: its own write
+leaves a `.env` of yours that the next reader may find private, so a line another
+account planted there must be gone first. The rest is written beside `.env` with
+its mode and renamed over it, a link to a file is replaced rather than written
+through, and a link to anything else is removed.
 
 Such a `.env` lends no credential to any reader: a line there may be another
 account's, and a gateway URL or headers of its own would carry your key to it.
