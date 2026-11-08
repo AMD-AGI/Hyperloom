@@ -33,6 +33,10 @@ so, when the sheet asks for the check (``bad``: wrong for short prompts, ``drift
 did not answer).
 ``fake_long_context: {broken: [family, ...], served: N}`` leaves the outputs of a long-context check whose server loses those
 task families (``niah``, ``tracking``, ``words``) and serves ``served`` tokens, when the sheet asks for the check.
+``fake_reads_prompt_sets: true`` reads the prompt sets the sheet's checks name as the runner does before it starts a server
+(``measure.local``'s check of the call, in the runner cache this sandbox's ``HYPERLOOM_RUNNER_CACHE`` names): a set that is
+missing or holds other prompts fails the test as the runner does (``status.json`` says ``spec_rejected`` and why), and
+one that is read is listed, with the prompts it holds, in ``prompt_sets_read.json``.
 ``fake_export: [line, ...]`` lists the per-request export of an AgentX round (``aiperf_artifacts/profile_export.jsonl``
 below the round's directory) with those lines.
 ``fake_eval_round: true`` lays the rounds out as a graded test with a warmup leaves them (one evaluation, in a round of
@@ -65,9 +69,13 @@ from hyperloom.measure.jit_kinds import AITER_JIT
 from hyperloom.measure.jit.store import Snapshot, StoredFile
 from hyperloom.measure.manifest import encode_manifest, result_schema_for
 from hyperloom.measure.runner.service import Progress
+from hyperloom.measure.local import TestCallRefused, _validate_checks
+from hyperloom.measure.long_context import staging as long_context_staging
 from hyperloom.measure.long_context.tests.support import outputs_files as long_context_outputs
+from hyperloom.measure.short_prompts.staging import load_prompt_set
 from hyperloom.measure.short_prompts.tests.support import outputs_files
 from hyperloom.measure.tests.run_dirs import run_dir_report
+from hyperloom.measure.socket import TestCall
 from hyperloom.measure.spec import SPEC_SCHEMA_V1, MeasurementSpec, fingerprint, spec_sha256
 
 REPORT_PATH = "suite_run_0/report.json"
@@ -328,11 +336,50 @@ def _long_context_files(out: Path, spec: MeasurementSpec, config: dict[str, Any]
     return files
 
 
-def _publish(out: Path, spec: MeasurementSpec, raw: bytes, config: dict[str, Any], mode: str) -> None:
+PROMPT_SETS_READ = "prompt_sets_read.json"
+
+
+def _read_prompt_sets(spec: MeasurementSpec, root: Path) -> bytes:
+    """The prompt sets the sheet's checks name, read as the runner reads them before it starts a server: its own check of
+    the call (``measure.local``), then the prompts of each, listed by key, hash and count.
+
+    Raises:
+        TestCallRefused: As the runner's check does, naming the set and why it cannot be used.
+    """
+    procedure = spec.procedure
+    call = TestCall(
+        points=(),
+        output_dir=root / "out" / "files",
+        timeout_sec=1,
+        cwd=str(root),
+        task_id=spec.request_id,
+        kind=spec.kind,  # type: ignore[arg-type]
+        short_prompts=procedure.short_prompts,
+        long_context=procedure.long_context,
+    )
+    _validate_checks(call)
+    read: dict[str, Any] = {"cache": os.environ.get("HYPERLOOM_RUNNER_CACHE")}
+    if procedure.short_prompts is not None:
+        plan = procedure.short_prompts
+        prompts = load_prompt_set(plan, os.environ)
+        read["short_prompts"] = {"key": plan.prompt_set, "sha256": plan.prompts_sha256, "prompts": len(prompts)}
+    if procedure.long_context is not None:
+        plan = procedure.long_context
+        prompts = long_context_staging.load_prompt_set(plan, os.environ)
+        read["long_context"] = {"key": plan.prompt_set, "sha256": plan.prompts_sha256, "prompts": len(prompts)}
+    return json.dumps(read, sort_keys=True).encode()
+
+
+def _publish(
+    out: Path, spec: MeasurementSpec, raw: bytes, config: dict[str, Any], mode: str, read: bytes | None = None
+) -> None:
     key = signing.load_private_key(Path(os.environ["HYPERLOOM_SIGNING_KEY_FILE"]))
     files = _write_files(out, config, mode)
     files.update(_short_prompt_files(out, spec, config))
     files.update(_long_context_files(out, spec, config))
+    if read is not None:
+        _atomic(out / "files" / PROMPT_SETS_READ, read)
+        files[PROMPT_SETS_READ] = read
     if config.get("fake_repro"):
         files.update(_repro_files(spec, Path(os.environ["HYPERLOOM_SANDBOX_ROOT"]), out))
     if config.get("fake_attached_env"):
@@ -385,7 +432,15 @@ def main() -> int:
             _atomic(out / "files" / "server.log", b"partial log\n")
             _atomic(out / "status.json", json.dumps(state).encode())
             return 0
-        _publish(out, spec, raw, config, mode)
+        read = None
+        if config.get("fake_reads_prompt_sets"):
+            try:
+                read = _read_prompt_sets(spec, root)
+            except TestCallRefused as exc:
+                state = {"state": "failed", "error_class": "spec_rejected", "message": str(exc)}
+                _atomic(out / "status.json", json.dumps(state).encode())
+                return 0
+        _publish(out, spec, raw, config, mode, read)
     return 0
 
 
