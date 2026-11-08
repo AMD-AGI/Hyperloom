@@ -40,8 +40,8 @@ as of any other limit, is a usage error.
 ``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's
 serving template; a name that is not one directory, or one given with no agent, is a usage error, and a pack the Arbor
 checkout lacks is refused when the branch starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX
-recipe's adds to, which Magpie resolves from InferenceX and MB does not carry yet; a file the adapter cannot use, or one
-given with no agent, is a usage error. Each ``--specialist-prompt`` file holds a direction the user wrote
+recipe's adds to, as resolved from InferenceX; a file the adapter cannot use, or one given with no agent, is a usage
+error. Each ``--specialist-prompt`` file holds a direction the user wrote
 for one specialist: its branch opens at PRELUDE's
 root ahead of the opening batch, counted within ``--max-branches``, its specialist sees the text in every launch
 prompt, and the judge neither stops it nor lowers its K for its first judged tests; an empty or unreadable file, or
@@ -471,7 +471,7 @@ def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar=FILE_METAVAR,
         help=(
-            "The launch an AgentX recipe's adds to, as Magpie resolves it from InferenceX, for an Arbor"
+            "The launch an AgentX recipe's adds to, as resolved from InferenceX, for an Arbor"
             " --autonomous-agent: a JSON object of server_flags, server_env, model_name and client"
             " (examples/multibranch-arbor-launch)."
         ),

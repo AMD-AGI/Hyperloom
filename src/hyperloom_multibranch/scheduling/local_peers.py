@@ -70,6 +70,7 @@ from hyperloom_multibranch.rulegate.regression import RegressionSet, ReproRunner
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule, Rule
 from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
+from hyperloom_multibranch.scheduling.session_base import freeze_session_base
 from hyperloom_multibranch.scheduling.settings import AGENT_PORT, Workload
 from hyperloom_multibranch.specialist.fix_check import FixChecking
 from hyperloom_multibranch.specialist.fix_tools import register_fix_tools
@@ -315,8 +316,10 @@ def specialist_recall(reports: Path) -> LessonRecall:
 
 
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
-    """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`).
-    Raises :class:`PeersUnavailable` when the session's canonical measurement cannot be taken.
+    """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`) and
+    freezes the base launch every test runs on in ``MB-toolbox`` unless the session froze one
+    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`). Raises :class:`PeersUnavailable`
+    when no base launch can be frozen or the session's canonical measurement cannot be taken.
 
     Called on the event loop the session runs on. The toolbox is built, not started: the session starts it, and its
     close releases the backend and the sandboxes. The MCP service is started; the session stop stops it.
@@ -329,6 +332,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox, host.image.ref)
+    freeze_session_base(layout.toolbox, workload, setup.agent_launch)
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
