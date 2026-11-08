@@ -106,6 +106,7 @@ def test_an_allowed_path_below_the_home_opens_up_only_its_ancestors(home, writte
         home / ".ssh",
         home / "scratch" / "other",
         home / "scratch/a/notes.txt",
+        home / ".cache",  # where Hugging Face would make its login, not made yet
     }
     assert not any(worktree == mask or mask in worktree.parents for mask in found)
 
@@ -137,7 +138,6 @@ def test_every_variable_that_names_a_credential_location_is_masked(tmp_path):
         path.write_text("x", encoding="ascii")
     secret_dir.mkdir()
     environ = {
-        "HOME": "/nonexistent-home",
         "HYPERLOOM_BUILD_SIGNING_KEY_FILE": str(key),
         "KUBECONFIG": f"{kube}:{tmp_path / 'missing'}:relative/path",
         "MY_SERVICE_TOKEN_PATH": str(token),
@@ -158,6 +158,48 @@ def test_hugging_faces_login_files_are_masked_and_its_cache_is_not(tmp_path):
     assert found == {hf / "token", hf / "stored_tokens"}
 
 
+#: Where Hugging Face writes a login made after the launch, as ``huggingface_hub`` resolves it, below a bound data
+#: tree that holds none of it yet: each setting, and what is hidden for it (the first path missing below ``data``).
+HF_LATER = {
+    "token_path": ({"HF_TOKEN_PATH": "{data}/secrets/hf_token"}, ["secrets"]),
+    "token_path_dir": ({"HF_TOKEN_PATH": "{data}/kept/hf_token"}, ["kept/hf_token", "kept/stored_tokens"]),
+    "hf_home": ({"HF_HOME": "{data}/.hf"}, [".hf"]),
+    "xdg_cache": ({"XDG_CACHE_HOME": "{data}/.cache"}, [".cache"]),
+    "home": ({"HOME": "{data}/home"}, ["home"]),
+    "hf_home_tilde": ({"HOME": "{data}", "HF_HOME": "~/.hf"}, [".hf"]),
+    "hf_home_variable": ({"HF_HOME": "${{MODEL_PATH}}/.hf"}, [".hf"]),
+}
+
+
+@pytest.mark.parametrize("whose", ["app", "child"])
+@pytest.mark.parametrize("location", list(HF_LATER))
+def test_a_hugging_face_login_not_made_yet_is_hidden_where_it_would_be_written(tmp_path, monkeypatch, location, whose):
+    """``hf auth login`` writes ``HF_TOKEN_PATH`` (default ``$HF_HOME/token``, ``HF_HOME`` default
+    ``$XDG_CACHE_HOME/huggingface``, that default ``~/.cache``) and ``stored_tokens`` beside it, making the directories
+    on the way: so the first path missing on the way is hidden, and the data tree that holds it is bound entry by
+    entry, whichever environment, this process's or the child's, names the location."""
+    data = tmp_path / "data"
+    model = _write(data / "model" / "weights")
+    (data / "kept").mkdir()
+    settings, hidden = HF_LATER[location]
+    child = {"MODEL_PATH": str(data)}
+    named = {name: value.format(data=data) for name, value in settings.items()}
+    if whose == "app":
+        monkeypatch.setenv("MODEL_PATH", str(data))
+        for name, value in named.items():
+            monkeypatch.setenv(name, value)
+    else:
+        child.update(named)
+
+    found = credential_paths(child, allowed=[data])
+
+    assert {data / path for path in hidden} <= set(found)
+    policy = Confinement(readable=(data,), masked=found).policy()
+    assert str(data) not in policy.read_only, "a name made in the tree later is not shown"
+    assert str(model.parent) in policy.read_only
+    assert policy.masked == ()
+
+
 def test_xdg_directories_outside_the_home_and_registered_files_are_masked(tmp_path, monkeypatch):
     config, state, private = tmp_path / "config", tmp_path / "state", tmp_path / "state-dir"
     for path in (config, state, private):
@@ -165,7 +207,7 @@ def test_xdg_directories_outside_the_home_and_registered_files_are_masked(tmp_pa
     registry = PrivatePaths()
     registry.add(private, "hosted state dir")
     registry.add(private, "registered twice")
-    environ = {"HOME": "/nonexistent-home", "XDG_CONFIG_HOME": str(config), "XDG_STATE_HOME": str(state)}
+    environ = {"XDG_CONFIG_HOME": str(config), "XDG_STATE_HOME": str(state)}
     assert registry.paths() == (private,)
     assert _masks(environ) == {config, state}, "the process registry is empty"
     monkeypatch.setattr(confinement, "PRIVATE_PATHS", registry)
@@ -180,10 +222,13 @@ def test_a_given_path_stays_readable_even_inside_the_masked_home(home):
 
 
 def test_the_root_directory_is_never_a_mask_nor_opened_up(home, monkeypatch):
-    """Opened up around ``/usr``, a home of ``/`` would mask ``/etc``, ``/opt``, ``/root`` and the rest."""
-    assert _masks({"HOME": "/", "SOME_TOKEN_DIR": "/"}, allowed=[Path("/usr")]) == set()
+    """Opened up around ``/usr``, a home of ``/`` would mask ``/etc``, ``/opt``, ``/root`` and the rest; only where
+    Hugging Face would make its login there, not made yet, is hidden."""
+    cache = Path("/.cache")
+    found = _masks({"HOME": "/", "SOME_TOKEN_DIR": "/"}, allowed=[Path("/usr")])
+    assert found and all(mask == cache or cache in mask.parents for mask in found), found
     monkeypatch.setenv("HOME", "/")
-    assert credential_paths({}, allowed=[Path("/usr")]) == ()
+    assert set(credential_paths({}, allowed=[Path("/usr")])) == found
 
 
 def test_this_processs_own_credential_locations_are_masked_whatever_the_child_is_given(tmp_path, monkeypatch):
