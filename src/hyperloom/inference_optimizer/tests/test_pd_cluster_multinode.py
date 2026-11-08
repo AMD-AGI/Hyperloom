@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -457,3 +458,27 @@ def test_engine_launch_ignores_gpu_handles_it_inherited(tmp_path: Path, monkeypa
     out, err = proc.communicate(timeout=30)
     assert proc.returncode == 0, err
     assert "GPU still held" not in out + err
+
+
+def test_engine_launch_closes_listening_sockets_it_inherited(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine can bind its port when the replaced engine left that port's listening socket open in this process."""
+    monkeypatch.setattr(pd_internal, "GPU_DEVICE_PATHS", (str(tmp_path / "no-gpu"),))
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    script = tmp_path / "launch.sh"
+    bind = f"python3 -c \"import socket; socket.socket().bind(('127.0.0.1', {port})); print('bound')\""
+    script.write_text(pd_internal.launch_script("decode", bind, {}), encoding="utf-8")
+    with listener:
+        proc = subprocess.Popen(
+            ["bash", str(script)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            pass_fds=(listener.fileno(),),
+            env=dict(os.environ, SGLANG_HOST_IP="127.0.0.1"),
+        )
+    out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    assert "bound" in out

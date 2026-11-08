@@ -507,11 +507,13 @@ def _gpu_patterns() -> str:
     return "|".join(shlex.quote(path) for path in GPU_DEVICE_PATHS)
 
 
-def _close_inherited_gpu_lines() -> list[str]:
-    """Bash that closes GPU device handles this process inherited from the image it replaced."""
+def _close_inherited_handle_lines() -> list[str]:
+    """Bash that closes GPU device handles and sockets this process inherited from the image it replaced."""
     return [
         "for hl_fd in /proc/$$/fd/*; do",
-        f'  case "$(readlink "$hl_fd" 2>/dev/null || true)" in {_gpu_patterns()}) eval "exec ${{hl_fd##*/}}>&-" ;; esac',
+        '  [ "${hl_fd##*/}" -gt 2 ] || continue',
+        f'  case "$(readlink "$hl_fd" 2>/dev/null || true)" in {_gpu_patterns()}|socket:*)'
+        ' eval "exec ${hl_fd##*/}>&-" ;; esac',
         "done",
     ]
 
@@ -553,7 +555,7 @@ def launch_script(role: str, command: str, extra_env: dict[str, str], *, log_ip:
             continue
         lines.append(f"export {key}={shlex.quote(str(value))}")
     if role != "router":
-        lines.extend(_close_inherited_gpu_lines())
+        lines.extend(_close_inherited_handle_lines())
         log_dir = str(extra_env.get("HYPERLOOM_MN_SERVER_LOG_DIR") or "")
         if log_dir.startswith("/") and log_ip:
             lines.extend(_engine_log_lines(log_dir, log_ip))
