@@ -233,8 +233,8 @@ function render(payload) {
   const rebased = rebases > 0 && !!stamped;
   // The collector's warm chain (realtime.py warm_chain): each rebased bar read on its
   // replays after the container's first, which reads low, as the candidates run. The
-  // driver's chain (the lessons' `scale`) counted that first replay: one campaign's
-  // read well above what its round-end A/B measured.
+  // driver's chain (the lessons' `scale`) counts that first replay, and can read
+  // well above what a round-end A/B measures.
   const warm = rebased && typeof c.warm_scale === "number" && typeof c.warm_best === "number";
   const scale = rebased ? (warm ? c.warm_scale : stamped.scale) : 1;
   const scale2 = rebased && typeof stamped.secondary_scale === "number" ? stamped.secondary_scale : 1;

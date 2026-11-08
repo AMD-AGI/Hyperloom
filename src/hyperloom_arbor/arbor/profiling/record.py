@@ -3,14 +3,14 @@
 The record is the contract between a profiler run and every evaluator that
 projects a component win onto the whole step. Three rules it exists to enforce:
 
-**Emit every op, not a top-N slice.** ``evalctl.sikl_share()`` computes
+**Emit every op, not a top-N slice.** The pinned reader's share function computes
 ``matched / sum(ops)``. When the writer truncates ``ops`` to the 25 most
 expensive kernels, that denominator is a subtotal and every share comes out
 inflated — silently, and by an amount nobody can recover from the file. Writing
 the full list makes the *existing, pinned* reader correct without editing it.
 
-**Emit both key spellings.** The pinned reader wants ``name``/``us``; the older
-SIKL log parser wrote ``op``/``ms``. Carrying both costs a few bytes and means
+**Emit both key spellings.** The pinned reader wants ``name``/``us``; an older
+log parser wrote ``op``/``ms``. Carrying both costs a few bytes and means
 neither reader has to be the one that changes.
 
 **Carry coverage.** A share is only as trustworthy as the fraction of the step
@@ -35,9 +35,9 @@ from arbor.profiling.trace import KernelTotals
 
 SCHEMA_VERSION = 2
 
-# Below this, a share is not reported. Chosen so that the DSv4 precedent — SIKL
-# leaving a sizable share of prefill in `<rest>` and still being useful — sits
-# inside the band, while a table that names only half the step does not.
+# Below this, a share is not reported. Chosen so that a profile leaving a sizable
+# share of prefill in `<rest>` and still being useful sits inside the band, while
+# a table that names only half the step does not.
 MIN_COVERAGE = 0.70
 
 
@@ -59,11 +59,11 @@ class ProfileRecord:
         total = self.totals.total_us
         ops = [
             {
-                # Keys evalctl.sikl_share() reads. The list is COMPLETE — see
+                # Keys the pinned reader reads. The list is COMPLETE — see
                 # the module docstring; truncating it corrupts the denominator.
                 "name": name,
                 "us": round(us, 3),
-                # Legacy spelling, for any reader of the old SIKL record.
+                # Legacy spelling, for any reader of the older record.
                 "op": name[:60],
                 "ms": round(us / 1000.0, 5),
                 "pct": round(100.0 * us / total, 3) if total else 0.0,
@@ -232,7 +232,7 @@ def share_from_patterns(
     """Bare-float adapter for callers that only want the number.
 
     Drops the verdict and every warning, so prefer :func:`component_share`.
-    Provided so an existing ``sikl_share(...)`` call site can be pointed here
+    Provided so an existing share-reader call site can be pointed here
     with a one-line change.
     """
     return component_share(record_path, patterns, name=name)["share"]

@@ -126,7 +126,7 @@ def main() -> None:
     p.add_argument('--tile-config', default='')
     p.add_argument('--deploy',     action='store_true')
     p.add_argument('--config-name', default='')
-    p.add_argument('--deploy-csv',  default='/workspace/knowledge_base/aiter/configs/model_configs/dsv41flash_fp8fp4_tuned_fmoe.csv')
+    p.add_argument('--deploy-csv',  default='/workspace/knowledge_base/aiter/configs/model_configs/fp8fp4_tuned_fmoe.csv')
     args = p.parse_args()
 
     import torch

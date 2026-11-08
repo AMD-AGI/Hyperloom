@@ -97,7 +97,7 @@ python3 -m arbor.collect project --session <session> --config <config>
   turn. A name the table does not know becomes a slug of
   itself, and the output says so. For a new model family, add an entry with
   examples (`arbor/tests/test_collect.py` checks every example resolves).
-- **user**: `--user`, else `ARBOR_USER`, else the login name. Use your ldap,
+- **user**: `--user`, else `ARBOR_USER`, else the login name. Use one user id,
   the same on every host, or your campaigns split across two users.
 - **campaign**: the session directory's name, or `--campaign`. Keep it across
   restarts and chunks; a new name is a new campaign on the share.
@@ -155,5 +155,5 @@ the share could not be reached or written (the local copy is still written),
 | --- | --- | --- |
 | `ARBOR_SHARE_HOST` | `arbor-share` | ssh destination, an alias from `~/.ssh/config` |
 | `ARBOR_SHARE_ROOT` | `/path/to/arbor-share` | the share root on that host; a scratch root (under `/tmp`) for tests |
-| `ARBOR_SHARE_SSH_OPTS` | none | extra options for both ssh and sftp; use `-F` and `-o` forms (`-o Port=2222`), since ssh and sftp spell `-p` differently |
+| `ARBOR_SHARE_SSH_OPTS` | none | extra options for both ssh and sftp; use `-F` and `-o` forms (`-o Port=<port>`), since ssh and sftp spell `-p` differently |
 | `ARBOR_PROJECT`, `ARBOR_USER` | none | the names above |

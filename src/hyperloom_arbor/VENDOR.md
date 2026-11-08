@@ -9,7 +9,7 @@ multi-branch (MB) runs as a component when a session is given `--autonomous-agen
 | Source | `AMD-AGI/Arbor` (internal) |
 | Tag | `v0.9.3` |
 | Commit | `e3a4bd1` |
-| Files | 349 |
+| Files | 338 |
 | Licence | Apache-2.0, [`LICENSE`](LICENSE) (`REUSE.toml` at the repository root says so per file) |
 
 ## What it holds
@@ -21,7 +21,7 @@ The engine and what its agents read:
   the serving playbook's rules and knob catalog, and the rest). The profiler skill is this copy's own: it profiles with
   TraceLens (below);
 - the skill families a pack loads (`lifecycle.load`, `docs/skill-integration.md`), each in `.claude/skills/<family>/`
-  with its `family.json`: `dossier` (the dossier split into six skills), `benchmark` (the benchmark studied once)
+  with its `family.json`: `dossier` (the dossier split into five skills), `benchmark` (the benchmark studied once)
   and `pack` (drafting a pack). Up to `v0.9.2` they were under `plugins/`;
 - `packs/serving` (the template MB names by default), `packs/agentx`, `packs/_shared`, `packs/parallel-dossier` and
   the `evolve-asm` packs;
@@ -41,6 +41,10 @@ The engine and what its agents read:
   - **Architecture research** (the `architecture` family, `architecture:performance`, and its guide) is left out: it
     studies how other vendors' frameworks implement a model, on their GPUs. A pack loads it only by naming it, which
     no pack here does.
+  - **The dossier's part 9** is left out. It holds a reference platform's traces, and the reference platform is
+    another vendor's GPU. The `dossier:reference` skill goes, as do the part's row in `arbor/dossier/parts.py` and every
+    step that reads it. The part was optional, so a dossier is whole without it.
+  - **A hipBLASLt tuning skill,** built on one internal study, is left out.
   - **Records of internal campaigns** are left out: the barren/learn design notes, the config index, a campaign
     archive skill, two notes about one model's profile and MoE, and two one-shot campaign scripts under
     `scripts/pack/`.
@@ -70,13 +74,32 @@ The engine and what its agents read:
     (for example `CAMPAIGN_CONFIG` for a launcher variable), so the copy is consistent with itself.
   - **GitHub owners:** a GitHub owner is named only when it is an organisation; the vendoring tool refuses a copy that
     names any other.
+- **No internal tools:**
+  - **An internal profiler** that the AgentX pack ran is gone with its validator. Where Arbor's text named it, this copy
+    says "profile" and names the `profiler` skill.
+  - **Its environment variables** in `arbor/profiling/vllm_driver.py` are `ARBOR_PROFILE_*` here.
+  - **An internal scheduler's job-id variable** is not read.
+- **Our packs, launchers and campaign ids are not named:**
+  - **The pack-drafting skill** lists only the parents this copy carries.
+  - **The parallel mode's launcher defaults** are generic: `scripts/parallel/lane.sbatch` and
+    `scripts/parallel/ab.sbatch`.
+  - **The collector's project examples** are model names.
+- **Defects by their class:** two AMD software defects that Arbor's text tells as found in its runs are described by
+  their kind only.
+- **The project settings ship without the permission bypass** (`.claude/settings.json`). MB starts its agents with its
+  own permission mode. The `evolve-asm` orchestrators still pass one to the agent SDK, since they run their agents
+  unattended; MB does not run them.
 - **No internal references:** Arbor's code and docs cite the board topic, comment or ticket where a decision was made.
   This copy keeps the decision and drops the citation.
   - **Also dropped:** internal plans, branches, sessions and decision records, roadmap ids, and study record ids.
   - **The private repository:** this copy carries no access or clone instructions for it. The README, getting started
     and the skills guide point to this copy instead.
-- **No results of internal campaigns:** from `v0.9.3`, Arbor's own tree has none in its code, skills and docs, and
-  the `benchmark` family's `contract.md` is Arbor's own text. The vendoring tool still refuses a copy that has one.
+- **No results or stories of internal campaigns:**
+  - **Arbor's own tree** has cleared most of them from its code, skills and docs since `v0.9.3`, and the `benchmark`
+    family's `contract.md` is Arbor's own text.
+  - **The rest** are cut to the rule they taught: worked examples drawn from our campaigns, our runs' figures, and
+    our own runs told as stories.
+  - **The vendoring tool** still refuses a copy that has one.
 - **`CONTRIBUTING.md`** is this copy's own: it says where a change to Arbor is made.
 - **Profiling on TraceLens:** upstream, Arbor's profiler skill traces with a tracer of its own, which is not released
   here. In this copy the skill (`.claude/skills/profiler/SKILL.md`) profiles with TraceLens instead, as this repository
@@ -125,11 +148,20 @@ Never edit it here: a change is made in Arbor and the copy is taken again, whole
 maintainers' vendoring tool, with the same omissions, placeholders, profiler skill and examples. The tool refuses a
 copy that still names any of the replaced terms, or cites an internal board or ticket.
 
-Up to `v0.9.2`, this copy carried a text-only scrub on top of the tag, applied by the vendoring tool as a patch: internal
-board, job and plan references, operator decision logs, measured performance figures and the history of internal runs
-removed. From `v0.9.3`, Arbor's own tree carries that cleanup, so no patch is applied. The tool still refuses a copy
-that has a job id, a dated operator log, an internal plan or a measured step time, or, in Arbor's own text, a date (bar
-timestamp examples), a run, round, generation or iteration id, or a run's counts, times or figures.
+This copy also carries a scrub on top of the tag. The vendoring tool applies it as a patch over its own output and
+refuses a tag the patch no longer fits, so a re-vendor keeps it.
+- **Up to `v0.9.2`, the patch removed:** internal board, job and plan references, operator decision logs, measured
+  performance figures and the history of internal runs.
+- **From `v0.9.3`, Arbor's own tree carries that cleanup.** The patch carries what this repository's public-repository
+  rule needs beyond it: part 9, the internal profiler and scheduler, our packs' names, the two defects, the settings,
+  and the remaining stories and figures of internal runs.
+
+The tool also refuses a copy that still has any of these:
+- a job id, a dated operator log, an internal plan or a measured step time;
+- in Arbor's own text: a date (bar timestamp examples), a run, round, generation or iteration id, or a run's counts,
+  times or figures;
+- from `v0.9.3`: the internal profiler or scheduler, part 9, the permission bypass, the defect's kernel, the study
+  skill, or our packs' and campaigns' names.
 
 Linting, formatting and code metrics skip this tree, as for the other vendored code (`pyproject.toml`: `[tool.ruff]`,
 `[tool.hyperloom.code_metrics]`, `[tool.bandit]`; `.pre-commit-config.yaml`'s formatting and lint hooks). Secret

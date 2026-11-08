@@ -44,11 +44,11 @@ first. It names the dossier's directory, the files to write, and the campaign's 
   dtypes per component at the served precision; parameter and KV bytes per
   token; the kernel that serves each component in this build (from part 8).
 - **From:** the model's config and code in the pinned tree, read whole (a
-  truncated print of `quantization_config` once hid most of a long exclude
+  truncated print of `quantization_config` can hide most of a long exclude
   list); the checkpoint's `config.json` as the container sees it, its
-  README, and the tensor dtypes in the safetensors headers (a router stored in
-  fp32 was reported as BF16). Write the routing function out, and the MoE's
-  dataflow in order, collectives included.
+  README, and the tensor dtypes in the safetensors headers (a reported dtype
+  can differ from the stored one). Write the routing function out, and the
+  MoE's dataflow in order, collectives included.
 - **Done when:** every component in part 7's profile maps to a row, and each
   row names the kernel that ran, not the one expected; and the parameter
   bytes per GPU reconcile with the server's own "Model loading took" line
@@ -86,13 +86,13 @@ first. It names the dossier's directory, the files to write, and the campaign's 
   tree (AITER, CK) is read where it decides dispatch (part 8). Then:
   - **Line numbers come only from numbered output** (`cat -n`, `grep -n`,
     `nl`). A file too large for one read is read in numbered ranges, never in
-    unnumbered `sed -n` slices: one campaign's reader did that, and most of
-    its citations into one model file were wrong, one past the end of the file.
+    unnumbered `sed -n` slices, whose citations come out wrong, some past the
+    end of the file.
   - **A reader's report is a lead, not a source.** Before a claim enters the
     dossier, the writer opens the cited range itself and confirms the named
-    class, function or line is there. One writer copied two reports without
-    opening a source file; one claimed a missing capability the code already
-    had, and it became a ranked direction.
+    class, function or line is there. A report copied without opening the
+    source can claim a missing capability the code already has, and it then
+    becomes a ranked direction.
   - **Write the part after the readers return**, not while one is still out.
   - **A partial part lists every area above it did not read**, not some of
     them.
@@ -152,26 +152,26 @@ first. It names the dossier's directory, the files to write, and the campaign's 
 
 ### 10. Earlier optimizations
 
-- **Answers:** what AMD, and the reference side, already did for this model
+- **Answers:** what AMD already did for this model
   or workload, so the campaign neither repeats it nor retries a known dead
   end.
 - **Inference:** InferenceX, from a clone with full history
   (`SemiAnalysisAI/InferenceX`):
   - `perf-changelog.yaml`: entries whose `config-keys` match the model on AMD
-    GPUs (`mi300x`, `mi325x`, `mi355x`) and on the reference platform, with
+    GPUs (`mi300x`, `mi325x`, `mi355x`), with
     their pull requests;
   - the recipe's history: `git log -p` on
     `benchmarks/single_node/<suite>/<model>_<gpu>_*.sh`, for image bumps,
     flags and kernel choices (a recipe's pull request that chose CK's a8w4
     MoE experts on MI355X is such an entry);
-  - the AMD recipe beside the reference platform's, and beside AMD's recipes
+  - the AMD recipe beside AMD's recipes
     for the same model on other frameworks (InferenceX often has ATOM, SGLang
     and vLLM recipes for one model on MI355X);
   - upstream pull requests to vLLM and AITER for the model's ops; the
     project's own ledger and campaign ledgers.
 - **Training:** InferenceX has no equivalent. Tell the user we want the
   history of AMD's optimizations for this workload, and ask where it is
-  (asks, item 2). If it is not available, write that and skip the part.
+  (asks, item 1). If it is not available, write that and skip the part.
 - **Contains:** per earlier change: what it did, where (pull request or
   commit), its measured effect and conditions (GPU, pins, operating point),
   and whether the baseline has it; the dead ends, with reasons.

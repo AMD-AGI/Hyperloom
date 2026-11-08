@@ -13,11 +13,11 @@ metadata:
 
 # Study the benchmark
 
-A campaign that does not know its benchmark keeps the wrong changes, and they are expensive. Each of these cost a campaign
-its result:
-- **Under the benchmark's correct rules,** a tuned config ran slower than the reference.
-- **Natural speculative acceptance** looked like a free P90 gain, where the benchmark fixes golden acceptance.
-- **A campaign scored output throughput** while the chart plots P90 interactivity, and its one adopted change lowered P90.
+A campaign that does not know its benchmark keeps the wrong changes, and they are expensive. Each of these can cost a
+campaign its result:
+- **Under the benchmark's correct rules,** a tuned config can run slower than the reference.
+- **Natural speculative acceptance** can look like a free P90 gain, where the benchmark fixes golden acceptance.
+- **Scoring output throughput** while the chart plots P90 interactivity can adopt a change that lowers P90.
 
 This skill writes down, once per benchmark, what every campaign on it must respect and measure. The dossier's part 4
 copies the rules in, and the gates check them.
@@ -37,8 +37,7 @@ its owners review changes to it.
   AgentX trace and client settings, `perf-changelog.yaml`, and the golden acceptance curve for speculative decoding.
 - **The host's rules,** when a host runs the campaign: the config's directives that start `Host rule`, copied
   verbatim.
-- **What campaigns on it learned:** [contract.md](contract.md), beside this file.
-  - **Its source:** earlier serving campaigns, and what failed in them.
+- **The measurement rules:** [contract.md](contract.md), beside this file.
   - **What to do with them:** each says what it guards against. Check whether it applies to this benchmark.
 
 ## What to write
@@ -73,7 +72,6 @@ rules:
 - **Its number:** the published one, with its source and date.
 - **How to measure it on the session's node,** under the rules above: the exact commands. A campaign measures it first
   and states its gain over it, not only over its own start.
-- **The same for the reference platform,** when one is published: a lead, never evidence for an AMD claim.
 
 ### `metric.md`: what to measure
 

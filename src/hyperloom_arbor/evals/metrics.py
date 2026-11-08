@@ -10,9 +10,9 @@ Four families, answering four different questions:
     million tokens, which is what actually separates two harnesses that reach
     the same throughput.
   * **Protocol adherence** — did the agent follow its own instructions? This
-    is the one that makes a prompt edit measurable instead of hopeful. Two
-    commits in this repo (`d0d0cfd`, `82053f4`) rewrote prompt text to force
-    Agent-tool dispatch with no way to check whether behavior changed;
+    is the one that makes a prompt edit measurable instead of hopeful. A
+    prompt edit that forces Agent-tool dispatch has no other way to check
+    whether behavior changed;
     ``agent_dispatch_rate`` and ``subagent_patch_applied_rate`` are that check.
   * **Pathology** — how did it waste time? Repeated changes, stalls, crash
     loops.
@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from collect import read_jsonl  # noqa: E402
 
 #: Server launches and kills, from hyperloom-optimize.md's gate step. Each
-#: restart costs 4–5 minutes on a large model, so the count is a real term in
+#: restart costs several minutes on a large model, so the count is a real term in
 #: the efficiency budget rather than trivia.
 _SERVER_START_RE = re.compile(r"vllm\.entrypoints|sglang\.launch_server|api_server")
 _SERVER_KILL_RE = re.compile(r"pkill\s+-f")
@@ -158,10 +158,10 @@ def outcome_metrics(steps: list[dict[str, Any]], session_json: dict[str, Any],
         delta = mark.get("delta_pct")
         if (spread is not None and isinstance(delta, (int, float))
                 and abs(delta) < spread):
-            # Carry the individual runs. The spread alone can mislead: in the
-            # observed case it was large only because a hot-cache run the agent
-            # had itself discarded as invalid was among the artifacts, while the
-            # the cold runs spread far less. A reader needs the values to judge
+            # Carry the individual runs. The spread alone can mislead: it is
+            # large when a hot-cache run the agent had itself discarded as
+            # invalid is among the artifacts, while the cold runs spread far
+            # less. A reader needs the values to judge
             # which comparison is the honest one.
             below_noise.append({"iteration": it, "delta_pct": delta,
                                 "noise_spread_pct": spread,
@@ -229,7 +229,7 @@ def efficiency_metrics(steps: list[dict[str, Any]],
         tok_cache_write += u.get("cache_creation_input_tokens") or 0
         # Reasoning volume survives even when reasoning text does not: models
         # that withhold the text still bill and report the tokens. This is the
-        # only reasoning-effort signal available on an Opus 5 run.
+        # only reasoning-effort signal available for such a model.
         tok_think += (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0
 
     thinking_steps = [s for s in steps if s.get("kind") == "thinking"]
@@ -292,7 +292,7 @@ def efficiency_metrics(steps: list[dict[str, Any]],
         "thinking_blocks": len(thinking_steps),
         "thinking_text_chars": thinking_text_chars,
         # 0 chars against a non-zero token count means the model withheld the
-        # text — see docs/archive/evals-README.md "Reasoning text". Not a collector fault.
+        # text. Not a collector fault.
         "thinking_text_captured": bool(thinking_text_chars) if tok_think else None,
         "cache_read_tokens": tok_cache_read,
         "cache_write_tokens": tok_cache_write,
@@ -352,9 +352,9 @@ def adherence_metrics(steps: list[dict[str, Any]]) -> dict[str, Any]:
     # "These two scripts are never modified by Claude" (README.md). Edits to the
     # measuring instrument deserve a first-class check rather than a reading of
     # the log, because they silently change what every throughput number means.
-    # Observed for real: on a cluster whose vLLM had moved benchmark_serving.py
-    # behind the CLI, the agent patched bench.sh to keep the benchmark runnable
-    # — a defensible fix, and still something a reviewer must be told about.
+    # Where vLLM has moved benchmark_serving.py behind the CLI, for example, an
+    # agent may patch bench.sh to keep the benchmark runnable — a defensible
+    # fix, and still something a reviewer must be told about.
     harness_edits = []
     for s in steps:
         if s.get("tool_name") not in ("Edit", "Write", "NotebookEdit"):
@@ -372,7 +372,7 @@ def adherence_metrics(steps: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
     # Subagents that actually applied a patch, vs. ones that only reported.
-    # This is exactly what commit 82053f4 tried to enforce by prompt.
+    # This is what prompt edits have tried to enforce.
     sub_steps = [s for s in steps if s.get("actor") == "subagent"]
     sub_edit_tools = sum(
         1 for s in sub_steps
@@ -559,7 +559,7 @@ def compute(session_dir: Path, price_in: float | None = None,
     artifacts = {int(k): v for k, v in (summary.get("artifacts") or {}).items()}
 
     # Two different "models" are in play and conflating them is easy: the one
-    # being optimized (Qwen3-32B) and the one doing the optimizing (Opus 5).
+    # being optimized (the served model) and the one doing the optimizing (the agent's).
     # Derived from the transcript rather than $ANTHROPIC_MODEL, which is unset
     # on this deployment — the default is picked per-model-tier instead.
     driving = Counter(s["model"] for s in steps if s.get("model"))

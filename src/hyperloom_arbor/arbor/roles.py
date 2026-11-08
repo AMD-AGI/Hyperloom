@@ -446,7 +446,7 @@ def worker_report(campaign, state, session_dir, order: dict, ended: str, detail:
                        for d in dirs if d.get("status") != directions.OPEN and since(d.get("closed_at"))],
             "open": [d.get("id") for d in dirs if d.get("status") == directions.OPEN],
             # The agent's own: not the map's, which are older or the order's (a lane a host seeds at the stretch's first
-            # iteration reads as added at it, as one run showed).
+            # iteration reads as added at it).
             "added": [d.get("id") for d in dirs if since(d.get("added_at")) and d.get("id") not in listed],
             "proposals": list(doc.get("proposals") or []),
         },

@@ -52,8 +52,8 @@ def parse_args(argv=None):
     p.add_argument("--conc", type=int, default=int(os.environ.get("CONC", "32")),
                    help="batch size; decode rows = conc x (1 + num_spec_tokens)")
     p.add_argument("--isl", type=int, default=int(os.environ.get("ISL", "32768")),
-                   help="live context per request. The campaign's traces reach ~996k; "
-                        "a share measured at 8k understates every context-scaling component")
+                   help="live context per request. A share measured at a short context "
+                        "(8k) understates every context-scaling component")
     p.add_argument("--phase", choices=["decode", "prefill"], default="decode")
     p.add_argument("--steps", type=int, default=16,
                    help="engine iterations to profile once started")
@@ -64,17 +64,17 @@ def parse_args(argv=None):
                    help="iterations to skip before profiling; -1 estimates from isl/chunk")
     p.add_argument("--chunked-prefill-size", type=int, default=16384)
     p.add_argument("--max-model-len", type=int,
-                   default=int(os.environ.get("SIKL_MAX_MODEL_LEN", "1048576")))
+                   default=int(os.environ.get("ARBOR_PROFILE_MAX_MODEL_LEN", "1048576")))
     p.add_argument("--num-spec-tokens", type=int,
-                   default=int(os.environ.get("SIKL_NUM_SPEC_TOKENS", "5")),
+                   default=int(os.environ.get("ARBOR_PROFILE_NUM_SPEC_TOKENS", "5")),
                    help="0 disables speculative decoding")
     p.add_argument("--gpu-mem-util", type=float, default=0.9)
     p.add_argument("--cudagraph-capture-size", type=int, default=1024)
     p.add_argument("--tokenizer-mode", default="deepseek_v41")
     p.add_argument("--trace-dir", default=os.environ.get(
         "ARBOR_TRACE_DIR", "/workspace/sessions/torch_profile"))
-    p.add_argument("--json", default=os.environ.get("SIKL_OUTPUT",
-                                                    "/tmp/sikl_decode_result.json"))
+    p.add_argument("--json", default=os.environ.get("ARBOR_PROFILE_OUTPUT",
+                                                    "/tmp/decode_profile_result.json"))
     p.add_argument("--top", type=int, default=25, help="ops to print")
     p.add_argument("--probe-only", action="store_true",
                    help="report engine profiling capabilities and exit; no GPU needed")
@@ -260,7 +260,7 @@ def main(argv=None) -> int:
         "max_num_seqs": max(args.conc, 32),
         "gpu_memory_utilization": args.gpu_mem_util,
         "tokenizer_mode": args.tokenizer_mode,
-        # Required for DSv4.1-Flash and missing from the original C8 config:
+        # Required for DSv4.1-Flash:
         # the recipe derives it as the first power of two >= max_num_seqs x
         # (1 + num_speculative_tokens). Top-level EngineArgs field that
         # forwards into CompilationConfig.

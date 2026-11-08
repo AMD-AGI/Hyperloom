@@ -81,4 +81,4 @@ Winning tile configs are written to the CSV the bench driver's `--deploy-csv` na
 in `validator/bench_moe_fp8fp4.py`).
 
 Use `--deploy --config-name <config> --tile-config <tile>` with the bench driver.
-The CSV is bind-mounted to the host git repo — changes are git-tracked automatically.
+If your setup bind-mounts the CSV from a git repository on the host, its changes are tracked there.

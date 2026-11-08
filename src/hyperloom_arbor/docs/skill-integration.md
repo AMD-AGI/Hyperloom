@@ -1,7 +1,7 @@
 # How skills fit into an Arbor campaign
 
 This page explains, for a person, how Arbor gives its agents their skills: the chapters a session runs through, how
-the dossier's work is split across six skills in those chapters, and where a new skill joins them. It is the picture;
+the dossier's work is split across five skills in those chapters, and where a new skill joins them. It is the picture;
 [skills.md](skills.md) is the reference for writing one, key by key.
 
 ## The short version
@@ -13,7 +13,7 @@ the dossier's work is split across six skills in those chapters, and where a new
   - Arbor **runs** it as a step of its chapter;
   - Arbor **triggers** it when something happens;
   - the agent of its chapters may **use** it when it chooses.
-- **The dossier,** which used to be one large skill an agent worked through in one go, is now six skills.
+- **The dossier,** which used to be one large skill an agent worked through in one go, is now five skills.
   - Each writes its own parts of the dossier, in its own chapter, in its own agent turn.
   - Arbor checks the files each one leaves.
 - **A new skill joins by declaring where it takes part.** Arbor places it, orders it, checks it and records it.
@@ -66,11 +66,11 @@ The difference that matters:
 
 ## The dossier, split
 
-A dossier is everything worth knowing before optimizing one model, workload and GPU: twelve numbered parts and an
+A dossier is everything worth knowing before optimizing one model, workload and GPU: eleven numbered parts and an
 index, under `docs/dossier/<name>/`. Until this change, one skill, now `dossier-v1`, held the whole procedure. One agent wrote
 every part in one long turn, and nothing but the agent's own diligence said which parts were done.
 
-Now six skills of the `dossier` family (`.claude/skills/dossier/`) share the work:
+Now five skills of the `dossier` family (`.claude/skills/dossier/`) share the work:
 
 ```mermaid
 flowchart LR
@@ -78,7 +78,7 @@ flowchart LR
     DI["dossier:discover<br/>parts 1-5, 10, index"]
   end
   subgraph measure ["map.measure"]
-    ME["dossier:measure<br/>parts 6-8, 12"] --> RE["dossier:reference<br/>part 9, opt-in"]
+    ME["dossier:measure<br/>parts 6-8, 12"]
   end
   subgraph directions ["map.directions"]
     DR["dossier:directions<br/>part 11, the map"]
@@ -90,7 +90,7 @@ flowchart LR
     UP["dossier:update<br/>NN.uK files"]
   end
   DI --> ME
-  RE --> DR
+  ME --> DR
   DR --> RD
   RD --> UP
 ```
@@ -98,8 +98,8 @@ flowchart LR
 - **The parts on disk did not change.** Same numbers and file names, so existing dossiers stay valid, and so does
   everything that reads them.
 - **The parts table,** `arbor/dossier/parts.py`, says which skill writes which part, and whether a dossier is whole
-  without it. Part 9 (a reference platform's traces, which only a person can supply) and part 12 (a fast bench that
-  may still be in progress) are optional. The checker, `python3 -m arbor.dossier.check`, reads the table.
+  without it. Part 12 (a fast bench that
+  may still be in progress) is optional. The checker, `python3 -m arbor.dossier.check`, reads the table.
 - **The iterating agent** gets `dossier:read`, which finds, reads and cites the dossier, instead of the writers' full
   procedure.
 - **The old skill, renamed `dossier-v1`,** stays for one release, for packs that still name it.

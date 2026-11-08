@@ -11,7 +11,7 @@ checklist on the dashboard.
 How it works:
 
 - The map lives in ``<session>/directions.json``. Only the harness writes it
-  (an agent hand-writing harness state once crashed every wake of a mesh); an
+  (state an agent writes by hand can crash every later wake); an
   older driver, which drops unknown ``session.json`` keys, leaves it alone.
 - The agent states the map with one ``DIRECTIONS: [...]`` line, and settles a
   direction with ``DIRECTION: {"id": ..., "status": ..., "why": ...}``. A

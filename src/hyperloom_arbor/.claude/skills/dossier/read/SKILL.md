@@ -14,7 +14,6 @@ part by part ([the rules](../shared/rules.md), relative to this skill's director
 it. The dossier plugin's other skills write it:
 - `dossier:discover`: parts 1-5 and 10;
 - `dossier:measure`: 6-8 and 12;
-- `dossier:reference`: 9;
 - `dossier:directions`: 11;
 - `dossier:update`: update rounds.
 
@@ -77,4 +76,4 @@ python3 -m arbor.dossier.check <reports dir> --round uK --no-index   # a round s
 - **What fails a file:** missing, a copied template, a status of "missing", or a round the index doesn't list.
 - **What it doesn't judge:** whether the content is right. That's what each part's "Done when" is for.
 
-Calibrated on a complete dossier: every real part was well above both minimums, while a template skeleton with one line filled in falls far below them. A FAIL names the file and why. Write or finish that file. A part that genuinely can't be filled says so in its own status line ("not available", with the reason); it isn't left out.
+The minimums sit well below a complete part and far above a template skeleton with one line filled in. A FAIL names the file and why. Write or finish that file. A part that genuinely can't be filled says so in its own status line ("not available", with the reason); it isn't left out.

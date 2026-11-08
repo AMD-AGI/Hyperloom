@@ -32,10 +32,9 @@ served code is laid out differently (a path split, a layer re-partitioned, a
 collective moved) and the step's time goes elsewhere, sometimes drastically.
 Part 7's rule (re-profile after a KEEP) keeps the profile current inside a
 campaign. It does not re-read the code or re-rank the directions, so the
-campaign goes on optimizing from a map of a tree that no longer exists. One
-campaign kept a series of changes, a sequence-parallel prefill path among
-them, and its stack was then merged onto another team's, which partitions the
-MoE pooler another way; the dossier it started from describes neither tree.
+campaign goes on optimizing from a map of a tree that no longer exists. After
+a merge onto a branch that partitions a layer another way, the dossier the
+campaign started from may describe neither tree.
 
 **When.** The operator decides, on signs like these:
 
@@ -137,11 +136,9 @@ measured. Then, on the served tree as it now is, in order:
      (config, tuning, framework, kernel), so a round that keeps working one
      level sees it.
 
-   The hand-off a restarted campaign reads is cut from this part. Across
-   earlier campaigns, several of the KEEPs that came from a handed ranking
-   reworked something an earlier map had killed. The core kernels there were
-   killed on floors that a later campaign found the kernel under test had
-   measured itself.
+   The hand-off a restarted campaign reads is cut from this part. A handed
+   ranking can rightly rework something an earlier map killed, when the kill
+   rested on a floor that the kernel under test had measured itself.
 5. **11.uK, the directions again**, as part 11, from 03.uK, 06.uK, 07.uK and
    10.uK, and the parts still current. A direction the campaign killed stays
    killed unless the new tree removes the reason it died or 10.uK marks it

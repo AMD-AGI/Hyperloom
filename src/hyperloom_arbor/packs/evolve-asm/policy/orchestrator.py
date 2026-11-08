@@ -196,10 +196,10 @@ Attack every axis:
    - Use v_cndmask_b32 instead of branch+mov sequences
 
 THINK BIG — NOP REMOVAL IS NOT ENOUGH:
-   Removing s_nop 0 is 1-2% gain at best. The real gains are:
+   Removing s_nop 0 is a small gain at best. The real gains are:
 
    A. VGPR REDUCTION: if VGPR=512, reducing to <256 unlocks 4 waves/SIMD (2x occupancy).
-      This alone can be 30-50% speedup. Reorder ALL instruction sequences to shorten live
+      This alone can be a large speedup. Reorder ALL instruction sequences to shorten live
       ranges. Rename registers to free them earlier. This takes real work.
 
    B. SOFTWARE PIPELINING: Issue buffer_load for tile K+1 BEFORE computing tile K.
@@ -210,12 +210,12 @@ THINK BIG — NOP REMOVAL IS NOT ENOUGH:
       accumulator pipeline. The 64-cycle MFMA latency window is where loads should go.
 
    D. LDS BANK CONFLICT ELIMINATION: Add stride padding, switch to ds_read_b128.
-      Bank conflicts serialize waves — eliminating them is 10-30% gain.
+      Bank conflicts serialize waves — eliminating them is a sizable gain.
 
    E. LOOP UNROLLING + PREFETCH DEPTH: Manually unroll the K-loop 2x or 4x to expose
       more ILP. Double-buffer: keep two tiles in flight at once.
 
-   NOP REMOVAL, s_setprio, and waitcnt loosening are SMALL wins (<3% each).
+   NOP REMOVAL, s_setprio, and waitcnt loosening are SMALL wins.
    Do those AFTER you attempt A-E. Focus on structural changes first.
    A 30-min session that reduces VGPR from 512 to 200 is worth 10 sessions of NOP removal.
 
@@ -691,10 +691,10 @@ Vague "kernel is HBM-bound" answers are not acceptable. Show the work.
     # ------------------------------------------------------------------
 
     def _git_commit_keep(self, candidate: Candidate) -> None:
-        """Stage all changes in the evolve repository (_EVOLVE_REPO) and commit."""
+        """Stage all changes in the repository at _EVOLVE_REPO and commit."""
         repo = _EVOLVE_REPO
         if not repo.exists():
-            log.warning("Evolve repo not found at %s — skipping commit.", repo)
+            log.warning("Git repository not found at %s — skipping commit.", repo)
             return
         try:
             # Skip files written by container as root (permission denied on git add)
@@ -831,7 +831,7 @@ def _parse_result_block(output: str) -> Optional[Dict[str, Any]]:
     # Take the MINIMUM (best candidate) the island found this iteration.
     gpu_us_matches = re.findall(r"gpu_us[=:\s]+([\d.]+)", output)
     if not gpu_us_matches:
-        # Also accept µs pattern: "7.33 µs" or "22.37µs"
+        # Also accept µs pattern: "<n> µs" or "<n>µs"
         gpu_us_matches = re.findall(r"([\d.]+)\s*µs", output)
     if gpu_us_matches:
         us_values = [float(x) for x in gpu_us_matches if 5.0 < float(x) < 100_000]

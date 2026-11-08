@@ -135,8 +135,8 @@ class FrameworkAdapter:
         silently gets the wrong devices. So HIP_VISIBLE_DEVICES is set to the identity
         on ROCR's list, "0,..,n-1", and a configured one is replaced. It must be set:
         Ray, which vLLM 0.27 imports at start, refuses ROCR_VISIBLE_DEVICES without it
-        ("Please use HIP_VISIBLE_DEVICES instead of ROCR_VISIBLE_DEVICES"), and every
-        server the harness itself started failed so (every A/B of one run).
+        ("Please use HIP_VISIBLE_DEVICES instead of ROCR_VISIBLE_DEVICES"), and a
+        server the harness itself starts fails so.
         """
         if not gpu_ids:
             return env

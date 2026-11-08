@@ -65,7 +65,7 @@ def _fold(summary: str, body: str, lang: str = "") -> str:
 def build_agent_index(steps: list[dict[str, Any]]) -> dict[str, int]:
     """Map each Agent dispatch's tool_use_id to a small stable ordinal.
 
-    With many dispatches and over a thousand subagent steps in one run, "this line came
+    With many dispatches and many subagent steps in a run, "this line came
     from a subagent" is not enough to read by — you need to know *which*.
     """
     index: dict[str, int] = {}

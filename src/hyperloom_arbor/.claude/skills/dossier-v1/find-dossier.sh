@@ -56,9 +56,9 @@ if [ -d "$share_root/projects" ]; then
         || echo "no dossier on the share: $share_root/projects (looked for */*/*/knowledge/dossier/README.md)"
 else
     host=${ARBOR_SHARE_HOST:-arbor-share}
-    # The gateway takes commands, not piped stdin, so the listing travels inside
-    # the command. It also exits 0 whatever happened, so a marker, not the exit
-    # status, says the listing ran.
+    # Some ssh gateways take commands, not piped stdin, so the listing travels
+    # inside the command. Some also exit 0 whatever happened, so a marker, not
+    # the exit status, says the listing ran.
     b64=$(printf '%s' "$report" | base64 | tr -d '\n')
     out=$(timeout 90 ssh -o BatchMode=yes -o ConnectTimeout=15 "$host" \
         "echo __ARBOR_SHARE__; echo $b64 | base64 -d | bash -s -- $share_glob" 2>&1 | tr -d '\r')

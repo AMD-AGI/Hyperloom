@@ -176,7 +176,7 @@ def _log_block(prefix: str, block) -> None:
 def _fix_api_env() -> None:
     """Ensure ANTHROPIC_BASE_URL points to a live gateway port.
 
-    The shell may have a stale port (e.g. 9102 from a dead proxy).
+    The shell may have a stale port (one left by a dead local proxy, say).
     Probe known ports and fix os.environ before the SDK inherits it.
     """
     import os, urllib.request
@@ -216,19 +216,16 @@ def _report_agent_tmp_health() -> None:
     """Log the state of the directory the agent CLI needs, BEFORE it runs.
 
     The CLI creates ``/tmp/claude-<uid>`` at startup and dies instantly if it
-    cannot. Campaigns have aborted on exactly that, and every time the
-    evidence had to be reconstructed after the fact from a node that had
-    already been released. One cheap line per iteration turns that into a
-    record.
+    cannot. Without a record, the evidence has to be reconstructed after the
+    fact from a node that may already be released. One cheap line per
+    iteration turns that into a record.
 
     WHAT THE ERRNO MEANS HERE, because it is the diagnosis. Where Slurm runs
     ``JobContainerType=job_container/tmpfs``, /tmp is a bind mount from a
     PER-JOB path (``/slurm/<jobid>/.<jobid>/_tmp``, as findmnt on a job
     shows). If that bind SOURCE is removed while the mount
     stays, every lookup under /tmp returns ENOENT rather than ENOSPC or
-    EACCES -- which matches the observed failure exactly, and matches the
-    campaign's own report that its baseline artifacts under /tmp had been
-    reaped. So: ENOENT here points at the mount, a full filesystem would say
+    EACCES. So: ENOENT here points at the mount, a full filesystem would say
     ENOSPC, and permissions would say EACCES. Record which one it actually is.
 
     This never raises. A health probe that can break the loop it is protecting
@@ -265,11 +262,9 @@ class AgentLaunchError(RuntimeError):
         Command failed with exit code 1 (exit code: 1)
         Error output: Check stderr output for details
 
-    -- a message that names a stream nobody was reading. Several campaigns have
-    died this way, costing hours of exclusive GPU time, and each
-    time the diagnosis had to be reconstructed from a single line that happened
-    to leak into the driver's own stdout. The real cause was one `mkdir` errno
-    that was being thrown away.
+    -- a message that names a stream nobody was reading. The diagnosis then
+    has to be reconstructed from whatever line leaks into the driver's own
+    stdout, while the real cause (one `mkdir` errno, for example) is thrown away.
 
     A failure that is going to abort the campaign should at minimum say what it
     was. The stderr callback below captures it; this exception carries it.
@@ -517,11 +512,10 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
         raise err
 
     # NEWLINE, not "". Separate text blocks are separate chunks and a block does
-    # not reliably end in one. Gluing them ran the last line of one block into
-    # the first line of the next, so a `CLASS: PROBE` that started its own block
-    # landed MID-LINE -- invisible to the anchored parsers below. One iteration
-    # declared CLASS: PROBE, was read as the default B, missed the read-only
-    # probe path, and was recorded as "REVERT: no changes".
+    # not reliably end in one. Gluing them runs the last line of one block into
+    # the first line of the next, so a `CLASS: PROBE` that starts its own block
+    # lands MID-LINE -- invisible to the anchored parsers below, which then read
+    # the default B, miss the read-only probe path, and record "REVERT: no changes".
     return "\n".join(text_parts)
 
 
@@ -531,8 +525,8 @@ def _run_phase(coro, phase: str, config: dict):
     Standalone: exactly that, with no timeout. Component mode: bounded by
     component.phase_seconds, the phase's cap or the time left before the deadline,
     whichever is less; past it the turn is cancelled and PhaseTimeout raised, which
-    the caller books as NOT MEASURED. MB saw one unbounded agent turn hang for 511
-    minutes, and a session iterating an hour after its deadline.
+    the caller books as NOT MEASURED. Unbounded, one agent turn can hang for hours,
+    and a session can keep iterating past its deadline.
     """
     timeout = component.phase_seconds(config, phase)
     if timeout is None:
@@ -612,8 +606,8 @@ def _last_verdict(output: str, *tokens: str) -> tuple[str, str] | None:
 
     A verdict is a line of its own. `_run_claude` returns every text block of the turn
     joined, so a token mentioned in passing ("once it is healthy I'll report SERVER_READY
-    or SERVER_FAILED") is not one: a substring match on that interim status reverted a
-    correct, much faster kernel under a host.
+    or SERVER_FAILED") is not one: a substring match on that interim status can revert a
+    correct, faster change.
     Markdown around the line (backticks, bold, a quote or list marker) is ignored, and the
     token must end there (``METRICS`` is not ``METRIC``).
     """
@@ -653,8 +647,7 @@ def _extract_change(output: str) -> str | None:
     Agents decorate it the way they decorate INTENT (`**DONE: ...**`,
     `- DONE: ...`, `**DONE:** ...`), and _extract_class already reads through
     that. This did not: a decorated line parsed as nothing, and the iteration
-    was recorded as "iteration N". Campaigns' first iterations lost their
-    change text that way.
+    was recorded as "iteration N".
     """
     for line in reversed(output.strip().splitlines()):
         line = line.strip().strip(_MARKDOWN_DECORATION)
@@ -780,12 +773,10 @@ def _synthesize_dead_end(campaign, iteration: int, change: str, reason: str,
 
     A REVERT that emits no `LEDGER:` line teaches the campaign nothing: the
     change is undone, the history row scrolls out of the window after ten more
-    iterations, and the next agent is free to try the same thing. One campaign
-    is the argument for this — three of its iterations were reverted,
-    and the discovery that all three were NULL (the bar was the maximum of its
-    own cohort, unreachable by most identical runs) was possible only
-    because that agent happened to write ledger entries voluntarily. Nothing in
-    the harness required it.
+    iterations, and the next agent is free to try the same thing. Only a ledger
+    entry lets a later reader find that reverted iterations were NULL (a bar
+    set at the maximum of its own cohort is unreachable by most identical runs),
+    and nothing else in the harness requires one.
 
     This record is deliberately worse than one the agent writes. It knows the
     number and the gate's reason; it does not know what the agent now believes
@@ -863,13 +854,11 @@ def _finalize_iteration(
     the check off. ``scope`` is the iteration's image and operating point
     (arbor/measure/scope.py), stamped on the dead ends it records.
     """
-    # save_patch is used further down to archive a KEEP/PROBE's diff. It was
-    # never imported, so the call raised NameError -- and the `except` around it
-    # reinterprets ANY failure as "downgrade to REVERT". An iteration therefore
-    # recorded REVERT even though the gate returned PROBE and the critic upheld
-    # it. Same shape as the snapshot_digests NameError that corrupted the one
-    # before: an undefined name inside a try whose handler turns a crash into a
-    # verdict.
+    # save_patch is used further down to archive a KEEP/PROBE's diff. Import it
+    # here: the `except` around that call reinterprets ANY failure as "downgrade
+    # to REVERT", so a NameError there would record REVERT even when the gate
+    # returned PROBE and the critic upheld it. An undefined name inside a try
+    # whose handler turns a crash into a verdict is the hazard.
     from arbor.execute.workspace import git, save_landed_patch, save_patch, save_scratch_patch
     from arbor.measure import armcheck, scope as _scope
     from arbor.measure.gate import run_gate
@@ -1092,7 +1081,7 @@ def _finalize_iteration(
 
     # ── Component mode: the short-prompt check at a KEEP ────────────────────
     # A second process of the same tree, probed and compared with the first: a
-    # disagreement above the session's floor is the defect GSM8K once did not see
+    # disagreement above the session's floor is a defect GSM8K can miss
     # under a host (arbor/measure/short_prompts.py). One that cannot finish refuses
     # nothing; the host re-gates every KEEP.
     if decision == "KEEP" and component.is_component(campaign.config):
@@ -1141,16 +1130,10 @@ def _finalize_iteration(
 
     if decision in ("KEEP", "PROBE"):
         # Archiving the diff is BOOKKEEPING, not judgement. It must never
-        # overturn a verdict the gate reached and the critic upheld -- and it has
-        # now done so three times:
-        #   NameError: snapshot_digests   -> spurious REVERT
-        #   NameError: save_patch          -> spurious REVERT
-        #   save_patch: "not a git repository" (the server-start step ran
-        #     `docker rm -f` + `docker run`, recreating the container and
-        #     destroying the repo mid-iteration) -> spurious REVERT
-        # Each time the pattern was identical: an infrastructure failure inside a
-        # try whose handler rewrites it as a scientific conclusion. Record the
-        # failure, keep the verdict.
+        # overturn a verdict the gate reached and the critic upheld: an
+        # infrastructure failure here (an undefined name, or a container
+        # recreated mid-iteration that took its repository with it) is not a
+        # scientific conclusion. Record the failure, keep the verdict.
         try:
             save_patch(container, workspace, str(iter_dir / "patch.diff"))
         except Exception as e:
@@ -1178,7 +1161,7 @@ def _finalize_iteration(
                   f"tree is NOT recoverable if this container dies",
                   file=sys.stderr)
         # The other editable packages (AITER) beside it: landed.patch is the workspace
-        # only, and a KEEP's AITER edit the agent never wrote into landed_aiter.py died
+        # only, and a KEEP's AITER edit the agent never wrote into landed_aiter.py would die
         # with its container (arbor/execute/packages.py). Bookkeeping too.
         try:
             from arbor.execute import packages as _packages
@@ -1315,7 +1298,7 @@ def _extract_class(output: str) -> str:
     LEARN**`, `- CLASS: A`, or a block boundary that glued it mid-line. Falling
     back because of formatting silently applies the STRICTEST bar to work that
     declared an evidence-gated intent, which is the worst direction for the
-    error to go: it cost one iteration its probe path and recorded a
+    error to go: it costs the iteration its probe path and records a
     knowledge-producing iteration as a REVERT.
     """
     lines = list(reversed(output.strip().splitlines()))
@@ -1337,7 +1320,7 @@ def _as_claim_class(name: str | None) -> str:
 
     Returning the alias rather than the new name is deliberate and permanent:
     `claim_class` is what lands in session.json, and
-    check_review_consistency.py reads those strings out of four archived
+    check_review_consistency.py reads those strings out of archived
     campaigns. The rename is a change of what the agent WRITES, not of what the
     campaign RECORDS.
     """
@@ -1345,11 +1328,11 @@ def _as_claim_class(name: str | None) -> str:
 
 
 # Paths a read-only PROBE may touch. Anything here is incapable of changing
-# serving behaviour, so the 30-minute server run buys nothing and is skipped.
+# serving behaviour, so the server run buys nothing and is skipped.
 # `arbor/config.json` is written by the HARNESS on every iteration, not by the
-# agent. Counting it as a non-inert path forced every probe through a full
-# ~45-minute server+bench cycle, making a read-only probe cost exactly as much
-# as a real change — part of why one campaign stopped probing.
+# agent. Counting it as a non-inert path would force every probe through a full
+# server+bench cycle, making a read-only probe cost exactly as much
+# as a real change.
 READONLY_PROBE_PREFIXES = ("eval/", "knowledge/", "ledger.jsonl", "arbor/")
 
 
@@ -1363,14 +1346,10 @@ def _out_of_tree_artifacts(pack_dir, since_ts: float) -> list[tuple[Path, int]]:
     These live on SHARED STORAGE, outside the container's git workspace, so they
     never appear in the diff the critic reviews.
 
-    One campaign's iteration is why this exists. The agent found a genuine ROCm
-    feature gap, wrote a 22 KB grouped ``tl.dot_scaled`` MXFP8 BMM evaluator,
-    swept it against the BF16 einsum on real weights, and recorded seven ledger
-    findings. The gate returned PROBE. The critic then reverted it with "the
-    diff does not implement the claim" -- correctly, on the evidence it was
-    shown, because the only thing in the workspace diff was arbor/config.json.
-    A probe whose entire deliverable is an instrument is structurally invisible
-    to the critic without this, and the pack was rewritten to ENCOURAGE probes.
+    Why: a probe whose whole deliverable is an instrument (an evaluator, a sweep,
+    its ledger findings) leaves nothing in the workspace diff, so the critic
+    would revert it as a diff that does not implement its claim. Listing these
+    files makes such a probe visible to the critic.
     """
     found: list[tuple[Path, int]] = []
     for sub in OUT_OF_TREE_ARTIFACT_DIRS:
@@ -1556,9 +1535,8 @@ def _server_launch_cmd(config: dict, server_flags: str | None = None,
                        server_env: dict | None = None) -> str:
     """Build the framework-appropriate server launch command.
 
-    This used to hardcode `python3 -m sglang.launch_server`, so a campaign with
-    `"framework": "vllm"` failed at server start on every
-    iteration. The framework is declared in the config; honour it. The command
+    The framework is declared in the config (`"framework": "vllm"`, say); honour
+    it, never a hardcoded `python3 -m sglang.launch_server`. The command
     itself is that framework's adapter's (arbor/frameworks/).
 
     `server_flags` defaults to the LIVE flags (workspace arbor/config.json over
@@ -1576,7 +1554,7 @@ def _server_launch_cmd(config: dict, server_flags: str | None = None,
     change never reached it (arbor/measure/armcheck.py records what does).
 
     In component mode (arbor/component.py) the command never carries a GPU mask
-    (the host sets ROCR_/HIP_/CUDA_VISIBLE_DEVICES; MB found Arbor's servers on
+    (the host sets ROCR_/HIP_/CUDA_VISIBLE_DEVICES, so a server never lands on
     cards outside its lease), starts the server in a process group of its own,
     and writes its PID and log to ``<session>/server/``: what the harness stops is
     that group and nothing else.
@@ -1797,9 +1775,9 @@ def _component_kill(pid_file) -> str:
 def _component_rules(config: dict) -> str:
     """What every agent is told in component mode (docs/component-mode.md).
 
-    Each rule is one of MB's sandbox findings: Arbor stopped MB's servers with a
-    pattern pkill, ran on cards outside its lease, and loaded kernel tables from
-    paths outside the workspace, which the host never merges.
+    Each rule closes a failure a host's sandbox guards against: stopping the host's
+    servers with a pattern pkill, running on cards outside the lease, and loading
+    kernel tables from paths outside the workspace, which the host never merges.
     """
     session = component.session_root(config)
     pid_file, _ = component.server_paths(session)
@@ -1876,11 +1854,11 @@ def _stop_server(config: dict, container: str, gpu_ids, **kw) -> None:
     Standalone: preflight.stop_server, every framework's pattern swept in the
     container and a wait for the GPUs to empty. Component mode: the server this
     harness launched and only it, by the process group in its PID file
-    (preflight.stop_own_server). Inside MB, the sweep's pattern pkill stopped MB's
-    own servers, and its VRAM wait counted the host's memory as ours.
+    (preflight.stop_own_server). Inside MB, the sweep's pattern pkill would stop MB's
+    own servers, and its VRAM wait would count the host's memory as ours.
 
     ``gpu_ids`` as a config gives it ("0,1") or as a list: the VRAM wait tests each card
-    with ``in``, and a string made every A/B of one run fail before its first
+    with ``in``, and a string makes every A/B fail before its first
     server ("'in <string>' requires string as left operand, not int").
     """
     from arbor.execute import preflight
@@ -2226,11 +2204,11 @@ def run_iteration(
         # iteration restarted the server, ran a full bench against unchanged
         # code, and recorded "REVERT: no changes" — indistinguishable in
         # session.json from "the agent wrote something that regressed". It then
-        # cooled down and did it again. Once a campaign's node lost /tmp, the
-        # agent died in milliseconds with
+        # cooled down and did it again. When a node loses /tmp, the agent dies
+        # in milliseconds with
         #     ENOENT: no such file or directory, mkdir '/tmp/claude-<pid>'
-        # and the loop booked a REVERT on every iteration within minutes,
-        # burning hours of exclusive GPU time and manufacturing a long
+        # and the loop would book a REVERT on every iteration within minutes,
+        # burning exclusive GPU time and manufacturing a long
         # null_streak that reads exactly like diminishing returns.
         #
         # This is the same category as a bench that never ran, which
@@ -2345,7 +2323,7 @@ def run_iteration(
 
     # ── Step 3b: Read-only probe short-circuit ──────────────────────────────
     # A probe confined to eval/ and the ledger cannot change what the server
-    # does, so the 30-minute server run would measure nothing. This is the
+    # does, so a server run would measure nothing. This is the
     # pack's own rule made mechanical: search in eval/, confirm on the server.
     #
     # Read off the registry rather than compared to a literal: WHICH intents may
@@ -2430,8 +2408,8 @@ def run_iteration(
         f"only. The container filesystem holds the git repository at `{workspace}` "
         f"AND the source change you are about to measure. Recreating the container "
         f"resets both to the image, so the bench would silently measure UNMODIFIED "
-        f"code and report it as your change's result. This has already happened once "
-        f"and cost an iteration. If the container is genuinely gone or unhealthy, stop "
+        f"code and report it as your change's result. If the container is genuinely "
+        f"gone or unhealthy, stop "
         f"and say SERVER_FAILED: container unusable — do not rebuild it yourself.\n\n"
         f"Container: `{container}`\n"
         f"Port: {port}\n"
@@ -2528,12 +2506,8 @@ def run_iteration(
     # directory in its own writable layer and write there. The host sees
     # nothing, the driver falls back to parsing the agent's METRIC: line, and
     # everything except the primary metric is lost: no agg json (so
-    # duration_seconds cannot be checked, which is the campaign's first
-    # integrity rule) and no secondary metric (so the two-axis gate is inert).
-    #
-    # One run's iteration gained more on the second axis than on throughput,
-    # and the gate never saw it; an earlier run lost several iterations the
-    # same way.
+    # duration_seconds cannot be checked, which is an integrity
+    # rule) and no secondary metric (so the two-axis gate is inert).
     comp = component.is_component(config)
     session_mount = config.get("session_mount", "/workspace/sessions")
     if comp:
@@ -2565,13 +2539,12 @@ def run_iteration(
     for k, v in (component.strip_masks(server_env) if comp else server_env).items():
         bench_env[k] = str(v)
 
-    # Every key, one -e per line. This used to be `list(bench_env.items())[:8]`,
-    # which silently dropped everything after the 8th entry -- and since
-    # server_env is merged in AFTER the 7 base keys, the cut fell immediately
-    # after ROCR_VISIBLE_DEVICES. DURATION never reached bench_agentx.sh, which
-    # then fell back to its own default of 3600s: every iteration ran a 60-minute
-    # replay instead of the configured 600s, and was measured under different
-    # conditions than the baseline. A truncated env is never the right answer --
+    # Every key, one -e per line. A cut list (`list(bench_env.items())[:8]`, say)
+    # silently drops everything after its last entry -- and since server_env is
+    # merged in AFTER the 7 base keys, a bench setting such as DURATION never
+    # reaches the bench script, which then runs on its own default and is
+    # measured under different conditions than the baseline. A truncated env
+    # is never the right answer --
     # if a command is too long, wrap it, do not silently shorten what it says.
     bench_env_flags = " \\\n     ".join(f'-e {k}="{v}"' for k, v in bench_env.items())
     # The bench's runner and where it runs: `docker exec -e K="v" ... <container> bash`,
@@ -2584,8 +2557,7 @@ def run_iteration(
     # REPEATED MEASUREMENT. `bench_repeats` > 1 runs the replay N times and
     # books the MEAN, because a single replay is not a reliable estimate of this
     # workload: re-measuring a byte-identical tree on its own node, same code
-    # path, same DURATION, differed by a few percent, as did one campaign's own
-    # later measurements. Arbor books best_metric as a
+    # path, same DURATION, can differ by a few percent. Arbor books best_metric as a
     # running MAX, so with noise that large the bar lands on the luckiest draw
     # and nothing afterwards can clear it.
     #
@@ -2738,7 +2710,7 @@ def run_iteration(
     # ── Step 6: Harness runs correctness ────────────────────────────────────
     component.phase("correctness")   # the heartbeat's, in component mode
     # Component mode bounds it like every other phase: the pack's bench_timeout alone
-    # (40 minutes for one pack) let it run past the host's deadline. Cut off, it books nothing.
+    # could let it run past the host's deadline. Cut off, it books nothing.
     cap = component.phase_seconds(config, "correctness")
     if cap is not None and cap <= 0:
         return _not_measured(state, session_dir_p, iteration, change,

@@ -302,10 +302,9 @@ def run_gate(
     if not correctness_passed:
         err = correctness_result.get("error", "unknown")
         if _correctness_is_infrastructure(err):
-            # The server was never reachable under the name the check used.
-            # A working FP8 o-projection port was lost, twice over, to
-            # exactly this: a 404 for `/model_weights` against a Rust frontend
-            # that only knew the HF name.
+            # The server was never reachable under the name the check used
+            # (a 404 for a model path against a frontend that only knows the
+            # HF name, say): no evidence about the change.
             return _not_measured(
                 f"correctness could not reach the model ({err}) — harness "
                 f"failure, iteration NOT counted",
@@ -411,7 +410,7 @@ def run_gate(
     # The leaderboard this campaign targets is a throughput-vs-interactivity
     # CURVE. A change that buys one axis by spending the other is a new point
     # on the frontier, not a failure — a single-axis gate cannot see that and
-    # reverted the same FP8 o-projection port twice.
+    # would revert it.
     both_ok = pri.ok and sec.ok
     is_frontier = (pri.gain and not sec.ok) or (sec.gain and not pri.ok)
     delta_s = f"{pri.delta:+.1f}%{sec.note()}"
@@ -421,8 +420,8 @@ def run_gate(
     # primary clears `threshold_rel`, is_frontier fires and the band is never
     # consulted, so a +1% primary win could be kept at ANY secondary cost.
     # That is the right default for a genuine Pareto curve — the frontier
-    # branch exists because a single-axis gate reverted the same FP8
-    # o-projection port twice — but it is unbounded, and an unbounded trade is
+    # branch exists because a single-axis gate cannot see one — but it is
+    # unbounded, and an unbounded trade is
     # indistinguishable from a broken measurement.
     #
     # The budget is EARNED, not flat. A trade may spend

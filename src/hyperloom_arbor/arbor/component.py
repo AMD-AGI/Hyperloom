@@ -6,10 +6,10 @@ host owns them: Hyperloom's multibranch (MB) today, which runs Arbor as an
 merges what Arbor keeps, and polls session.json's KEEP lessons as the keep
 signal (docs/component-mode.md, the design and its decisions).
 
-MB built a sandbox around what standalone Arbor did wrong inside it: Arbor
-stopped MB's servers with a pattern `pkill`, ran on cards outside its lease,
-iterated an hour after the session died, hung for hours, and loaded kernel
-tables from paths outside the workspace.
+MB runs Arbor in a sandbox, against what standalone Arbor would do wrong inside
+it: stop the host's servers with a pattern `pkill`, run on cards outside its
+lease, iterate past the session's end, hang, and load kernel tables from paths
+outside the workspace.
 This module is the part of the fix that is not the serving path:
 
 - **the switch**: ``"mode": "standalone" | "component"`` and the ``"component"``
@@ -127,8 +127,8 @@ STOP_AT = ("map",)
 # without the key, the first commit is the base (workspace.base_commit).
 _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
-# Each phase's cap, in minutes (``component.phase_minutes`` overrides). The
-# 511-minute hang MB saw was one agent turn with no bound at all.
+# Each phase's cap, in minutes (``component.phase_minutes`` overrides): an agent
+# turn with no bound at all can hang for hours.
 PHASE_MINUTES = {"agent": 90, "server": 45, "bench": 60, "critic": 15, "correctness": 30,
                  "short_prompts": 10}
 
@@ -775,7 +775,7 @@ def server_paths(session_dir) -> tuple[Path, Path]:
 
 def strip_masks(env: dict | None) -> dict:
     """``env`` without ROCR_/HIP_/CUDA_VISIBLE_DEVICES: the host sets them, never Arbor
-    (MB found Arbor's servers on cards outside its lease)."""
+    (a server must never land on cards outside its lease)."""
     return {k: v for k, v in (env or {}).items() if k not in MASK_KEYS}
 
 
@@ -1000,7 +1000,7 @@ def _copy_tables(server_env: dict, workspace: str, dest: Path, say=log,
     (``tables``: {VAR: {path, file, sha256, bytes}}, ``tables_outside_workspace``:
     {VAR: path}). A host uploads tables/ as kernel artifacts, so a table need not sit
     in the worktree; one outside it (symlinks resolved) is still flagged, since a host
-    that loads only the worktree does not find it (MB's sandbox finding). A file over
+    that loads only the worktree does not find it. A file over
     TABLE_MAX_BYTES is listed with ``skipped``, not copied.
 
     A value that is a ``:``-separated list (aiter's tables: MB gives the start's as its
@@ -1137,7 +1137,7 @@ def snapshot_keep(config, session_dir, *, container: str, workspace: str, number
     - Both patches use the served pathspec (no probes, logs, bytecode or arbor/config.json),
       byte for byte as git wrote them (``workspace._write_diff``).
     - ``left_out``: a file over ``workspace.OVERSIZE_BYTES`` stays out of both patches and
-      is named here, with its size (a GPU core dump once rode in one).
+      is named here, with its size (a GPU core dump, for example).
     - config.json is the live arbor/config.json, what was measured (the server and
       bench agents may edit it after the commit), without the GPU masks the launch drops.
     - ``retracts`` (``{iteration, keep, finding}``) makes it a retraction's snapshot

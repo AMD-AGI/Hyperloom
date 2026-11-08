@@ -1,10 +1,9 @@
 """The end of an optimization round: a same-node A/B, then the next round.
 
 The target is not a STOP: it triggers an A/B and the next round of optimization, and
-so does the "every plan item has a verdict" trigger. A campaign once stopped at its
-early-exit target while its last KEEP still gained, and the number that stopped it was
-the chained first-node scale (arbor/rebaseline.py), each KEEP's single replay carried
-forward: an upper bound.
+so does the "every plan item has a verdict" trigger. An early-exit target would stop a
+campaign while its last KEEP still gains, on a number that is the chained first-node
+scale (arbor/rebaseline.py), each KEEP's single replay carried forward: an upper bound.
 
 A round ends on either trigger:
 

@@ -1,15 +1,15 @@
 """compare.py — rank many sessions side by side.
 
-The campaign table in docs/archive/configs-mi355x-README.md compares four models on one
-number each. This produces the same table with the process columns attached,
-so runs that reached the same gain can be told apart by what they spent and
-whether they followed the protocol to get there.
+A campaign table that compares models on one number each cannot tell apart runs
+that reached the same gain. This produces such a table with the process columns
+attached, so those runs can be told apart by what they spent and whether they
+followed the protocol to get there.
 
 Grouping is by whatever you ask for — ``--group-by model`` for the campaign
 table, ``--group-by arbor_git_sha`` to A/B a prompt edit across the same model,
 ``--group-by orchestrator_model`` to A/B the Claude model doing the driving.
-Note that ``model`` is the model being *optimized* (Qwen3-32B) while
-``orchestrator_model`` is the one *doing* the optimizing (claude-opus-5).
+Note that ``model`` is the model being *optimized* (the served model) while
+``orchestrator_model`` is the one *doing* the optimizing (the agent's model).
 Because ``meta.json`` records the Arbor commit that produced each session, a
 prompt change is a groupable variable rather than something you have to
 remember you made.
@@ -90,8 +90,8 @@ def build_table(sessions: list[Path], price_in: float | None,
         except Exception as exc:
             print(f"[arbor-trace] skipped {s}: {exc}", file=sys.stderr)
 
-    # Session directories are UTC timestamps, so a campaign root that ran four
-    # models the same night yields four identical labels. Qualify with the
+    # Session directories are UTC timestamps, so several models started
+    # together under one campaign root can yield identical labels. Qualify with the
     # parent only when the bare name is ambiguous.
     counts: dict[str, int] = {}
     for m in metrics:

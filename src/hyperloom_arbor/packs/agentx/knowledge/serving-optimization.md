@@ -1,17 +1,9 @@
 # Serving Optimization on MI355X
 
-## SIKL decode profile — run this before every hypothesis
+## Profile before every hypothesis
 
-**Before proposing any change, run the SIKL decode profile to know where time is actually going.**
-
-```bash
-# SIKL requires MODEL_PATH and TP — always set them explicitly:
-docker exec -e MODEL_PATH=/models/<model> -e TP=4 \
-  $CONTAINER bash /workspace/Arbor/packs/agentx/validator/sikl_profile_decode.sh
-# Reads: /tmp/sikl_decode_result.json
-# Shows: per-op GPU time breakdown for the model's decode step
-# Note: SIKL starts its own server instance, so run it BEFORE the bench server is up
-```
+**Before proposing any change, profile the decode step to know where time is actually going**: the `profiler`
+skill gives the per-op GPU time breakdown.
 
 **To validate server flags before committing:** run `docker exec $CONTAINER python3 -m sglang.launch_server --help 2>&1 | grep <flag>` to confirm a flag is valid in this build.
 

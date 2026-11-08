@@ -105,19 +105,18 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out.
 ## Several operating points
 
 Each concurrency is its own MB session: its own PRELUDE, Arbor(s), map from its own dossier pass, gate, integration
-and FINAL. No map is split across the points. `hyperloom-multibranch points` runs them in two stages, so no node waits
-for a person:
+and FINAL. No map is split across the points. For a review that keeps no node waiting for a person, a point runs in
+two sessions:
 
-1. **`points map`:** each point runs `run --stop-after-map`. That is PRELUDE and the map step, kept in
-   `MB-agent-map/` (the map, the dossier); then it stops with reason `mapped`. It never pauses.
-2. **The review, offline:** `points approve` or `points reject`, per point, on the points directory.
-3. **`points run`:** the approved points run with their reviewed map and dossier (`--agent-directions`,
-   `--agent-dossier`) and `--no-review-gate`.
+1. **`run --stop-after-map`:** PRELUDE and the map step, kept in `MB-agent-map/` (the map, the dossier); then it stops
+   with reason `mapped`. It never pauses.
+2. **The review, offline,** of that map and dossier.
+3. **The run:** a second session with the reviewed map and dossier (`--agent-directions`, `--agent-dossier`) and
+   `--no-review-gate`.
 
-On a shared node, each point gets its own container (`--slot`), cards and Arbor port base (`--agent-port`). Each
-point's Arbor gets its own point's `Host rule` directives. Each point ends with its own recipe; nothing merges across
-the points. How to run it, in Hyperloom's docs: `docs/how-to/multibranch-points.md`; the single-session review:
-`docs/how-to/multibranch-review-gate.md`.
+On a shared node, each session gets its own container, cards and Arbor port base (`--agent-port`). Each point's
+Arbor gets its own point's `Host rule` directives. Each point ends with its own recipe; nothing merges across the
+points. The single-session review, in Hyperloom's docs: `docs/how-to/multibranch-review-gate.md`.
 
 ## What passes between them
 

@@ -4,7 +4,7 @@ Two uses:
 
 - **A round end's hook** (arbor/rounds.py): the config's ``round_ab.command``, or ``ARBOR_ROUND_AB``, set to
   ``python3 -m arbor.ab --config <config> --out {out} --deadline {deadline}``. The base is the workspace's first
-  commit, the current tree its HEAD. Before this, the only hook was one campaign launcher's own round_ab script.
+  commit, the current tree its HEAD.
 - **An integration's A/B:** ``--base`` and ``--current`` name the two commits, such as the tree integrated so far and
   that tree with one worker's KEEPs merged in.
 

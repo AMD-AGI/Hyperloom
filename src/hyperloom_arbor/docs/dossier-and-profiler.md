@@ -40,7 +40,7 @@ twelve parts: model, system, code reading, target, workload, baseline, profile, 
 platform, earlier optimizations, directions and fast bench. Part 11, the directions, ends with the
 map a campaign works.
 
-### The dossier family: the same dossier, written by six skills
+### The dossier family: the same dossier, written by five skills
 
 The `dossier` family (`.claude/skills/dossier/`) splits the flat `dossier-v1` skill into skills a pack
 loads, each placed in the lifecycle's chapters by its own metadata ([packs.md](packs.md)). The dossier
@@ -52,7 +52,6 @@ valid.
 | `dossier:read` | `use`, for the iteration agent | nothing: finds the dossier, reads it, cites it |
 | `dossier:discover` | `run`, `map.discover` | the index, parts 1-5 and 10 (no GPU) |
 | `dossier:measure` | `run`, `map.measure`, after discover | parts 6, 7, 8 (and 12), on the node; completes 1 and 3 |
-| `dossier:reference` | `run`, `map.measure`, opt-in | part 9, from the user's reference traces |
 | `dossier:directions` | `run`, `map.directions` | part 11, ending in the map Arbor reads |
 | `dossier:update` | `run`, `round_end` | a round's `NN.uK` parts and the new map |
 
@@ -87,7 +86,7 @@ What the agent does:
      serves.
    - **Missing:** it writes one as LEARN iterations, in the order
      `packs/serving/knowledge/dossier-and-profile.md` gives. Parts 6 and 7 use the node.
-   - **What only a person can answer** (a reference platform's traces, AMD's earlier work on the
+   - **What only a person can answer** (AMD's earlier work on the
      model, the target) goes under "Open asks" in the index, and the campaign goes on.
 2. **It states the map** with one `DIRECTIONS: [...]` line, taken from the newest part 11.
    - The harness keeps the map in `<session>/directions.json`, and the map starts at the next

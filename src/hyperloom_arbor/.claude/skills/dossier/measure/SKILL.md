@@ -79,7 +79,7 @@ The procedure is [kernels.md](kernels.md).
   provider, calls and share per step, shapes, step kinds); the dispatch
   decision (call site, flag, tuned-table hit or fallback); alternatives in the
   codebase that do not run at these shapes, why not, and how to try each;
-  KernelForge's pages; what the reference platform runs for the same op; the gfx950 gap that may
+  KernelForge's pages; the gfx950 gap that may
   block a port; the lead, with its ceiling from part 7. The serving playbook's
   `knobs.json` says whether a vendor knob changes numerics, depends on the
   operating point, or belongs to a bundle.

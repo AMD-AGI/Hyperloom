@@ -38,7 +38,7 @@ or agent. A first campaign on a node: [docs/getting-started.md](docs/getting-sta
 | [docs/packs.md](docs/packs.md) | the pack format, validators, skills, the packs here, writing one |
 | [docs/dossier-and-profiler.md](docs/dossier-and-profiler.md) | using the dossier and profiler skills; whether a dossier's directions can go into a pack |
 | [docs/model-architecture-performance.md](docs/model-architecture-performance.md) | optional architecture and cache-capacity research between dossier discovery and profiling |
-| [docs/skill-integration.md](docs/skill-integration.md) | how skills fit into a campaign: the chapters, the dossier split into six skills, where a new skill joins, two skills that write the same thing, and the `arbor-dev` skills for developing Arbor |
+| [docs/skill-integration.md](docs/skill-integration.md) | how skills fit into a campaign: the chapters, the dossier split into five skills, where a new skill joins, two skills that write the same thing, and the `arbor-dev` skills for developing Arbor |
 | [docs/skills.md](docs/skills.md) | contributing skills: runtime and development types, families under `.claude/skills/`, the lifecycle's chapters and events, the run, trigger and use modes a skill declares, checking a skill, loading it in a pack, conflicts |
 | [docs/master-worker.md](docs/master-worker.md) | a session's master and its workers: which side runs each chapter and pass, the work order and the worker report, where the split stands, and `arbor version` for callers |
 | [docs/reference.md](docs/reference.md) | the command line, every config key, environment variables, the session layout |

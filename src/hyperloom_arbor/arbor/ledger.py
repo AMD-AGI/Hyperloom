@@ -43,8 +43,8 @@ PROBEABLE_TYPES = ("ASSUMPTION", "UNKNOWN")
 
 LEDGER_FILENAME = "ledger.jsonl"
 
-# Used when a record declares no cost estimate. A server run is ~30 min and an
-# eval run ~2 min, so this sits between them: an unestimated probe is assumed
+# Used when a record declares no cost estimate. A server run takes tens of minutes and
+# an eval run a few, so this sits between them: an unestimated probe is assumed
 # non-trivial but not a server booking.
 DEFAULT_COST_MIN = 15.0
 

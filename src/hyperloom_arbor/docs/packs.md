@@ -98,7 +98,7 @@ agent only (not the server or bench agent); a skill named in a pack must exist.
 | `serving-playbook` | the rules for serving changes, and the knob catalog the harness reads | balanced |
 | `plan` | write a round plan | a document campaign that writes one |
 | `knowledge-collector` | share and read campaign learnings | parallel-dossier |
-| `campaign-archive`, `dashboard`, `realtime-collector`, `merge-optimization-trees`, `geko-hipblaslt-tuning` | tools for the people running campaigns | none |
+| `campaign-archive`, `dashboard`, `realtime-collector`, `merge-optimization-trees` | tools for the people running campaigns | none |
 
 Vendored: the profiler's tracer (`profiler/VENDOR.md` names its source and commit);
 `kernels/reference` and `hardware/reference` from KernelForge (MIT licence, `kernels/reference/LICENSE-KernelForge`).

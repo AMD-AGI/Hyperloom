@@ -38,8 +38,8 @@ def bench_moe1(args):
     # a per-shape tuned CSV rather than one global config. A decode/verify batch
     # streams a full 128xK weight slab for very few rows of A, so it wants a short
     # tile_m; prefill is compute-bound and wants a tall one. One default cannot
-    # serve both: pinning the prefill tile (below) made every decode-regime shape
-    # run the wrong kernel, measurably slower.
+    # serve both: the prefill tile (below) runs every decode-regime shape on the
+    # wrong kernel.
     #
     # Under the official validator (weakest-of-3, gfx950/MI355X), t16x128x256
     # leads t64x128x256 at decode shapes and trails it at prefill shapes. The
@@ -196,9 +196,9 @@ def bench_moe2(args):
     #   3. a2_scale is indexed in SORTED-ROW space, pad32(sorted_token_ids), not
     #      (M, topk, .), and is e8m0 too.  torch.ones() in e8m0 is byte 0x7F =
     #      2^0; a uint8 filled with 1 would mean 2^-126 (~0).
-    # Before this fix every output element was inf/NaN and nondeterministic, so
-    # the SNR gate failed even for the reference kernel compared against itself
-    # - no kernel could ever have passed.  Layout per aiter's own tuner,
+    # Any of these wrong makes every output element inf/NaN and nondeterministic,
+    # so the SNR gate fails even for the reference kernel compared against
+    # itself.  Layout per aiter's own tuner,
     # aiter_meta/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py:1694-1702.
     from aiter.ops.shuffle import shuffle_weight_a16w4
     from aiter.utility.fp4_utils import e8m0_shuffle

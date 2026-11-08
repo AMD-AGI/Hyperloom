@@ -107,7 +107,7 @@ Parallel mode reads a separate run config ([operations.md](operations.md)).
 | `ARBOR_SHARE_HOST`, `ARBOR_SHARE_ROOT`, `ARBOR_PROJECT`, `ARBOR_USER` | where the collectors push: the shared directory's host and path, the project and the user; set them for your site |
 | `ARBOR_AGENT_BACKEND` | leave unset. Its non-Claude value imports a module that is not in the tree |
 | `ARBOR_SITE` | a directory of packages for Arbor alone (`pip install --target`), for a host that cannot install into the interpreter's site-packages. Arbor puts it on its own `sys.path` when imported, after its checkout. Never put it on `PYTHONPATH`: a server the agent starts inherits Arbor's environment, and the directory's pydantic, starlette and uvicorn would shadow the image's |
-| `SLURM_JOB_ID`, `SPUR_JOB_ID` | read to label rows and rounds |
+| `SLURM_JOB_ID` | read to label rows and rounds |
 
 ## The session directory
 

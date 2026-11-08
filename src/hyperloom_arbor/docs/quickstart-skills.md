@@ -151,8 +151,8 @@ metadata:
 
 - **Its description is all an agent chooses it by.** Say what it is for and when to use it, and quote it: an unquoted
   `: ` breaks the YAML.
-- **Nothing checks that it was used.** In one run, the iterating agents never called `dossier:read`; they read the
-  dossier's files directly. Write the description for the moment the agent needs it.
+- **Nothing checks that it was used.** Iterating agents may never call `dossier:read` and read the dossier's files
+  directly instead. Write the description for the moment the agent needs it.
 
 ### 4.4 For every skill
 

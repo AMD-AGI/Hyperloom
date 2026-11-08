@@ -282,7 +282,7 @@ class Session:
 
     def map_set(self) -> None:
         """``map_set``, once per map round in the session: a round already announced, in the journal, is not again, by
-        this process or by the next command of a split run (one run fired it once per process)."""
+        this process or by the next command of a split run."""
         doc, _ = directions.load(self.session_dir)
         if self.fired_map["round"] is None:
             self.fired_map["round"] = (lifecycle.last(self.session_dir, "event", "map_set") or {}).get("map_round")
@@ -368,8 +368,7 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
             return rc
     elif campaign.config.get("docker_container"):
         # Not rolling, the flag KEEPs still go into a fresh container, and each KEEP's are
-        # mirrored below: one campaign's first iteration in a fresh container ran
-        # without them, without --enable-expert-parallel.
+        # mirrored below, or the first iteration in a fresh container runs without them.
         from arbor.cluster import handoff
         handoff.restore_workspace_config(campaign.config, session_dir)
 
@@ -544,11 +543,10 @@ def _reload_measurement(s: Session) -> None:
     #
     # That asymmetry mattered. A band narrower than the measurement noise
     # silently rejects real work, and the noise is routinely underestimated:
-    # a spread quoted across campaigns came from a pair of runs on one node,
-    # while re-measuring a byte-identical tree on its own node later differed
-    # by several times that. One campaign widened its secondary band only at
-    # the START of the next campaign, after dozens of iterations under a bar
-    # it could not reach.
+    # a spread from a pair of runs on one node can be several times smaller
+    # than what re-measuring a byte-identical tree on its own node shows.
+    # Without the refresh, a widened band takes effect only when the next
+    # campaign starts, after every iteration under a bar it cannot reach.
     #
     # Only the measurement block is refreshed. Validators, protected paths
     # and tools stay pinned to what the campaign started with, so a

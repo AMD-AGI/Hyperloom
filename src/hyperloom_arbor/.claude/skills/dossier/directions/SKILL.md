@@ -32,7 +32,7 @@ campaign's map from it, and a dossier pass ends there. Check it first:
 - **Contains:** per direction: the component and kernel it targets (parts 7,
   8); its largest gain in the target's unit (part 4) beside the floor (part
   6); what it depends on, what it costs, what would stop it; whether it was
-  tried before (part 10) or the reference platform shows it (part 9); the
+  tried before (part 10); the
   rules of part 4's table it touches, and how it stays within each, or
   "none". A direction that only pays by breaking a rule is not a direction:
   list it with the rule, and set it aside.
@@ -54,17 +54,16 @@ campaign's map from it, and a dossier pass ends there. Check it first:
   - Part 11 lists rewrites in their own table, each with a kernel plan
     ([kernel-plan.md](kernel-plan.md)), even while increments lead.
 - **When rewrites go first: the increments are running out.** Watch for these
-  signs. They're calibrated on earlier campaigns; revisit the numbers
-  after the first rewrite campaign.
+  signs. Their numbers are a starting point; revisit them after the first
+  rewrite campaign.
   - **The KEEPs are small:** the median of the last five KEEPs is under 3×
     the gate.
   - **The probes kill their own leads:** five or more probes in a row each
     closed the lead it set out to build, at or below the gate, the last one
     killing the campaign's last big build.
   - **The board is thin:** no increment left has a measured ceiling of 3× the
-    gate, or what's left is launch-bound or already at its roofline. In one
-    campaign the mixed-step all-gather already ran at the XGMI roofline; in
-    the other most of the mixed-step idle time was a dependency stall.
+    gate, or what's left is launch-bound or already at its roofline (a
+    collective at the XGMI roofline, idle time that is a dependency stall).
   - **Arbor's `barren_streak` has reached its notice (8).** Any KEEP resets it,
     so on its own it misses a campaign that still keeps a gate-sized change
     now and then. The first three signs don't.
@@ -117,8 +116,8 @@ campaign's map from it, and a dossier pass ends there. Check it first:
       lever can remove;
     - **part 3's opportunity labels:** every in-path method labelled an
       opportunity that no direction covers yet;
-    - **part 8's better kernels:** each kernel that AITER, KernelForge, the
-      codebase's unused kernels or the reference platform's choice offers
+    - **part 8's better kernels:** each kernel that AITER, KernelForge or the
+      codebase's unused kernels offer
       for a served shape;
     - **the system, not only kernels:**
       - scheduling and batching;

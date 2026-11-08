@@ -380,7 +380,7 @@ def _split(argv: list[str] | None, args: argparse.Namespace) -> int:
 
 
 # Passes running that may fail the same way before the run ends: a failure that repeats unchanged is the harness's or
-# the session's, which another attempt does not mend (one run repeated an identical failure well over a hundred times).
+# the session's, which another attempt does not mend.
 SAME_FAILURE_LIMIT = 5
 
 
@@ -473,7 +473,7 @@ def _run_pass(s: master.Session, iteration: int, state: CampaignState) -> str:
         if last.get("iteration") == iteration and last.get("decision") == "KEEP":
             from arbor.cluster import handoff
             handoff.mirror_workspace_config(campaign.config, session_dir, os.environ.get(
-                "SLURM_JOB_ID") or os.environ.get("SPUR_JOB_ID") or "local")
+                "SLURM_JOB_ID") or "local")
     keeps = sum(1 for l in state.lessons if l.get("decision") == "KEEP")
     reverts = sum(1 for l in state.lessons if l.get("decision") == "REVERT")
     invalid = sum(1 for l in state.lessons if l.get("decision") == "INVALID")

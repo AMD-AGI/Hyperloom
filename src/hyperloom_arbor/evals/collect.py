@@ -212,9 +212,8 @@ def parse_transcripts(paths: list[Path]) -> dict[str, Any]:
                     }
 
                 elif btype == "thinking":
-                    # Text is empty on this deployment — the gateway strips
-                    # reasoning before it reaches the client, confirmed for both
-                    # the transcript and stream-json capture routes. The block is
+                    # Text can be empty: a gateway may strip reasoning before
+                    # it reaches the client. The block is
                     # still emitted so the gap is visible in the rendered log
                     # rather than reading as "the agent did not reason".
                     text = block.get("thinking") or ""
@@ -386,16 +385,16 @@ def load_artifacts(session_dir: Path) -> dict[int, dict[str, Any]]:
         it = int(m.group(1))
         entry: dict[str, Any] = {}
         # Glob, not a fixed name. A rigorous run writes more than one bench:
-        # observed in the wild were bench_output_cold1/cold2/confirm.json (two
-        # cold runs plus a discarded hot one) and bench_output_normonly.json for
-        # an ablation. Matching only "bench_output.json" found nothing for most
+        # bench_output_cold1/cold2/confirm.json, say (cold runs plus a
+        # discarded hot one), or bench_output_normonly.json for an ablation.
+        # Matching only "bench_output.json" found nothing for most
         # iterations and silently left the agent's self-reported number
         # unchecked — which is the one thing this cross-check exists to prevent.
         # ``bench_result*`` as well as ``bench_output*``: the filename is the
-        # agent's choice, not the harness's, and a Sonnet-driven run named every
-        # one of them bench_result.json. Scoring that run as "gate unverified"
-        # would have been the collector's naming assumption masquerading as a
-        # finding about the agent.
+        # agent's choice, not the harness's, and an agent may name every one of
+        # them bench_result.json. Scoring that run as "gate unverified" would be
+        # the collector's naming assumption masquerading as a finding about the
+        # agent.
         measurements: list[dict[str, Any]] = []
         benches = sorted(child.glob("bench_output*.json")) + \
             sorted(child.glob("bench_result*.json"))

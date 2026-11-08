@@ -79,9 +79,9 @@ class ClusterCfg:
     account: str = ""
     time_limit: str = "04:00:00"
     log_dir: str = ""
-    lane_script: str = "scripts/model-m-campaign/campaign_model_m.sbatch"
+    lane_script: str = "scripts/parallel/lane.sbatch"
     profile_script: str = "scripts/parallel/profile_round.sbatch"
-    ab_script: str = "scripts/parallel/ab_model_m.sbatch"
+    ab_script: str = "scripts/parallel/ab.sbatch"
     dossier_script: str = "scripts/parallel/dossier_round.sh"
     host: str = ""                       # ssh to a login node when the controller runs elsewhere
 

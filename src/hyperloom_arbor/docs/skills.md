@@ -70,8 +70,7 @@ metadata:
 
 - **`name`:** must be its folder's name.
 - **`description`:** what every agent reads to choose the skill. Claude Code cuts it, with `when_to_use`, past 1,536
-  characters. Quote it when it holds `: `, or YAML misreads it: two of Arbor's own skills lost their descriptions that
-  way.
+  characters. Quote it when it holds `: `, or YAML misreads it and the skill loses its description.
 - **The body:** under 500 lines (Claude Code's guidance). Move detail into files beside it, and link them by relative
   path; a family's shared files are `../shared/<file>`.
 - **Unknown front-matter keys** are ignored by Claude Code. `metadata.arbor` is Arbor's own, and Arbor checks it.

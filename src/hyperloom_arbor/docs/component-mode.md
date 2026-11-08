@@ -214,8 +214,8 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
 A second launch at each KEEP, component mode only.
 `arbor/measure/short_prompts.py`; the probe after correctness and the check after the critic in
 `arbor/policy/claude_loop.py`. Where the build settled what the design left open:
-- **What it answers:** a defect MB found. AITER's vectorized_5d `mha_batch_prefill` gave wrong output on
-  short sequences in about one server process in three, and GSM8K did not see it. The design's
+- **What it answers:** a kernel defect that gives wrong output on short sequences in some server processes
+  and not in others, which GSM8K does not see. The design's
   "against the base server" was dropped: MB compared with the parent first and stopped
   (Hyperloom `b315477e5`), because exact greedy matching fires on the largest gains (fp8 KV,
   quantized GEMMs). A defect wrong in every process is one GSM8K already sees, so the check
