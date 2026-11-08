@@ -43,7 +43,7 @@ import secrets
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache, partial
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
@@ -70,7 +70,7 @@ from hyperloom_multibranch.rulegate.regression import RegressionSet, ReproRunner
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule, Rule
 from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
-from hyperloom_multibranch.scheduling.session_base import freeze_session_base
+from hyperloom_multibranch.scheduling.session_base import freeze_session_base, served_launch
 from hyperloom_multibranch.scheduling.settings import AGENT_PORT, Workload
 from hyperloom_multibranch.specialist.fix_check import FixChecking
 from hyperloom_multibranch.specialist.fix_tools import register_fix_tools
@@ -347,7 +347,8 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox, host.image.ref)
-    base = freeze_session_base(layout.toolbox, workload, setup.agent_launch)
+    frozen = freeze_session_base(layout.toolbox, workload, setup.agent_launch)
+    base, setup = frozen.launch, replace(setup, agent_launch=served_launch(frozen, setup.agent_launch))
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
