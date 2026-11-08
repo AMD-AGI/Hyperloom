@@ -359,7 +359,7 @@ def test_a_framework_not_installed_or_with_no_layout_links_nothing(
 def test_arbor_s_install_checks_each_import_it_needs_as_arbor_before_installing_it() -> None:
     """Each import is checked after Arbor's own, with ``ARBOR_SITE`` set as Arbor's commands have it, so a module pip
     installed out of the interpreter's reach counts as there only for an Arbor that reads it."""
-    assert ARBOR_PYTHON == 'env ${PIP_TARGET:+"ARBOR_SITE=$PIP_TARGET"} python3'
+    assert ARBOR_PYTHON == 'env ARBOR_SETTINGS=/dev/null ${PIP_TARGET:+"ARBOR_SITE=$PIP_TARGET"} python3'
     assert INSTALL[1:3] == (
         f"{ARBOR_PYTHON} -c 'import arbor, yaml' 2>/dev/null || python3 -m pip install --quiet pyyaml",
         f"{ARBOR_PYTHON} -c 'import arbor, claude_agent_sdk' 2>/dev/null"
@@ -368,6 +368,21 @@ def test_arbor_s_install_checks_each_import_it_needs_as_arbor_before_installing_
     assert "(3, 11)" in INSTALL[0] and INSTALL[-1].startswith(
         f"{ARBOR_PYTHON} -c 'import arbor, yaml, claude_agent_sdk' ||"
     )
+
+
+def test_arbor_s_commands_read_no_settings_file_of_the_user_running_them(tmp_path: Path) -> None:
+    """A user's ``~/.arbor/settings.env`` would set ``ARBOR_*`` values MB's preflight refuses in the environment (a
+    roll, a review gate, another agent backend); Arbor's commands point the file at an empty one, which Arbor reads as
+    no settings, where an empty value would fall back to the user's file."""
+    shown = subprocess.run(
+        ["sh", "-c", ARBOR_PYTHON.replace(" python3", " sh -c 'echo \"$ARBOR_SETTINGS\"'")],
+        env={"PATH": os.environ["PATH"], "HOME": str(tmp_path), "ARBOR_SETTINGS": str(tmp_path / "user.env")},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert shown.stdout.strip() == "/dev/null"
 
 
 async def test_the_root_s_op_shares_reach_arbor_s_profile_as_mb_writes_them_beside_the_adapter_s_config(
@@ -490,7 +505,9 @@ def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Pa
     assert all(rule.startswith(arbor_adapter.HOST_RULE) for rule in (*rules, *agentx_rules))
     fixed, kept, accuracy = rules
     assert "inferencex at concurrency 8, isl 1024, osl 1024" in fixed and "ISL" in fixed and "CONC" in fixed
-    assert "output_throughput" in kept
+    assert "output_throughput" in kept and "a second measurement confirms" in kept
+    agentx_kept = agentx_rules[1]
+    assert "in one measurement, which is final unless a guard" in agentx_kept and "second" not in agentx_kept
     assert "at least 0.5" in accuracy and "at most 0.05" in accuracy
     assert "the root it measures itself" in accuracy
     assert "error rate stays at or under 10%" in agentx_rules[-1]
