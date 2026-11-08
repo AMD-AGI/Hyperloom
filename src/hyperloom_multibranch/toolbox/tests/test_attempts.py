@@ -111,12 +111,9 @@ async def test_another_infrastructure_failure_is_still_retried_on_other_nodes(re
     assert reported == ["n1", "n2", "n3", "n4"]
 
 
-async def test_a_dataset_cache_lock_the_sandbox_may_not_take_is_not_retried_and_not_held_against_the_node(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    for name in ("HF_HOME", "HF_DATASETS_CACHE", "HF_HUB_CACHE"):
-        monkeypatch.delenv(name, raising=False)
-    log = "PermissionError: [Errno 13] Permission denied: '/x/hf/datasets/_x_openai___gsm8k_main_0.0.0_e53f048.lock'"
+async def test_a_dataset_cache_lock_the_sandbox_may_not_take_is_not_retried_and_not_held_against_the_node() -> None:
+    lock = "/x/hf/datasets/_x_hf_datasets_openai___gsm8k_main_0.0.0_e53f048.lock"
+    log = f"PermissionError: [Errno 13] Permission denied: '{lock}'"
     reason = classify_test_failure(returncode=1, logs=[log]).failure_reason
     assert reason is not None and reason.startswith(f"{HF_CACHE_PERMISSION}: ")
     result, executor, reported = await _run(reason)

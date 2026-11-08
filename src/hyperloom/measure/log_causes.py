@@ -81,11 +81,17 @@ _HUB_RATE_LIMITED = re.compile(HUB_RATE_LIMITED)
 #: A frame of aiter's JIT build in a stack dumped at the watchdog: py-spy writes ``build_module (aiter/jit/core.py:N)``, a
 #: Python traceback ``File ".../aiter/jit/core.py", line N, in build_module``.
 _JIT_BUILD_FRAME = re.compile(r"\bbuild_module\b.*\baiter[/.]jit[/.]core\b|\baiter[/.]jit[/.]core\b.*\bbuild_module\b")
-#: A file the process may not open (``EACCES``), as Python prints it: ``[Errno 13] Permission denied: '<path>'``.
-_PERMISSION_DENIED = re.compile(r"\[Errno 13\] Permission denied: (['\"])(?P<path>[^'\"]+)\1")
-#: The lock a ``datasets`` cache directory holds next to each dataset it prepared
-#: (``<cache>/datasets/_<cache>_openai___gsm8k_main_0.0.0_<hash>.lock``).
-_DATASETS_LOCK = re.compile(r"/datasets/(?:[^/]+/)*[^/]+\.lock$")
+#: The exception a file the process may not open (``EACCES``) raised, as Python prints it: ``PermissionError: [Errno 13]
+#: Permission denied: '<path>'``. A logger that reports the same refusal and carries on (``huggingface_hub``'s "Could not
+#: cache non-existence of file. Will ignore error and continue. Error: [Errno 13] ...") names no ``OSError`` and does not
+#: match.
+_PERMISSION_DENIED = re.compile(
+    r"(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:PermissionError|OSError|IOError):\s*"
+    r"\[Errno 13\] Permission denied: (['\"])(?P<path>[^'\"]+)\1"
+)
+#: A path in the Hugging Face Hub cache's own layout, under a repository's directory ``models--<org>--<name>`` (or
+#: ``datasets--``, ``spaces--``), its blobs and snapshots and its lock in ``.locks``, wherever ``HF_HUB_CACHE`` puts it.
+_HUB_CACHE_ENTRY = re.compile(r"/(?:models|datasets|spaces)--[^/]+(?:/|$)")
 _HIP_EXCEPTION = re.compile(r"\bHIP (?:runtime )?error: ")
 #: The name of the failed call, on its own line when the exception text was cut (``Search for `hipErrorIllegalAddress'``).
 _HIP_ERROR_TOKEN = re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]+")
@@ -176,15 +182,35 @@ def hub_rate_limited(text: str) -> str | None:
     return _last_matching(text, lambda line: bool(_HUB_RATE_LIMITED.search(line)))
 
 
-def hf_cache_permission(text: str, cache_dirs: tuple[str, ...] = ()) -> str | None:
-    """The path of a Hugging Face cache the process was refused (``[Errno 13] Permission denied``): a path with
-    ``huggingface`` in it, one under a directory of ``cache_dirs`` (what ``HF_HOME`` or ``HF_DATASETS_CACHE`` names), or
-    the lock a ``datasets`` cache keeps for a dataset. The cache is shared by every sandbox that mounts it, so no candidate
-    causes the refusal; any other path refused stays what it was."""
-    roots = tuple(d.rstrip("/") + "/" for d in cache_dirs if d and d.strip("/"))
+def terminal_error(text: str) -> str | None:
+    """The last exception line of ``text`` (:func:`python_exception`'s line, uncut): the error a log ended on, the final line
+    of its last traceback when nothing failed after it."""
     for line in reversed(text.splitlines()):
-        for found in _PERMISSION_DENIED.finditer(line):
-            path = found.group("path")
-            if "huggingface" in path.lower() or path.startswith(roots) or _DATASETS_LOCK.search(path):
-                return one_line(path)
+        if _EXCEPTION_WITH_MESSAGE.search(line) or _EXCEPTION_ALONE.match(line):
+            return line
     return None
+
+
+def hf_cache_permission(line: str) -> str | None:
+    """The path of a Hugging Face cache whose refusal (``PermissionError: [Errno 13] Permission denied``) ``line``
+    raised: a path with ``huggingface`` in it, one in the Hub cache's layout, or the lock ``datasets`` takes for a dataset
+    it prepares. The cache is shared by every sandbox that mounts it, so no candidate causes the refusal; any other path
+    refused stays what it was.
+
+    Each is known by its own shape, never by ``HF_HOME`` and its kin: the process that reads the log is not always the one
+    that ran the test, and a variable naming a broad directory would take a candidate's own files for the cache.
+    ``line`` is one log's :func:`terminal_error`: a refusal the process logged and survived is not what ended it.
+    """
+    for found in reversed(list(_PERMISSION_DENIED.finditer(line))):
+        path = found.group("path")
+        if "huggingface" in path.lower() or _HUB_CACHE_ENTRY.search(path) or _is_datasets_lock(path):
+            return one_line(path)
+    return None
+
+
+def _is_datasets_lock(path: str) -> bool:
+    """Whether ``path`` is the lock ``datasets`` takes for a dataset it prepares: in the cache directory, named after the
+    dataset's directory below it with every ``/`` turned into ``_``
+    (``<cache>/_<cache with _>_openai___gsm8k_main_0.0.0_<hash>.lock``), whatever ``HF_DATASETS_CACHE`` calls the cache."""
+    directory, _, name = path.rpartition("/")
+    return bool(directory) and name.endswith(".lock") and name.startswith(directory.replace("/", "_") + "_")

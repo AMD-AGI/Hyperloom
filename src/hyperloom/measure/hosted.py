@@ -124,12 +124,12 @@ _LOSS_POLLS = 3
 #: The steps of a landing, marked on the attempt's timeline when each ends. The journal line of the attempt's end says how
 #: long each took (``landing_sec``): all of them are file system work below the session directory, and a slow landing
 #: is told apart only by its steps. What ``result_landing`` holds beyond them is that journal line and its event.
-_VERIFIED, _ARCHIVED, _MATERIALIZED, _JIT_PUBLISHED, _ROUNDS_READ = (
+_VERIFIED, _ROUNDS_READ, _ARCHIVED, _MATERIALIZED, _JIT_PUBLISHED = (
     "read_verified",
+    "rounds_read",
     "archived",
     "materialized",
     "jit_published",
-    "rounds_read",
 )
 _LANDING_SEC = "landing_sec"
 _LOG_SUFFIX = ".log"
@@ -664,14 +664,15 @@ class HostedMeasurementBackend:
         try:
             verified = self._read_and_verify(attempt, staging)
             step(_VERIFIED)
+            # Before anything is kept or shared: a bundle whose rounds are refused publishes nothing.
+            rounds = _rounds_of(verified, Path(call.output_dir))
+            step(_ROUNDS_READ)
             location = self._archive(attempt, verified, staging)
             step(_ARCHIVED)
             self._land(attempt, verified)
             step(_MATERIALIZED)
             self._publish_jit(attempt, verified, staging)
             step(_JIT_PUBLISHED)
-            rounds = _rounds_of(verified, Path(call.output_dir))
-            step(_ROUNDS_READ)
         except ResultRejected as exc:
             outcome = _refusal(call, HOSTED_RESULT_REJECTED_RC, "result_rejected", str(exc))
             self._finish_record(attempt, outcome, {"verdict": "result_rejected", "reject": exc.reason.value})

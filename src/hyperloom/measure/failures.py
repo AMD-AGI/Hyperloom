@@ -20,7 +20,6 @@ so it gets no failure class at all: calling it ``candidate`` would write a false
 from __future__ import annotations
 
 import errno
-import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -91,8 +90,6 @@ HUB_RATE_LIMITED = "hub_rate_limited"
 #: mounts alike, so no candidate causes it and a fresh sandbox meets it again: ``hyperloom_multibranch.toolbox.attempts``
 #: ends the test with it at once and does not hold it against the node.
 HF_CACHE_PERMISSION = "hf_cache_permission"
-#: The variables that name a Hugging Face cache directory; a refused path under one is :data:`HF_CACHE_PERMISSION`.
-_HF_CACHE_VARIABLES = ("HF_HOME", "HF_DATASETS_CACHE", "HF_HUB_CACHE")
 #: The test's own timeout passed while its attempt waited for a slot of the sandbox pool or for room in the grant's
 #: quota, before any sandbox was made (``hyperloom.measure.sandboxes.AcquireTimedOut``); the reason is ``<this>: <what it
 #: waited for and what held it>``. Nothing ran, so no node and no candidate is to blame, and a retry would wait on the same
@@ -243,12 +240,13 @@ def classify_test_failure(
         return _unclear(TEST_TIMEOUT_REASON)
     if returncode == 0:
         return FailureClassification(Disposition.SUCCEEDED)
-    text = "\n".join(_bounded(part) for part in logs if part)
+    parts = [_bounded(part) for part in logs if part]
+    text = "\n".join(parts)
     refused = log_causes.hub_rate_limited("\n".join([text, *(_bounded(part) for part in client_logs if part)]))
     if refused:
         # Before the signatures: the client that was refused may then fail to load a tokenizer, which reads as one.
         return _infra(f"{HUB_RATE_LIMITED}: {refused}")
-    named = _named_by_logs(text)
+    named = _named_by_logs(text, parts)
     if named is not None:
         return named
     if returncode == _SERVER_STALLED_RC:
@@ -280,17 +278,18 @@ def _from_error_class(error_class: str) -> FailureClassification:
     return FailureClassification(Disposition.PROGRAM_ERROR, failure_reason=f"unknown_error_class:{error_class}")
 
 
-def _named_by_logs(text: str) -> FailureClassification | None:
-    """The verdict a log gives by itself: a port taken, a known signature, a refused command line; else ``None``."""
+def _named_by_logs(text: str, parts: list[str]) -> FailureClassification | None:
+    """The verdict a log gives by itself: a port taken, a known signature, a refused command line; else ``None``.
+
+    ``text`` is the logs ``parts`` joined.
+    """
     if _PORT_IN_USE.search(text):
         return _infra(PORT_IN_USE_REASON)
     full = log_causes.disk_full(text)
     if full:
         # Before the signatures: a full disk breaks whatever was writing, and the traceback it leaves can match one.
         return _infra(f"{DISK_FULL}: {full}")
-    refused_cache = log_causes.hf_cache_permission(
-        text, tuple(os.environ.get(name, "") for name in _HF_CACHE_VARIABLES)
-    )
+    refused_cache = _hf_cache_refusal(parts)
     if refused_cache:
         # Before the signatures: the evaluation that could not take the lock dies on it with a Python exception.
         return _infra(f"{HF_CACHE_PERMISSION}: {refused_cache}")
@@ -314,6 +313,20 @@ def _named_by_logs(text: str) -> FailureClassification | None:
     if flag_error:
         return _candidate(f"{SERVE_FLAG}: {flag_error}")
     return None
+
+
+def _hf_cache_refusal(parts: list[str]) -> str | None:
+    """The Hugging Face cache path whose refusal ended the test, else ``None``.
+
+    The refusal must be the error a log ended on (:func:`log_causes.terminal_error`): ``huggingface_hub`` logs a refusal
+    of a read-only cache and carries on, and a refusal survived is no cause. When another log ended on a failure a
+    candidate is known to cause (a failed import, say), that failure is the cause and the refusal is not.
+    """
+    endings = [ending for ending in map(log_causes.terminal_error, parts) if ending]
+    refused = [path for path in (log_causes.hf_cache_permission(e) for e in endings) if path]
+    if not refused or any(classify_failure(e).is_actionable for e in endings):
+        return None
+    return refused[-1]
 
 
 def _from_unnamed_logs(text: str) -> FailureClassification:
