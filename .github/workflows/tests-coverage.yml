@@ -33,9 +33,10 @@ name: Tests with Coverage
 # pull_request runs use the workflow definition from the PR merge ref.
 on:
   # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
-  # PR does not double-trigger (one run per event class).
+  # PR does not double-trigger (one run per event class). ``multibranch-dev`` is
+  # also tested on push: it takes direct merges that no pull request covers.
   push:
-    branches: [main]
+    branches: [main, multibranch-dev]
   pull_request:
 
 # Cancel superseded runs for the same ref (newest push/PR sync wins).
