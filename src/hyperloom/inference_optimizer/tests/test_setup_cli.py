@@ -1177,6 +1177,8 @@ def _sourceable_installer(install_script: Path, tmp_path: Path) -> Path:
     assert marker in text, "install_baremetal.sh must end by invoking main"
     lib = tmp_path / "installer_lib.sh"
     lib.write_text(text.replace(marker, "\n"), encoding="utf-8", newline="\n")
+    # The installer sources the runtime_env.sh beside it.
+    (tmp_path / "runtime_env.sh").write_bytes((install_script.parent / "runtime_env.sh").read_bytes())
     return lib
 
 

@@ -507,7 +507,12 @@ excludes dotenv-provided `PYTHON`, `VIRTUAL_ENV`, and
 `INFERENCE_OPTIMIZER_FORCE_PYTHON`; explicit shell selections remain intact.
 A readonly `USER_DATA_PATH` is not reassigned; reconcile a conflict with the
 setup-selected workspace root before continuing. CLI preflight loads generated
-`kernel-agent.env.sh` in-process, not through shell `source`.
+`kernel-agent.env.sh` in-process, not through shell `source`. On a checkout
+another account can write (a group- or other-writable checkout or `.env`, one of
+another account's, or a link, as a bind-mounted shared source dir is), `install.sh`
+keeps the Anthropic-side credentials out of `.env` and in that container-local
+file alone, and `install.sh` and preflight read them from there: export them in
+the shell that runs `install.sh` in each new container.
 
 
 ### Step 1 — Install (one-time per pod / venv rebuild)
