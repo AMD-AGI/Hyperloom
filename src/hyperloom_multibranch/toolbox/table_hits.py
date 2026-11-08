@@ -5,7 +5,9 @@
 
 A tuned table that changes nothing a test ran gives a flat result, and a flat result looks the same whether the table
 was read and did not matter or was never read. The result says which: for each kernel table the test's recipe loads,
-how many of the table's rows aiter resolved a lookup in, counted from the test's server logs.
+how many of the table's rows aiter resolved a lookup in, counted from the test's server logs: each server's own log once.
+A round that ran on a server another round booted (a sweep arm's) holds a copy of the stretch of that server's log it ran
+over, which its report records as the round's log range; the copy is not read again.
 
 aiter logs a lookup that missed unconditionally and a lookup that hit only under ``AITER_LOG_TUNED_CONFIG``, so the
 count has three outcomes and a reader must not fold them into two:
@@ -48,6 +50,8 @@ from hyperloom.measure.compile import BlobError, CompiledEnvironment, LocalBlobS
 from hyperloom.measure.farm import server_environment
 from hyperloom.measure.framework.rows import cell
 from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
+from hyperloom_common.jsonio import read_json_strict
+from inference_suite.contracts import Report, RunLayout
 
 __all__ = ["describe", "read_table_hits", "runtime_findings"]
 
@@ -212,16 +216,31 @@ def _hit_logging_requested(points: Sequence[Path]) -> bool:
     return True
 
 
+def _copied(log: Path) -> bool:
+    """Whether ``log`` is a round's copy of a stretch of a live log kept elsewhere, as the round's report records.
+
+    Raises ``OSError``, ``ValueError`` (``ReportError``) for a report off contract.
+    """
+    layout = RunLayout(log.parent)
+    if log != layout.server_log or not layout.report.is_file():
+        return False
+    server = Report.from_document(read_json_strict(layout.report)).server
+    return server is not None and server.log_range is not None
+
+
 def _scan(logs: Sequence[Path], tables: Sequence[_Table], requested: bool) -> _Scan:
-    scan = _Scan({table.artifact.ref: _Tally() for table in tables}, len(logs), requested)
+    scan = _Scan({table.artifact.ref: _Tally() for table in tables}, 0, requested)
     for log in logs:
         before = scan.hit_lines
         try:
+            if _copied(log):
+                continue
             with log.open(encoding=_UTF8, errors="replace") as handle:
                 for line in handle:
                     _count(line, tables, scan)
-        except OSError:
+        except (OSError, ValueError):
             scan.unread_logs += 1
+        scan.logs += 1
         scan.logs_with_hits += scan.hit_lines > before
     return scan
 
