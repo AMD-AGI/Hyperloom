@@ -61,7 +61,9 @@ anything is created, so a missing one fails the command without leaving a sessio
 PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is configured by ``KB_STORE_URL`` and
 ``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI archive ``HYPERLOOM_RSI_ARCHIVE``
 names must be set and a writable directory (no path is assumed: each deployment names its own shared folder); a
-session measured in hosted sandboxes also needs ``HYPERLOOM_RUNNER_CACHE``, this host's directory of the runner cache; the image the session runs on must be named by both
+session's runners read the inference_suite staging from ``HYPERLOOM_RUNNER_CACHE``, this host's directory of the runner
+cache, which a session measured in hosted sandboxes must set and one on this machine's cards takes as ``/runner-cache``
+when unset; the image the session runs on must be named by both
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``; the application's inference_suite tool cache
 must hold a staging of the InferenceX client that verifies; the framework's package must be installed in the image;
 and the agent CLI the specialists run must be installed. A canonical measurement that cannot be taken fails the command

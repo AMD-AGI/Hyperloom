@@ -39,7 +39,7 @@ from hyperloom_multibranch.toolbox.local_hosted import (
     build_local_toolbox,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, freeze_base_at, req, staged_runner_cache
+from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, freeze_base_at, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 from hyperloom_multibranch.toolbox.tests.test_local_hosted import _require_tool_checkout
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
@@ -73,7 +73,7 @@ class _Rig:
             self.spec,
             options=LocalOptions(
                 policy=QueuePolicy(per_branch_k=2, global_concurrency=64),
-                runner_envs={"INFERENCEX_REPO": str(repo), **staged_runner_cache(tmp_path)},
+                runner_envs={"INFERENCEX_REPO": str(repo)},
                 python=_runner_python(tmp_path),
                 poll_interval_sec=0.1,
                 timeout_sec=timeout_sec,

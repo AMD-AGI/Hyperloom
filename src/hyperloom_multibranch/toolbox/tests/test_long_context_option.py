@@ -59,7 +59,7 @@ async def test_a_toolbox_built_without_a_set_runs_no_check_even_for_a_request_th
     toolbox, branch_env = await _built(tmp_path)
 
     assert toolbox._acceptance._long_context is None
-    assert CACHE_ENV not in _runner_env(toolbox) and CACHE_ENV not in branch_env
+    assert CACHE_ENV not in branch_env
     assert await _planned(toolbox, long_context_check=True) is None
 
 
