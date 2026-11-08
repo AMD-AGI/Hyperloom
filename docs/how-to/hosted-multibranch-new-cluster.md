@@ -138,8 +138,8 @@ entry's manifest. Build by hand from another checkout into a `HYPERLOOM_RUNNER_C
 After the entry, `cache_build` publishes the commit's inference_suite staging, the AgentX client and InferenceX subset
 a v2 test's rounds run, with the commit's own `inference_suite` (`python -m inference_suite publish`). It downloads the
 pinned python-build-standalone CPython 3.12 build and the wheels of `src/inference_suite/agentx-client.lock`, each
-checked against its pinned sha256, fetches InferenceX at its pin, and installs the client with `--no-deps` from those
-files alone. The builder needs egress to GitHub and PyPI; the sandbox needs none.
+checked against its pinned sha256, fetches InferenceX at its pin, installs the client with `--no-deps` from those
+files alone, and patches its aiperf to export `error_osl` (a client the patch does not apply to fails the build). The builder needs egress to GitHub and PyPI; the sandbox needs none.
 
 ```text
 <HYPERLOOM_RUNNER_CACHE>/inference-suite/                  2775, group of the cache (setgid)
@@ -150,8 +150,8 @@ files alone. The builder needs egress to GitHub and PyPI; the sandbox needs none
     .staging-<staging key>-<uuid>/                         a build in progress; no reader looks inside
 ```
 
-The staging key is the sha256 of the InferenceX pin, the interpreter build and the client lock, so a change to any of
-them publishes a new directory beside the old one. Builders share the directory without a lock: each builds in its own
+The staging key is the sha256 of the InferenceX pin, the interpreter build, the client lock and the client's patch, so a
+change to any of them publishes a new directory beside the old one. Builders share the directory without a lock: each builds in its own
 `.staging-*` directory, syncs it and renames it to the key. A builder that loses the rename removes its own directory
 and uses the winner once the winner's normalised manifest (each package's name, version and wheel sha256, the
 interpreter and the InferenceX pin) is the one it built; one that differs is refused, naming the packages. A

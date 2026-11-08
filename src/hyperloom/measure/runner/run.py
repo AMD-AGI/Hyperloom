@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
+from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import AttachmentRef, FailureClass
@@ -55,7 +55,6 @@ from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, Shee
 from hyperloom.measure.jit.session import JitCacheSession
 from hyperloom.measure.runner import hardware
 from hyperloom.measure.runner.card_watch import BEFORE_TEST, CardWatch
-from hyperloom.measure.runner.aiperf_patch import ReplayClientPatchError, patch_replay_client
 from hyperloom.measure.attachments import AttachmentError, place_attachments
 from hyperloom.measure.farm import (
     Farm,
@@ -358,22 +357,6 @@ def _sheet_builds(spec: MeasurementSpec, environ: Mapping[str, str]) -> SheetBui
     return sheet_builds(named, store_from_environment(environ) if named else None, spec.image.digest)
 
 
-def _patch_replay_client(ctx: _Context, points: list[Path], inferencex: Path) -> None:
-    """Make the client of an AgentX test keep the output token count of a reply it found nothing in.
-
-    The patch only adds a field to the export line of a failed request, so a test it cannot be made for runs without it
-    and says so: its no-content failures are then counted but not told empty from short.
-    """
-    if not read_benchmark_point(points[0]).agentx:
-        return
-    try:
-        patch_replay_client(inferencex)
-    except ReplayClientPatchError as exc:
-        ctx.notes.append(
-            f"the replay client was not patched to export the output token count of a failed request: {exc}"
-        )
-
-
 def _case_attachments(spec: MeasurementSpec) -> tuple[AttachmentRef, ...]:
     """The attachments a repro test's case is looked for in, as unpacked under ``attach/<id>/``; no other kind has any."""
     if spec.kind != "repro":
@@ -635,7 +618,6 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     progress.phase("preparing")
     ctx.phases.begin(ENV_REBUILD)
     points, inferencex, farm = _prepare(ctx, spec)
-    _patch_replay_client(ctx, points, inferencex)
     surface = _surface_sha256(points)
     _build_image_own_once()
     session = _jit_session(ctx, spec, points, farm, facts)

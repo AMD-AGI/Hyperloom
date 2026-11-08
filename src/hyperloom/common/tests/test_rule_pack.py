@@ -87,17 +87,13 @@ _SHORT_PROMPT_TOUCH = r"""(?ix) ^ (?:
 _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "AIPERF_ERROR_CLASS_KEY": "type",
     "AIPERF_ERROR_KEY": "error",
-    "AIPERF_ERROR_OUTPUT_LENGTH_METRIC": "error_osl",
     "AIPERF_EXPORT_DIR": "aiperf_artifacts",
     "AIPERF_EXPORT_FILE": "profile_export.jsonl",
     "AIPERF_INVALID_REPLY_ERROR": "InvalidInferenceResultError",
     "AIPERF_METADATA_KEY": "metadata",
     "AIPERF_METRICS_KEY": "metrics",
-    "AIPERF_OUTPUT_LENGTH_FILE": "src/aiperf/metrics/types/output_sequence_length_metric.py",
-    "AIPERF_PARSER_FILE": "src/aiperf/records/inference_result_parser.py",
     "AIPERF_PHASE_KEY": "benchmark_phase",
     "AIPERF_PROFILING_PHASE": "profiling",
-    "AIPERF_SUBMODULE": "utils/aiperf",
     "AITER_DEVELOP_MODE": "develop",
     "AITER_INSTALL_MODE_FILE": "install_mode",
     "AITER_LOG_TUNED_CONFIG_ENV": "AITER_LOG_TUNED_CONFIG",
@@ -230,7 +226,7 @@ def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
     assert pack.version == str(yaml.safe_load(DEFAULT_PACK_PATH.read_text(encoding="utf-8"))["version"])
     assert Counter(entry.kind for entry in pack.entries.values()) == {
-        Kind.NAMES: 19,
+        Kind.NAMES: 18,
         Kind.LOG_REGEX: 15,
         Kind.ENV_DEFAULT: 1,
         Kind.COMPONENT_LAYOUT: 9,

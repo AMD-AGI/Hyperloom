@@ -1,21 +1,23 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The two files of the replay client the runner patches, as they are at the commit InferenceX pins.
+"""The two files of the AgentX client staging patches, as agentx-harness 1.0.13 installs them.
 
-``SemiAnalysisAI/aiperf`` 754356e (the ``utils/aiperf`` submodule of the pinned InferenceX): the whole output length
-metric module, and the part of ``inference_result_parser.py`` around the branch that returns a parsed record found
-invalid as an error record. A test of the patch that holds these and one that is given the real checkout
-(``HYPERLOOM_TEST_AIPERF_SOURCE``) anchor on the same text.
+The whole output length metric module, and the part of ``inference_result_parser.py`` around the branch that returns a
+parsed record found invalid as an error record. A test of the patch that holds these and one that is given the real
+installed client (``INFERENCE_SUITE_TEST_AIPERF_SITE``) anchor on the same text.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from pathlib import Path
 
-#: Where the two files are below the client's directory, written out and not read from the rule pack.
-PARSER_FILE = "src/aiperf/records/inference_result_parser.py"
-METRIC_FILE = "src/aiperf/metrics/types/output_sequence_length_metric.py"
+#: Where the two files are below the client environment's site-packages, written out and not read from the patch.
+PARSER_FILE = "aiperf/records/inference_result_parser.py"
+METRIC_FILE = "aiperf/metrics/types/output_sequence_length_metric.py"
+DIST_INFO = "agentx_harness-1.0.13.dist-info"
 
 PARSER = """\
         else:
@@ -124,14 +126,20 @@ class TotalOutputSequenceLengthMetric(
 '''
 
 
-def write_client(inferencex: Path, *, parser: str = PARSER, metric: str = OUTPUT_LENGTH_METRIC) -> Path:
-    """The ``utils/aiperf`` submodule of an InferenceX checkout at ``inferencex``, holding the given two files."""
-    client = inferencex / "utils" / "aiperf"
-    for relative, text in (
-        (PARSER_FILE, parser),
-        (METRIC_FILE, metric),
-        ("pyproject.toml", '[project]\nname = "aiperf"\n'),
-    ):
-        (client / relative).parent.mkdir(parents=True, exist_ok=True)
-        (client / relative).write_text(text, encoding="utf-8")
-    return client
+def record_line(relative: str, data: bytes) -> str:
+    """A ``RECORD`` row as pip writes it: the path, the urlsafe base64 sha256 without padding, the size."""
+    digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+    return f"{relative},sha256={digest},{len(data)}\r\n"
+
+
+def write_site(site: Path, *, parser: str = PARSER, metric: str = OUTPUT_LENGTH_METRIC) -> Path:
+    """A site-packages directory at ``site`` where agentx-harness installed the given two files; its ``RECORD``."""
+    rows = []
+    for relative, text in ((PARSER_FILE, parser), (METRIC_FILE, metric)):
+        (site / relative).parent.mkdir(parents=True, exist_ok=True)
+        (site / relative).write_text(text, encoding="utf-8")
+        rows.append(record_line(relative, text.encode()))
+    record = site / DIST_INFO / "RECORD"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_bytes("".join([*rows, f"{DIST_INFO}/RECORD,,\r\n"]).encode())
+    return record
