@@ -40,6 +40,7 @@ from hyperloom.measure.runner.native.isolated import (
     ChildInterpreter,
     IsolatedBuilds,
     Isolation,
+    Unisolated,
     local_isolation,
     private_network,
 )
@@ -90,7 +91,7 @@ def test_where_the_host_makes_a_network_namespace_the_compile_gets_one_and_anoth
 ) -> None:
     found = local_isolation(lambda unshare: root_with_tools.append(unshare) or True)
 
-    assert found is not None and (found.uid, found.level) == (65534, ISOLATION_UID_NETNS)
+    assert isinstance(found, Isolation) and (found.uid, found.level) == (65534, ISOLATION_UID_NETNS)
     assert found.prefix[:4] == (UNSHARE, "--net", "--", SETPRIV) and "--reuid=65534" in found.prefix
     assert root_with_tools == [UNSHARE], "the host is probed once"
 
@@ -100,7 +101,7 @@ def test_where_it_cannot_the_compile_still_runs_as_another_user_on_the_hosts_net
 ) -> None:
     found = local_isolation(lambda unshare: root_with_tools.append(unshare) and False)
 
-    assert found is not None and (found.uid, found.level) == (65534, ISOLATION_UID)
+    assert isinstance(found, Isolation) and (found.uid, found.level) == (65534, ISOLATION_UID)
     assert found.prefix[0] == SETPRIV and UNSHARE not in found.prefix and "--net" not in found.prefix
     assert {"--reuid=65534", "--regid=65534", "--clear-groups", "--no-new-privs"} <= set(found.prefix)
     assert root_with_tools == [UNSHARE]
@@ -115,7 +116,7 @@ def test_without_unshare_the_compile_runs_as_another_user_and_nothing_is_probed(
 
     found = local_isolation(lambda unshare: pytest.fail("there is nothing to probe"))
 
-    assert found is not None and (found.prefix[0], found.level) == (SETPRIV, ISOLATION_UID)
+    assert isinstance(found, Isolation) and (found.prefix[0], found.level) == (SETPRIV, ISOLATION_UID)
 
 
 def test_a_host_that_cannot_change_the_user_or_run_bubblewrap_gives_no_isolation(
@@ -124,10 +125,12 @@ def test_a_host_that_cannot_change_the_user_or_run_bubblewrap_gives_no_isolation
     monkeypatch.setattr(isolated, "bwrap_isolation", lambda: NoIsolation(("bubblewrap: not found on PATH",)))
     monkeypatch.setattr(isolated.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(isolated.os, "geteuid", lambda: 1000)
-    assert local_isolation(lambda unshare: True) is None, "only root can give the compile another user"
+    assert isinstance(local_isolation(lambda unshare: True), Unisolated), "only root can give the compile another user"
     monkeypatch.setattr(isolated.os, "geteuid", lambda: 0)
     monkeypatch.setattr(isolated.shutil, "which", lambda name: UNSHARE if name == "unshare" else None)
-    assert local_isolation(lambda unshare: True) is None, "a network namespace alone does not keep the key from it"
+    assert isinstance(local_isolation(lambda unshare: True), Unisolated), (
+        "a network namespace alone does not keep the key from it"
+    )
 
 
 @pytest.mark.parametrize(("exit_code", "made"), [(0, True), (1, False)])
@@ -166,15 +169,15 @@ async def test_the_build_record_names_the_isolation_its_compile_had(tmp_path: Pa
             "under bubblewrap 0.9.0 /usr/bin/bwrap as this process's user, in a network namespace of their own "
             f"({ISOLATION_BWRAP_NETNS}): compiling as user 65534: not root",
         ),
-        (None, logging.WARNING, "cannot isolate a compile now: each build asks again"),
+        (Unisolated("no tier (a stand-in)"), logging.WARNING, "cannot isolate a compile now: each build asks again"),
     ],
 )
 def test_the_session_logs_its_isolation_once(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, isolation: Isolation | None, level: int, says: str
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, isolation: Isolation | Unisolated, level: int, says: str
 ) -> None:
     probes: list[int] = []
 
-    def probe() -> Isolation | None:
+    def probe() -> Isolation | Unisolated:
         probes.append(1)
         return isolation
 
@@ -183,7 +186,10 @@ def test_the_session_logs_its_isolation_once(
 
     (record,) = [r for r in caplog.records if r.name == native_builds_module.logger.name]
     assert (record.levelno, says in record.getMessage()) == (level, True)
-    assert isolation is None or isolation.level in record.getMessage()
+    if isinstance(isolation, Unisolated):
+        assert record.getMessage().endswith(": no tier (a stand-in)"), "the reasons the choice found, not asked again"
+    else:
+        assert isolation.level in record.getMessage()
     assert probes == [1], "the host is probed once, at the start"
 
 
@@ -264,7 +270,7 @@ def _nobody_python() -> str | None:
     """An interpreter user 65534 can run on this host (this process's may live where only its own user reads)."""
     found = local_isolation(lambda unshare: False)
     for python in (sys.executable, shutil.which("python3")):
-        if found is not None and found.uid is not None and python is not None:
+        if isinstance(found, Isolation) and found.uid is not None and python is not None:
             ran = subprocess.run([*found.prefix, python, "-I", "-c", "pass"], capture_output=True, check=False)
             if ran.returncode == 0:
                 return python
@@ -277,7 +283,7 @@ def test_on_a_real_host_the_compile_runs_as_nobody_cannot_read_the_key_and_has_a
     network: bool,
 ) -> None:
     isolation = local_isolation(lambda unshare: network and private_network(unshare))
-    assert isolation is not None and isolation.uid is not None, "the account tier, as for _nobody_python"
+    assert isinstance(isolation, Isolation) and isolation.uid is not None, "the account tier, as for _nobody_python"
     if network and isolation.level != ISOLATION_UID_NETNS:
         pytest.skip("this host cannot make a network namespace")
     base = Path(tempfile.mkdtemp(prefix="native-isolation-"))
@@ -475,27 +481,31 @@ def test_a_runner_given_what_chooses_its_isolation_asks_it_at_each_build(tmp_pat
     assert staged.toolchain == {"tree": "marked", ISOLATION_KEY: "none"} and answers == []
 
 
-@pytest.mark.parametrize("found", [None, Isolation((), None, ISOLATION_BWRAP_NETNS)], ids=["none", "found"])
+@pytest.mark.parametrize(
+    "found", [Unisolated("no tier (a stand-in)"), Isolation((), None, ISOLATION_BWRAP_NETNS)], ids=["none", "found"]
+)
 def test_a_session_that_finds_no_isolation_at_its_start_asks_again_at_each_build(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, found: Isolation | None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, found: Isolation | Unisolated
 ) -> None:
     given: list[object] = []
     monkeypatch.setattr(
         native_builds_module, "IsolatedBuilds", lambda planner, blobs, isolation, factories: given.append(isolation)
     )
 
-    def choose() -> Isolation | None:
+    def choose() -> Isolation | Unisolated:
         return found
 
     native_builds(_configured(tmp_path), LocalBlobStore(tmp_path / "blobs"), IMAGE, isolation=choose)
 
-    assert given == [choose if found is None else found], "asked again where the start found none, else kept"
+    assert given == [found if isinstance(found, Isolation) else choose], (
+        "asked again where the start found none, else kept"
+    )
 
 
 def test_the_build_service_registers_its_signing_key_and_trust_file_as_the_apps_private_paths(tmp_path: Path) -> None:
     environ = _configured(tmp_path)
 
-    native_builds(environ, LocalBlobStore(tmp_path / "blobs"), IMAGE, isolation=lambda: None)
+    native_builds(environ, LocalBlobStore(tmp_path / "blobs"), IMAGE, isolation=lambda: Unisolated("a stand-in"))
 
     registered = set(confinement.PRIVATE_PATHS.paths())
     assert {Path(environ["HYPERLOOM_BUILD_SIGNING_KEY"]), Path(environ["HYPERLOOM_BUILD_TRUST"])} <= registered
