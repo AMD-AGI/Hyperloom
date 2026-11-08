@@ -208,7 +208,7 @@ def test_a_graded_test_answers_after_its_evaluation_on_the_server_its_warmup_boo
     assert [r.phase for r in outcome.rounds] == ["warmup", "measure", "accuracy"]
 
 
-def test_an_agentx_test_holds_its_server_for_the_check_and_reports_no_accuracy_round(monkeypatch, tmp_path, cache):
+def test_an_agentx_test_records_the_check_not_held_and_asks_its_server_nothing(monkeypatch, tmp_path, cache):
     grid = _grid(monkeypatch, tmp_path)
     point = _agentx_point(tmp_path, monkeypatch)
 
@@ -216,10 +216,13 @@ def test_an_agentx_test_holds_its_server_for_the_check_and_reports_no_accuracy_r
         _call(tmp_path, point, short_prompts=staged_plan(cache), rounds=RoundPlan(warmup_rounds=1))
     )
 
-    assert _names(grid) == ["test"] and grid.calls[0]["launch"].server_lifecycle["cleanup"] is False
+    assert _names(grid) == ["test"] and grid.calls[0]["launch"].server_lifecycle["cleanup"] is True
     assert grid.calls[0]["recipe"].base.extra_envs is None, "an AgentX round carries no evaluation"
     assert [r.phase for r in outcome.rounds] == ["measure"]
-    assert [e.status for e in read_outputs(tmp_path / "out").processes] == [OK]
+    found = read_outputs(tmp_path / "out")
+    assert [(e.index, e.status) for e in found.processes] == [(0, FAILED)] and NOT_HELD in found.processes[0].reason
+    assert grid.servers.flushes == 0 and SHORT_PROMPTS not in [p.name for p in outcome.phases]
+    assert outcome.returncode == 0
 
 
 def test_a_test_whose_evaluation_failed_runs_no_check(monkeypatch, tmp_path, cache):

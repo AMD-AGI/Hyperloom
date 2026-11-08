@@ -183,6 +183,7 @@ _WARMUP_DISCARDED = "run_grid_warmup_discarded_first"
 _CHECK_SKIPPED = "short_prompt_check skipped: test failed"
 _LONG_CONTEXT_SKIPPED = "long_context_check skipped: test failed"
 _NOT_HELD = "the test's server was not held up for the check (its framework's lifecycle cannot hold one)"
+_NOT_CHECKED = "the test's server was not held up for the check (an AgentX test runs no accuracy check)"
 _WARMUP_TPUT = "warmup_round_tput"
 
 
@@ -673,13 +674,15 @@ def _warms(warmup: int | None) -> bool:
 
 
 def _checks_held(call: TestCall) -> bool:
-    """Whether the test runs an accuracy check, which asks the test's own server before its teardown."""
-    return call.short_prompts is not None or call.long_context is not None
+    """Whether the test runs an accuracy check, which asks the test's own server before its teardown; a point that holds
+    none (``BenchmarkPoint.holds_accuracy_checks``) has its planned checks recorded as not held."""
+    planned = call.short_prompts is not None or call.long_context is not None
+    return planned and _point(call.points[0]).holds_accuracy_checks
 
 
 async def _held_rounds(run: _Run, lifecycle: _Lifecycle, warm: bool) -> None:
     """The warmup bench when ``warm``, the measured bench and, for a graded test, the evaluation (``_evaluate``), on one
-    server; then the accuracy checks on it. A bench that followed the evaluation started on the KV pool it left full, and
+    server; then the accuracy checks on it (``_checks_held``). A bench that followed the evaluation started on the KV pool it left full, and
     read lower. The warmup draws prompts of its own (``_grid``); when it failed, was stopped or its logs name a cause
     that settles the test (a crashed server, a refused request), nothing is measured."""
     run.evaluates_apart = True
@@ -933,7 +936,7 @@ def _model_of(call: TestCall) -> str:
 async def _short_prompts(run: _Run) -> None:
     """Write the short-prompt check: the test's own server's answers, or why it gave none; a failure of the check is the
     check's (``outputs.json`` says), never the test's."""
-    first = run.held.short if run.held is not None else not_held(_held_checks_of(run.call), _NOT_HELD)
+    first = run.held.short if run.held is not None else not_held(_held_checks_of(run.call), _unheld_reason(run.call))
     if first is not None:
         write_answered(first, Path(run.call.output_dir))
 
@@ -941,7 +944,11 @@ async def _short_prompts(run: _Run) -> None:
 async def _long_context_unheld(run: _Run) -> None:
     """The long-context check of a test whose server was not held up for it (one that was ran it there)."""
     if run.held is None:
-        await long_context_unheld(_held_checks_of(run.call), _NOT_HELD)
+        await long_context_unheld(_held_checks_of(run.call), _unheld_reason(run.call))
+
+
+def _unheld_reason(call: TestCall) -> str:
+    return _NOT_HELD if _point(call.points[0]).holds_accuracy_checks else _NOT_CHECKED
 
 
 def _held_checks_of(call: TestCall) -> HeldChecks:
