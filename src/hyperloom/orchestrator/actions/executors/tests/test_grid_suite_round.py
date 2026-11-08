@@ -12,6 +12,7 @@ no base runs nothing.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from hyperloom.orchestrator.actions.executors._suite_config import WARMUP_SEED
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _MODEL, _base
 from hyperloom.orchestrator.rehearsal import READY, STAGE_FAILED, LaunchAttempt, LaunchScenario, ScriptedRounds
 from hyperloom.orchestrator.rehearsal import VirtualClock
+from hyperloom.orchestrator.rehearsal.scenario import ScenarioError
 from hyperloom.orchestrator.state.failure_evidence import ARGV_INVALID
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout, WorkloadKind
@@ -266,3 +268,62 @@ def test_a_multi_node_variant_restarts_the_cluster_and_measures_it_externally_af
     assert (measured.server.host, measured.server.port) == ("10.0.0.2", 30000)
     assert (warm.fixed.seed, measured.fixed.seed) == (WARMUP_SEED, MEASURED_SEED)
     assert Path(warm.paths.run_dir).parent == slot / "mn_warmup"
+
+
+@pytest.mark.parametrize(("agentx", "rounds"), [(False, 2), (True, 1)], ids=["inferencex", "agentx"])
+def test_a_grid_asked_to_warm_up_plans_a_warmup_round_unless_its_point_is_measured_once(
+    monkeypatch, suite, agentx, rounds
+):
+    """An AgentX replay is long and stable and warms its own client inside the round, so it is measured once."""
+    document = yaml.safe_load(suite.point.read_text())
+    document["benchmark"]["agentx"] = {"enabled": agentx}
+    suite.point.write_text(yaml.safe_dump(document), encoding="utf-8")
+    planned = []
+
+    async def measure_variant(run, at):
+        planned.append((run.auto_warmup_requested, run.rounds_per_variant))
+        return SimpleNamespace(status="succeeded")
+
+    monkeypatch.setattr(_grid_runner, "_measure_variant", measure_variant)
+    monkeypatch.setattr(_grid_runner, "_attach_grid_launch_evidence", lambda *args, **kwargs: None)
+    launch = GridLaunch(warmup_before_measure=True)
+
+    asyncio.run(
+        run_grid(grid=[GridVariant("vA")], output_root=suite.out, recipe=GridRecipe(suite.point), launch=launch)
+    )
+
+    assert planned == [(not agentx, rounds)]
+
+
+def _agentx(point: Path) -> None:
+    document = yaml.safe_load(point.read_text())
+    launch = {"replace_args": True, "append_args": list(_base("sglang").args)}
+    document["benchmark"]["agentx"] = {"enabled": True, "launch_overrides": launch}
+    document["benchmark"]["envs"]["WEKA_LOADER_OVERRIDE"] = "/traces"
+    point.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("ready", "mode"), [(False, LifecycleMode.BOOT), (True, LifecycleMode.REUSE)], ids=["boots", "reuses"]
+)
+def test_an_agentx_round_holds_the_server_its_caller_asked_for(monkeypatch, suite, tmp_path, ready, mode):
+    """A held AgentX round boots the server the rounds after it reuse; one that owned its own would boot again."""
+    _agentx(suite.point)
+    played = []
+
+    def run_round(config, *, cancel=None):  # ScriptedRounds plays no AgentX load: the round's shape is the contract
+        played.append(config)
+        raise ScenarioError("the round is not played")
+
+    monkeypatch.setattr(_suite_config, "run_round", run_round)
+    held = {"cleanup": False, "pid_dir": str(tmp_path / "held"), "port": 30001}
+    launch = GridLaunch(server_lifecycle=held, server_already_ready=ready, warmup_before_measure=False)
+
+    with contextlib.suppress(ScenarioError):
+        asyncio.run(
+            run_grid(grid=[GridVariant("vA")], output_root=suite.out, recipe=GridRecipe(suite.point), launch=launch)
+        )
+
+    assert [(c.workload, c.lifecycle.mode, c.lifecycle.pid_dir) for c in played] == [
+        (WorkloadKind.AGENTX, mode, held["pid_dir"])
+    ]

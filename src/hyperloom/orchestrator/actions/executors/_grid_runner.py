@@ -70,6 +70,7 @@ from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer import speculative_capability
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override, prepend_launch_path
 from ._server_argv import seal_server_argv
+from ._server_lifecycle import inject_lifecycle_settings
 from .agentx_point import ServerArgvInvalidError, materialize_grid_variant
 from ._workload_envs import BenchmarkTarget, LaunchLayer
 
@@ -334,7 +335,7 @@ async def _settled_measurement(
 
 
 def _run_grid_warmup_enabled() -> bool:
-    """Whether ``run_grid`` should discard a cold warmup round when possible."""
+    """Whether ``run_grid`` should discard a cold warmup round when possible; a point measured once never has one."""
     return env_flag("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", default=not os.environ.get("PYTEST_CURRENT_TEST"))
 
 
@@ -1368,7 +1369,10 @@ async def run_grid(
     warmup_before_measure = launch.warmup_before_measure
     if warmup_before_measure is None:
         warmup_before_measure = _run_grid_warmup_enabled()
-    auto_warmup_requested = bool(warmup_before_measure and launch.server_lifecycle is None)
+    auto_warmup_requested = (
+        bool(warmup_before_measure and launch.server_lifecycle is None)
+        and not read_benchmark_point(recipe.base_yaml_path).measured_once
+    )
     # This function names the working directory, so it creates it: callers and the per-variant config writer both
     # happen to create it first today, and neither is a contract.
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1611,9 +1615,10 @@ def _build_variant_yaml(
     point = BenchmarkPoint.from_document(cfg, source=str(recipe.base_yaml_path))
     bench = cfg["benchmark"]
     if point.agentx:
-        return materialize_grid_variant(
+        path = materialize_grid_variant(
             recipe.base_yaml_path, variant, output_subdir, model_path=target.model_path, base=base
         )
+        return path if server_lifecycle is None else _hold_server(path, server_lifecycle)
     replacing = str(base.args_mode).strip().lower() == "replace"
     envs = apply_runtime_benchmark_overrides(
         bench,
@@ -1663,8 +1668,6 @@ def _build_variant_yaml(
     pin_xdit_tool_path(envs, point.framework)
 
     if server_lifecycle is not None:
-        from ._server_lifecycle import inject_lifecycle_settings
-
         inject_lifecycle_settings(bench, server_lifecycle)
 
     # The final write to the argument env; nothing below may touch it.
@@ -1674,6 +1677,14 @@ def _build_variant_yaml(
     with out_path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
     return out_path
+
+
+def _hold_server(path: Path, server_lifecycle: dict[str, Any]) -> Path:
+    """The point at ``path`` with its round's ``server_lifecycle``: without it the round owns a server of its own."""
+    cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+    inject_lifecycle_settings(cfg["benchmark"], server_lifecycle)
+    path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    return path
 
 
 def variant_conc(variant: Any) -> int | None:

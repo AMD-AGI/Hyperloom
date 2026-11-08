@@ -119,19 +119,14 @@ def _agentx_point(tmp_path: Path) -> Path:
     return path
 
 
-def test_an_agentx_test_names_its_warmup_run_and_splits_its_measured_run_at_its_clients_phases(
-    monkeypatch, clock, tmp_path
-) -> None:
+def test_an_agentx_test_is_one_round_that_boots_and_splits_at_its_clients_phases(monkeypatch, clock, tmp_path) -> None:
     call = _call(tmp_path, _agentx_point(tmp_path), rounds=RoundPlan(warmup_rounds=1))
 
     outcome, _ = _run(monkeypatch, clock, call, Rounds(clock).agentx())
 
     assert _stamped(outcome.phases) == [
-        ("round_setup", 10.0, 0),
-        ("server_boot", 80.0, 0),
-        ("warmup", 40.0, 0),
-        ("round_collect", 30.0, 0),
         ("round_setup", 5.0, 0),
+        ("server_boot", 80.0, 0),
         ("client_start", 15.0, 0),
         ("warmup", 30.0, 0),
         ("measured", 200.0, 0),

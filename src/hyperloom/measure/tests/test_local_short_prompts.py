@@ -216,9 +216,9 @@ def test_an_agentx_test_holds_its_server_for_the_check_and_reports_no_accuracy_r
         _call(tmp_path, point, short_prompts=staged_plan(cache), rounds=RoundPlan(warmup_rounds=1))
     )
 
-    assert _names(grid) == ["warmup", "test"] and grid.calls[1]["launch"].server_already_ready is True
-    assert [c["recipe"].base.extra_envs for c in grid.calls] == [None, None], "an AgentX round carries no evaluation"
-    assert [r.phase for r in outcome.rounds] == ["warmup", "measure"]
+    assert _names(grid) == ["test"] and grid.calls[0]["launch"].server_lifecycle["cleanup"] is False
+    assert grid.calls[0]["recipe"].base.extra_envs is None, "an AgentX round carries no evaluation"
+    assert [r.phase for r in outcome.rounds] == ["measure"]
     assert [e.status for e in read_outputs(tmp_path / "out").processes] == [OK]
 
 

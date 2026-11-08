@@ -540,6 +540,22 @@ def test_a_graded_test_without_a_warmup_boots_in_its_measured_round_and_evaluate
     assert outcome.rounds[1].output_dir == Path(evaluation.workspace) and outcome.rounds[1].accuracy[0].score == 0.64
 
 
+@pytest.mark.parametrize("held", [True, False], ids=["held", "unheld"])
+@pytest.mark.parametrize("plan", [None, 1])
+def test_an_agentx_test_is_measured_once_with_no_warmup_round_before_it(monkeypatch, grid, tmp_path, held, plan):
+    """An AgentX replay is long and stable and warms its own client inside the round: one round, whatever the plan."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+    _Server(monkeypatch, eligible=held)
+    point = _agentx_point(tmp_path, monkeypatch)
+
+    outcome = _run(_call(tmp_path, point, rounds=RoundPlan(warmup_rounds=plan)))
+
+    (kwargs,) = grid.calls
+    assert kwargs["grid"][0].name == "test"
+    assert kwargs["launch"].warmup_before_measure is False and not kwargs["launch"].server_already_ready
+    assert [r.phase for r in outcome.rounds] == ["measure"]
+
+
 def test_a_graded_test_on_a_framework_that_cannot_hold_a_server_evaluates_in_its_one_round(monkeypatch, grid, tmp_path):
     _Server(monkeypatch, eligible=False)
     result = grid.result("test")

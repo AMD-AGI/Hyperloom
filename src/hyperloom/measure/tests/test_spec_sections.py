@@ -10,6 +10,7 @@ import time
 from dataclasses import replace
 
 import pytest
+import yaml
 
 from hyperloom.measure.hosted_spec import SpecRefused, build_spec
 from hyperloom.measure.socket import SessionFacts
@@ -157,3 +158,15 @@ def test_a_first_point_the_sheet_cannot_read_its_gpus_from_is_refused(tmp_path, 
         _build(tmp_path, point)
 
     assert refused.value.reason == "point_unreadable"
+
+
+@pytest.mark.parametrize(("agentx", "warmup"), [(False, 1), (True, 0)], ids=["inferencex", "agentx"])
+def test_the_sheet_plans_a_warmup_round_for_a_fixed_shape_point_and_none_for_an_agentx_one(
+    tmp_path, monkeypatch, agentx, warmup
+):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+    point = tmp_path / "point.yaml"
+    bench = {"agentx": {"enabled": agentx}, "envs": {"TP": "1", "RUN_EVAL": "false"}}
+    point.write_text(yaml.safe_dump({"benchmark": bench}), encoding="utf-8")
+
+    assert _build(tmp_path, point).procedure.warmup_rounds == warmup

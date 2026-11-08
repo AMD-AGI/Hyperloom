@@ -116,7 +116,7 @@ async def test_a_graded_inferencex_test_has_every_phase_of_its_path_in_order(
     _adds_up(result)
 
 
-async def test_an_agentx_test_has_the_phases_of_its_warmup_run_and_of_its_clients_measured_run(
+async def test_an_agentx_test_has_the_phases_of_its_one_run_and_of_its_clients_measured_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phased
 ) -> None:
     result = await _attempt(tmp_path, monkeypatch, phased, "agentx", 0.004, _point(tmp_path, agentx=True))
@@ -128,9 +128,6 @@ async def test_an_agentx_test_has_the_phases_of_its_warmup_run_and_of_its_client
             *BEFORE_THE_ROUNDS,
             "round_setup",
             "server_boot",
-            "warmup",
-            "round_collect",
-            "round_setup",
             "client_start",
             "warmup",
             "measured",
