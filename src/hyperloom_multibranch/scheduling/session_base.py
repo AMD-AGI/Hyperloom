@@ -7,8 +7,9 @@ Every inference_suite round refuses a session that froze no base launch
 (:func:`hyperloom.orchestrator.state.base_launch.frozen_base`). A fresh session resolves its base as
 ``hyperloom optimize`` does (:func:`~hyperloom.inference_optimizer.cli.base_launch.resolve_server_base`) for its
 workload, on the cards one test runs on; a session that froze one, a resumed one, keeps it. An Arbor
-``--agent-launch`` that is a base launch record is the operator's launch file, so the record is the base. The workload
-fixes the topology every test is sized by, so a base on another one is refused.
+``--agent-launch`` that is a base launch record is the operator's launch file, so the record is the base, frozen without
+reading any recipe source, and the Arbor agents are served the frozen base (:func:`served_launch`), the one the gate
+measures on. The workload fixes the topology every test is sized by, so a base on another one is refused.
 """
 
 from __future__ import annotations
@@ -20,14 +21,15 @@ from typing import TYPE_CHECKING
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import Workload
-from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunch, BaseLaunchError
+from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunchError
 from inference_suite.contracts import Workload as LaunchWorkload
 
 if TYPE_CHECKING:
     from hyperloom.inference_optimizer.cli.base_launch import SessionLaunch
+    from hyperloom.orchestrator.state.base_launch import FrozenBase
 
 
-def freeze_session_base(toolbox: Path, workload: Workload, agent_launch: str) -> BaseLaunch:
+def freeze_session_base(toolbox: Path, workload: Workload, agent_launch: str) -> FrozenBase:
     """Freeze the base launch of a session of ``workload`` in ``toolbox`` unless it froze one, and return the frozen
     one; raises :class:`PeersUnavailable` when the frozen one is not what the session recorded, or none can be
     resolved."""
@@ -38,14 +40,22 @@ def freeze_session_base(toolbox: Path, workload: Workload, agent_launch: str) ->
     try:
         frozen = frozen_base(toolbox)
         if frozen is not None:
-            return frozen.launch
+            return frozen
     except (BaseLaunchMismatch, BaseLaunchError) as exc:
         raise PeersUnavailable(f"the session's frozen base launch cannot be read: {exc}") from exc
     try:
         base = resolve_server_base(_session_launch(workload, agent_launch))
     except BaseLaunchUnresolved as exc:
         raise PeersUnavailable(str(exc)) from exc
-    return freeze_base(toolbox, base).launch
+    return freeze_base(toolbox, base)
+
+
+def served_launch(frozen: FrozenBase, agent_launch: str) -> str:
+    """The launch file the session's Arbor agents are served: the session's ``frozen`` base when the operator's
+    ``agent_launch`` is a base launch record, which the base was frozen from or, on a resume, stands in for; else
+    ``agent_launch`` as it is."""
+
+    return str(frozen.path) if _is_base_launch_record(agent_launch) else agent_launch
 
 
 def _session_launch(workload: Workload, agent_launch: str) -> SessionLaunch:
@@ -79,4 +89,4 @@ def _is_base_launch_record(path: str) -> bool:
     return isinstance(document, dict) and document.get("schema") == BASE_LAUNCH_SCHEMA
 
 
-__all__ = ["freeze_session_base"]
+__all__ = ["freeze_session_base", "served_launch"]

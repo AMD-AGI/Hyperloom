@@ -41,10 +41,16 @@ class ServerBase:
     env: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
 
+def server_argv(base: BaseLaunch) -> tuple[str, ...]:
+    """The server argv of ``base`` word by word, its golden layer last."""
+    golden = base.golden_al
+    return (*base.args, *golden.args) if golden is not None else base.args
+
+
 def server_base(base: BaseLaunch) -> ServerBase:
     """The server half of ``base`` as a launch is seeded with: its argv and the environment a launch may set."""
     golden = base.golden_al
-    args = (*base.args, *golden.args) if golden is not None else base.args
+    args = server_argv(base)
     layers = {**base.env, **golden.env} if golden is not None else base.env
     env = {
         name: value for name, value in layers.items() if isinstance(value, str) and is_allowed_external_env_key(name)
@@ -127,6 +133,7 @@ __all__ = [
     "freeze_base",
     "frozen_base",
     "frozen_session_base",
+    "server_argv",
     "server_base",
     "session_cards",
     "session_server_base",
