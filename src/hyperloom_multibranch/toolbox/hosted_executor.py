@@ -17,12 +17,12 @@ next start.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import math
 import re
 import subprocess
-import sys
 import tempfile
 import time
 from collections.abc import Callable, Mapping
@@ -49,7 +49,7 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.measure.agentx_requests import read_round_classes
-from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, baseline_prefix_cache_refusal
+from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, RoundUnreadable, baseline_prefix_cache_refusal
 from hyperloom.measure.failures import Disposition, classify_test_failure
 from hyperloom.measure.archive import ArchiveError
 from hyperloom.measure.boot_watch import boot_seconds
@@ -61,8 +61,19 @@ from hyperloom.measure.phases import RESULT_READ, account
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.profile_traces import PROFILE_DIR, has_step_traces, has_traces, is_trace_file
 from hyperloom.measure.repro import REPRO_DIR, VERDICT_FILE, ReproError, read_verdict
-from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, RoundPlan, TestCall, TestMeta, TestOutcome
+from hyperloom.measure.consistency import SessionNotMeasurable, session_facts
+from hyperloom.measure.socket import (
+    MeasurementTimeout,
+    RoundOutcome,
+    RoundPlan,
+    SessionFacts,
+    TestCall,
+    TestMeta,
+    TestOutcome,
+)
+from hyperloom.orchestrator.actions.executors import is_round_folder
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
+from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.acceptance import backend_kind
@@ -96,7 +107,8 @@ DEFAULT_TEST_TIMEOUT_SEC = 3600
 TEST_SILENCE_TIMEOUT_SEC = 600.0
 #: Where a test's landed files go, below the session directory: ``tests/<request_id>/attempt-<n>``.
 OUTPUTS_DIR = "tests"
-_REPORT = "benchmark_report.json"
+#: The report an archived v1 bundle's round left; a v2 round is an inference_suite run_dir.
+_V1_REPORT = "benchmark_report.json"
 _MANIFEST = "manifest.json"
 _UNFINISHED = (STATE_SUBMITTED, STATE_SENT)
 _SWEEP = "conc_sweep"
@@ -134,7 +146,6 @@ class HostedExecutor:
         session_dir: The session directory; test output lands below ``<session_dir>/tests`` and a result's
             ``output_dir`` is relative to it.
         timeout_sec: The timeout of one attempt.
-        magpie_python: The interpreter the measurement runs with (``TestCall.magpie_python``).
         workload_kind: The campaign's workload; an AgentX baseline served with the prefix cache off does not end
             ``succeeded``.
     """
@@ -145,13 +156,11 @@ class HostedExecutor:
         session_dir: Path,
         *,
         timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC,
-        magpie_python: str = sys.executable,
         workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
     ) -> None:
         self._backend = backend
         self._session = Path(session_dir)
         self._timeout = timeout_sec
-        self._python = magpie_python
         self._clock: Callable[[], float] = time.time
         self._workload = workload_kind
 
@@ -174,6 +183,15 @@ class HostedExecutor:
         result = await self._with_short_prompts(result, accepted, call)
         result = await self._with_long_context(result, accepted, call)
         return await self._with_request_classes(result, request, outcome, call)
+
+    @functools.cached_property
+    def _session_facts(self) -> SessionFacts:
+        """Read on the first test and kept: the base is frozen, and the staging the application holds is fixed for the
+        session. A session that cannot be measured is not cached, so every test is refused with the reason."""
+        try:
+            return session_facts(self._session)
+        except (SessionNotMeasurable, BaseLaunchMismatch) as exc:
+            raise MeasurementRefused(f"the session cannot be measured: {exc}") from exc
 
     def withdraw(self, request_id: str) -> None:
         """End the running attempt of ``request_id``: its sandbox is closed and its cards go back to the pool."""
@@ -236,7 +254,6 @@ class HostedExecutor:
             timeout_sec=self._timeout,
             silence_timeout_sec=TEST_SILENCE_TIMEOUT_SEC,
             cwd=str(self._session),
-            magpie_python=self._python,
             task_id=request.request_id or "",
             kind=backend_kind(request.kind),  # type: ignore[arg-type]
             prep=_SWEEP if request.kind is TestKind.SWEEP or len(accepted.points) > 1 else "grid",
@@ -253,6 +270,7 @@ class HostedExecutor:
             attachments=request.attachments if request.kind is TestKind.REPRO else (),
             short_prompts=accepted.short_prompts,
             long_context=accepted.long_context,
+            session_facts=self._session_facts,
         )
 
     # -- the outcome -----------------------------------------------------------------------------------------------
@@ -371,7 +389,10 @@ class HostedExecutor:
         for item in outcome.rounds:
             if item.phase != _MEASURE or item.point >= len(accepted.points):
                 continue
-            reason = baseline_prefix_cache_refusal(accepted.points[item.point], Path(item.output_dir))
+            try:
+                reason = baseline_prefix_cache_refusal(accepted.points[item.point], Path(item.output_dir))
+            except RoundUnreadable as exc:
+                raise MeasurementRefused(f"the verified baseline round is unreadable: {exc}") from None
             if reason:
                 return f"{PREFIX_CACHE_OFF_ERROR_CLASS}: {reason}"
         return ""
@@ -643,8 +664,8 @@ def _concurrency_in(text: str) -> int | None:
     return value if value >= 1 else None
 
 
-def _report_of(directory: Path) -> dict[str, Any] | None:
-    for path in sorted(Path(directory).rglob(_REPORT)) if Path(directory).is_dir() else []:
+def _v1_report_of(directory: Path) -> dict[str, Any] | None:
+    for path in sorted(Path(directory).rglob(_V1_REPORT)) if Path(directory).is_dir() else []:
         try:
             document = json.loads(path.read_text(encoding=_UTF8))
         except (OSError, ValueError):
@@ -722,13 +743,22 @@ def _round_values_at(rounds: tuple[RoundOutcome, ...], concurrencies: tuple[int 
     return tuple(values)
 
 
+def _round_measurement(round_dir: Path) -> dict[str, Any] | None:
+    """A run_dir's measurement from its report, an archived v1 round's from its ``benchmark_report.json``; ``None``
+    when the round left no readable report."""
+    if is_round_folder(round_dir):
+        try:
+            return extract_benchmark_measurement(None, workspace=round_dir)
+        except (OSError, ValueError):
+            return None
+    report = _v1_report_of(round_dir)
+    return None if report is None else extract_benchmark_measurement(report, workspace=round_dir)
+
+
 def _round_value(phase: str, round_dir: Path, concurrency: int | None) -> RoundValue | None:
     """The value of the round that landed in ``round_dir``; ``None`` when its report is missing or invalid."""
-    report = _report_of(round_dir)
-    if report is None:
-        return None
-    measurement = extract_benchmark_measurement(report, workspace=round_dir)
-    if not measurement.get("valid_measurement"):
+    measurement = _round_measurement(round_dir)
+    if measurement is None or not measurement.get("valid_measurement"):
         return None
     completed = measurement.get("completed_requests")
     requested = measurement.get("requested_requests")

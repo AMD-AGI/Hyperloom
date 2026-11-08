@@ -29,7 +29,7 @@ from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.local_hosted import LocalOptions, LocalSession, build_local_toolbox
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
+from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, freeze_base_at, req, staged_runner_cache
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 from hyperloom_multibranch.toolbox.tests.test_local_hosted import _require_tool_checkout
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
@@ -53,17 +53,16 @@ async def test_the_warnings_run_grid_wrote_are_on_the_stored_result_and_an_edite
     commit = _git_repo(repo)
     _require_tool_checkout(repo, commit, tmp_path / "home", monkeypatch)
     session = tmp_path / "session"
+    freeze_base_at(session, commit)
     blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     toolbox = build_local_toolbox(
         LocalSession(session, "run-1", range(2)),
         blackboard,
         AcceptanceSetup(FakeRepo(), PointPlanner(_point(tmp_path)), IMAGE, WorkloadKind.AGENTX),
-        spec_context(
-            tmp_path, inferencex_commit=commit, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")
-        ),
+        spec_context(tmp_path, blob_root=str(session / "hosted" / "blobs")),
         options=LocalOptions(
             policy=QueuePolicy(per_branch_k=2, global_concurrency=64),
-            runner_envs={"INFERENCEX_REPO": str(repo)},
+            runner_envs={"INFERENCEX_REPO": str(repo), **staged_runner_cache(tmp_path)},
             python=_runner_python(tmp_path),
             poll_interval_sec=0.1,
             timeout_sec=120,

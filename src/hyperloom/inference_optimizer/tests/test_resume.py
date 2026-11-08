@@ -142,6 +142,28 @@ class TestAClosedSessionIsReopenedOnResume:
         finally:
             await coordinator.stop()
 
+    @pytest.mark.asyncio
+    async def test_the_reopened_pass_is_a_new_macro_cycle_whose_kernel_round_is_still_to_run(self, session_dir):
+        """The rewrite controller runs once per macro-cycle, so the closed cycle's verdict must not stand for this one."""
+        from hyperloom.orchestrator.phases.controller_settlement import kernel_controller_settled
+
+        SharedState(
+            session_id="closed",
+            phase="CLOSE",
+            macro_cycle=1,
+            kernel_optimizer="forge",
+            kernel_rewrite_controller_result={"macro_cycle": 1, "status": "failed"},
+        ).save(session_dir)
+
+        coordinator = Coordinator(session_dir, backends=_backends_full())
+        try:
+            state = coordinator.shared_state
+            assert state.macro_cycle == 2
+            assert state.phase_history[-1]["cycle"] == 2
+            assert not kernel_controller_settled(state)
+        finally:
+            await coordinator.stop()
+
 
 @pytest.mark.asyncio
 async def test_existing_events_triggers_resume(session_dir):
@@ -607,7 +629,7 @@ class TestTracelensRootEnvCorrection:
             "KERNEL_AGENT_ENV",
             "USER_DATA_PATH",
             "TRACELENS_ROOT",
-            "MAGPIE_PATH",
+            "INFERENCEX_PATH",
         ):
             monkeypatch.delenv(var, raising=False)
         try:
@@ -654,57 +676,26 @@ class TestTracelensRootEnvCorrection:
         assert outcome["detail"]["corrected_keys"] == []
 
     @pytest.mark.parametrize("override_kind", ["missing", "non-checkout", "empty"])
-    def test_magpie_path_is_not_corrected(self, tmp_path, monkeypatch, override_kind):
-        """TraceLens correction must not replace an explicit Magpie value, even an invalid one."""
-        magpie_dir = tmp_path / "installed-magpie"
-        (magpie_dir / "Magpie").mkdir(parents=True)
-        (magpie_dir / "Magpie" / "__init__.py").write_text("", encoding="utf-8")
-        override = tmp_path / "not-a-magpie-checkout"
+    def test_another_explicit_path_is_not_corrected(self, tmp_path, monkeypatch, override_kind):
+        """TraceLens correction must not replace another explicit path value, even an invalid one."""
+        installed_dir = tmp_path / "installed-inferencex"
+        installed_dir.mkdir()
+        override = tmp_path / "not-an-inferencex-checkout"
         if override_kind == "non-checkout":
             override.mkdir()
         selected = "" if override_kind == "empty" else str(override)
         _installed_env_file(tmp_path, monkeypatch).write_text(
-            f"export MAGPIE_PATH='{magpie_dir}'\n",
+            f"export INFERENCEX_PATH='{installed_dir}'\n",
             encoding="utf-8",
         )
-        monkeypatch.setenv("MAGPIE_PATH", selected)
+        monkeypatch.setenv("INFERENCEX_PATH", selected)
 
         outcome = cli_preflight_env._load_kernel_agent_env_fallback()
 
         import os as _os
 
-        assert _os.environ["MAGPIE_PATH"] == selected
-        assert "MAGPIE_PATH" not in outcome["detail"]["corrected_keys"]
-
-    def test_runtime_magpie_gapfill_reaches_child_imports(self, tmp_path, monkeypatch):
-        """The runtime file's Magpie import root reaches child processes."""
-        import os
-        import subprocess
-        import sys
-
-        magpie_dir = tmp_path / "runtime Magpie"
-        (magpie_dir / "Magpie").mkdir(parents=True)
-        (magpie_dir / "Magpie" / "__init__.py").write_text("RUNTIME_MARKER = 'installer-checkout'\n", encoding="utf-8")
-        _installed_env_file(tmp_path, monkeypatch).write_text(
-            f"export MAGPIE_PATH='{magpie_dir}'\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("PYTHONPATH", "")
-
-        outcome = cli_preflight_env._load_kernel_agent_env_fallback()
-        cli_preflight_env._derive_runtime_paths()
-
-        assert os.environ["MAGPIE_PATH"] == str(magpie_dir)
-        assert "MAGPIE_PATH" not in outcome["detail"]["corrected_keys"]
-        child = subprocess.run(
-            [sys.executable, "-c", "import Magpie; print(Magpie.RUNTIME_MARKER)"],
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        assert child.returncode == 0, child.stderr
-        assert child.stdout.strip() == "installer-checkout"
+        assert _os.environ["INFERENCEX_PATH"] == selected
+        assert "INFERENCEX_PATH" not in outcome["detail"]["corrected_keys"]
 
     def test_placeholder_path_to_your_is_unset(self):
         assert cli_preflight_env._is_placeholder_tracelens_path("/path/to/your/TraceLens") is True
@@ -748,7 +739,6 @@ async def test_resume_preserves_custom_workload_paths(session_dir):
         framework="custom",
         bypass_scripts_dir="/opt/worldplay/scripts",
         framework_repo_path="/opt/worldplay/src",
-        benchmark_backend="bypass",
     ).save(session_dir)
 
     coordinator = Coordinator(session_dir, backends=_backends_full())
@@ -757,7 +747,6 @@ async def test_resume_preserves_custom_workload_paths(session_dir):
         assert state.framework == "custom"
         assert state.bypass_scripts_dir == "/opt/worldplay/scripts"
         assert state.framework_repo_path == "/opt/worldplay/src"
-        assert state.benchmark_backend == "bypass"
     finally:
         await coordinator.stop()
 

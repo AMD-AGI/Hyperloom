@@ -126,7 +126,10 @@ metadata at boot. There is no separate live `classify` action.
 
 ENABLEMENT is entered when a baseline fails and enablement is admitted
 (`--enablement` is not `off` and the run is not multi-node). It is skipped
-entirely on runs where the baseline boots on the first attempt.
+entirely on runs where the baseline boots on the first attempt. A baseline the
+harness refused to launch because the host lacked the idle GPUs it needs never
+enters it: no server started, so the run stops on the first refusal with
+`stop_reason='host_gpus_unavailable'`.
 
 Admission is controlled by `--enablement {off,launch,eval,all}`,
 defaulting to `all`. `launch` admits the boot-failure lane, `eval` the
@@ -627,7 +630,7 @@ interactivity curve. The ladder is sized for the workload: powers of two
 down from 256 for a synthetic run, `1,4,8,10,14,20,28` for an agentic one,
 where a request carries orders of magnitude more prompt and the same card
 saturates far lower. Override either with `--conc-sweep-concs`. Under
-native Magpie AgentX, concurrency is fixed for the session and
+native AgentX, concurrency is fixed for the session and
 `--enable-conc-sweep` is rejected at startup. Start a separate session for each
 CONC. The independent MLPerf backend keeps its optional sweep, disabled by
 default. See the [AgentX workflow](../how-to/optimize.md#optimize-an-agentx-workload)

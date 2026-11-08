@@ -1,288 +1,51 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for reference-script parsing and rendering."""
+"""Tests for rendering launch scripts, and for re-feeding one as a ``--reference-script`` launch file."""
 
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import sys
 
 import pytest
-from pathlib import Path
-from types import SimpleNamespace
 
-from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.inference_optimizer.reference_script import (
     LaunchSettings,
     ServingTarget,
-    parse_reference_script,
     render_reference_script,
 )
-from hyperloom.inference_optimizer.cli.bootstrap import _resolve_reference_recipe
-
-_M3_RECIPE = """#!/usr/bin/env bash
-source "$(dirname "$0")/../benchmark_lib.sh"
-check_env_vars MODEL TP CONC ISL OSL
-
-export VLLM_USE_BREAKABLE_CUDAGRAPH=0
-export VLLM_ROCM_USE_AITER=1
-export VLLM_ALLREDUCE_USE_FLASHINFER=1
-export VLLM_USE_RUST_FRONTEND=1
-export NCCL_DMABUF_ENABLE=0
-export VLLM_CACHE_ROOT=/workspace/cache
-export SOME_SECRET=hunter2
-
-PORT=${PORT:-8888}
-set -x
-vllm serve $MODEL --port $PORT \\
---tensor-parallel-size=$TP \\
---block-size 128 \\
---attention-backend TRITON_ATTN \\
---no-enable-prefix-caching \\
---language-model-only \\
---served-model-name $NAME \\
---max-model-len $MAX_MODEL_LEN \\
---trust-remote-code > $SERVER_LOG 2>&1 &
-"""
+from inference_suite import UserFileError, parse_user_file
 
 
-def _write(tmp_path: Path, text: str, name: str = "recipe.sh") -> str:
-    p = tmp_path / name
-    p.write_text(text, encoding="utf-8")
-    return str(p)
+def _refeed(text: str, *, framework: str):
+    return parse_user_file("rendered.sh", text.encode("utf-8"), framework=framework).launch
 
 
-def test_parse_lifts_static_flags(tmp_path):
-    src = _write(tmp_path, _M3_RECIPE)
-    r = parse_reference_script(src, framework="vllm")
-    assert "--block-size 128" in r.server_args
-    assert "--attention-backend TRITON_ATTN" in r.server_args
-    assert "--no-enable-prefix-caching" in r.server_args
-    assert "--language-model-only" in r.server_args
-    assert "--trust-remote-code" in r.server_args
-
-
-def test_parse_drops_var_tokens(tmp_path):
-    src = _write(tmp_path, _M3_RECIPE)
-    r = parse_reference_script(src, framework="vllm")
-    assert "$" not in r.server_args
-    assert "--port" not in r.server_args
-    assert "--tensor-parallel-size" not in r.server_args
-    assert "--max-model-len" not in r.server_args
-
-
-def test_parse_orphan_flag_dropped_with_value(tmp_path):
-    """R1: --served-model-name $NAME drops BOTH tokens, no orphan flag."""
-    src = _write(tmp_path, _M3_RECIPE)
-    r = parse_reference_script(src, framework="vllm")
-    assert "--served-model-name" not in r.server_args
-
-
-def test_parse_flag_equals_var_dropped_whole(tmp_path):
-    text = "vllm serve $MODEL --tensor-parallel-size=$TP --block-size=32\n"
-    src = _write(tmp_path, text)
-    r = parse_reference_script(src, framework="vllm")
-    assert "--tensor-parallel-size" not in r.server_args
-    assert "--block-size=32" in r.server_args
-
-
-def test_parse_env_denylist(tmp_path):
-    """R6: tuning envs are carried; credential-shaped names are not."""
-    src = _write(tmp_path, _M3_RECIPE)
-    r = parse_reference_script(src, framework="vllm")
-    assert r.envs.get("VLLM_USE_BREAKABLE_CUDAGRAPH") == "0"
-    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
-    assert r.envs.get("VLLM_ALLREDUCE_USE_FLASHINFER") == "1"
-    assert r.envs.get("VLLM_USE_RUST_FRONTEND") == "1"
-    assert r.envs.get("NCCL_DMABUF_ENABLE") == "0"
-    # Path-typed vars pass: the denylist gates names, not value shapes.
-    assert r.envs.get("VLLM_CACHE_ROOT") == "/workspace/cache"
-    assert "SOME_SECRET" not in r.envs
-
-
-def test_parse_env_execution_and_redirect_vectors_blocked(tmp_path):
-    """A recipe may tune the server, not hijack the interpreter or reroute traffic."""
-    text = """\
-export PYTHONUSERBASE=/tmp/evil
-export NODE_OPTIONS=--require=/tmp/evil.js
-export PERL5OPT=-M/tmp/evil
-export GIT_SSH_COMMAND=/tmp/evil.sh
-export HTTPS_PROXY=http://attacker
-export HF_ENDPOINT=http://attacker
-export SSL_CERT_FILE=/tmp/evil.pem
-export REQUESTS_CA_BUNDLE=/tmp/evil.pem
-export TMPDIR=/tmp/evil
-export VLLM_ROCM_USE_AITER=1
-vllm serve $MODEL --trust-remote-code
-"""
-    src = _write(tmp_path, text)
-    r = parse_reference_script(src, framework="vllm")
-    for blocked in (
-        "PYTHONUSERBASE",
-        "NODE_OPTIONS",
-        "PERL5OPT",
-        "GIT_SSH_COMMAND",
-        "HTTPS_PROXY",
-        "HF_ENDPOINT",
-        "SSL_CERT_FILE",
-        "REQUESTS_CA_BUNDLE",
-        "TMPDIR",
-    ):
-        assert blocked not in r.envs, f"{blocked} should be blocked"
-    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
-
-
-def test_parse_env_gpu_masks_blocked(tmp_path):
-    """A recipe selects how the run is tuned, never which devices it sees."""
-    text = """\
-export CUDA_VISIBLE_DEVICES=0
-export GPU_DEVICE_ORDINAL=1
-export HSA_VISIBLE_DEVICES=2
-export HIP_VISIBLE_DEVICES=3
-export ROCR_VISIBLE_DEVICES=4
-export VLLM_ROCM_USE_AITER=1
-vllm serve $MODEL --trust-remote-code
-"""
-    src = _write(tmp_path, text)
-    r = parse_reference_script(src, framework="vllm")
-    for blocked in sorted(GPU_MASK_ENV_NAMES):
-        assert blocked not in r.envs, f"{blocked} should be blocked"
-    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
-
-
-def test_parse_env_tokenizer_knob_is_not_a_credential(tmp_path):
-    """The TOKEN fragment must not swallow TOKENIZERS_PARALLELISM, and the exemption must not turn TOKENIZER into a way past the fragment rule."""
-    text = """\
-export TOKENIZERS_PARALLELISM=false
-export HF_TOKEN=secret
-export TOKENIZER_API_KEY=secret
-export MY_TOKENIZER_SECRET=secret
-vllm serve $MODEL --trust-remote-code
-"""
-    src = _write(tmp_path, text)
-    r = parse_reference_script(src, framework="vllm")
-    assert r.envs.get("TOKENIZERS_PARALLELISM") == "false"
-    for blocked in ("HF_TOKEN", "TOKENIZER_API_KEY", "MY_TOKENIZER_SECRET"):
-        assert blocked not in r.envs, f"{blocked} should be blocked"
-
-
-def test_parse_env_workload_owned_blocked(tmp_path):
-    """Workload keys the optimizer owns must never come from a reference script."""
-    text = """\
-export TP=16
-export MODEL=/bad/path
-export CONC=128
-export RUN_EVAL=false
-export RESULT_DIR=/bad
-export VLLM_ROCM_USE_AITER=1
-vllm serve $MODEL --trust-remote-code
-"""
-    src = _write(tmp_path, text)
-    r = parse_reference_script(src, framework="vllm")
-    for blocked in ("TP", "MODEL", "CONC", "RUN_EVAL", "RESULT_DIR"):
-        assert blocked not in r.envs, f"{blocked} should be blocked"
-    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
-
-
-def test_parse_env_shell_safety_blocked(tmp_path):
-    """Shell-unsafe vars (BLOCKED_UNTRUSTED_ENV_NAMES) must be denied."""
-    text = """\
-export LD_LIBRARY_PATH=/bad
-export PYTHONPATH=/bad
-export PATH=/bad/bin
-export VLLM_ROCM_USE_AITER=1
-vllm serve $MODEL
-"""
-    src = _write(tmp_path, text)
-    r = parse_reference_script(src, framework="vllm")
-    for blocked in ("LD_LIBRARY_PATH", "PYTHONPATH", "PATH"):
-        assert blocked not in r.envs, f"{blocked} should be blocked"
-    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
-
-
-def test_parse_env_self_defaults(tmp_path):
-    text = """\
-export VLLM_USE_BREAKABLE_CUDAGRAPH=${VLLM_USE_BREAKABLE_CUDAGRAPH:-0}
-export NCCL_DMABUF_ENABLE="${NCCL_DMABUF_ENABLE-1}"
-export VLLM_ROCM_USE_AITER=${OTHER:-1}
-export VLLM_USE_RUST_FRONTEND=${VLLM_USE_RUST_FRONTEND:-$DEFAULT}
-"""
-    r = parse_reference_script(_write(tmp_path, text), framework="vllm")
-    assert r.envs["VLLM_USE_BREAKABLE_CUDAGRAPH"] == "0"
-    assert r.envs["NCCL_DMABUF_ENABLE"] == "1"
-    assert "VLLM_ROCM_USE_AITER" not in r.envs
-    assert "VLLM_USE_RUST_FRONTEND" not in r.envs
-
-
-def test_parse_continuation_parity(tmp_path):
-    """A \\-continuation recipe parses identically to its single-line form."""
-    multi = _write(tmp_path, _M3_RECIPE, "multi.sh")
-    single_line = (
-        "vllm serve $MODEL --block-size 128 "
-        "--attention-backend TRITON_ATTN --no-enable-prefix-caching "
-        "--language-model-only --trust-remote-code\n"
-    )
-    single = _write(tmp_path, single_line, "single.sh")
-    rm = parse_reference_script(multi, framework="vllm")
-    rs = parse_reference_script(single, framework="vllm")
-    assert rm.server_args == rs.server_args
-
-
-def test_parse_missing_file_raises():
-    with pytest.raises(OSError):
-        parse_reference_script("/nonexistent/recipe.sh", framework="vllm")
-
-
-def test_parse_sglang_entrypoint(tmp_path):
-    text = (
-        "export SGLANG_USE_AITER=1\n"
-        "python3 -m sglang.launch_server --model-path=$MODEL "
-        "--port $PORT --tp $TP --chunked-prefill-size 8192\n"
-    )
-    src = _write(tmp_path, text)
-    r = parse_reference_script(src, framework="sglang")
-    assert "--chunked-prefill-size 8192" in r.server_args
-    assert "$" not in r.server_args
-    assert r.envs.get("SGLANG_USE_AITER") == "1"
-
-
-def test_parse_sglang_serve_entrypoint_as_the_cookbook_writes_it(tmp_path):
-    text = (
-        "export SGLANG_OPT_USE_TOPK_V2=1\n"
-        "sglang serve \\\n"
-        "  --trust-remote-code \\\n"
-        "  --model-path amd/GLM-5.2-MXFP4 \\\n"
-        "  --tp 4 \\\n"
-        "  --kv-cache-dtype fp8_e4m3 \\\n"
-        "  --host 0.0.0.0 \\\n"
-        "  --port 30000\n"
-    )
-    r = parse_reference_script(_write(tmp_path, text), framework="sglang")
-    assert r.server_args == "--trust-remote-code --tp 4 --kv-cache-dtype fp8_e4m3"
-    assert r.model == "GLM-5.2-MXFP4"
-    assert r.envs == {"SGLANG_OPT_USE_TOPK_V2": "1"}
-
-
-def test_parse_serve_entrypoint_does_not_take_the_cli_name_for_the_model(tmp_path):
-    r = parse_reference_script(_write(tmp_path, "sglang serve --model-path=$MODEL --tp 8\n"), framework="sglang")
-    assert r.server_args == "--tp 8"
-    assert r.model is None
-
-
-def test_render_round_trip(tmp_path):
-    src = _write(tmp_path, _M3_RECIPE)
-    r = parse_reference_script(src, framework="vllm")
+def test_render_round_trip():
+    args, envs = "--block-size 128 --attention-backend TRITON_ATTN --trust-remote-code", {"VLLM_ROCM_USE_AITER": "1"}
     text = render_reference_script(
-        framework="vllm",
-        launch=LaunchSettings(server_args=r.server_args, envs=r.envs),
-        target=ServingTarget(model=r.model),
+        framework="vllm", launch=LaunchSettings(server_args=args, envs=envs), target=ServingTarget(model="/models/M")
     )
-    rt_src = _write(tmp_path, text, "rt.sh")
-    r2 = parse_reference_script(rt_src, framework="vllm")
-    assert r2.server_args == r.server_args
-    assert r2.envs == r.envs
+    launch = _refeed(text, framework="vllm")
+    assert " ".join(launch.args) == args
+    assert launch.env == {"MODEL": "/models/M", **envs}
+
+
+@pytest.mark.parametrize(
+    ("framework", "command"),
+    [
+        ("sglang", "python3 -m sglang.launch_server --model-path=$MODEL --tp 8"),
+        ("vllm", "vllm serve $MODEL --tp 8"),
+        ("atom", "python3 -m atom.entrypoints.openai_server --tp 8"),
+    ],
+)
+def test_render_launches_the_frameworks_entrypoint(framework, command):
+    text = render_reference_script(framework=framework, launch=LaunchSettings(server_args="--tp 8"))
+    assert text.endswith(command + "\n")
+    assert _refeed(text, framework=framework).args == ("--tp", "8")
 
 
 def test_render_carries_validated_rocm_envs():
@@ -313,7 +76,7 @@ def test_render_model_path_is_exported():
 
 
 def test_render_bare_model_name_stays_a_comment():
-    """parse_reference_script records a basename; exporting it would break --model-path."""
+    """A model named without a path is recorded; exporting it would break --model-path."""
     text = render_reference_script(
         framework="sglang", launch=LaunchSettings(server_args=""), target=ServingTarget(model="minimaxm3")
     )
@@ -343,31 +106,13 @@ def test_render_quotes_env_values():
 def test_literal_environment_survives_export_child_and_reference_import(tmp_path, value):
     name = "AITER_CONFIG_GEMM_BF16"
     text = render_reference_script(framework="sglang", launch=LaunchSettings(server_args="", envs={name: value}))
-    recipe = _write(tmp_path, text)
-    assert parse_reference_script(recipe, framework="sglang").envs[name] == value
+    assert _refeed(text, framework="sglang").env[name] == value
     observer = tmp_path / "observe.py"
     observer.write_text("import json,os; print(json.dumps(os.environ['AITER_CONFIG_GEMM_BF16']))")
     wrapper = tmp_path / "run.sh"
-    import shlex
-
     wrapper.write_text("python3() { " + shlex.join([sys.executable, "-S", str(observer)]) + "; }\n" + text)
     child = subprocess.run(["bash", str(wrapper)], text=True, capture_output=True, check=True)
     assert json.loads(child.stdout) == value
-
-
-def test_reference_import_keeps_literal_dollars_and_skips_dynamic_commands(tmp_path):
-    recipe = _write(
-        tmp_path,
-        """export AITER_CONFIG_GEMM_BF16='/tables/$literal file.csv'
-export DYNAMIC=$HOME
-export COMMAND=`printf surprise`
-export DEFAULT=${DEFAULT:-`printf surprise`}
-export CHAIN=value;true
-""",
-    )
-    assert parse_reference_script(recipe, framework="sglang").envs == {
-        "AITER_CONFIG_GEMM_BF16": "/tables/$literal file.csv",
-    }
 
 
 def test_render_redacts_secret_shaped_envs():
@@ -421,56 +166,21 @@ def test_render_base_params_unchanged_without_enablement():
     assert "VLLM_ROCM_USE_AITER" in text
 
 
-def test_render_round_trip_with_enablement_params(tmp_path):
-    """The setup call does not confuse parse_reference_script, so the script still re-feeds."""
+def test_render_round_trip_with_enablement_params():
+    """The setup call does not confuse the launch file parser, so the script still re-feeds."""
     text = render_reference_script(
         framework="sglang",
         launch=LaunchSettings(server_args="--tp 8", envs={"VLLM_ROCM_USE_AITER": "1"}),
         target=ServingTarget(model="/models/M"),
         setup_script="enablement_setup.sh",
     )
-    sh = tmp_path / "enablement_setting.sh"
-    sh.write_text(text, encoding="utf-8")
-    r = parse_reference_script(str(sh), framework="sglang")
-    assert "--tp 8" in r.server_args
-    assert r.envs.get("VLLM_ROCM_USE_AITER") == "1"
-
-
-# --- bootstrap._resolve_reference_recipe tests ---
-
-
-def test_resolve_no_flag_returns_empty():
-    """No --reference-script → empty tuple, nothing attempted."""
-    args = SimpleNamespace(reference_script=None)
-    assert _resolve_reference_recipe(args, "vllm") == ("", {}, "", {})
-
-
-def test_resolve_valid_flag_is_used(tmp_path):
-    src = _write(tmp_path, _M3_RECIPE, "explicit.sh")
-    args = SimpleNamespace(reference_script=src)
-    server_args, envs, model, controls = _resolve_reference_recipe(args, "vllm")
-    assert "--block-size 128" in server_args
-
-
-def test_resolve_unreadable_flag_raises_system_exit():
-    """Given but unreadable path → SystemExit(2)."""
-    args = SimpleNamespace(reference_script="/no/such/recipe.sh")
-    with pytest.raises(SystemExit) as exc_info:
-        _resolve_reference_recipe(args, "vllm")
-    assert exc_info.value.code == 2
-
-
-def test_resolve_script_with_no_flags_raises_system_exit(tmp_path):
-    """A readable script that yields no server flags and no envs → SystemExit(2)."""
-    empty = _write(tmp_path, "#!/usr/bin/env bash\necho hello\n")
-    args = SimpleNamespace(reference_script=empty)
-    with pytest.raises(SystemExit) as exc_info:
-        _resolve_reference_recipe(args, "vllm")
-    assert exc_info.value.code == 2
+    launch = _refeed(text, framework="sglang")
+    assert launch.args == ("--tp", "8")
+    assert launch.env.get("VLLM_ROCM_USE_AITER") == "1"
 
 
 @pytest.mark.parametrize("invalid", ["missing", "empty_manifest", "bad_manifest", "path_list"])
-def test_export_and_reimport_reject_unloadable_overlay(tmp_path, invalid):
+def test_export_rejects_unloadable_overlay(tmp_path, invalid):
     overlay = tmp_path / "overlay"
     overlay.mkdir()
     if invalid != "missing":
@@ -482,34 +192,24 @@ def test_export_and_reimport_reject_unloadable_overlay(tmp_path, invalid):
     value = str(overlay) + (":/another" if invalid == "path_list" else "")
     with pytest.raises(ValueError, match="overlay_pythonpath"):
         render_reference_script(framework="sglang", launch=LaunchSettings(server_args="", overlay_pythonpath=value))
-    source = _write(tmp_path, "# hyperloom-launch-controls: " + json.dumps({"overlay_pythonpath": value}))
-    with pytest.raises(ValueError, match="overlay_pythonpath"):
-        parse_reference_script(source, framework="sglang")
 
 
-@pytest.mark.parametrize("remote", [False, True])
-def test_untrusted_reference_cannot_enable_loadable_overlay(tmp_path, monkeypatch, remote):
+def test_a_rendered_overlay_cannot_be_refed(tmp_path):
+    """A launch file cannot authorize Python code: the overlay's controls line refuses the re-feed."""
     overlay = tmp_path / "overlay"
     overlay.mkdir()
     (overlay / "sitecustomize.py").write_text("raise RuntimeError('must not be imported')")
     text = render_reference_script(
         framework="sglang", launch=LaunchSettings(server_args="--tp 8", overlay_pythonpath=str(overlay))
     )
-    if remote:
-        source = "https://example.invalid/recipe.sh"
-        monkeypatch.setattr(
-            "hyperloom.inference_optimizer.baseline_comparison.inferencex_client._fetch_raw",
-            lambda _source: text.encode(),
-        )
-    else:
-        source = _write(tmp_path, text)
-    with pytest.raises(ValueError, match="imports executable code"):
-        parse_reference_script(source, framework="sglang")
+    with pytest.raises(UserFileError, match="hyperloom-launch-controls"):
+        _refeed(text, framework="sglang")
 
 
-def test_nonexecutable_launch_controls_roundtrip(tmp_path):
+def test_launch_controls_are_recorded_and_refuse_a_refeed():
     controls = {"unset_envs": ["SGLANG_USE_AITER"], "remove_args": ["--disable-cuda-graph"], "args_mode": "replace"}
     text = render_reference_script(framework="sglang", launch=LaunchSettings(server_args="--tp 8", **controls))
-    recipe = parse_reference_script(_write(tmp_path, text), framework="sglang")
-    assert recipe.launch_controls == controls
-    assert recipe.server_args == "--tp 8"
+    assert "# hyperloom-launch-controls: " + json.dumps(controls, sort_keys=True) in text.splitlines()
+    assert "unset SGLANG_USE_AITER" in text.splitlines()
+    with pytest.raises(UserFileError, match="hyperloom-launch-controls"):
+        _refeed(text, framework="sglang")

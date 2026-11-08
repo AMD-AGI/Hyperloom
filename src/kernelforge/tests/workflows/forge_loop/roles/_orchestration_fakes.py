@@ -93,38 +93,15 @@ def _assignment(
 
 
 def _dispatch_payload(*, both_roles: bool = False) -> str:
-    assignments = [
-        {
-            "assignment_id": "memory-1",
-            "role_id": "memory",
-            "target_case_ids": ["case-a"],
-            "evidence_refs": [
-                {
-                    "kind": "measurement",
-                    "path": "case:case-a",
-                    "summary": "Memory case",
-                }
-            ],
-            "reason": "Inspect memory behavior.",
-        }
-    ]
+    assignments = [{"role_id": "memory", "target_case_ids": ["case-a"], "reason": "Inspect memory behavior."}]
     if both_roles:
-        assignments.append(
-            {
-                "assignment_id": "compute-1",
-                "role_id": "compute",
-                "target_case_ids": ["case-b"],
-                "evidence_refs": [
-                    {
-                        "kind": "measurement",
-                        "path": "case:case-b",
-                        "summary": "Compute case",
-                    }
-                ],
-                "reason": "Inspect compute behavior.",
-            }
-        )
+        assignments.append({"role_id": "compute", "target_case_ids": ["case-b"], "reason": "Inspect compute behavior."})
     return json.dumps({"assignments": assignments})
+
+
+def _critic_answer(verdict: str, review: str = "The plan is worth executing.", *drops: dict) -> str:
+    """A plan critic's answer, as the text a provider that cannot constrain its own answer returns it in."""
+    return json.dumps({"verdict": verdict, "review": review, "lane_narrowing": list(drops)})
 
 
 class _StaticBackend:
@@ -213,9 +190,13 @@ async def _compute_and_memory_round() -> SpecialistRound:
     return SpecialistRound(dispatch, outcomes, _coverage(["compute", "memory"]))
 
 
+#: The answer of a partition that found no move wider than one region.
+NO_CROSS_CUTTING_MOVE = {"move": "", "lane_id": 0, "unassigned_reason": ""}
+
+
 def _partition(*grounds: str) -> str:
     """The round partition a lane round now buys before it synthesizes."""
-    return json.dumps({"lanes": [{"ground": ground, "reason": "one session's worth"} for ground in grounds]})
+    return _partition_lanes([_lane(ground) for ground in grounds])
 
 
 GROUND_A = "chunk_intra.py: the MFMA issue schedule"
@@ -225,16 +206,13 @@ GROUND_B = "chunk.py: the scale stream's staging"
 JOINT_GROUND = "chunk_intra.py: the BLOCK_H tile and the num_warps/waves_per_eu/num_stages the launch passes with it"
 
 
-def _partition_lanes(lanes: list[dict], move: object | None = None) -> str:
+def _partition_lanes(lanes: list[dict], move: dict | None = None) -> str:
     """A partition answer that can carry joint lanes and its widest move."""
-    payload: dict = {"lanes": lanes}
-    if move is not None:
-        payload["cross_cutting_move"] = move
-    return json.dumps(payload)
+    return json.dumps({"lanes": lanes, "cross_cutting_move": {**NO_CROSS_CUTTING_MOVE, **(move or {})}})
 
 
 def _lane(ground: str, **extra) -> dict:
-    return {"ground": ground, "reason": "one session's worth", **extra}
+    return {"ground": ground, "reason": "one session's worth", "joint": False, "fallback": "", **extra}
 
 
 def _single_lane_service() -> OrchestrationService:

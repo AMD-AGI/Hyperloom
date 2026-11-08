@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common import proctree
+from hyperloom_common import proctree
 from hyperloom.orchestrator.specialists import resources
 from hyperloom.orchestrator.specialists.resources import (
     ProcessTreeSampler,

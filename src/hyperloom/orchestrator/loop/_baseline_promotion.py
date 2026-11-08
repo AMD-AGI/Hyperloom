@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom_common.coerce import optional_positive_float, to_float
 from hyperloom_common.env import is_truthy
+from hyperloom.common.benchmark_config import BenchmarkPointError, read_benchmark_point
 from hyperloom.common.gain_math import accuracy_meets_floor
 from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
@@ -19,7 +21,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 import yaml
 
 from ..actions.executors._accuracy_gate import (
-    BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
+    ACCURACY_DEFINITION_DIGEST_KEY,
     BASELINE_EVAL_EVIDENCE_KEY,
     BASELINE_EVAL_FAILURE_KIND_KEY,
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
@@ -72,22 +74,18 @@ _WORKLOAD_ARG_COUNTS: dict[str, str] = {
 
 
 def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
-    """Extract KB workload-tag fields from a baseline-materialized Magpie YAML."""
+    """Extract KB workload-tag fields from a baseline-materialized point YAML."""
     try:
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError):
+        point = read_benchmark_point(Path(yaml_path))
+    except (OSError, BenchmarkPointError, yaml.YAMLError):
         return {}
-    out: dict[str, Any] = {}
-    bm = cfg.get("benchmark") if isinstance(cfg, dict) else None
-    if not isinstance(bm, dict):
-        return out
-    for key in ("workload_mode", "quant_scheme"):
-        value = bm.get(key)
-        if value not in (None, "", 0):
-            out[key] = value
-    envs = bm.get("envs") if isinstance(bm.get("envs"), dict) else {}
-    declared = envs.get(server_args_env_name(bm.get("framework")))
+    out: dict[str, Any] = {
+        key: value
+        for key, value in (("workload_mode", point.workload_mode), ("quant_scheme", point.quant_scheme))
+        if value
+    }
+    envs = point.envs
+    declared = envs.get(server_args_env_name(point.framework))
     tokens = declared.split() if isinstance(declared, str) else []
     for index, token in enumerate(tokens):
         out.update(_WORKLOAD_ARG_FLAGS.get(token, {}))
@@ -120,9 +118,7 @@ def _adopt_eval_trigger(state: Any, result_payload: Mapping[str, Any]) -> None:
     cfg = result_payload.get("materialized_config")
     if isinstance(cfg, str) and cfg:
         enablement.probe_config_path = cfg
-    fingerprint = result_payload.get(BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY)
-    if isinstance(fingerprint, str) and fingerprint:
-        enablement.eval_contract_fingerprint = fingerprint
+    enablement.eval_definition_digest = str(result_payload.get(ACCURACY_DEFINITION_DIGEST_KEY) or "")
     incoming_kind = result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY)
     if isinstance(incoming_kind, str) and incoming_kind:
         enablement.baseline_eval_kind = incoming_kind
@@ -382,6 +378,7 @@ class BaselinePromotionMixin:
         accuracy = result.get("accuracy")
         if isinstance(accuracy, (int, float)):
             state.baseline_accuracy = float(accuracy)
+            state.baseline_accuracy_definition_digest = str(result.get(ACCURACY_DEFINITION_DIGEST_KEY) or "")
         # Persist the materialized YAML so downstream tasks reuse the exact workload contract.
         materialized = result.get("materialized_config")
         if isinstance(materialized, str) and materialized:

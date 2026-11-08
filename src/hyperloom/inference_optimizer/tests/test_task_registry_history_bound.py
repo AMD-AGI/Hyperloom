@@ -226,20 +226,26 @@ async def test_cursor_reuse_validates_dispatch_class(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_exists_with_key_prefix_matches_the_prefix_literally(tmp_path):
+async def test_with_key_prefix_matches_the_prefix_literally(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "key-prefix.db"))
     try:
-        await registry.create_or_return_existing(
+        first, _ = await registry.create_or_return_existing(
             TaskSpec(kind="integrate_patch", params={}, idempotency_key="aab-reconcile1")
         )
+        await registry.transition(first.task_id, "running")
+        await registry.transition(first.task_id, "succeeded")
+        second, _ = await registry.create_or_return_existing(
+            TaskSpec(kind="integrate_patch", params={}, idempotency_key="aab-reconcile2")
+        )
 
-        assert await registry.exists_with_key_prefix("integrate_patch", "aab-reconcile", states=("queued",))
+        # Every state, oldest first: the caller decides which ones count.
+        matched = await registry.with_key_prefix("integrate_patch", "aab-reconcile")
+        assert [(t.task_id, t.state) for t in matched] == [(first.task_id, "succeeded"), (second.task_id, "queued")]
         # Real keys carry ``_``; it must match only itself, not any character.
-        assert not await registry.exists_with_key_prefix("integrate_patch", "a_b-reconcile", states=("queued",))
-        assert not await registry.exists_with_key_prefix("integrate_patch", "a%b-reconcile", states=("queued",))
-        assert not await registry.exists_with_key_prefix("integrate_patch", "AAB-reconcile", states=("queued",))
-        assert not await registry.exists_with_key_prefix("explore", "aab-reconcile", states=("queued",))
-        assert not await registry.exists_with_key_prefix("integrate_patch", "aab-reconcile", states=("succeeded",))
+        assert await registry.with_key_prefix("integrate_patch", "a_b-reconcile") == []
+        assert await registry.with_key_prefix("integrate_patch", "a%b-reconcile") == []
+        assert await registry.with_key_prefix("integrate_patch", "AAB-reconcile") == []
+        assert await registry.with_key_prefix("explore", "aab-reconcile") == []
     finally:
         registry.db.close()
 

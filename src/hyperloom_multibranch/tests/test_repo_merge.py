@@ -21,6 +21,7 @@ from hyperloom.contracts.recipe import (
     LaunchConfig,
     PatchRef,
     Recipe,
+    RecipeBase,
     RecipeDelta,
     RecipeError,
     ValueChange,
@@ -553,6 +554,17 @@ def test_a_candidate_on_another_base_image_does_not_merge():
             "i1",
             BASE,
             replace(BASE, base_image_digest="rocm/vllm@sha256:" + "d" * 64),
+            BASE,
+            Stored(_applies, _table, _store, _keep),
+        )
+
+
+def test_a_candidate_on_another_base_launch_does_not_merge():
+    with pytest.raises(RecipeError, match="base launch"):
+        carry(
+            "i1",
+            BASE,
+            replace(BASE, base=RecipeBase("sha256:" + "d" * 64, "inferencex")),
             BASE,
             Stored(_applies, _table, _store, _keep),
         )

@@ -254,6 +254,42 @@ async def test_stop_signals_follow_the_normal_terminal_path(session_dir, stop_si
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_sigterm_stays_captured_until_the_inflight_round_is_cancelled(session_dir, monkeypatch):
+    """A second SIGTERM while the stop tears the round's server down must not kill the process outright."""
+    from hyperloom.orchestrator.loop.signals import SignalDrain
+
+    def _launch_disposition(_signum, _frame):
+        pass
+
+    c = Coordinator(session_dir, backends=_build_backends({}))
+    c._stop.set()
+    seen: list[tuple[str, Any]] = []
+
+    async def _close(*, reason):
+        seen.append(("close_sequence", signal.getsignal(signal.SIGTERM)))
+
+    async def _cancel(*, reason, exempt=frozenset()):
+        seen.append(("cancel_inflight", signal.getsignal(signal.SIGTERM)))
+        return []
+
+    c.phase_close.ensure_close_sequence = _close
+    c._recipe_kb_t4_hook = _noop_finalize
+    monkeypatch.setattr(c.dispatcher, "cancel_inflight_actions", _cancel)
+    previous = signal.signal(signal.SIGTERM, _launch_disposition)
+    try:
+        await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=1, install_signal_handlers=True))
+        await c.stop()
+        seen.append(("stopped", signal.getsignal(signal.SIGTERM)))
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert seen == [
+        ("close_sequence", SignalDrain._noop_handler),
+        ("cancel_inflight", SignalDrain._noop_handler),
+        ("stopped", _launch_disposition),
+    ]
+
+
 # MockBackend
 @pytest.mark.asyncio
 async def test_mock_backend_plays_scripted_turns():
@@ -1644,7 +1680,7 @@ def _eval_failed_result() -> dict:
         "baseline_eval_failure_kind": "eval_runtime_failure",
         "baseline_eval_accuracy_floor": 0.2,
         "baseline_eval_evidence": "run_eval failed with exit code 1",
-        "baseline_eval_contract_fingerprint": "abc123",
+        "accuracy_definition_digest": "sha256:abc123",
         "materialized_config": "/runs/baseline/materialized.yaml",
     }
 
@@ -1664,7 +1700,7 @@ async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_
         assert c.shared_state.enablement.pending is True
         assert c.shared_state.enablement.accuracy_floor == 0.2
         assert c.shared_state.enablement.probe_config_path == "/runs/baseline/materialized.yaml"
-        assert c.shared_state.enablement.eval_contract_fingerprint == "abc123"
+        assert c.shared_state.enablement.eval_definition_digest == "sha256:abc123"
         assert c.shared_state.enablement.baseline_eval_kind == "eval_runtime_failure"
         assert c.shared_state.enablement.launch_log
     finally:
@@ -1790,7 +1826,6 @@ def _eval_unavailable_result() -> dict:
         "baseline_eval_evidence": (
             "baseline accuracy did not meet floor: accuracy=None floor=0.0 task=None metric=None source=None"
         ),
-        "baseline_eval_contract_fingerprint": "noeval-fp",
         "materialized_config": "/runs/baseline/noeval.yaml",
     }
 
@@ -1809,7 +1844,7 @@ async def test_eval_less_baseline_does_not_downgrade_measured_trigger(session_di
         st.enablement.observed_metric = "exact_match,strict-match"
         st.enablement.baseline_eval_evidence = "measured: accuracy=0.0 task=gsm8k source=/runs/.../results.json"
         st.enablement.probe_config_path = "/runs/baseline/measured.yaml"
-        st.enablement.eval_contract_fingerprint = "measured-fp"
+        st.enablement.eval_definition_digest = "sha256:measured"
 
         await c.writeback.handle_unpromotable_result(_mk_task("baseline", "t-noeval"), _eval_unavailable_result())
 
@@ -1819,7 +1854,7 @@ async def test_eval_less_baseline_does_not_downgrade_measured_trigger(session_di
         assert st.enablement.observed_metric == "exact_match,strict-match"
         assert "accuracy=0.0" in st.enablement.baseline_eval_evidence
         assert st.enablement.probe_config_path == "/runs/baseline/measured.yaml"
-        assert st.enablement.eval_contract_fingerprint == "measured-fp"
+        assert st.enablement.eval_definition_digest == "sha256:measured"
         # ...while the round still registers as an eval-rooted failure.
         assert st.enablement.origin == "eval"
         assert st.enablement.pending is True
@@ -1862,7 +1897,7 @@ async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir,
     try:
         c.shared_state.enablement.validation_pending = True
         c.shared_state.enablement.revalidation_task_id = "t-reval-boot"
-        c.shared_state.enablement.eval_contract_fingerprint = "frozen-fp"
+        c.shared_state.enablement.eval_definition_digest = "sha256:frozen"
         c.shared_state.enablement.accuracy_floor = 0.5
         await c.writeback.handle_unpromotable_result(
             _mk_task("baseline", "t-reval-boot"),
@@ -1871,7 +1906,7 @@ async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir,
         assert c.shared_state.enablement.validation_pending is False
         assert c.shared_state.enablement.revalidation_task_id == ""
         # Frozen trigger identity must be preserved.
-        assert c.shared_state.enablement.eval_contract_fingerprint == "frozen-fp"
+        assert c.shared_state.enablement.eval_definition_digest == "sha256:frozen"
         assert c.shared_state.enablement.accuracy_floor == 0.5
     finally:
         await c.stop()
@@ -2203,14 +2238,24 @@ async def test_handle_unpromotable_profile_clears_the_initial_analysis_gate(sess
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ending", ["cancelled", "succeeded"])
-@pytest.mark.parametrize("phase", ["PRELUDE", "ENABLEMENT"])
-async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_unbooked(session_dir, ending, phase):
-    """A cancelled initial analysis, or one that ended before a restart booked it, must not hold the phase.
+@pytest.mark.parametrize(
+    ("phase", "ending", "asks_again"),
+    [
+        ("PRELUDE", "cancelled", True),
+        ("PRELUDE", "succeeded", False),
+        ("ENABLEMENT", "cancelled", False),
+        ("ENABLEMENT", "succeeded", False),
+    ],
+)
+async def test_a_phase_settles_the_initial_analysis_gate_when_its_task_ended_unbooked(
+    session_dir, phase, ending, asks_again
+):
+    """An initial analysis that ended without being booked must not hold the phase on the task that ended.
 
     Neither path reaches the writeback that clears the marker: the dispatcher returns early for a
     cancelled result, and a restart between the runner's terminal write and booking loses the outcome.
-    Both phases that hold for the marker have to release it.
+    Both phases release the marker, except that PRELUDE asks again for an analysis that was cancelled
+    before it ran and holds on that one instead.
     """
     from hyperloom.orchestrator.phases import machine_state as phase_state
 
@@ -2231,7 +2276,12 @@ async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_un
         await c.tasks.transition(task.task_id, ending)
         assert phase_state.compute_next_phase(c.shared_state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
         await c.phase_machine.advance_phase_if_needed()
-        assert c.shared_state.auto_roofline_pending_task_id == ""
+        marker = c.shared_state.auto_roofline_pending_task_id
+        if asks_again:
+            assert marker not in ("", task.task_id)
+            assert (await c.tasks.get(marker)).state == "queued"
+        else:
+            assert marker == ""
     finally:
         await c.stop()
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import logging
 import subprocess
 
 import pytest
@@ -16,6 +17,7 @@ from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.tests.test_geak_promotion_retention import (
     promotion as promotion,
 )
+from hyperloom.orchestrator.phases import kernel_geak_dispatch
 from hyperloom.orchestrator.phases.geak_rebench import geak_candidate_is_adjudicated
 from hyperloom.orchestrator.phases.kernel_geak_promotion import GeakRunnerFacts
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -95,6 +97,32 @@ async def test_a_settled_agentx_candidate_is_not_re_promoted_on_the_next_kernel_
     # The verdict is left standing rather than retired by the skip that refused the replay.
     assert state.geak_result["revalidation_error_class"] == "incomparable"
     assert not state.geak_pending.get("status") == "awaiting_rebench"
+
+
+def test_a_failed_runner_logs_the_error_from_its_result_json(promotion, caplog):
+    coord, _result, _recorder = promotion
+    geak_dir = coord.session_dir / "geak"
+    geak_dir.mkdir(parents=True, exist_ok=True)
+    failure = {"status": "error", "error_class": "workflow_parse_error", "error": "connect ECONNREFUSED 127.0.0.1:4000"}
+    (geak_dir / "result.json").write_text(json.dumps(failure), encoding="utf-8")
+    exited_failed = subprocess.CompletedProcess(["geak_runner"], 1, "", "")
+
+    with caplog.at_level(logging.WARNING, logger=kernel_geak_dispatch.__name__):
+        coord.phase_kernel._settle_geak_runner_exit(
+            exited_failed,
+            handoff={"exp_root": str(coord.session_dir), "eval_dir": ""},
+            agentx=False,
+            facts=GeakRunnerFacts(
+                started_at="2026-09-02T00:00:00+00:00",
+                duration_sec=60.0,
+                runner_timeout_sec=3600,
+                kill_timeout_sec=3900,
+            ),
+        )
+
+    assert [r.getMessage() for r in caplog.records if r.name == kernel_geak_dispatch.__name__] == [
+        "GEAK runner rc=1: error_class=workflow_parse_error error=connect ECONNREFUSED 127.0.0.1:4000 stderr_tail="
+    ]
 
 
 def test_late_rejection_does_not_create_an_event(tmp_path):

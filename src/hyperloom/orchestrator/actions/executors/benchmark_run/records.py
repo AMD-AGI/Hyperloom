@@ -13,10 +13,12 @@ from typing import TYPE_CHECKING, Any, Iterator, Mapping, NamedTuple
 
 import yaml
 
-from hyperloom.common.env_safety import scrub_benchmark_process_env
 from ...stop_attribution import StoppedByTheRun
+from .._accuracy_gate import ACCURACY_DEFINITION_DIGEST_KEY, EVAL_DEFINITION_DIGEST_KEY
 from .._grid_runner import stopped_by_the_run
-from .._subprocess_kill import post_ready_runtime_sec
+from .._server_argv import ConfigUnreadable, config_point
+from .._suite_config import SuiteRoute
+from inference_suite.contracts import RunLayout
 
 if TYPE_CHECKING:
     from ....loop.sub_agent_runner import RunnerContext
@@ -40,11 +42,9 @@ _ACCURACY_ROUND_DIR = "accuracy_round"
 def _config_framework(config_path: Path | str) -> str:
     """Framework name from a materialized benchmark YAML (``""`` when unreadable)."""
     try:
-        with Path(config_path).open(encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError):
+        return config_point(config_path).framework.strip().lower()
+    except ConfigUnreadable:
         return ""
-    return str((cfg.get("benchmark") or {}).get("framework") or "").strip().lower()
 
 
 def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
@@ -57,19 +57,25 @@ def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
 
 
 def _round_post_ready_sec(
-    server_log_path: str | None,
+    round_dir: Path | None,
     *,
     started_unix: float,
     runtime_sec: float,
 ) -> float | None:
-    """How much of a round's wall-clock came after the boot: the benchmark, and the accuracy eval if it ran one."""
-    if not server_log_path:
+    """How much of a round's wall-clock came after the boot: the benchmark, and the accuracy eval if it ran one.
+
+    ``round_dir`` holds the round's ready stamp; ``None`` for a server-less round. A stamp written before the round
+    started is an earlier round's and says nothing about this one.
+    """
+    if round_dir is None:
         return None
-    return post_ready_runtime_sec(
-        server_log_path,
-        started_unix=started_unix,
-        runtime_sec=runtime_sec,
-    )
+    try:
+        stamp = RunLayout(round_dir).read_ready_stamp()
+    except OSError:
+        return None
+    if stamp is None or stamp.ready_unix < started_unix:
+        return None
+    return max(0.0, min(float(runtime_sec), float(runtime_sec) - stamp.boot_sec))
 
 
 class _RoundEnd(NamedTuple):
@@ -182,29 +188,35 @@ def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Pa
     return (output_dir / result_dir).resolve()
 
 
-def _benchmark_process_env(
-    config_path: Path, output_dir: Path, result_dir: Path, inferencex_path: str
-) -> dict[str, str]:
-    """Build the client environment without overriding Magpie's native checkout selection."""
-    from ..magpie_agentx import native_config
-
-    env = scrub_benchmark_process_env(os.environ.copy())
-    env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-    if inferencex_path and not native_config(config_path):
-        env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-    env["RESULT_DIR"] = str(result_dir)
-    # InferenceX removes EVAL_RESULT_DIR after processing lm-eval output.
-    env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
-    env["SERVER_LOG"] = str(output_dir / "server.log")
-    env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
-    return env
-
-
 def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] | None = None) -> bool:
     """Only a genuine ``baseline`` task may establish/overwrite the quality reference."""
     if str(task_kind or "") != "baseline":
         return False
     return not (params or {}).get("quality_ref_exempt")
+
+
+#: What ``record_eval_score`` writes about the score itself; the definition digest travels with it, since a score
+#: graded without the definition it was taken under compares with no baseline.
+EVAL_SCORE_KEYS = ("accuracy", "accuracy_task", "accuracy_metric", "accuracy_source", ACCURACY_DEFINITION_DIGEST_KEY)
+
+
+def carry_eval_score(result: dict[str, Any], scored: Mapping[str, Any]) -> None:
+    """Copy the score ``record_eval_score`` wrote on ``scored`` into ``result``."""
+    result.update({key: scored[key] for key in EVAL_SCORE_KEYS if scored.get(key) is not None})
+
+
+def record_eval_score(result: dict[str, Any], eval_data: Mapping[str, Any]) -> bool:
+    """Copy the score ``parse_eval_results`` read into ``result``; False when it read none."""
+    accuracy = eval_data.get("accuracy")
+    if accuracy is None:
+        return False
+    result["accuracy"] = accuracy
+    result["accuracy_task"] = eval_data.get("task", "gsm8k")
+    result["accuracy_metric"] = eval_data.get("metric", "")
+    result["accuracy_source"] = eval_data.get("source_file", "")
+    result[ACCURACY_DEFINITION_DIGEST_KEY] = eval_data.get(EVAL_DEFINITION_DIGEST_KEY, "")
+    result["eval_runtime_sec"] = eval_data.get("eval_runtime_sec")
+    return True
 
 
 def _requested_framework(params: dict[str, Any]) -> str | None:
@@ -265,6 +277,8 @@ class BenchmarkAttempt:
     serving_lease: Any = None
     recorder: Any = None
     run_index: int = 0
+    #: Where the attempt's rounds run on inference_suite; set once the attempt resolved its session's route.
+    suite: SuiteRoute | None = None
 
 
 class _BenchmarkRound(NamedTuple):
@@ -274,8 +288,6 @@ class _BenchmarkRound(NamedTuple):
     result_dir: Path
     ctx: RunnerContext
     ctx_extra: Mapping[str, Any]
-    cmd: list[str]
-    env: dict[str, Any]
     framework: str
     watchdog_server_log: str | None
     capture_meta: dict[str, Any]

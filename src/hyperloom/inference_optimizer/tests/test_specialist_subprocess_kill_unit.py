@@ -172,7 +172,7 @@ class _SameUidRunAs:
 @pytest.mark.skipif(os.getuid() == 0, reason="pid 1 has to belong to another uid")
 def test_demoted_reap_signals_only_pids_the_specialist_account_owns(monkeypatch):
     """The account can write into the scan's stdout, so a pid it prints is believed only if that account owns it."""
-    from hyperloom.common.proctree import Tree
+    from hyperloom_common.proctree import Tree
 
     own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     roots: list[list[int]] = []
@@ -195,7 +195,7 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, dem
     import os
     import signal
     import time
-    from hyperloom.common.proctree import running
+    from hyperloom_common.proctree import running
 
     pid_path = tmp_path / "heartbeat.pid"
     child_code = (
@@ -275,7 +275,7 @@ def test_kill_exited_root_cannot_confirm_descendants(monkeypatch):
 
 @pytest.mark.parametrize("confirmed_dead", [True, False])
 def test_kill_reuses_tree_cleanup_confirmation(monkeypatch, confirmed_dead):
-    from hyperloom.common.proctree import Tree
+    from hyperloom_common.proctree import Tree
 
     proc = Mock(pid=4242)
     proc.poll.return_value = None
@@ -298,7 +298,7 @@ def test_kill_reuses_tree_cleanup_confirmation(monkeypatch, confirmed_dead):
 
 @pytest.mark.parametrize("failure", [OSError("procfs unreadable"), subprocess.TimeoutExpired("specialist", 1)])
 def test_kill_does_not_confirm_failed_collection_or_wait(monkeypatch, failure):
-    from hyperloom.common.proctree import Tree
+    from hyperloom_common.proctree import Tree
 
     proc = Mock(pid=4242)
     proc.poll.return_value = None
@@ -314,7 +314,7 @@ def test_kill_does_not_confirm_failed_collection_or_wait(monkeypatch, failure):
 
 
 def test_kill_missing_process_identity_cannot_confirm_tree(monkeypatch):
-    from hyperloom.common.proctree import Tree
+    from hyperloom_common.proctree import Tree
 
     proc = Mock(pid=4242)
     proc.poll.return_value = None

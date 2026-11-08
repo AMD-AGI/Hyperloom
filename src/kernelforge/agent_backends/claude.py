@@ -37,6 +37,7 @@ from kernelforge.agent_backends.gateway import (
     normalize_anthropic_base_url,
     resolve_anthropic_gateway,
 )
+from kernelforge.agent_backends.structured_output import output_json_schema
 from kernelforge.utils.process_reaping import (
     ReapReport,
     install_child_subreaper,
@@ -386,6 +387,7 @@ class _StreamTranscript:
         self.subtype = ""
         self.num_turns: int | None = None
         self.session_id = ""
+        self.structured_output: Any = None
 
     def absorb(self, message: Any) -> None:
         """Fold one message into the transcript."""
@@ -399,6 +401,7 @@ class _StreamTranscript:
             turns = getattr(message, "num_turns", None)
             if isinstance(turns, int):
                 self.num_turns = turns
+            self.structured_output = getattr(message, "structured_output", None)
         if not hasattr(message, "content"):
             return
         for block in message.content:
@@ -503,6 +506,7 @@ def _session_result(
         tool_calls=transcript.tool_calls,
         stderr_tail=(str(stream_error)[:2000] if stream_error else ""),
         workspace_contention=contention,
+        structured_output=transcript.structured_output,
     )
     result.file_changes = _verified_file_changes(guard)
     result.target_edit_count = guard.count_target_edits()
@@ -581,7 +585,7 @@ class ClaudeBackend:
         del usage  # Availability probes are not part of campaign accounting.
         self.preflight()
         selected_model = model.strip() or self.runtime.model
-        timeout = timeout_sec or min(60, self.runtime.timeout_sec)
+        timeout = timeout_sec or self.runtime.probe_timeout_sec
         command = [
             resolve_claude_cli(self.runtime.executable),
             "--print",
@@ -737,6 +741,8 @@ class ClaudeBackend:
         if spec.on_response_started is not None:
             # Partial events report the response starting; whole messages only arrive as each block completes.
             options["include_partial_messages"] = True
+        if spec.output_schema is not None:
+            options["output_format"] = {"type": "json_schema", "schema": output_json_schema(spec.output_schema)}
         options.update(self.runtime.options)
         options.update(spec.provider_options)
         if spec.env:

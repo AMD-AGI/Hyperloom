@@ -93,19 +93,27 @@ def test_resume_propagates_complete_ruling_to_planner_and_implementer(
     )
     captured = {}
 
-    async def orchestration(*, iteration, **_kwargs):
-        captured["guidance"] = loop._build_orchestration_context().supervisor_guidance
-        plan_path = workspace / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}" / "optimization_plan.md"
-        plan_path.parent.mkdir(parents=True, exist_ok=True)
-        plan_path.write_text("# Optimization plan\nInspect fused merge.\n")
-        return plan_path, ""
+    class OrchestrationService:
+        has_plan_critic = False
+
+        async def run(self, context, **_kwargs):
+            captured["guidance"] = context.supervisor_guidance
+            return SimpleNamespace(
+                optimization_plans=("# Optimization plan\nInspect fused merge.",),
+                optimization_plan_draft="",
+                optimization_plan_executable=True,
+                dispatch_plan=None,
+                specialist_outcomes=(),
+                structured_output_diagnostics={},
+                plan_critic=None,
+                plan_revised=False,
+            )
 
     async def agent(_kernel_path, history, session_sink):
         captured["history"] = history
         session_sink["plan"] = "inspect fused merge"
         return "No source change."
 
-    monkeypatch.setattr(loop, "_run_orchestration", orchestration)
     monkeypatch.setattr(
         loop,
         "_time_remaining",
@@ -114,7 +122,9 @@ def test_resume_propagates_complete_ruling_to_planner_and_implementer(
 
     asyncio.run(
         loop.run(
-            runner_module.LoopAgents(agent_fn=agent, orchestration_service=object(), supervisor_fn=_unused_supervisor)
+            runner_module.LoopAgents(
+                agent_fn=agent, orchestration_service=OrchestrationService(), supervisor_fn=_unused_supervisor
+            )
         )
     )
 

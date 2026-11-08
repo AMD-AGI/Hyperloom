@@ -86,6 +86,19 @@ class ExperimentsLayout:
         """Where a fan-out round's unmeasured candidates wait for the iterations that measure them."""
         return self.orchestration / "lane_queue.json"
 
+    @property
+    def unmeasured_lanes(self) -> Path:
+        """Where lane candidates the canonical tree moved past before any iteration measured them are kept."""
+        return self.root / "unmeasured_lanes"
+
+    @property
+    def unmeasured_lane_index(self) -> Path:
+        return self.unmeasured_lanes / "index.jsonl"
+
+    def unmeasured_lane(self, round_iteration: int, lane_id: str) -> Path:
+        """The directory one such candidate is kept in, named for the round that planned it and its lane."""
+        return self.unmeasured_lanes / f"round_{round_iteration:03d}_lane_{lane_id}"
+
     def candidate(self, iteration: int) -> Path:
         """The directory an iteration's candidate is archived in, its ``CANDIDATE_META`` among the files."""
         return self.candidates / iteration_tag(iteration)

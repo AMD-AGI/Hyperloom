@@ -53,7 +53,7 @@ from hyperloom.common.agent_isolation import (
 )
 from hyperloom.common.confinement import Confinement, credential_paths, toolchain_paths
 from hyperloom.common.env_safety import RunAs
-from hyperloom.common.proctree import (
+from hyperloom_common.proctree import (
     REAP_MARK_ENV,
     TERM_GRACE_SEC,
     descendants,

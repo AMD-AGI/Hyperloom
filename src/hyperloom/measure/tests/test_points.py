@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import pytest
@@ -41,7 +40,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     materialize_config_with_envs,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
+from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
 
 SERVER_ARGS = "--max-running-requests 77 --enable-dp-attention"
 
@@ -64,9 +63,9 @@ def clean_process_env(monkeypatch, tmp_path):
     ):
         monkeypatch.delenv(name, raising=False)
     for name in (
-        "MAGPIE_EVAL_TASKS",
-        "MAGPIE_EVAL_LIMIT",
-        "MAGPIE_EVAL_TOKENIZED_REQUESTS",
+        "HYPERLOOM_EVAL_TASKS",
+        "HYPERLOOM_EVAL_LIMIT",
+        "HYPERLOOM_EVAL_TOKENIZED_REQUESTS",
         "INFERENCE_OPTIMIZER_SERVER_ARGS",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -155,7 +154,7 @@ def test_kernel_table_reaches_the_yaml_as_an_attachment_placeholder(canonical, b
     assert value == "${HL_ATTACH:" + env.attachments[0].id + "}"
 
 
-@pytest.mark.parametrize("name", ["ISL", "MAGPIE_EVAL_LIMIT", "RUN_EVAL", "NUM_PROMPTS"])
+@pytest.mark.parametrize("name", ["ISL", "HYPERLOOM_EVAL_LIMIT", "RUN_EVAL", "NUM_PROMPTS"])
 def test_recipe_that_sets_a_workload_or_eval_variable_is_refused_before_rendering(canonical, blobs, tmp_path, name):
     delta = RecipeDelta(config=ConfigDelta(envs={name: "1"}))
     env = environment(blobs, tmp_path, delta=delta)
@@ -165,7 +164,7 @@ def test_recipe_that_sets_a_workload_or_eval_variable_is_refused_before_renderin
     assert not list((tmp_path / "points").glob("*.yaml"))
 
 
-@pytest.mark.parametrize(("name", "value"), [("ISL", "16"), ("MAGPIE_EVAL_LIMIT", "5"), ("OSL", "8")])
+@pytest.mark.parametrize(("name", "value"), [("ISL", "16"), ("HYPERLOOM_EVAL_LIMIT", "5"), ("OSL", "8")])
 def test_a_point_whose_surface_drifted_from_the_canonical_one_is_refused(
     canonical, blobs, tmp_path, monkeypatch, name, value
 ):
@@ -317,7 +316,7 @@ def test_an_agentx_canonical_is_what_the_main_flow_renders_for_the_workload(tmp_
 
 
 @pytest.mark.parametrize("level", [8, 64])
-def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_concurrency(
+def test_an_agentx_point_is_what_the_main_flow_hands_the_round_for_the_recipe_and_concurrency(
     agentx_canonical, blobs, tmp_path, model, level
 ):
     delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS, envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1"}))
@@ -342,7 +341,7 @@ def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_c
     assert launch["env"] == {"HSA_FORCE_FINE_GRAIN_PCIE": "1"}
 
 
-#: An option of the launch Magpie resolves from the InferenceX recipe, which the recipe's own arguments lack.
+#: An option of the launch resolved from the InferenceX recipe, which the recipe's own arguments lack.
 RESOLVED_OPTION = "--enable-linear-replayssm-spec"
 
 
@@ -363,7 +362,7 @@ def test_a_point_that_resolves_no_launch_of_its_own_refuses_a_removal_it_cannot_
     delta = RecipeDelta(config=ConfigDelta(remove_args=(RESOLVED_OPTION,)))
     env = environment(blobs, tmp_path, delta=delta)
 
-    with pytest.raises(PointError, match=f"only a Magpie AgentX point .* so {RESOLVED_OPTION} would stay"):
+    with pytest.raises(PointError, match=f"only an AgentX point .* so {RESOLVED_OPTION} would stay"):
         generate_points(env, canonical, tmp_path / "points")
 
 
@@ -452,7 +451,7 @@ def test_acceptance_generates_the_agentx_profile_point_for_a_profile_request(age
     assert load(point)["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
 
 
-def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_magpie(canonical, blobs, tmp_path, model):
+def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_the_round(canonical, blobs, tmp_path, model):
     delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS, envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1"}))
     env = environment(blobs, tmp_path, delta=delta)
 
@@ -469,28 +468,12 @@ def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_magpie(canoni
     assert rendered["benchmark"]["envs"]["RUN_EVAL"] == "true" and "NUM_PROMPTS" in rendered["benchmark"]["envs"]
 
 
-# --- the launcher on a cold InferenceX checkout ---------------------------------------------------------------------
-
-LAUNCHER = "sglang_mi355x.sh"
-MAGPIE_LAUNCHER = b"magpie launcher\n"
-
-
-@pytest.fixture()
-def magpie(tmp_path, monkeypatch):
-    """The Magpie the session runs, which ships the launcher; the process names no checkout of its own."""
-
-    shipped = tmp_path / "magpie" / "Magpie" / "scripts" / "benchmark"
-    shipped.mkdir(parents=True)
-    (shipped / LAUNCHER).write_bytes(MAGPIE_LAUNCHER)
-    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "magpie"))
-    for name in ("INFERENCEX_PATH", "HYPERLOOM_BENCHMARK_BACKEND"):
-        monkeypatch.delenv(name, raising=False)
-    return shipped / LAUNCHER
+# --- a canonical names no benchmark script --------------------------------------------------------------------------
 
 
 @pytest.fixture()
 def cold_checkout(tmp_path):
-    """A fresh InferenceX cache: the pinned commit does not track the launcher, so it is not in the tree yet."""
+    """A fresh InferenceX cache with its benchmark library and no launcher."""
 
     benchmarks = tmp_path / "InferenceX" / "benchmarks"
     benchmarks.mkdir(parents=True)
@@ -499,7 +482,7 @@ def cold_checkout(tmp_path):
 
 
 def cold_canonical(tmp_path, model, checkout):
-    """The canonical measurement as a session takes it at start, on the runner type that names the launcher."""
+    """The canonical measurement as a session takes it at start."""
 
     return default_canonical(
         tmp_path / "canonical",
@@ -511,71 +494,10 @@ def cold_canonical(tmp_path, model, checkout):
     )
 
 
-def magpie_first_benchmark(launcher: Path, checkout: Path) -> Path:
-    """What Magpie does when its first benchmark starts: it copies the launchers it ships into the checkout."""
+@pytest.mark.parametrize("checkout", ["InferenceX", "not-a-checkout"])
+def test_a_canonical_names_no_benchmark_script_so_none_is_hashed(tmp_path, model, cold_checkout, checkout):
+    """inference_suite drives load itself, so a point names no benchmark script whatever the checkout holds."""
 
-    placed = checkout / "benchmarks" / LAUNCHER
-    shutil.copy2(launcher, placed)
-    return placed
-
-
-def test_a_baseline_test_on_a_cold_checkout_has_the_surface_the_canonical_took_at_session_start(
-    tmp_path, model, magpie, cold_checkout, blobs
-):
-    canonical = cold_canonical(tmp_path, model, cold_checkout)
-    magpie_first_benchmark(magpie, cold_checkout)
-
-    (point,) = generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points")
-
-    assert load(point)["benchmark"]["benchmark_script"] == LAUNCHER
-    assert canonical.surface.fields["benchmark_script_sha256"] == sha(MAGPIE_LAUNCHER)
-
-
-def test_the_launcher_a_candidate_changed_in_the_checkout_is_still_a_surface_mismatch(
-    tmp_path, model, magpie, cold_checkout, blobs
-):
-    canonical = cold_canonical(tmp_path, model, cold_checkout)
-    placed = magpie_first_benchmark(magpie, cold_checkout)
-    placed.write_bytes(b"magpie launcher\nexport SGLANG_FAST=1\n")
-
-    with pytest.raises(SurfaceViolation, match=rf"benchmark_script_sha256: canonical '{sha(MAGPIE_LAUNCHER)}', test '"):
-        generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points")
-
-
-def test_a_launcher_that_is_nowhere_refuses_the_canonical_instead_of_recording_none(
-    tmp_path, model, magpie, cold_checkout
-):
-    magpie.unlink()
-
-    with pytest.raises(PointError, match=rf"{LAUNCHER}.*{cold_checkout.name}.*no such file"):
-        cold_canonical(tmp_path, model, cold_checkout)
-
-
-def test_a_launcher_the_pinned_commit_tracks_is_hashed_as_it_is_when_magpie_ships_none(
-    tmp_path, model, magpie, cold_checkout
-):
-    magpie.unlink()
-    (cold_checkout / "benchmarks" / LAUNCHER).write_bytes(b"tracked launcher\n")
-
-    canonical = cold_canonical(tmp_path, model, cold_checkout)
-
-    assert canonical.surface.fields["benchmark_script_sha256"] == sha(b"tracked launcher\n")
-
-
-def test_the_bypass_backend_never_has_magpie_copy_a_launcher_so_the_checkout_is_left_as_it_is(
-    tmp_path, model, magpie, cold_checkout, monkeypatch
-):
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
-
-    canonical = cold_canonical(tmp_path, model, cold_checkout)
-
-    assert canonical.surface.fields["benchmark_script_sha256"] is None
-    assert not (cold_checkout / "benchmarks" / LAUNCHER).exists()
-
-
-def test_a_checkout_with_nowhere_to_put_the_launcher_is_left_to_the_host_check(tmp_path, model, magpie):
-    """A test cannot see a launcher there either, and the host refuses a tree without the benchmark library."""
-
-    canonical = cold_canonical(tmp_path, model, tmp_path / "not-a-checkout")
+    canonical = cold_canonical(tmp_path, model, tmp_path / checkout)
 
     assert canonical.surface.fields["benchmark_script_sha256"] is None

@@ -1,6 +1,6 @@
 .. meta::
   :description: Learn how Hyperloom autonomously optimizes large language model inference on AMD GPUs — from installation and components to API reference and case studies.
-  :keywords: Hyperloom, LLM inference, AMD GPU, optimization, agentic, ROCm, GEMM tuning, kernel optimization, throughput, TraceLens, Magpie, GEAK, IntelliKit, documentation
+  :keywords: Hyperloom, LLM inference, AMD GPU, optimization, agentic, ROCm, GEMM tuning, kernel optimization, throughput, TraceLens, InferenceSuite, GEAK, IntelliKit, documentation
 
 ***********************
 Hyperloom documentation
@@ -41,6 +41,7 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
     * :doc:`Environment variables </reference/environment-variables>`
     * :doc:`Authentication and credentials </reference/authentication>`
     * :doc:`Kernel optimization execution path </reference/kernel-execution-path>`
+    * :doc:`InferenceSuite benchmark rounds </reference/inference-suite>`
     * :doc:`Operations and self-hosting </reference/operations>`
     * :doc:`Upgrade guide </reference/upgrade>`
     * :doc:`Session output schema </reference/session-breakdown>`

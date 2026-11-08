@@ -16,7 +16,7 @@ from hyperloom.inference_optimizer.session.session_paths import (
     forge_cycle_dir,
     next_forge_attempt_dir,
 )
-from hyperloom.orchestrator.kernel.forge_handoff import write_forge_handoff
+from hyperloom.orchestrator.kernel.forge_handoff import build_workload_md, write_forge_handoff
 
 
 class _State(SimpleNamespace):
@@ -93,7 +93,7 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
                     "SERVICE_API_KEY": "must-not-be-written",
                 },
             },
-            "launch_recipe": str(tmp_path / "recipe.yaml"),
+            "launch_json": str(tmp_path / "run" / "launch.json"),
         },
     )
 
@@ -105,6 +105,7 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
     assert "example/model" in workload
     assert "Tensor parallelism:** `8`" in workload
     assert "--tp 8 --mem-fraction-static 0.9" in serving
+    assert f"Launch record:** `{(tmp_path / 'run' / 'launch.json').resolve()}`" in serving
     assert "--enable-torch-compile" in serving
     assert "PROFILE_ENV=enabled" in serving
     assert "SAFE_SETTING=1" in serving
@@ -115,6 +116,28 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
     assert str(source_resolution.resolve()) in evidence
     assert "partial_trace" in evidence
     assert not (handoff_dir / raw_trace.name).exists()
+
+
+def test_an_agentic_workload_states_the_corpus_shape_not_the_placeholder_lengths() -> None:
+    shape = {
+        "corpus_loader": "agentic_traces",
+        "isl": {"p50": 108000, "p90": 361000, "p99": 600000},
+        "osl": {"p50": 520, "p90": 1500, "p99": 4000},
+    }
+    workload = build_workload_md(_state(agentx_corpus_shape=shape))
+
+    assert "Input sequence length" not in workload
+    assert "Output sequence length" not in workload
+    assert "- input/req : p50 108,000   p90 361,000   p99 600,000" in workload
+    assert "- output/req: p50 520   p90 1,500   p99 4,000" in workload
+    assert "1024" not in workload
+
+
+def test_a_synthetic_workload_keeps_its_sequence_lengths() -> None:
+    workload = build_workload_md(_state(agentx_corpus_shape={}))
+
+    assert "- **Input sequence length:** `1024`" in workload
+    assert "- **Output sequence length:** `256`" in workload
 
 
 def test_trace_evidence_resolution_filename_has_one_owner(tmp_path: Path) -> None:

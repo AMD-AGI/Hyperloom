@@ -12,11 +12,12 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from kernelforge.workflows.forge_loop.roles import orchestration as orchestration_module
 from kernelforge.agent_backends import AgentProviderUnavailableError, AgentRunResult
 from kernelforge.workflows.forge_loop.roles.contracts import EvidenceRef
 from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent, OrchestrationInfrastructureError
+from kernelforge.workflows.forge_loop.roles.plan_requests import dispatch_answer_model
 from kernelforge.workflows.forge_loop.roles import specialists as specialists_module
 from kernelforge.workflows.forge_loop.roles.specialists import (
     SpecialistAgent,
@@ -36,9 +37,7 @@ from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
 
 @pytest.mark.asyncio
 async def test_dispatch_framework_binds_real_evidence_paths() -> None:
-    raw = json.loads(_dispatch_payload())
-    raw["assignments"][0]["evidence_refs"][0]["path"] = "analysis/abc123/cases/case-a/analysis.md"
-    backend = _StaticBackend(json.dumps(raw))
+    backend = _StaticBackend(_dispatch_payload())
     agent = OrchestrationAgent(
         backend=backend,
         timeout_sec=1,
@@ -50,22 +49,34 @@ async def test_dispatch_framework_binds_real_evidence_paths() -> None:
 
     assert plan.assignments[0].role_id == "memory"
     evidence_paths = {reference.path for reference in plan.assignments[0].evidence_refs}
-    assert "analysis/abc123/cases/case-a/analysis.md" not in evidence_paths
     assert "case:case-a" in evidence_paths
     assert "analysis/abc123/profiles/case-a/summary.json" in evidence_paths
 
 
+def test_the_dispatch_answer_names_only_the_registered_roles_and_scored_cases() -> None:
+    """A role or case the planner could not name is one the framework never has to drop."""
+    model = dispatch_answer_model(("compute", "memory"), ("case-a", "case-b"))
+    assignment = model.model_json_schema()["$defs"]["DispatchAssignment"]["properties"]
+
+    assert assignment["role_id"]["enum"] == ["compute", "memory"]
+    assert assignment["target_case_ids"]["items"]["enum"] == ["case-a", "case-b"]
+    with pytest.raises(ValidationError):
+        model.model_validate({"assignments": [{"role_id": "cache", "target_case_ids": [], "reason": "x"}]})
+
+
 @pytest.mark.asyncio
-async def test_dispatch_turn_cap_still_runs_json_repair(caplog) -> None:
-    backend = _QueuedBackend(
-        [
-            AgentRunResult(
-                text='{"assignments": [',
-                end_reason="turn_cap",
-            ),
-            _dispatch_payload(),
-        ]
-    )
+@pytest.mark.parametrize(
+    "result",
+    [
+        AgentRunResult(text="not-json"),
+        AgentRunResult(text='{"assignments": [', end_reason="turn_cap"),
+        AgentRunResult(text=json.dumps({"assignments": [{"role_id": "cache", "target_case_ids": [], "reason": "x"}]})),
+    ],
+    ids=["not-json", "turn-cap", "unregistered-role"],
+)
+async def test_an_unusable_dispatch_answer_falls_back_to_framework_coverage(result) -> None:
+    """The round still dispatches, from the framework's own coverage, without a second call."""
+    backend = _QueuedBackend([result])
     agent = OrchestrationAgent(
         backend=backend,
         timeout_sec=1,
@@ -73,13 +84,17 @@ async def test_dispatch_turn_cap_still_runs_json_repair(caplog) -> None:
         min_assignments=1,
     )
 
-    with caplog.at_level("WARNING", logger=orchestration_module.log.name):
-        plan = await agent.plan_dispatch(_context(), _definitions())
+    plan = await agent.plan_dispatch(_context(), _definitions())
 
-    assert len(backend.specs) == 2
+    assert len(backend.specs) == 1
     assert plan.assignments
-    assert plan.assignments[0].role_id == "memory"
-    assert "continuing through JSON repair" in caplog.text
+    assert {case_id for assignment in plan.assignments for case_id in assignment.target_case_ids} == {
+        "case-a",
+        "case-b",
+    }
+    notes = agent.structured_output_diagnostics["dispatch"]["normalization_notes"]
+    assert any(note.startswith("dispatch answer unusable") for note in notes)
+    assert any("added default role" in note for note in notes)
 
 
 def test_the_specialist_is_told_its_own_deadline_without_a_probe() -> None:
@@ -325,23 +340,6 @@ async def test_specialist_pool_respects_parallel_limit() -> None:
     )
 
     assert backend.max_active == 1
-
-
-@pytest.mark.asyncio
-async def test_dispatch_repairs_invalid_structured_response() -> None:
-    backend = _QueuedBackend(["not-json", _dispatch_payload()])
-    agent = OrchestrationAgent(
-        backend=backend,
-        timeout_sec=1,
-        max_turns=2,
-        min_assignments=1,
-    )
-
-    plan = await agent.plan_dispatch(_context(), _definitions())
-
-    assert plan.assignments[0].role_id == "memory"
-    assert len(backend.specs) == 2
-    assert agent.structured_output_diagnostics["dispatch"]["normalization_notes"]
 
 
 @pytest.mark.asyncio

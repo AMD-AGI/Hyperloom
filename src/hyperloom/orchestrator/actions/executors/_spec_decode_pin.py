@@ -1,49 +1,26 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a benchmarked candidate may change about a launch that simulates speculative-decoding acceptance."""
+"""What a benchmarked candidate may change about a launch that simulates speculative-decoding acceptance.
+
+The simulated acceptance is the golden layer of the launch (D10): a candidate that touches a key golden owns is a
+candidate ``serve_flag`` failure naming that key, as a flag the parser refuses is.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
 
-from hyperloom.inference_optimizer.grid_server_args import (
-    SPECULATIVE_CONFIG_FLAG,
-    flag_occurrences,
-    speculative_config,
+from inference_suite.argv import SPECULATIVE_CONFIG_FLAG, flag_occurrences
+from inference_suite.golden import (
+    GOLDEN_OWNED_ENV_PREFIXES,
+    GOLDEN_OWNED_FLAG_PREFIXES,
+    golden_owned_settings,
 )
 
-SPECULATIVE_DECODING_PINNED = "speculative_decoding_pinned"
+from hyperloom.common.failure_signature import SERVE_FLAG
 
-# A simulated acceptance length is only valid for the draft it was set for (InferenceX's golden AL is keyed by model,
-# method and draft length), so what is drafted and how acceptance is simulated stay pinned; how fast the draft runs
-# stays open.
-_PINNED_FLAGS = frozenset(
-    {
-        "speculative-num-steps",
-        "speculative-num-draft-tokens",
-        "speculative-eagle-topk",
-        "speculative-algorithm",
-        "speculative-draft-model-path",
-        "speculative-dspark-block-size",
-        "num-speculative-tokens",
-        "method",
-        "draft-model",
-    }
-)
-_ACCEPTANCE_FLAG_PREFIXES = ("spec-decode-acceptance", "speculative-acceptance")
-_PINNED_SPEC_CONFIG_KEYS = frozenset(
-    {
-        "method",
-        "model",
-        "num_speculative_tokens",
-        "rejection_sample_method",
-        "synthetic_acceptance_length",
-        "draft_sample_method",
-    }
-)
-_ACCEPTANCE_ENV_PREFIX = "SGLANG_SIMULATE_ACC_"
 _SIMULATED_LENGTH_ENV = "SGLANG_SIMULATE_ACC_LEN"
 _SYNTHETIC_REJECTION = f"--{SPECULATIVE_CONFIG_FLAG}.rejection_sample_method"
 _SYNTHETIC_LENGTH = f"--{SPECULATIVE_CONFIG_FLAG}.synthetic_acceptance_length"
@@ -52,7 +29,7 @@ _SYNTHETIC_LENGTH = f"--{SPECULATIVE_CONFIG_FLAG}.synthetic_acceptance_length"
 class SpeculativeDecodingPinnedError(ValueError):
     """A candidate changes the draft or the simulated acceptance its base launch pins."""
 
-    error_class = SPECULATIVE_DECODING_PINNED
+    error_class = SERVE_FLAG
 
 
 def _canonical(value: Any) -> str:
@@ -65,24 +42,9 @@ def _canonical(value: Any) -> str:
 
 
 def _speculative_identity(server_args: str, envs: Mapping[str, Any]) -> dict[str, str]:
-    """The pinned settings a launch carries, keyed by flag, ``--speculative-config`` key or env name.
-
-    vLLM also takes a ``--speculative-config.<key>`` per key, merged over the JSON object by
-    :func:`speculative_config`, so both spellings land in the same keys.
-    """
-    identity = {str(k): _canonical(v) for k, v in envs.items() if str(k).startswith(_ACCEPTANCE_ENV_PREFIX)}
-    occurrences = flag_occurrences(server_args)
-    config = speculative_config(occurrences)
-    for flag, value in dict(occurrences).items():
-        if flag in _PINNED_FLAGS or flag.startswith(_ACCEPTANCE_FLAG_PREFIXES):
-            identity[f"--{flag}"] = _canonical(value)
-    identity.update(
-        {
-            f"--{SPECULATIVE_CONFIG_FLAG}.{key}": _canonical(config[key])
-            for key in _PINNED_SPEC_CONFIG_KEYS & config.keys()
-        }
-    )
-    return identity
+    """The pinned settings a launch carries, canonicalized so equal values compare equal."""
+    settings = golden_owned_settings(flag_occurrences(server_args), envs)
+    return {key: _canonical(value) for key, value in settings.items()}
 
 
 def _simulates_acceptance(identity: Mapping[str, Any]) -> bool:
@@ -90,12 +52,12 @@ def _simulates_acceptance(identity: Mapping[str, Any]) -> bool:
         bool(identity.get(_SIMULATED_LENGTH_ENV))
         or identity.get(_SYNTHETIC_REJECTION) == "synthetic"
         or _SYNTHETIC_LENGTH in identity
-        or any(key.lstrip("-").startswith(_ACCEPTANCE_FLAG_PREFIXES) for key in identity)
+        or any(key.lstrip("-").startswith(GOLDEN_OWNED_FLAG_PREFIXES) for key in identity)
     )
 
 
 def _configures_a_draft(identity: Mapping[str, Any]) -> bool:
-    return any(not key.startswith(_ACCEPTANCE_ENV_PREFIX) for key in identity)
+    return any(not key.startswith(GOLDEN_OWNED_ENV_PREFIXES) for key in identity)
 
 
 def refuse_unpinned_speculative_change(
@@ -118,27 +80,26 @@ def refuse_unpinned_speculative_change(
     """
     base = _speculative_identity(base_args, base_envs)
     candidate = _speculative_identity(candidate_args, candidate_envs)
+    changed = sorted(key for key in base.keys() | candidate.keys() if base.get(key) != candidate.get(key))
     if not _simulates_acceptance(base):
         if _configures_a_draft(base) and _simulates_acceptance(candidate):
             raise SpeculativeDecodingPinnedError(
-                f"{SPECULATIVE_DECODING_PINNED}: the base launch verifies a real draft, so its acceptance is measured; "
-                "this candidate switches to a simulated acceptance length, which is declared, so its gain would not be "
-                "comparable. Keep real draft verification and vary the draft or other knobs."
+                f"{SERVE_FLAG}: golden-owned {', '.join(changed)}: the base launch verifies a real draft, so its "
+                "acceptance is measured; this candidate switches to a simulated acceptance length, which is declared, "
+                "so its gain would not be comparable. Keep real draft verification and vary the draft or other knobs."
             )
         return
-    changed = sorted(key for key in base.keys() | candidate.keys() if base.get(key) != candidate.get(key))
     if changed:
         changes = ", ".join(f"{key} ({base.get(key)!r} -> {candidate.get(key)!r})" for key in changed)
         raise SpeculativeDecodingPinnedError(
-            f"{SPECULATIVE_DECODING_PINNED}: the base launch simulates speculative-decoding acceptance, which is "
-            f"only valid for the draft it was set for, so the draft and its simulated acceptance are pinned; this "
-            f"candidate changes {changes}. Keep them as the base sets them (a --{SPECULATIVE_CONFIG_FLAG} must restate "
-            "its pinned keys) and vary other knobs."
+            f"{SERVE_FLAG}: golden-owned {', '.join(changed)}: the base launch simulates speculative-decoding "
+            "acceptance, which is only valid for the draft it was set for, so the draft and its simulated acceptance "
+            f"are pinned; this candidate changes {changes}. Keep them as the base sets them "
+            f"(a --{SPECULATIVE_CONFIG_FLAG} must restate its pinned keys) and vary other knobs."
         )
 
 
 __all__ = [
-    "SPECULATIVE_DECODING_PINNED",
     "SpeculativeDecodingPinnedError",
     "refuse_unpinned_speculative_change",
 ]

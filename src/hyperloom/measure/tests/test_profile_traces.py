@@ -9,7 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.profile_traces import collect_traces, has_step_traces, has_traces, is_trace_file
+from hyperloom.measure.profile_traces import (
+    collect_traces,
+    has_step_traces,
+    has_traces,
+    is_trace_file,
+    round_has_traces,
+)
+from inference_suite.contracts import RunLayout
 
 
 def _file(path: Path, data: bytes = b"x") -> Path:
@@ -56,71 +63,54 @@ def test_only_a_trace_that_is_not_a_graph_capture_sidecar_records_serving_steps(
     assert has_step_traces(tmp_path / "profile") is steps
 
 
-def test_trace_directories_are_moved_with_their_names_and_nothing_is_left_behind(tmp_path: Path) -> None:
-    workspace = tmp_path / "round" / "ws"
-    _file(workspace / "torch_trace" / "r0" / "a.pt.trace.json.gz", b"a")
-    _file(workspace.parent / "capture_traces" / "g.json", b"g")
-    _file(workspace / "server.log", b"log")
+def test_trace_directories_are_moved_and_nothing_else_is_taken(tmp_path: Path) -> None:
+    layout = RunLayout(tmp_path / "round" / "suite_run_0")
+    _file(layout.profile_torch_trace / "r0" / "a.pt.trace.json.gz", b"a")
+    _file(layout.server_log, b"log")
+    _file(layout.root / "torch_trace" / "outside.pt.trace.json.gz", b"not in profile/")
 
-    moved = collect_traces(workspace, tmp_path / "out" / "profile")
+    moved = collect_traces(layout.root, tmp_path / "out" / "profile")
 
-    assert moved == 2
+    assert moved == 1
     assert (tmp_path / "out" / "profile" / "torch_trace" / "r0" / "a.pt.trace.json.gz").read_bytes() == b"a"
-    assert (tmp_path / "out" / "profile" / "capture_traces" / "g.json").read_bytes() == b"g"
-    assert not (workspace / "torch_trace").exists() and (workspace / "server.log").exists()
+    assert not layout.profile_torch_trace.exists() and layout.server_log.exists()
+    assert (layout.root / "torch_trace" / "outside.pt.trace.json.gz").exists(), "only the run_dir's profile/ is read"
 
 
 def test_a_directory_with_no_trace_file_stays_and_nothing_is_created(tmp_path: Path) -> None:
-    workspace = tmp_path / "ws"
-    _file(workspace / "torch_trace" / "notes.txt")
+    layout = RunLayout(tmp_path / "ws")
+    _file(layout.profile_torch_trace / "notes.txt")
 
-    assert collect_traces(workspace, tmp_path / "out" / "profile") == 0
-    assert (workspace / "torch_trace" / "notes.txt").exists() and not (tmp_path / "out").exists()
+    assert collect_traces(layout.root, tmp_path / "out" / "profile") == 0
+    assert (layout.profile_torch_trace / "notes.txt").exists() and not (tmp_path / "out").exists()
+    assert not round_has_traces(layout.root)
 
 
 def test_a_stale_directory_of_an_earlier_attempt_is_replaced_not_merged(tmp_path: Path) -> None:
     destination = tmp_path / "out" / "profile"
     _file(destination / "torch_trace" / "old.pt.trace.json.gz")
-    workspace = tmp_path / "ws"
-    _file(workspace / "torch_trace" / "new.pt.trace.json.gz")
+    layout = RunLayout(tmp_path / "ws")
+    _file(layout.profile_torch_trace / "new.pt.trace.json.gz")
 
-    collect_traces(workspace, destination)
+    collect_traces(layout.root, destination)
 
     assert sorted(p.name for p in (destination / "torch_trace").iterdir()) == ["new.pt.trace.json.gz"]
 
 
-def test_capture_traces_in_and_beside_the_workspace_are_both_kept_and_both_counted(tmp_path: Path) -> None:
-    workspace = tmp_path / "round" / "ws"
-    _file(workspace / "capture_traces" / "bs_1_rank0.json", b"inside 1")
-    _file(workspace / "capture_traces" / "bs_2_rank0.json", b"inside 2")
-    _file(workspace.parent / "capture_traces" / "bs_1_rank0.json", b"beside 1")
-    _file(workspace.parent / "capture_traces" / "bs_4_rank0.json", b"beside 4")
+def test_a_run_dirs_trace_directories_are_moved_apart_not_flattened(tmp_path: Path) -> None:
+    layout = RunLayout(tmp_path / "round-000")
+    _file(layout.profile_torch_trace / "rank0.pt.trace.json.gz", b"step")
+    _file(layout.profile_dir / "capture_traces" / "bs_1_rank0.json", b"capture")
+    _file(layout.profile_dir / "graph_capture_profile" / "DecodeCudaGraphRunner_bs_8_rank0.json.gz", b"graph")
     destination = tmp_path / "out" / "profile"
+    assert round_has_traces(layout.root)
 
-    assert collect_traces(workspace, destination) == 2
+    assert collect_traces(layout.root, destination) == 3
 
     kept = {p.relative_to(destination).as_posix(): p.read_bytes() for p in destination.rglob("*") if p.is_file()}
-    assert sorted(kept.values()) == [b"beside 1", b"beside 4", b"inside 1", b"inside 2"], "no trace was overwritten"
-    assert kept["capture_traces/bs_1_rank0.json"] == b"inside 1", "the round's own file keeps its name"
-    assert all(path.startswith("capture_traces/bs_") for path in kept), "each still reads as a capture sidecar"
-    assert has_traces(destination) and not has_step_traces(destination)
-    assert not (workspace / "capture_traces").exists() and not (workspace.parent / "capture_traces").exists()
-
-
-@pytest.mark.parametrize("file_first", [True, False], ids=["the-file-in-the-workspace", "the-file-beside-it"])
-def test_a_file_in_one_capture_traces_and_a_directory_of_its_name_in_the_other_are_both_kept(
-    tmp_path: Path, file_first: bool
-) -> None:
-    workspace = tmp_path / "round" / "ws"
-    inside, beside = workspace / "capture_traces", workspace.parent / "capture_traces"
-    with_file, with_directory = (inside, beside) if file_first else (beside, inside)
-    _file(with_file / "bs_1_rank0.json", b"file")
-    _file(with_file / "bs_2_rank0.json", b"file 2")
-    _file(with_directory / "bs_1_rank0.json" / "bs_4_rank0.json", b"nested")
-    destination = tmp_path / "out" / "profile"
-
-    assert collect_traces(workspace, destination) == 2
-
-    kept = sorted(p.read_bytes() for p in destination.rglob("*") if p.is_file())
-    assert kept == [b"file", b"file 2", b"nested"], "no trace was lost or overwritten"
-    assert not inside.exists() and not beside.exists()
+    assert kept == {
+        "torch_trace/rank0.pt.trace.json.gz": b"step",
+        "capture_traces/bs_1_rank0.json": b"capture",
+        "graph_capture_profile/DecodeCudaGraphRunner_bs_8_rank0.json.gz": b"graph",
+    }
+    assert has_step_traces(destination)

@@ -173,11 +173,11 @@ def test_the_workload_reaches_the_renderer_as_hyperloom_optimize_exports_it(monk
     }
 
 
-def test_an_mi350x_is_measured_on_mi355x_scripts_and_named_as_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_mi350x_is_exported_as_itself(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HL_MODEL_BASE", raising=False)
     environment = workload_environment(replace(WORKLOAD, gpu_type="mi350x"))
 
-    assert (environment["GPU_TYPE"], environment["TARGET_GPU_TYPE"]) == ("mi355x", "mi350x")
+    assert (environment["GPU_TYPE"], environment["TARGET_GPU_TYPE"]) == ("mi350x", "mi350x")
 
 
 def test_an_agentx_workload_reaches_the_renderer_as_agentx_without_sequence_lengths(
@@ -536,9 +536,7 @@ async def test_an_agentx_session_measures_the_agentx_benchmark_it_writes_for_its
         canonical = yaml.safe_load((toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
         assert is_magpie_agentx(canonical) and canonical["agentx"]["mode"] == "canonical"
         assert canonical["inferencex_path"] == host.inferencex.path
-        assert [(spec.magpie_commit, spec.inferencex_commit) for spec in specs] == [
-            (host.magpie_commit, host.inferencex.commit)
-        ]
+        assert [(spec.image_digest, spec.gpu_type) for spec in specs] == [(host.image.digest, workload.gpu_type)]
         assert (canonical["model"], canonical["envs"]["MODEL_PATH"]) == (
             workload.model,
             str(tmp_path / "models" / "Llama-3-8B"),
@@ -635,11 +633,8 @@ async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -
     assert peers.briefs.repo is peers.repo and isinstance(peers.briefs.learnings, LessonRecall)
     assert isinstance(peers.toolbox, LocalHostedToolbox) and isinstance(peers.repo, GitExperimentRepo)
     canonical = yaml.safe_load((layout.toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
-    assert (canonical["model"], canonical["runner_type"], canonical["inferencex_path"]) == (
-        WORKLOAD.model,
-        WORKLOAD.gpu_type,
-        HOST.inferencex.path,
-    )
+    assert (canonical["model"], canonical["inferencex_path"]) == (WORKLOAD.model, HOST.inferencex.path)
+    assert "runner_type" not in canonical
     assert not (layout.toolbox / "measurement-config.json").exists()
     assert benchmark_config_path() is None and not (layout.toolbox / "benchmark.yaml").exists()
     assert peers.base_image_digest == IMAGE.digest
@@ -843,8 +838,8 @@ async def test_an_agent_of_an_inferencex_session_measures_with_the_client_of_the
     model_backed_sessions(AgentCommand("claude", "claude"))(_with_agent(built.wiring))
 
     [client] = clients
-    assert client is not None and (client.conc, client.isl, client.osl) == (WORKLOAD.conc, 1024, 512)
-    assert client.inferencex_root == HOST.inferencex.path
+    assert client is not None
+    assert (client.workload.concurrency, client.workload.isl, client.workload.osl) == (WORKLOAD.conc, 1024, 512)
 
 
 @pytest.mark.parametrize(

@@ -108,6 +108,8 @@ class IntegratePatchExecutor(
             recovery["phase"] = "applied"
             if recovery.get("stash_oid"):
                 recovery["phase"] = "applied_with_restored_stash"
+        if attempt.merged_patches:
+            result["patches_merged"] = attempt.merged_patches
         state = attempt.shared_state
         if state is not None:
             state.save(self.session_dir)

@@ -28,7 +28,7 @@ from hyperloom.measure.short_prompts.tests.support import staged_plan as short_p
 from hyperloom.measure.tests.test_local_backend import _call, _point
 from hyperloom.measure.tests.test_local_short_prompts import _CheckGrid as _ShortGrid
 from hyperloom.measure.tests.test_local_short_prompts import _Servers as _ShortServers
-from hyperloom.measure.tests.test_local_short_prompts import cache, magpie_backend  # noqa: F401 - fixtures
+from hyperloom.measure.tests.test_local_short_prompts import cache  # noqa: F401 - fixtures
 
 SKIPPED = "long_context_check skipped: test failed"
 CONTEXT_FLAG_ENV = framework_registry.FRAMEWORKS["sglang"].extra_args_env
@@ -70,7 +70,7 @@ def test_a_planned_test_asks_its_own_server_after_its_measured_round_and_boots_n
     outcome = _run(tmp_path, cache)
 
     assert [kwargs["grid"][0].name for kwargs in grid.calls] == ["test"], "no second boot"
-    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "Magpie leaves the server up for the check"
+    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "the round leaves the server up for the check"
     assert (grid.servers.started, grid.servers.teardowns) == (["test"], 1), "one server, torn down after the check"
     found = read_outputs(tmp_path / "out")
     assert [e.status for e in found.prompts] == [PROMPT_OK] * 64 and found.served_context == 4096

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ._chunks import ChunkBudget
+from ._decode_groups import decode_served_groups, dispatch_groups
 from ._dense_args import dense_tuner_args
 from ._dense_chunks import DenseRun, run_dense_chunks
 from ._timings import unmeasured_timings
@@ -152,7 +153,8 @@ def _demand_input_csv(
         return None
     budget = _demand_budget(ctx)
     decode_m = compute_decode_m_values(ctx.conc, ctx.m_grid)
-    shapes = ranked if budget is None else _demand_shapes_within_budget(ranked, decode_m, budget)
+    served = decode_served_groups(entry, decode_m)
+    shapes = ranked if budget is None else _demand_shapes_within_budget(ranked, decode_m, budget, served=served)
 
     out = work_dir / f"untuned_{tuner_name}_demand.csv"
     header = "M,N,K,q_dtype_w" if needs_q_dtype_w else "M,N,K"
@@ -174,13 +176,15 @@ def _demand_input_csv(
         budget or "none",
         out,
     )
-    return _ensure_decode_m_coverage(out, ctx, work_dir, needs_q_dtype_w=needs_q_dtype_w)
+    return _ensure_decode_m_coverage(out, ctx, work_dir, needs_q_dtype_w=needs_q_dtype_w, served=served)
 
 
 def _demand_shapes_within_budget(
     ranked: list[dict[str, Any]],
     decode_m: Sequence[int],
     budget: int,
+    *,
+    served: frozenset[tuple[int, int]],
 ) -> list[dict[str, Any]]:
     """The highest-ranked demand shapes whose decode band ``budget`` can also pay for.
 
@@ -201,7 +205,8 @@ def _demand_shapes_within_budget(
         key = (int(shape["N"]), int(shape["K"]))
         trial = dict(group_m)
         trial[key] = group_m.get(key, set()) | {int(shape["M"])}
-        band = sum(len(b) for b in _decode_band_buckets(list(trial.values()), decode_m))
+        unserved = [ms for group, ms in trial.items() if group not in served]
+        band = sum(len(b) for b in _decode_band_buckets(unserved, decode_m))
         if len(taken) + 1 + band <= budget:
             group_m = trial
             taken.append(shape)
@@ -281,8 +286,9 @@ def _ensure_decode_m_coverage(
     ctx: TuneContext,
     work_dir: Path,
     needs_q_dtype_w: bool = False,
+    served: frozenset[tuple[int, int]] = frozenset(),
 ) -> Path:
-    """Guarantee every tuned dispatch group covers the decode-band M."""
+    """Guarantee every tuned dispatch group covers the decode-band M, except the ``served`` (N, K) groups."""
     from ..dense_shapes import compute_decode_m_values
 
     try:
@@ -296,34 +302,15 @@ def _ensure_decode_m_coverage(
     if not {"M", "N", "K"}.issubset(idx):
         return csv
     q_idx = idx.get("Q_DTYPE_W")
-
-    # Group key = the aiter dispatch key.
-    group_order: list[tuple[int, int, str]] = []
-    group_m: dict[tuple[int, int, str], set[int]] = {}
-    body: list[str] = []
-    for line in lines[1:]:
-        if not line.strip():
-            continue
-        body.append(line)
-        parts = [p.strip() for p in line.split(",")]
-        try:
-            m = int(parts[idx["M"]])
-            n = int(parts[idx["N"]])
-            k = int(parts[idx["K"]])
-        except (ValueError, IndexError):
-            continue
-        q = parts[q_idx] if q_idx is not None and q_idx < len(parts) else ""
-        key = (n, k, q)
-        if key not in group_m:
-            group_m[key] = set()
-            group_order.append(key)
-        group_m[key].add(m)
-
+    group_order, group_m, body = dispatch_groups(lines[1:], idx, q_idx)
     if not group_order:
         return csv
 
     decode_m = compute_decode_m_values(ctx.conc, ctx.m_grid)
-    plan = _decode_band_buckets([group_m[key] for key in group_order], decode_m)
+    plan = [
+        [] if key[:2] in served else buckets
+        for key, buckets in zip(group_order, _decode_band_buckets([group_m[key] for key in group_order], decode_m))
+    ]
     additions, uncovered = _decode_band_rows(header, idx, q_idx, group_order, plan)
 
     if not additions:

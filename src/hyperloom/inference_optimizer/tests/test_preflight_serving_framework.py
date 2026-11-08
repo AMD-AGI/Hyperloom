@@ -115,7 +115,7 @@ def test_missing_serving_framework_exits_with_guidance(monkeypatch, capsys):
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
     # Names the framework and both remedies, and disambiguates the two run modes so nobody repeats the issue author's
-    # reading of Magpie's run_mode=local.
+    # reading of the old run_mode=local.
     assert "vllm" in err
     assert "--install-framework vllm" in err
     assert "HYPERLOOM_RUN_MODE=docker" in err

@@ -164,7 +164,7 @@ def test_the_pattern_sees_a_module_imported_from_its_package(line: str) -> None:
     [
         "from hyperloom.orchestrator.enablement.runtime import targeted_build",
         "from hyperloom.orchestrator.framework import paths as fp",
-        "from hyperloom.orchestrator.framework.adapter_parsers import parser_source_for",
+        "from hyperloom.orchestrator.framework.artifacts import candidate_key",
         "from hyperloom.orchestrator.enablement import artifacts as art",
     ],
 )
@@ -191,7 +191,6 @@ def test_relocated_modules_are_importable() -> None:
         "hyperloom.common.failure_signature",
         "hyperloom.orchestrator.enablement.mandate",
         "hyperloom.orchestrator.enablement.artifacts",
-        "hyperloom.orchestrator.framework.adapter_parsers",
         "hyperloom.orchestrator.enablement.runtime.adapters",
         "hyperloom.orchestrator.enablement.runtime.stack_actions",
         "hyperloom.orchestrator.enablement.runtime.localization",

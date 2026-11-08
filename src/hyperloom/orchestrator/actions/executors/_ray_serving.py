@@ -11,16 +11,17 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from hyperloom.common.proctree import TERM_GRACE_SEC
+from hyperloom_common.proctree import TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 
 from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
 
 if TYPE_CHECKING:
-    from ._ray_backend import SessionKillRound
+    from ._ray_backend import LeasedRound
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +29,10 @@ log = logging.getLogger(__name__)
 # before claiming a new one.
 _ACTOR_TIMEOUT_RC: int = -916
 _RAY_ACTOR_DIED_RC: int = -913
+
+# Marks a lease round for the dead-actor reap alone; the actor's round teardown reaps by REAP_MARK_ENV, which would
+# also kill the server a ``cleanup: false`` round leaves up for the next round.
+_ROUND_MARK_ENV = "HYPERLOOM_RAY_ROUND_MARK"
 
 # Timeout for ray.get probes on specialist actor methods (is_alive/exit_code/stop).
 _LEASE_PROBE_TIMEOUT_SEC: float = 30.0
@@ -53,7 +58,7 @@ CLOSE_STOP_TIMEOUT_SEC: float = 10.0
 # leaving their lane leases to expire unreclaimed.
 #
 # The slack covers only what the round spends OUTSIDE its own cap, which is less than it looks: server bringup is
-# inside it, because ``_grid_runner.sync_benchmark_timeout`` writes the same ``timeout_sec`` into the benchmark's
+# inside it, because ``_grid_base.sync_benchmark_timeout`` writes the same ``timeout_sec`` into the benchmark's
 # ``server_lifecycle.server_ready_timeout_s``, and both submitters run that before submitting. What is genuinely
 # outside is Ray dispatching the method onto an actor ``ensure()`` already created, the cooperative reap the actor
 # performs once the cap fires (``COOPERATIVE_REAP_BUDGET_SEC``), and shipping the round's captured stdout/stderr
@@ -246,6 +251,14 @@ def _stop_request(waited: float, wait_ceiling: float, cancel_scope: Any) -> _Sto
     return None
 
 
+def _reap_marked_round(mark: str) -> int:
+    """Stop every process on this host that inherited ``mark``; return how many were found."""
+    pids = marked_pids(_ROUND_MARK_ENV, mark)
+    if pids:
+        kill_tree(collect_tree(pids))
+    return len(pids)
+
+
 def _pdeathsig_preexec() -> None:
     """Ask the OS to SIGTERM this child if its parent dies (Linux ``PR_SET_PDEATHSIG``).
 
@@ -253,8 +266,8 @@ def _pdeathsig_preexec() -> None:
     the server is ``setsid``'d into its own process group, so the only in-band teardown that can reach it is the
     wrapper's own ``trap cleanup EXIT INT TERM``. SIGKILL cannot be trapped, so arming it here killed the one process
     that knew how to stop the server and orphaned a multi-GPU vLLM tree. A no-op where prctl is unavailable, and no
-    guarantee either way -- the durable backstop is the pidfile scanned by
-    :func:`._server_lifecycle.reap_orphaned_servers`.
+    guarantee either way -- the durable backstop is the session's ``server.pid`` files, which
+    :func:`._server_lifecycle.reap_orphaned_servers` stops through :func:`inference_suite.stop`.
     """
     try:
         import ctypes
@@ -350,7 +363,7 @@ class ManagedServerProcess:
 
     def stop(self, *, grace_seconds: float = TERM_GRACE_SEC) -> bool:
         """Confirm teardown of the enumerated live tree before dropping its handle."""
-        from hyperloom.common.proctree import collect_tree, kill_tree
+        from hyperloom_common.proctree import collect_tree, kill_tree
         from ._subprocess_kill import kill_my_spawned_server
 
         proc = self._proc
@@ -425,13 +438,12 @@ def _serving_actor_body() -> Any:
             import subprocess as _sp
 
             from ..cancel_channel import CancelScope, use_cancel_scope
-            from ._ray_backend import _run_subprocess_worker
 
             scope = CancelScope()
             self._round_scope = scope
             try:
                 with use_cancel_scope(scope):
-                    return _run_subprocess_worker(bench_round)
+                    return bench_round.run()
             except _sp.TimeoutExpired as exc:
                 return _ACTOR_TIMEOUT_RC, "", f"TimeoutExpired: {exc}"
             finally:
@@ -513,7 +525,7 @@ class ServingLease:
             )
             _note_lease_actor_submitted()
 
-    def run_session_kill(self, bench_round: SessionKillRound) -> tuple[int, str, str]:
+    def run_session_kill(self, bench_round: LeasedRound) -> tuple[int, str, str]:
         """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``."""
         from ..cancel_channel import cancel_scope_listener
 
@@ -533,34 +545,32 @@ class ServingLease:
         except (RayInfeasibleError, RuntimeError) as exc:
             log.warning("ServingLease.run_session_kill: cluster ensure failed: %r", exc)
             return 1, "", f"ray_ensure_error: {exc}"[:2000]
+        # Stamped over the caller's env, so a mark it inherited cannot join this round to another launch.
+        bench_round = replace(bench_round, env={**bench_round.env, _ROUND_MARK_ENV: uuid.uuid4().hex})
         # Registered before the round is submitted, so a cancel that arrives while Ray is still scheduling it is one
         # this call is counted as able to hear -- the same window the local path opens around its spawn.
         with cancel_scope_listener() as cancel_scope:
             acquire_ref = self._actor.pid.remote()
             ref = self._actor.run_blocking.remote(bench_round)
-            return self._collect_round(
-                ref,
-                acquire_ref=acquire_ref,
-                cmd=bench_round.cmd,
-                timeout=bench_round.timeout,
-                cancel_scope=cancel_scope,
-            )
+            return self._collect_round(ref, acquire_ref=acquire_ref, bench_round=bench_round, cancel_scope=cancel_scope)
 
     def _collect_round(
         self,
         ref: Any,
         *,
         acquire_ref: Any,
-        cmd: list[str],
-        timeout: int | float | None,
+        bench_round: LeasedRound,
         cancel_scope: Any,
     ) -> tuple[int, str, str]:
         """Wait for a submitted round, forwarding a cancel to the actor if one comes."""
+        cmd, timeout = bench_round.cmd, bench_round.timeout
         import subprocess as _sp
 
         import ray
 
-        _actor_err, _task_err = ray.exceptions.RayActorError, ray.exceptions.RayTaskError
+        # Ray's memory monitor kills an actor with OutOfMemoryError, which is no RayActorError.
+        _actor_err = (ray.exceptions.RayActorError, ray.exceptions.OutOfMemoryError)
+        _task_err = ray.exceptions.RayTaskError
         try:
             # Even an uncancellable round goes through the polling wait: a bare ``ray.get`` has no wall-clock
             # deadline, which is exactly how a never-scheduled task parked a pool thread for an hour.
@@ -574,13 +584,10 @@ class ServingLease:
         except _actor_err as exc:
             # The actor (worker) itself died — e.g. its server OOM-killed the worker, or raylet reaped it. Drop the
             # dead handle so the next round re-creates a fresh actor via ``ensure()`` and this round surfaces as a
-            # benchmark failure instead of cascading. Dropping it also makes ``stop()``/``close()`` no-ops, so nothing
-            # here can still reach the server tree the dead actor spawned; the shutdown pidfile reap frees those GPUs.
-            log.warning(
-                "ServingLease.run_session_kill: ray actor died: %r; its server tree (if any) "
-                "is left to the pidfile reaper",
-                exc,
-            )
+            # benchmark failure instead of cascading. The round sits in its own session and outlives a killed actor,
+            # so it is reaped here by its mark before the GPUs and the port go to the next round.
+            reaped = _reap_marked_round(bench_round.env[_ROUND_MARK_ENV])
+            log.warning("ServingLease.run_session_kill: ray actor died: %r; reaped %d leftover pids", exc, reaped)
             self._actor = None
             from ._ray_backend import mark_ray_backend_unhealthy
 

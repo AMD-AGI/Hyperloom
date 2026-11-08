@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hyperloom.orchestrator.state.failure_evidence import (
     FAILURE_ATTRIBUTION_CANDIDATE,
     FAILURE_ATTRIBUTION_ENVIRONMENT,
@@ -23,8 +25,7 @@ from hyperloom.orchestrator.state.failure_evidence import (
 class TestClassifyFailureAttribution:
     def test_known_invalid_measurement_is_harness_failure(self):
         assert (
-            classify_failure_attribution(error_class="magpie_nonzero_invalid_measurement")
-            == FAILURE_ATTRIBUTION_HARNESS
+            classify_failure_attribution(error_class="round_nonzero_invalid_measurement") == FAILURE_ATTRIBUTION_HARNESS
         )
 
     def test_explicit_candidate_class_is_publishable(self):
@@ -48,13 +49,37 @@ class TestClassifyFailureAttribution:
             == FAILURE_ATTRIBUTION_ENVIRONMENT
         )
 
+    def test_a_taken_server_port_is_the_environments(self):
+        assert (
+            classify_failure_attribution(
+                error_class="round_nonzero_invalid_measurement",
+                error_excerpt="AgentX server port 8888 is unavailable; existing servers are not reused",
+            )
+            == FAILURE_ATTRIBUTION_ENVIRONMENT
+        )
+
+    @pytest.mark.parametrize(
+        "excerpt",
+        [
+            "AgentX server exited before becoming healthy (-9)",
+            "AgentX server exited during its health check (1)",
+            "Memory access fault by GPU node-2 (Agent handle: 0x5d0) on address 0x7f00. Reason: Unknown.",
+            "ray_actor_error: The actor died unexpectedly before finishing this task.",
+        ],
+    )
+    def test_a_server_that_died_is_not_the_harnesss(self, excerpt):
+        assert (
+            classify_failure_attribution(error_class="round_nonzero_invalid_measurement", error_excerpt=excerpt)
+            == FAILURE_ATTRIBUTION_UNKNOWN
+        )
+
     def test_ambiguous_failure_remains_unknown(self):
         assert classify_failure_attribution(error_class="server_init_dead") == FAILURE_ATTRIBUTION_UNKNOWN
 
     def test_valid_explicit_attribution_wins(self):
         assert (
             classify_failure_attribution(
-                error_class="magpie_timeout",
+                error_class="round_timeout",
                 explicit=FAILURE_ATTRIBUTION_CANDIDATE,
             )
             == FAILURE_ATTRIBUTION_CANDIDATE
@@ -204,3 +229,99 @@ class TestRenderFailureLine:
         }
         line = render_failure_line(fe, excerpt_chars=40)
         assert "AssertionError: batch == 1" in line
+
+
+class TestFailedStepClasses:
+    def test_every_failed_step_has_a_class(self):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+
+        classes = {step: failed_step_error_class(step) for step in FailedStep}
+        assert all(classes.values())
+        assert len(set(classes.values())) == len(FailedStep)
+
+    def test_action_owned_steps_are_not_mapped_twice(self):
+        from hyperloom.orchestrator.actions.executors import _failed_step
+        from hyperloom.orchestrator.state.failure_evidence import FAILED_STEP_ERROR_CLASSES
+
+        assert not set(_failed_step._ACTION_OWNED_STEP_CLASSES) & set(FAILED_STEP_ERROR_CLASSES)
+
+    def test_replaced_failures_keep_their_class(self):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+        from hyperloom.common.failure_signature import SERVE_FLAG
+        from hyperloom.orchestrator.actions.stop_attribution import STOPPED_BY_THE_RUN
+
+        assert failed_step_error_class(FailedStep.FLAG_UNKNOWN) == ARGV_INVALID
+        assert failed_step_error_class(FailedStep.GOLDEN_OWNED_TOUCHED) == SERVE_FLAG
+        assert failed_step_error_class(FailedStep.SERVER_EXITED_BEFORE_READY) == "server_init_dead"
+        assert failed_step_error_class(FailedStep.SERVER_STALLED) == "detokenizer_stall"
+        assert failed_step_error_class(FailedStep.CLIENT_OUTPUT_MISSING) == "benchmark_report_missing"
+        assert failed_step_error_class(FailedStep.CONFIG_INVALID) == "yaml_build_error"
+        assert failed_step_error_class(FailedStep.GPUS_UNAVAILABLE) == "host_gpus_unavailable"
+        for step in (FailedStep.DEADLINE_EXHAUSTED, FailedStep.CANCELLED):
+            assert failed_step_error_class(step) in STOPPED_BY_THE_RUN
+
+    def test_new_step_classes_carry_their_attribution(self):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+
+        environment = {
+            FailedStep.DISK_FULL,
+            FailedStep.GPUS_UNAVAILABLE,
+            FailedStep.FRAMEWORK_VERSION_TOO_OLD,
+            FailedStep.FRAMEWORK_VERSION_UNKNOWN,
+            FailedStep.PORT_IN_USE,
+            FailedStep.REUSE_NOT_OWNED,
+            FailedStep.SERVER_SILENT_BEFORE_READY,
+            FailedStep.TEARDOWN_INCOMPLETE,
+        }
+        harness = {
+            FailedStep.BASE_DIGEST_MISMATCH,
+            FailedStep.CLIENT_FAILED,
+            FailedStep.EVAL_CONTEXT_TOO_SHORT,
+            FailedStep.ROUND_TIMEOUT,
+            FailedStep.SOURCE_FILES_CHANGED,
+            FailedStep.STAGING_MISSING,
+        }
+        for step in environment:
+            assert classify_failure_attribution(error_class=failed_step_error_class(step)) == (
+                FAILURE_ATTRIBUTION_ENVIRONMENT
+            )
+        for step in harness:
+            assert (
+                classify_failure_attribution(error_class=failed_step_error_class(step)) == FAILURE_ATTRIBUTION_HARNESS
+            )
+
+    def test_a_golden_owned_touch_is_a_candidate_failure(self):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+
+        error_class = failed_step_error_class(FailedStep.GOLDEN_OWNED_TOUCHED)
+        assert classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_CANDIDATE
+
+
+class TestTheSuitePathClasses:
+    def test_a_client_or_timeout_step_is_its_own_class(self):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+
+        for step in (FailedStep.CLIENT_FAILED, FailedStep.ROUND_TIMEOUT):
+            assert failed_step_error_class(step) == step.value
+
+    def test_a_nonzero_round_is_attributed_to_the_harness(self):
+        for error_class in ("round_nonzero_invalid_measurement", "round_nonzero_after_valid_measurement"):
+            assert classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_HARNESS
+
+    def test_a_failed_client_is_signed_by_its_output_like_a_nonzero_round(self):
+        from hyperloom.orchestrator.state.failure_evidence import nonzero_output_signature
+
+        client = nonzero_output_signature("client_failed", "", "Traceback: boom at port 8001")
+        nonzero = nonzero_output_signature("round_nonzero_invalid_measurement", "", "Traceback: boom at port 8001")
+        assert client.startswith("client_failed|") and client.split("|")[1] == nonzero.split("|")[1]

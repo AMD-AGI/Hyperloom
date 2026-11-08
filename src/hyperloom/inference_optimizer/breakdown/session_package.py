@@ -26,6 +26,16 @@ from typing import Iterable
 
 from hyperloom_common.env import env_flag
 from hyperloom.common.env_safety import redact_secret_env_values
+from inference_suite.contracts.layout import (
+    AGENTX_TIMELINE,
+    CONFIG_FILE,
+    GPU_METRICS,
+    GPU_POWER,
+    KV_METRICS,
+    LAUNCH_FILE,
+    PHASE_MARKS,
+    REPORT_FILE,
+)
 
 from ..session.optimization_journal import JOURNAL_FILENAME
 from ..session.paths import PRIVATE_SESSION_SUBDIRS, is_path_within
@@ -87,10 +97,10 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "reports/kernel_optimization_summary.json",
     "reports/kernel_roofline.json",
     "reports/conc_sweep_summary.json",
-    "runs/**/kv_metrics.json",
-    "runs/**/agentx_timeline.jsonl",
-    "runs/**/gpu_metrics.json",
-    "runs/**/gpu_power.json",
+    f"runs/**/{KV_METRICS}",
+    f"runs/**/{AGENTX_TIMELINE}",
+    f"runs/**/{GPU_METRICS}",
+    f"runs/**/{GPU_POWER}",
     "reports/sbd_v6/timeline/*.json",
     "reports/sbd_v6/write_warnings.jsonl",
     "reports/trace/*.jsonl",
@@ -113,6 +123,11 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "runs/**/benchmark_report.json",
     "runs/**/summary.txt",
     "runs/**/inferencex_result.json",
+    # ── an inference_suite round's run_dir: its report, the launch and config it ran, its phase instants ─
+    f"runs/**/{REPORT_FILE}",
+    f"runs/**/{LAUNCH_FILE}",
+    f"runs/**/{CONFIG_FILE}",
+    f"runs/**/{PHASE_MARKS}",
     "runs/gemm_tuning/**/final_report.json",
     "runs/gemm_tuning/**/best_results.json",
     "runs/specialist/**/specialist_done.json",

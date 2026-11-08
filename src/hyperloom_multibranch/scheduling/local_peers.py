@@ -51,7 +51,6 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom_common.llm.llm_config import preferred_agent_backend, provider_model_defaults, resolve_forge_llm_model
 from hyperloom.common.model_paths import resolve_serving_model_path
-from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import BranchLogStore, CommitQuery
@@ -226,9 +225,8 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
     """The workload as the process environment carries it to the main flow's config renderer, which the toolbox
     renders the canonical measurement and every test's points with, and to the kernel tuning the toolbox runs, which
     takes its backend from ``KERNEL_OPT_BACKEND_ORDER``; ``hyperloom optimize`` exports the same, the model resolved to
-    the directory a server loads it from. ``GPU_TYPE`` is the Magpie runner type whose scripts measure the board and
-    ``TARGET_GPU_TYPE`` the board, as ``hyperloom optimize`` sets them: the same for mi300x and mi355x, mi355x for an
-    mi350x (``gpu_runner_type``). An InferenceX workload carries its sequence lengths; an AgentX one carries
+    the directory a server loads it from. ``GPU_TYPE`` and ``TARGET_GPU_TYPE`` are both the board, as ``hyperloom optimize``
+    sets them. An InferenceX workload carries its sequence lengths; an AgentX one carries
     :data:`AGENTX_ENV` instead."""
 
     shape = workload.inferencex
@@ -239,7 +237,7 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
         "TP": str(workload.tp),
         **workload_specific,
         "PRECISION": workload.precision,
-        "GPU_TYPE": gpu_runner_type(workload.gpu_type),
+        "GPU_TYPE": workload.gpu_type,
         "TARGET_GPU_TYPE": workload.gpu_type,
         "KERNEL_OPT_BACKEND_ORDER": workload.kernel_optimizer.value,
     }
@@ -278,7 +276,6 @@ def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> N
         ep=workload.ep,
         conc=workload.conc,
         model_path=workload.model,
-        gpu_type=workload.gpu_type,
         docker_image=image_ref,
     )
     write_agentx_benchmark(path, benchmark)
@@ -399,8 +396,6 @@ def _toolbox(
         image_ref=image.ref,
         image_digest=image.digest,
         gpu_type=workload.gpu_type,
-        magpie_commit=host.magpie_commit,
-        inferencex_commit=host.inferencex.commit,
         blobs=setup.blobs,
         blob_root=str(setup.blobs.root),
     )

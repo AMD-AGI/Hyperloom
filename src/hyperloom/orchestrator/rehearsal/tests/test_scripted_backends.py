@@ -6,34 +6,20 @@
 from __future__ import annotations
 
 import inspect
-import subprocess
-import sys
-import time
 from pathlib import Path
 
 import pytest
 
-from hyperloom.common.bringup import LadderStage
-from hyperloom.orchestrator.actions.executors._subprocess_kill import RoundWatch
-from hyperloom.orchestrator.bringup import observe_bringup
 from hyperloom.orchestrator.rehearsal import (
     COMPLETED,
     CRASHED,
-    DIED_SILENTLY,
     EMPTY,
-    HANG,
     HUNG,
-    READY,
-    STAGE_FAILED,
-    LaunchAttempt,
     LaunchScenario,
     ScenarioError,
-    ScenarioExhausted,
-    ScriptedLaunchBackend,
     ScriptedSpecialist,
     SpecialistStep,
     VirtualClock,
-    installed_clock,
 )
 from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn, SpecialistSubprocessDispatcher
 
@@ -48,132 +34,6 @@ def _spawn(task_id: str, workspace: Path) -> SpecialistSpawn:
         system_prompt="",
         user_prompt="",
     )
-
-
-def _backend(*attempts: LaunchAttempt) -> ScriptedLaunchBackend:
-    """Build a backend over ``attempts`` on a fresh clock."""
-    return ScriptedLaunchBackend(scenario=LaunchScenario(attempts=attempts), clock=VirtualClock())
-
-
-def _play(backend: ScriptedLaunchBackend, slot, **gates) -> subprocess.CompletedProcess:
-    """Run one launch against ``backend``, writing into ``slot``."""
-    return backend.run(["magpie", "bench.yaml"], watch=RoundWatch(server_log_path=str(slot / "server.log"), **gates))
-
-
-def test_a_clean_boot_serves_and_leaves_a_log_that_classifies_as_booted(tmp_path):
-    backend = _backend(LaunchAttempt(outcome=READY, artifacts={"bench/benchmark_report.json": {"success": True}}))
-
-    done = _play(backend, tmp_path)
-
-    assert done.returncode == 0
-    observed = observe_bringup(server_log=(tmp_path / "server.log").read_text(encoding="utf-8"))
-    assert observed.observation.stage_failed is None
-    assert observed.observation.stage_reached >= LadderStage.HTTP_READY
-    assert (tmp_path / "bench" / "benchmark_report.json").exists()
-
-
-@pytest.mark.parametrize(
-    "stage",
-    [LadderStage.ARGV_PARSE, LadderStage.CONFIG_VALIDATE, LadderStage.WEIGHTS_LOADING, LadderStage.ENGINE_INIT],
-)
-def test_a_boot_that_fails_at_a_named_stage_is_classified_back_to_that_stage(tmp_path, stage):
-    """The scenario names the wall; the classifier has to find the same one."""
-    backend = _backend(LaunchAttempt(outcome=STAGE_FAILED, stage=stage.name))
-
-    done = _play(backend, tmp_path)
-
-    assert done.returncode != 0
-    observed = observe_bringup(server_log=(tmp_path / "server.log").read_text(encoding="utf-8"))
-    assert observed.observation.stage_failed == stage
-
-
-def test_a_hang_is_reaped_on_the_hard_timeout_and_charges_it_to_the_clock(tmp_path):
-    backend = _backend(LaunchAttempt(outcome=HANG, duration_sec=10.0))
-
-    with pytest.raises(subprocess.TimeoutExpired):
-        _play(backend, tmp_path, timeout=1800)
-
-    assert backend.clock.elapsed == pytest.approx(1800.0)
-    assert backend.calls[-1].returncode == -1
-
-
-def test_a_process_that_dies_without_a_log_leaves_nothing_to_classify(tmp_path):
-    backend = _backend(LaunchAttempt(outcome=DIED_SILENTLY, returncode=139))
-
-    done = _play(backend, tmp_path)
-
-    assert done.returncode == 139
-    assert not (tmp_path / "server.log").exists()
-
-
-def test_a_blocker_stack_peels_one_per_attempt_and_then_boots(tmp_path):
-    scenario = LaunchScenario.from_dict({"blockers": ["argv_parse", "import", "engine_init"]})
-    backend = ScriptedLaunchBackend(scenario=scenario, clock=VirtualClock())
-
-    reached = []
-    for _ in scenario.attempts:
-        _play(backend, tmp_path)
-        observed = observe_bringup(server_log=(tmp_path / "server.log").read_text(encoding="utf-8"))
-        reached.append(observed.observation.stage_failed)
-
-    assert reached == [LadderStage.ARGV_PARSE, LadderStage.IMPORT, LadderStage.ENGINE_INIT, None]
-    assert backend.exhausted
-
-
-def test_one_launch_past_the_end_of_the_scenario_is_an_error_not_a_repeat(tmp_path):
-    backend = _backend(LaunchAttempt(outcome=READY))
-    _play(backend, tmp_path)
-
-    with pytest.raises(ScenarioExhausted):
-        _play(backend, tmp_path)
-
-
-def test_a_session_deadline_the_attempt_runs_past_stops_the_round(tmp_path):
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import SESSION_TIME_EXHAUSTED_RETURNCODE
-
-    backend = _backend(LaunchAttempt(outcome=READY, duration_sec=600.0))
-
-    with installed_clock(backend.clock):
-        done = _play(backend, tmp_path, session_deadline_sec=backend.clock.monotonic() + 60.0)
-
-    assert done.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
-    assert backend.clock.elapsed == pytest.approx(60.0)
-
-
-def test_a_deadline_from_a_clock_this_backend_does_not_read_is_refused(tmp_path):
-    """A deadline is an instant on one clock, and this backend must be that clock."""
-    backend = _backend(LaunchAttempt(outcome=READY))
-
-    with pytest.raises(ScenarioError):
-        _play(backend, tmp_path, session_deadline_sec=time.monotonic() + 60.0)
-
-    assert backend.served == 0
-
-
-def test_a_hang_that_outlives_the_budget_stops_for_the_budget_in_both_backends(tmp_path):
-    """The double and production have to name the same cause when both gates trip."""
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
-        SESSION_TIME_EXHAUSTED_RETURNCODE,
-        run_with_session_kill,
-    )
-
-    hard_timeout = 0.4
-    produced = run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(30)"],
-        watch=RoundWatch(timeout=hard_timeout, session_deadline_sec=time.monotonic() + hard_timeout),
-    )
-
-    backend = _backend(LaunchAttempt(outcome=HANG, duration_sec=30.0))
-    with installed_clock(backend.clock):
-        scripted = _play(
-            backend,
-            tmp_path,
-            timeout=hard_timeout,
-            session_deadline_sec=backend.clock.monotonic() + hard_timeout,
-        )
-
-    assert produced.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
-    assert scripted.returncode == produced.returncode
 
 
 def test_a_scenario_that_names_neither_spelling_is_rejected():

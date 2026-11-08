@@ -447,3 +447,9 @@ def test_launch_provided_names_cover_the_rank_topology_and_the_schedulers():
     assert common_env_safety.is_launch_provided_env_name("TORCHELASTIC_RUN_ID")
     assert not common_env_safety.is_launch_provided_env_name("HL_FUSE_RMSNORM")
     assert not common_env_safety.is_launch_provided_env_name("")
+
+
+@pytest.mark.parametrize("name", ["HYPERLOOM_EVAL_TASKS", "HYPERLOOM_EVAL_LIMIT", "HYPERLOOM_EVAL_TOKENIZED_REQUESTS"])
+def test_an_external_source_may_not_set_what_the_evaluation_runs(name):
+    """A recipe that sets the evaluation's task or limit would grade every candidate on another evaluation."""
+    assert not common_env_safety.is_allowed_external_env_key(name)

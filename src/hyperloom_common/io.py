@@ -8,6 +8,7 @@ from __future__ import annotations
 import json as _json
 import os
 import shutil
+import stat
 import tempfile
 from collections.abc import Iterator
 from contextlib import suppress
@@ -86,7 +87,10 @@ class WriteOptions:
     one group write in turn, and the rename replaces the file whoever owned it; the two
     options above are then ignored, and the parents ``make_parents`` creates are ``2775``
     (:func:`~hyperloom_common.shared_storage.make_shared_dirs`). Never use it for a file that holds a credential or
-    that anything executes or sources. ``fsync`` and ``fsync_dir`` raise the
+    that anything executes or sources. ``group_read`` lets the directory's group read a
+    new file when the directory is shared with that group (setgid and group-readable);
+    never other-readable, and ignored when ``mode``, ``preserve_mode`` or ``shared`` applies.
+    ``fsync`` and ``fsync_dir`` raise the
     ``OSError`` of a flush that fails: a caller that asks for durability learns
     when it did not get it.
     """
@@ -97,6 +101,7 @@ class WriteOptions:
     mode: int | None = None
     preserve_mode: bool = False
     shared: bool = False
+    group_read: bool = False
 
 
 #: A crash-safe replace: parents created, the data and the rename flushed to disk, an existing file's mode kept.
@@ -133,6 +138,15 @@ def _owner_mode(tmp: Path, path: Path, options: WriteOptions) -> None:
         os.chmod(tmp, options.mode & 0o700)
     elif options.preserve_mode and path.is_file():
         shutil.copymode(path, tmp)
+    elif options.group_read:
+        _share_with_directory_group(tmp, path.parent)
+
+
+def _share_with_directory_group(file: Path, directory: Path) -> None:
+    """Grant ``file`` its directory's group read bit when the directory is a setgid shared tree."""
+    shared = directory.stat().st_mode
+    if shared & stat.S_ISGID:
+        os.chmod(file, stat.S_IRUSR | stat.S_IWUSR | (shared & stat.S_IRGRP))
 
 
 def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions = WriteOptions()) -> None:

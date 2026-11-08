@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The signed result manifest (``MeasurementResult`` v1) a runner writes to ``/out/manifest.json``.
+"""The signed result manifest (``MeasurementResult`` v2) a runner writes to ``/out/manifest.json``.
+
+A v2 runner states the inference_suite staging it ran (``runner.inference_suite_staging``, the sha256 of the
+staging's normalised manifest, which is the sheet's); a v1 runner stated the Magpie commit instead. The archive keeps v1 manifests, so they still load.
 
 The manifest is read only after its signature has been verified over the raw bytes (see
 :func:`hyperloom.measure.bundle.verify_bundle`); parsing here is strict all the same, because a manifest that is signed
@@ -24,6 +27,7 @@ from hyperloom.contracts.measurement import (
     PhaseTiming,
 )
 from hyperloom.measure.jit_kinds import STATES as JIT_STATES
+from hyperloom.measure.spec import SPEC_SCHEMA_V1
 from hyperloom.measure.docs import (
     PREFIXED_SHA256_RE,
     SHA256_RE,
@@ -34,7 +38,16 @@ from hyperloom.measure.docs import (
     relative_path,
 )
 
-RESULT_SCHEMA = "hyperloom.measurement-result/v1"
+RESULT_SCHEMA_V1 = "hyperloom.measurement-result/v1"
+RESULT_SCHEMA = "hyperloom.measurement-result/v2"
+RESULT_SCHEMAS = (RESULT_SCHEMA_V1, RESULT_SCHEMA)
+
+
+def result_schema_for(spec_schema: str) -> str:
+    """The result schema a runner answers a sheet of ``spec_schema`` with."""
+    return RESULT_SCHEMA_V1 if spec_schema == SPEC_SCHEMA_V1 else RESULT_SCHEMA
+
+
 FAILURE_CLASSES = ("infra", "unclear", "candidate")
 #: Names the bundle itself owns; a manifest never lists them as result files.
 RESERVED_NAMES = ("manifest.json", "manifest.sig")
@@ -98,7 +111,8 @@ class CardOccupancyFacts:
 @dataclass(frozen=True)
 class RunnerFacts:
     """What the runner states about itself. ``rule_pack`` and ``card_occupancy`` are absent from a manifest an older runner
-    signed, and ``card_occupancy`` from one a runner without a card signed."""
+    signed, and ``card_occupancy`` from one a runner without a card signed. A v2 runner names the staging it ran
+    (``inference_suite_staging``), a v1 runner the Magpie commit (``magpie_commit``); each leaves the other ``None``."""
 
     sandbox_id: str
     signing_key_fingerprint: str
@@ -108,16 +122,26 @@ class RunnerFacts:
     power_cap_w: float | None
     partition_mode: str | None
     hyperloom_version: str
-    magpie_commit: str
     inferencex_commit: str
     gpu_ids: tuple[int, ...]
     ecc_delta: EccDelta | None
     rule_pack: RulePackFacts | None = None
     card_occupancy: CardOccupancyFacts | None = None
+    inference_suite_staging: str | None = None
+    magpie_commit: str | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "RunnerFacts":
         r = Reader(value, path)
+        return cls._parse(r, inference_suite_staging=r.text("inference_suite_staging", pattern=SHA256_RE) or "")
+
+    @classmethod
+    def parse_v1(cls, value: Any, path: str) -> "RunnerFacts":
+        r = Reader(value, path)
+        return cls._parse(r, magpie_commit=r.text("magpie_commit") or "")
+
+    @classmethod
+    def _parse(cls, r: Reader, **tool: str) -> "RunnerFacts":
         ecc = r.optional("ecc_delta")
         pack = r.optional("rule_pack")
         occupancy = r.optional("card_occupancy")
@@ -130,12 +154,12 @@ class RunnerFacts:
             power_cap_w=r.number("power_cap_w", minimum=0, optional=True),
             partition_mode=r.text("partition_mode", optional=True),
             hyperloom_version=r.text("hyperloom_version") or "",
-            magpie_commit=r.text("magpie_commit") or "",
             inferencex_commit=r.text("inferencex_commit") or "",
             gpu_ids=r.sequence("gpu_ids", _gpu_id),
             ecc_delta=None if ecc is None else EccDelta.parse(ecc, r.at("ecc_delta")),
             rule_pack=None if pack is None else RulePackFacts.parse(pack, r.at("rule_pack")),
             card_occupancy=None if occupancy is None else CardOccupancyFacts.parse(occupancy, r.at("card_occupancy")),
+            **tool,
         )
         r.done()
         return facts
@@ -350,14 +374,15 @@ class ResultManifest:
     @classmethod
     def from_document(cls, document: Any) -> "ResultManifest":
         r = Reader(document, "manifest")
-        if r.text("schema") != RESULT_SCHEMA:
-            raise DocumentError(f"manifest.schema: expected {RESULT_SCHEMA}")
+        schema = r.text("schema")
+        if schema not in RESULT_SCHEMAS:
+            raise DocumentError(f"manifest.schema: {schema!r} is not one of {', '.join(RESULT_SCHEMAS)}")
         manifest = cls(
             request_id=r.text("request_id") or "",
             spec_fingerprint=r.text("spec_fingerprint", pattern=_FINGERPRINT_RE) or "",
             spec_sha256=r.text("spec_sha256", pattern=SHA256_RE) or "",
             surface_sha256=r.text("surface_sha256", pattern=SHA256_RE, optional=True),
-            runner=r.section("runner", RunnerFacts.parse),
+            runner=r.section("runner", RunnerFacts.parse if schema == RESULT_SCHEMA else RunnerFacts.parse_v1),
             outcome=r.section("outcome", Outcome.parse),
             platform_env_changed=r.sequence("platform_env_changed", _name),
             timing=r.section("timing", Timing.parse),

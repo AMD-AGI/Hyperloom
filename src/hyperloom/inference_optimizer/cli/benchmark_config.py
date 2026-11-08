@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Bind a native Magpie workload to one optimization session."""
+"""Bind a native AgentX workload to one optimization session."""
 
 from __future__ import annotations
 
@@ -17,12 +17,11 @@ from hyperloom.common.benchmark_config import (
     BENCHMARK_CONFIG_ENV,
     benchmark_config_path,
     configured_benchmark,
-    is_magpie_agentx,
+    is_agentx,
 )
 from hyperloom.common.agentx_workload import is_mlperf_backend
 from hyperloom_common.env import env_bool
 from hyperloom.inference_optimizer import framework_registry
-from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
 
 
 _SESSION_CONFIG = "benchmark.yaml"
@@ -62,6 +61,8 @@ def configure_benchmark(args: argparse.Namespace) -> None:
     elif not native:
         if getattr(args, "docker_image", None):
             raise ValueError("--docker-image requires native AgentX")
+        if getattr(args, "no_agentx_accuracy", False):
+            raise ValueError("--no-agentx-accuracy requires native AgentX; other workloads have no accuracy round")
         return
     _validate_agentx_options(args)
     args.enable_conc_sweep = False
@@ -100,16 +101,16 @@ def _validate_agentx_options(args: argparse.Namespace) -> None:
         args.framework or pins.get("FRAMEWORK") or os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
     )
     if framework not in {"sglang", "vllm"}:
-        raise ValueError("Magpie AgentX optimization supports SGLang or vLLM")
+        raise ValueError(f"AgentX optimization supports SGLang or vLLM, not {framework}")
     if int(getattr(args, "nodes", 1)) != 1:
-        raise ValueError("Magpie AgentX optimization requires one node")
+        raise ValueError("AgentX optimization requires one node")
     if any(getattr(args, key, None) is not None and int(getattr(args, key)) <= 0 for key in ("tp", "ep", "conc")):
         raise ValueError("AgentX TP, EP and CONC must be positive")
     if getattr(args, "enable_conc_sweep", None):
         raise ValueError("AgentX concurrency is fixed per session; create a session for each CONC")
     conflicting = [
         name
-        for name in ("isl", "osl", "profile_osl", "max_model_len", "reference_script", "quantize", "quantize_scheme")
+        for name in ("isl", "osl", "profile_osl", "max_model_len", "quantize", "quantize_scheme")
         if getattr(args, name, None)
     ]
     if conflicting:
@@ -125,13 +126,16 @@ def _validate_agentx_options(args: argparse.Namespace) -> None:
 
 
 def _validate_agentx_benchmark(benchmark: dict) -> None:
-    if not is_magpie_agentx(benchmark):
+    if not is_agentx(benchmark):
         raise ValueError("--benchmark-config currently requires benchmark.agentx: enable")
     agentx = benchmark["agentx"]
     if isinstance(agentx, dict) and agentx.get("mode", _CANONICAL) != _CANONICAL:
         raise ValueError("Optimization requires canonical AgentX; fast runs are diagnostic only")
-    if benchmark.get("profiler", {}).get("torch_profiler", {}).get("enabled"):
+    capture = benchmark.get("profiler", {}).get("torch_profiler", {})
+    if capture.get("enabled"):
         raise ValueError("Disable torch_profiler in the benchmark YAML; the profile phase enables it separately")
+    if capture.get("num_profiles", 1) != 1:
+        raise ValueError(f"The YAML sets num_profiles {capture['num_profiles']}; a profile round captures one window")
     envs = benchmark.get("envs", {})
     required = ("framework", "model", "precision")
     if any(not benchmark.get(key) for key in required):
@@ -140,7 +144,7 @@ def _validate_agentx_benchmark(benchmark: dict) -> None:
         raise ValueError("AgentX YAML requires explicit positive envs.TP and envs.CONC for resource accounting")
     legacy = [key for key in envs if key.startswith(("AIPERF_", "AGENTX_", "AGENTIC_"))]
     if legacy:
-        raise ValueError("Use Magpie agentx configuration instead of legacy client controls: " + ", ".join(legacy))
+        raise ValueError("Use the agentx configuration block instead of legacy client controls: " + ", ".join(legacy))
 
 
 @dataclass(frozen=True)
@@ -155,12 +159,14 @@ class AgentXWorkload:
     ep: int
     conc: int
     model_path: str = ""
-    gpu_type: str | None = None
     docker_image: str | None = None
+    # Ignored: multibranch-dev's scheduling.local_peers still passes the board the YAML no longer names; removed once
+    # that caller moves.
+    gpu_type: str | None = None
 
 
 def write_agentx_benchmark(target: Path, workload: AgentXWorkload) -> None:
-    """Write ``workload`` to ``target`` in Magpie's public AgentX schema."""
+    """Write ``workload`` to ``target`` in the public AgentX workload schema."""
     benchmark: dict[str, Any] = {
         "framework": workload.framework,
         "model": workload.model,
@@ -172,11 +178,6 @@ def write_agentx_benchmark(target: Path, workload: AgentXWorkload) -> None:
     }
     if workload.model_path and Path(workload.model_path).is_dir():
         benchmark["envs"]["MODEL_PATH"] = str(Path(workload.model_path).resolve())
-    if workload.gpu_type:
-        # Magpie resolves {framework}_{runner_type}.sh and ships no script for mi308x or
-        # mi325x; both run the mi300x one. ``gpu_type`` is the real board, so the
-        # runner label has to be derived here the way $GPU_TYPE already is.
-        benchmark["runner_type"] = gpu_runner_type(workload.gpu_type)
     if workload.docker_image:
         benchmark["docker_image"] = workload.docker_image
     _validate_agentx_benchmark(benchmark)
@@ -199,7 +200,6 @@ def bind_benchmark(session_dir: Path, args: argparse.Namespace) -> None:
             ep=args.ep,
             conc=args.conc,
             model_path=os.environ.get("MODEL_PATH", ""),
-            gpu_type=args.gpu_type,
             docker_image=args.docker_image,
         )
         write_agentx_benchmark(target, workload)
@@ -209,10 +209,16 @@ def bind_benchmark(session_dir: Path, args: argparse.Namespace) -> None:
 
 
 def add_benchmark_argument(parser: argparse.ArgumentParser) -> None:
-    """Register the native workload's optional YAML and image inputs."""
+    """Register the native workload's optional YAML, image and accuracy-round inputs."""
     parser.add_argument(
-        "--benchmark-config", type=Path, help="Optional Magpie AgentX YAML instead of Hyperloom workload flags."
+        "--benchmark-config", type=Path, help="Optional AgentX workload YAML instead of Hyperloom workload flags."
     )
     parser.add_argument(
         "--docker-image", help="AgentX serving image identity (run Hyperloom inside it); required for custom models."
+    )
+    parser.add_argument(
+        "--no-agentx-accuracy",
+        action="store_true",
+        help="Skip the AgentX GSM8K round (own server, golden acceptance removed) at the baseline and at each "
+        "candidate past the KEEP threshold. Recorded with the session.",
     )

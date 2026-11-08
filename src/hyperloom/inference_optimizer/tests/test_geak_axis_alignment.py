@@ -55,6 +55,8 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     geak_metric_axis,
 )
 
+from ._geak_helpers import replay_env_spec
+
 
 def _clear_axis_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
@@ -155,9 +157,6 @@ def _sweep_with_summary(
 
     The replay env each point was launched with is appended to the returned list.
     """
-    monkeypatch.setenv("MODEL_PATH", "/models/x")
-    monkeypatch.setenv("FRAMEWORK", "sglang")
-    monkeypatch.setenv("TP", "1")
     launched: list[dict[str, str]] = []
 
     def _fake_run(_cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
@@ -182,6 +181,7 @@ def _sweep_with_summary(
                 conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=30, repeats=1, metric_axis=metric_axis
             ),
             output_root=tmp_path / "sweep",
+            env_spec=replay_env_spec(tmp_path / "round"),
         )
 
     return _go, launched

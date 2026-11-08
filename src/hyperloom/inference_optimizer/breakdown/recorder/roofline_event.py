@@ -391,10 +391,8 @@ def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
         "capture_op_meta_coverage": capture.get("op_meta_coverage"),
         "capture_cpu_op_total": capture.get("cpu_op_total"),
         "capture_kernel_count": capture.get("kernel_count"),
-        # Which file the live resolver would open, which decides whether any of the above describes production.
+        # Role of the file the analysis reads.
         "selected_role": inventory.get("selected_role"),
-        "production_selected_role": inventory.get("production_selected_role"),
-        "production_would_analyze_split_chunk": inventory.get("production_would_analyze_split_chunk"),
         "file_count_by_role": _as_dict(inventory.get("file_count_by_role")),
         "verdict_measures": measures,
     }
@@ -467,10 +465,11 @@ class RooflineRequest:
 class ProfileRunOutcome:
     """How one profile attempt ended.
 
-    ``server_liveness`` is the post-attempt process-level probe. A run whose
-    trace exported completely and whose engine then died is indistinguishable
-    from a clean run by the result dict alone, so the row carries the process
-    outcome next to the wall clock rather than leaving it to be inferred.
+    ``server_liveness`` is what the attempt's round reports say of its server.
+    A run whose trace exported completely and whose engine then died is
+    indistinguishable from a clean run by the result dict alone, so the row
+    carries the server's fate next to the wall clock rather than leaving it to
+    be inferred.
 
     ``instrumentation`` is which patchers ran on this attempt and what they
     returned. It is stored on the run row rather than folded into ``validate``
@@ -503,9 +502,10 @@ class RooflineConclusion:
     """What a succeeded roofline action promoted.
 
     ``kernel_attribution_degraded`` says that zero hot kernels are an
-    attribution artifact rather than a real absence, and ``snapshot`` is
-    passed in rather than looked up because the recorder holds no reference
-    to session state.
+    attribution artifact rather than a real absence, ``analysis_degraded``
+    that the analysis carries a degrading trace-health warning, and
+    ``snapshot`` is passed in rather than looked up because the recorder
+    holds no reference to session state.
     """
 
     snapshot_id: Any
@@ -514,6 +514,7 @@ class RooflineConclusion:
     cached: dict[str, Any] | None
     trace_path: str
     snapshot: Mapping[str, Any] | None = None
+    analysis_degraded: bool = False
 
 
 class RooflineEventRecorder:
@@ -755,15 +756,17 @@ class RooflineEventRecorder:
                 # instead of interleaving them with the ones they replaced.
                 natural_ids=(self._action_id, f"{rank:04d}"),
             )
-        # Zero routable candidates is a completed roofline that cannot advance
-        # kernel work, which is a different operational state from a clean run.
+        # Zero routable candidates, or candidates from a degraded analysis, is a
+        # completed roofline in a different operational state from a clean run.
+        degraded = conclusion.kernel_attribution_degraded or conclusion.analysis_degraded
         self._close(
-            status="degraded" if conclusion.kernel_attribution_degraded else "succeeded",
+            status="degraded" if degraded else "succeeded",
             payload={
                 "outcome": {
                     "snapshot_id": _int_or_none(promoted.get("roofline_snapshot_id") or conclusion.snapshot_id),
                     "hot_kernel_count": int(conclusion.hot_kernel_count),
                     "kernel_attribution_degraded": bool(conclusion.kernel_attribution_degraded),
+                    "analysis_degraded": bool(conclusion.analysis_degraded),
                     "profile_trace": str(conclusion.trace_path or ""),
                     "steady_state_trace": str(promoted.get("steady_state_trace") or ""),
                     "analysis_md_path": str(promoted.get("analysis_md_path") or ""),

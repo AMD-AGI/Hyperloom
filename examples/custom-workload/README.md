@@ -101,7 +101,6 @@ export HYPERLOOM=/path/to/your/Hyperloom/clone
 
 cp -r "$HYPERLOOM/examples/custom-workload" ~/custom-workload-run && cd ~/custom-workload-run
 
-export HYPERLOOM_BENCHMARK_BACKEND=bypass
 export HYPERLOOM_BYPASS_SCRIPTS_DIR="$PWD"
 
 python3 -m hyperloom optimize \

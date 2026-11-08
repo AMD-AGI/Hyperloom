@@ -29,9 +29,7 @@ def add_gpu_partition_arguments(opt: argparse.ArgumentParser) -> None:
         "wins when both are present and disagree; a WARN is "
         "emitted to stderr so the operator sees the typo. Used "
         "verbatim only when the probe fails (CPU sandbox / no "
-        "rocm-smi). Magpie runner_type is derived separately; "
-        "mi308x and mi325x currently run with mi300x runner scripts because "
-        "Magpie does not yet ship MI308X/MI325X-specific SGLang/vLLM scripts.",
+        "rocm-smi).",
     )
     opt.add_argument(
         "--compute-partition-mode",
@@ -148,8 +146,8 @@ def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
         "--gpus-per-node",
         type=int,
         default=None,
-        help="GPUs per multi-node pod (Infera worker/prefill/decode or RayJob "
-        "head+workers). Defaults to 8 when omitted.",
+        help="GPUs per node: sizes each multi-node pod (Infera worker/prefill/decode or RayJob "
+        "head+workers) and, with --nodes, the GPUs the base launch is chosen for. Defaults to 8 when omitted.",
     )
     # Platform-owned, inert here.
     opt.add_argument("--mn-image", default=None, help=argparse.SUPPRESS)
@@ -263,14 +261,15 @@ def add_workload_arguments(opt: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         help=(
-            "Reference launch recipe (.sh path or http(s) URL). Its serve "
-            "flags plus the exports the denylist allows seed the baseline "
-            "server args at lowest priority (the config arm can override); shell-unsafe, "
-            "credential-shaped and optimizer-owned workload variables are "
-            "dropped. The recipe is applied as given — there is no model gate "
-            "and no auto-discovery — so a path that cannot be read, or that "
-            "yields neither a flag nor an export, exits 2 instead of falling "
-            "back. Omit the flag to leave the baseline unchanged."
+            "The session's base launch (path or http(s) URL): a shell launch "
+            "script, or a base_launch.json frozen by an earlier session. It "
+            "wins over every recipe source; omitted, the base comes from "
+            "InferenceX, then the framework's cookbook, then the default "
+            "table. A script must fix every flag in its text: a flag set from "
+            "a shell variable, or a '# hyperloom-launch-controls:' line, exits "
+            "2, as does a file that cannot be read or does not launch the "
+            "session's framework. The base is resolved once, at launch, and "
+            "frozen as <session>/base_launch.json; a resume reads that file."
         ),
     )
     opt.add_argument("--precision", type=str, default=None, help=f"Model precision (default {DEFAULT_PRECISION})")
@@ -606,7 +605,7 @@ def add_recon_arguments(opt: argparse.ArgumentParser) -> None:
 
 def add_conc_sweep_arguments(opt: argparse.ArgumentParser) -> None:
     """Add the post-optimization concurrency-sweep flags of ``optimize``."""
-    # Post-optimization concurrency sweep: a baseline-vs-optimized Magpie grid across CONC values (see
+    # Post-optimization concurrency sweep: a baseline-vs-optimized grid across CONC values (see
     # orchestrator/conc_sweep.py). Defaults to None so bootstrap can pick by benchmark mode.
     opt.add_argument(
         "--enable-conc-sweep",
@@ -617,7 +616,7 @@ def add_conc_sweep_arguments(opt: argparse.ArgumentParser) -> None:
         "current_best across CONC) and write "
         "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
         "On by default for synthetic workloads, off by default for MLPerf. "
-        "Unavailable for native Magpie AgentX: start a separate session for each CONC.",
+        "Unavailable for native AgentX: start a separate session for each CONC.",
     )
     opt.add_argument(
         "--conc-sweep-concs",
@@ -628,7 +627,7 @@ def add_conc_sweep_arguments(opt: argparse.ArgumentParser) -> None:
         "(low-to-high for synthetic, high-to-low for MLPerf), so the order given does not matter. "
         "Defaults to the ladder for the workload: "
         "256,128,64,32,16,8,4,2 for synthetic, 1,4,8,10,14,20,28 for MLPerf. "
-        "Unavailable for native Magpie AgentX.",
+        "Unavailable for native AgentX.",
     )
     opt.add_argument(
         "--conc-sweep-total-budget-sec",
@@ -636,7 +635,7 @@ def add_conc_sweep_arguments(opt: argparse.ArgumentParser) -> None:
         type=int,
         default=9000,
         help="Total wall-clock budget (seconds) for the whole conc-sweep action, independent of the per-variant "
-        "Magpie timeout. Past its first CONC the baseline arm may spend half of it; the optimized arm runs only the CONCs the "
+        "round timeout. Past its first CONC the baseline arm may spend half of it; the optimized arm runs only the CONCs the "
         "baseline reached, so a budget that runs out drops whole pairs. Once exhausted, remaining variants are "
         "recorded as status=skipped / error_class=budget_exhausted and the JSON envelope carries "
         "budget_exhausted=true. Default 9000 (~2.5h); set to 0 to disable. Also bounded above by the main "
