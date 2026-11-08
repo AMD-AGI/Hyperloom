@@ -133,7 +133,7 @@ benchmark:
     NUM_PROMPTS: 320
     NUM_WARMUPS: 8
     RUN_EVAL: 'true'
-    MAGPIE_TRUST_REMOTE_CODE: '1'
+    BENCH_TRUST_REMOTE_CODE: '1'
   benchmark_script: sglang_mi355x.sh
   inferencex_path: /cache/InferenceX
 """
