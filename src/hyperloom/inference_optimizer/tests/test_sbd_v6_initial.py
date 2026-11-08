@@ -21,6 +21,8 @@ from hyperloom.inference_optimizer.session.sbd_v6 import (
     write_timeline_event_at,
 )
 
+pytestmark = pytest.mark.usefixtures("process_environ")
+
 
 def read_timeline_event(session_dir: Path, event_type: str) -> dict | None:
     matching = [event for event in read_timeline_events(session_dir) if event["type"] == event_type]
