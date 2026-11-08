@@ -311,7 +311,11 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert all(check["regression_cases"] == 0 for check in breakdown["close"]["selection"]["checks"])
     markdown = layout.report_markdown.read_text()
     assert "Chosen: integration `i1`" in markdown
-    assert "| candidate | commit | eligible | regression cases | degraded concs | error |" in markdown
+    header = (
+        "| candidate | commit | eligible | reproduced | gain % | refused by | waived for the root "
+        "| regression cases | degraded concs | error |"
+    )
+    assert header in markdown
     assert f"Experiences: {DISABLED} {MB_FAKE_EXPERIENCE_KB}" in markdown
     assert f"Playbook: {knowledge['playbook']['status']}" in markdown
     assert f"Lesson curation: {SKIPPED} {NO_LESSONS}" in markdown
@@ -604,18 +608,30 @@ def test_a_report_that_records_a_final_choice_refuses_a_second_final(layout: Ses
         ended_before_final(_written(layout, SessionStopReason.TIME_EXHAUSTED, CHOICE))
 
 
-def test_the_report_says_how_many_regression_cases_ran_on_each_candidate() -> None:
-    chosen = FinalCandidate("integration", INTEGRATION_BRANCH, CHOSEN, 1041.0)
+def test_the_report_says_how_each_candidate_reproduced_and_how_many_regression_cases_ran_on_it() -> None:
+    chosen = FinalCandidate("integration", INTEGRATION_BRANCH, CHOSEN, 1041.0, root=True)
     checks = (
-        CandidateCheck(chosen, {64: 1041.0}, True, True, True, regression_cases=2),
-        CandidateCheck(FinalCandidate("best branch", "b01", "c7", 1030.0), {64: 1030.0}, True, True, True),
+        CandidateCheck(chosen, {64: 1041.0}, True, True, True, regression_cases=2, waived=("p90_regressed",)),
+        CandidateCheck(
+            FinalCandidate("best branch", "b01", "c7", 1030.0),
+            {64: 1030.0},
+            True,
+            False,
+            True,
+            gain_pct=-6.4,
+            refused_by=("below_reproduction_tolerance", "extra_failed_requests"),
+        ),
     )
     final = FinalChoice(chosen, checks, "the higher value", METRIC, 64)
     report = CloseReport(SessionStopReason.TIME_EXHAUSTED, final, None, StopReport((), QueueState()), "")
 
     lines = report_markdown(report, "s").splitlines()
 
-    assert "| integration | `i1` | True | 2 |  |  |" in lines and "| best branch | `c7` | True | 0 |  |  |" in lines
+    assert "| integration | `i1` | True | True |  |  | p90_regressed | 2 |  |  |" in lines
+    assert (
+        "| best branch | `c7` | False | False | -6.4 | below_reproduction_tolerance, extra_failed_requests |  | 0 |  |  |"
+        in lines
+    )
 
 
 def test_a_final_that_chose_nothing_may_be_run_again(layout: SessionLayout) -> None:
