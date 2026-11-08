@@ -14,12 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import FailureClass, SandboxFacts, TestResult, Validity
+from hyperloom.contracts.measurement import AccuracyValue, FailureClass, SandboxFacts, TestResult, Validity
 from hyperloom.measure import sandboxes
 from hyperloom.measure.hosted import HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT
 from hyperloom.measure.points import AcceptedMeasurement
-from hyperloom.measure.socket import TestCall, TestOutcome
+from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
 from hyperloom.sandbox.socket import IDEMPOTENCY_KEY, CreateOptions, SandboxGone, SandboxQuotaExceeded
@@ -29,6 +29,7 @@ from hyperloom_multibranch.toolbox.hosted_executor import (
     DEFAULT_TEST_TIMEOUT_SEC,
     TEST_SILENCE_TIMEOUT_SEC,
     HostedExecutor,
+    _accuracy_values,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import FakePlanner, Rig as ToolboxRig, build, req
@@ -540,3 +541,12 @@ async def test_the_staging_is_read_once_for_the_session_not_for_every_test(tmp_p
     await executor.run(_job(point_yaml(tmp_path)))
 
     assert [call.session_facts.staging for call in backend.calls] == [STAGING, STAGING]  # type: ignore[union-attr]
+
+
+def test_a_failed_accuracy_round_is_never_a_score_even_when_the_outcome_says_success() -> None:
+    score = AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.95)
+    rounds = (RoundOutcome(0, "measure", Path("m"), 0), RoundOutcome(0, "accuracy", Path("e"), 1, (score,)))
+    with pytest.raises(MeasurementRefused, match="accuracy round of point 0 failed with return code 1"):
+        _accuracy_values(rounds, wanted=True)
+    passed = (rounds[0], replace(rounds[1], returncode=0))
+    assert _accuracy_values(passed, wanted=True) == (score,)

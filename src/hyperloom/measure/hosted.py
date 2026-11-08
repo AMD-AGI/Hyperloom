@@ -1081,7 +1081,7 @@ def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ..
     returncode = verified.result.outcome.returncode
     if ROUNDS_FILE in listed:
         document = json.loads(verified.read_file(ROUNDS_FILE).decode("utf-8"))
-        return tuple(
+        rounds = tuple(
             RoundOutcome(
                 int(r["point"]),
                 r["phase"],
@@ -1092,6 +1092,10 @@ def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ..
             )
             for r in document
         )
+        if returncode == 0 and any(r.returncode != 0 for r in rounds):
+            # The runner's outcome is its first failed round's code, so a success over a failed round is not its own.
+            raise ResultRejected(RejectReason.MANIFEST_INVALID, "a round failed under an outcome that says success")
+        return rounds
     reports = sorted(
         path for path in listed if Path(path).name in _ROUND_REPORTS and WARMUP_DIR not in Path(path).parts
     )

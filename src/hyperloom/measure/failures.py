@@ -20,6 +20,7 @@ so it gets no failure class at all: calling it ``candidate`` would write a false
 from __future__ import annotations
 
 import errno
+import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -87,6 +88,13 @@ GIT_FETCH_TIMEOUT = "git_fetch_timeout"
 #: address the sandbox reaches it from, after the client's own retries; the reason is ``<this>: <the line>``. No candidate
 #: causes it and the node has no part in it (``hyperloom_multibranch.toolbox.attempts`` does not report it against one).
 HUB_RATE_LIMITED = "hub_rate_limited"
+#: A Hugging Face cache (the ``datasets`` lock of the evaluation's dataset, say) refused the test with ``[Errno 13]
+#: Permission denied``; the reason is ``<this>: <the path refused>``. The cache is a volume every sandbox of the platform
+#: mounts alike, so no candidate causes it and a fresh sandbox meets it again: ``hyperloom_multibranch.toolbox.attempts``
+#: ends the test with it at once and does not hold it against the node.
+HF_CACHE_PERMISSION = "hf_cache_permission"
+#: The variables that name a Hugging Face cache directory; a refused path under one is :data:`HF_CACHE_PERMISSION`.
+_HF_CACHE_VARIABLES = ("HF_HOME", "HF_DATASETS_CACHE", "HF_HUB_CACHE")
 #: The test's own timeout passed while its attempt waited for a slot of the sandbox pool or for room in the grant's
 #: quota, before any sandbox was made (``hyperloom.measure.sandboxes.AcquireTimedOut``); the reason is ``<this>: <what it
 #: waited for and what held it>``. Nothing ran, so no node and no candidate is to blame, and a retry would wait on the same
@@ -292,6 +300,12 @@ def _named_by_logs(text: str) -> FailureClassification | None:
     if full:
         # Before the signatures: a full disk breaks whatever was writing, and the traceback it leaves can match one.
         return _infra(f"{DISK_FULL}: {full}")
+    refused_cache = log_causes.hf_cache_permission(
+        text, tuple(os.environ.get(name, "") for name in _HF_CACHE_VARIABLES)
+    )
+    if refused_cache:
+        # Before the signatures: the evaluation that could not take the lock dies on it with a Python exception.
+        return _infra(f"{HF_CACHE_PERMISSION}: {refused_cache}")
     stalled_fetch = log_causes.git_fetch_timeout(text)
     if stalled_fetch:
         return _infra(f"{GIT_FETCH_TIMEOUT}: {stalled_fetch}")

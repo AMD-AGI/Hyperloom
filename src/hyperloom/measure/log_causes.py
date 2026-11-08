@@ -81,6 +81,11 @@ _HUB_RATE_LIMITED = re.compile(HUB_RATE_LIMITED)
 #: A frame of aiter's JIT build in a stack dumped at the watchdog: py-spy writes ``build_module (aiter/jit/core.py:N)``, a
 #: Python traceback ``File ".../aiter/jit/core.py", line N, in build_module``.
 _JIT_BUILD_FRAME = re.compile(r"\bbuild_module\b.*\baiter[/.]jit[/.]core\b|\baiter[/.]jit[/.]core\b.*\bbuild_module\b")
+#: A file the process may not open (``EACCES``), as Python prints it: ``[Errno 13] Permission denied: '<path>'``.
+_PERMISSION_DENIED = re.compile(r"\[Errno 13\] Permission denied: (['\"])(?P<path>[^'\"]+)\1")
+#: The lock a ``datasets`` cache directory holds next to each dataset it prepared
+#: (``<cache>/datasets/_<cache>_openai___gsm8k_main_0.0.0_<hash>.lock``).
+_DATASETS_LOCK = re.compile(r"/datasets/(?:[^/]+/)*[^/]+\.lock$")
 _HIP_EXCEPTION = re.compile(r"\bHIP (?:runtime )?error: ")
 #: The name of the failed call, on its own line when the exception text was cut (``Search for `hipErrorIllegalAddress'``).
 _HIP_ERROR_TOKEN = re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]+")
@@ -169,3 +174,17 @@ def hub_rate_limited(text: str) -> str | None:
     """The line that says the Hugging Face Hub refused a download for the rate limit, once the client's retries were spent:
     a limit of the egress address, which no candidate can cause."""
     return _last_matching(text, lambda line: bool(_HUB_RATE_LIMITED.search(line)))
+
+
+def hf_cache_permission(text: str, cache_dirs: tuple[str, ...] = ()) -> str | None:
+    """The path of a Hugging Face cache the process was refused (``[Errno 13] Permission denied``): a path with
+    ``huggingface`` in it, one under a directory of ``cache_dirs`` (what ``HF_HOME`` or ``HF_DATASETS_CACHE`` names), or
+    the lock a ``datasets`` cache keeps for a dataset. The cache is shared by every sandbox that mounts it, so no candidate
+    causes the refusal; any other path refused stays what it was."""
+    roots = tuple(d.rstrip("/") + "/" for d in cache_dirs if d and d.strip("/"))
+    for line in reversed(text.splitlines()):
+        for found in _PERMISSION_DENIED.finditer(line):
+            path = found.group("path")
+            if "huggingface" in path.lower() or path.startswith(roots) or _DATASETS_LOCK.search(path):
+                return one_line(path)
+    return None
