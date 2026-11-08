@@ -148,6 +148,11 @@ _FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
 }
 #: The steps whose reason quotes the report's ``failure_detail``, as ``<reason>: <detail>``.
 _DETAILED_STEPS = frozenset({FailedStep.FLAG_UNKNOWN})
+#: What the suite's framework probe says, as ``FailedStep.FRAMEWORK_VERSION_UNKNOWN``, when the serving interpreter
+#: finds no package of the framework at all (``framework_probe.probe_install``). Like a probe whose import raised, it
+#: is the candidate's ``import_error``, the cause a server that died on the same import used to name in its log; a
+#: probe that ran too long or could not start, or a version it could not read, says nothing of the candidate.
+_FRAMEWORK_NOT_FOUND = re.compile(r"\scannot import [A-Za-z_][\w.]*\Z")
 #: The two causes an unclear failure names when its log carries them; the reason is ``<prefix>: <the log's line>``.
 #: A failure the log only calls a crashed evaluation names the refused request too, when the log carries one.
 LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
@@ -280,8 +285,9 @@ def classify_test_failure(
         return _infra(f"{HUB_RATE_LIMITED}: {refused}")
     reported = evidence.step_failure
     step = reported.step if reported else None
-    if reported and step in _FAILED_STEP_VERDICTS:
-        return _from_step(reported)
+    by_step = _from_step(reported) if reported else None
+    if by_step is not None:
+        return by_step
     named = _named_by_logs(text, parts)
     if named is not None:
         return named
@@ -312,11 +318,22 @@ def _from_error_class(error_class: str) -> FailureClassification:
     return FailureClassification(Disposition.PROGRAM_ERROR, failure_reason=f"unknown_error_class:{error_class}")
 
 
-def _from_step(reported: StepFailure) -> FailureClassification:
+def _from_step(reported: StepFailure) -> FailureClassification | None:
+    """The verdict the failed step decides by itself; ``None`` leaves it to the logs."""
+    if reported.step is FailedStep.FRAMEWORK_VERSION_UNKNOWN:
+        return _unimportable_framework(reported.detail.strip())
+    if reported.step not in _FAILED_STEP_VERDICTS:
+        return None
     failure_class, reason = _FAILED_STEP_VERDICTS[reported.step]
     if reported.step in _DETAILED_STEPS and reported.detail.strip():
         reason = f"{reason}: {log_causes.one_line(reported.detail)}"
     return FailureClassification(Disposition.FAILED, failure_class, reason)
+
+
+def _unimportable_framework(detail: str) -> FailureClassification | None:
+    """The candidate's ``import_error`` when the framework probe found no framework or its import raised, else ``None``."""
+    line = log_causes.one_line(detail) if _FRAMEWORK_NOT_FOUND.search(detail) else log_causes.import_error(detail)
+    return _candidate(f"{IMPORT_ERROR}: {line}") if line else None
 
 
 def _named_by_logs(text: str, parts: list[str]) -> FailureClassification | None:
