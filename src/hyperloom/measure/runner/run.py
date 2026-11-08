@@ -34,6 +34,7 @@ from hyperloom.measure.failures import (
     FOREIGN_PROCESS_ON_CARD,
     Disposition,
     FailureClassification,
+    FailureEvidence,
     classify_test_failure,
     is_disk_full,
 )
@@ -423,7 +424,7 @@ def _verdict_of(outcome) -> FailureClassification:
     if outcome.failure_class is not None and outcome.failure_reason:
         failure_class = FailureClass(getattr(outcome.failure_class, "value", outcome.failure_class))
         return FailureClassification(Disposition.FAILED, failure_class, outcome.failure_reason)
-    return classify_test_failure(returncode=outcome.returncode, logs=[outcome.stderr])
+    return classify_test_failure(returncode=outcome.returncode, evidence=FailureEvidence(logs=(outcome.stderr,)))
 
 
 def _outcome_document(outcome, timed_out: bool) -> dict:

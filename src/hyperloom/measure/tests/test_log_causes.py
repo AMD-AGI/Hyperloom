@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.measure import log_causes
-from hyperloom.measure.failures import FailureClass, classify_test_failure
+from hyperloom.measure.failures import FailureClass, FailureEvidence, classify_test_failure
 from hyperloom.measure.tests import eval_refusal_logs
 
 ARGPARSE_LOG = (
@@ -111,7 +111,7 @@ PLAIN_LOG = "INFO server booted\nINFO request finished in 3.1s\nsegfault somewhe
 
 
 def _classify(*logs: str, returncode: int = 1):
-    verdict = classify_test_failure(returncode=returncode, logs=list(logs))
+    verdict = classify_test_failure(returncode=returncode, evidence=FailureEvidence(logs=logs))
     return verdict.failure_class, verdict.failure_reason
 
 

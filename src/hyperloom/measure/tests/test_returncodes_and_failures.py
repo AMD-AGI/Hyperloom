@@ -17,6 +17,7 @@ from hyperloom.measure.failures import (
     Disposition,
     FailureClass,
     FailureClassification,
+    FailureEvidence,
     classify_test_failure,
     decides_test,
 )
@@ -28,10 +29,6 @@ IMPORT_ERROR_LOG = (
 
 #: The kind of the signature table, then the line of the log that states it.
 IMPORT_ERROR_REASON = f"{failure_signature.IMPORT_ERROR}: ModuleNotFoundError: No module named 'sglang_patch'"
-
-
-def _classify(**kwargs):
-    return classify_test_failure(**kwargs)
 
 
 def test_the_hosted_return_codes_are_distinct_negative_and_clear_of_the_local_sentinels() -> None:
@@ -55,12 +52,18 @@ def test_the_literal_sentinels_in_failures_equal_their_definitions() -> None:
 
 def test_a_server_that_was_not_ready_in_time_is_the_candidates_failure_unless_its_log_names_another_cause() -> None:
     boot = returncodes.SERVER_BOOT_TIMEOUT_RC
-    slow = _classify(
-        returncode=boot, logs=["[aiter] TunableOp: tuning gemm 17/4096\n"], detail="not ready within 1800s"
+    slow = classify_test_failure(
+        returncode=boot,
+        evidence=FailureEvidence(logs=("[aiter] TunableOp: tuning gemm 17/4096\n",), detail="not ready within 1800s"),
     )
-    bare = _classify(returncode=boot)
-    crashed = _classify(returncode=boot, logs=[IMPORT_ERROR_LOG], detail="not ready within 1800s")
-    bound = _classify(returncode=boot, logs=["[Errno 98] address already in use"], detail="not ready within 1800s")
+    bare = classify_test_failure(returncode=boot)
+    crashed = classify_test_failure(
+        returncode=boot, evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG,), detail="not ready within 1800s")
+    )
+    bound = classify_test_failure(
+        returncode=boot,
+        evidence=FailureEvidence(logs=("[Errno 98] address already in use",), detail="not ready within 1800s"),
+    )
 
     assert (slow.failure_class, slow.failure_reason) == (
         FailureClass.CANDIDATE,
@@ -90,7 +93,7 @@ NO_SPACE_IN_RUNNER_STDERR = "shutil.Error: [Errno 28] No space left on device: '
     ids=["edquot_server", "enospc_runner", "edquot_words", "enospc_words"],
 )
 def test_a_full_disk_in_the_runners_or_the_servers_output_is_an_infrastructure_failure(logs, line) -> None:
-    verdict = _classify(returncode=1, logs=logs)
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=tuple(logs)))
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, f"{failures.DISK_FULL}: {line}")
 
 
@@ -103,7 +106,7 @@ GIT_FETCH_STALL = (
 
 
 def test_a_git_fetch_of_the_benchmarks_own_dependencies_that_timed_out_is_an_infrastructure_failure() -> None:
-    verdict = _classify(returncode=1, logs=[GIT_FETCH_STALL])
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(GIT_FETCH_STALL,)))
 
     assert verdict.failure_class is FailureClass.INFRA
     assert verdict.failure_reason.startswith(f"{failures.GIT_FETCH_TIMEOUT}: subprocess.TimeoutExpired: Command ['git'")
@@ -124,8 +127,11 @@ HUB_REFUSED_CLIENT_LOG = (
 
 
 def test_a_download_the_hub_refused_for_its_rate_limit_is_an_infrastructure_failure() -> None:
-    verdict = _classify(
-        returncode=1, logs=["AgentX benchmark client failed with exit code 1"], client_logs=[HUB_REFUSED_CLIENT_LOG]
+    verdict = classify_test_failure(
+        returncode=1,
+        evidence=FailureEvidence(
+            logs=("AgentX benchmark client failed with exit code 1",), client_logs=(HUB_REFUSED_CLIENT_LOG,)
+        ),
     )
 
     assert (verdict.failure_class, verdict.failure_reason) == (
@@ -138,26 +144,36 @@ def test_a_client_log_is_not_read_for_a_candidates_signature_nor_a_retried_429()
     retried = "HTTP Error 429 thrown while requesting HEAD https://huggingface.co/datasets/x/resolve/main/README.md\n"
     tokenizer = "Failed to load tokenizer example-org/example-model\n"
 
-    verdict = _classify(
-        returncode=1, logs=["AgentX benchmark client failed with exit code 1"], client_logs=[retried + tokenizer]
+    verdict = classify_test_failure(
+        returncode=1,
+        evidence=FailureEvidence(
+            logs=("AgentX benchmark client failed with exit code 1",), client_logs=(retried + tokenizer,)
+        ),
     )
 
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, failures.NO_KNOWN_SIGNATURE_REASON)
-    assert _classify(returncode=1, logs=[tokenizer]).failure_class is FailureClass.CANDIDATE, (
-        "the same line, from the server"
-    )
+    assert (
+        classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(tokenizer,))).failure_class
+        is FailureClass.CANDIDATE
+    ), "the same line, from the server"
 
 
 def test_a_timeout_of_any_other_command_stays_unclear() -> None:
     other = "subprocess.TimeoutExpired: Command ['python3', 'bench.py'] timed out after 300 seconds\n"
 
-    assert _classify(returncode=1, logs=[other]).failure_class is FailureClass.UNCLEAR
+    assert (
+        classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(other,))).failure_class
+        is FailureClass.UNCLEAR
+    )
 
 
 def test_a_full_disk_beats_the_candidate_signature_and_the_boot_timeout_it_caused() -> None:
-    with_import = _classify(returncode=1, logs=[IMPORT_ERROR_LOG + QUOTA_IN_SERVER_LOG])
-    slow = _classify(
-        returncode=returncodes.SERVER_BOOT_TIMEOUT_RC, logs=[QUOTA_IN_SERVER_LOG], detail="not ready within 1800s"
+    with_import = classify_test_failure(
+        returncode=1, evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG + QUOTA_IN_SERVER_LOG,))
+    )
+    slow = classify_test_failure(
+        returncode=returncodes.SERVER_BOOT_TIMEOUT_RC,
+        evidence=FailureEvidence(logs=(QUOTA_IN_SERVER_LOG,), detail="not ready within 1800s"),
     )
 
     assert with_import.failure_class is FailureClass.INFRA and with_import.failure_reason.startswith("disk_full: ")
@@ -165,8 +181,12 @@ def test_a_full_disk_beats_the_candidate_signature_and_the_boot_timeout_it_cause
 
 
 def test_a_full_disk_does_not_turn_a_class_the_runner_reported_or_another_errno_into_infra() -> None:
-    rejected = _classify(returncode=0, error_class="spec_rejected", logs=[QUOTA_IN_SERVER_LOG])
-    other = _classify(returncode=1, logs=["OSError: [Errno 13] Permission denied: '/x'\n"])
+    rejected = classify_test_failure(
+        returncode=0, error_class="spec_rejected", evidence=FailureEvidence(logs=(QUOTA_IN_SERVER_LOG,))
+    )
+    other = classify_test_failure(
+        returncode=1, evidence=FailureEvidence(logs=("OSError: [Errno 13] Permission denied: '/x'\n",))
+    )
 
     assert rejected.disposition is Disposition.PROGRAM_ERROR
     assert (other.failure_class, other.failure_reason) == (
@@ -176,7 +196,7 @@ def test_a_full_disk_does_not_turn_a_class_the_runner_reported_or_another_errno_
 
 
 def test_a_runner_that_reports_a_full_disk_is_an_infrastructure_failure() -> None:
-    verdict = _classify(returncode=0, error_class=failures.DISK_FULL)
+    verdict = classify_test_failure(returncode=0, error_class=failures.DISK_FULL)
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, "disk_full")
     assert failures.is_disk_full(OSError(errno.EDQUOT, "Disk quota exceeded"))
     assert failures.is_disk_full(OSError(errno.ENOSPC, "No space left on device"))
@@ -185,22 +205,22 @@ def test_a_runner_that_reports_a_full_disk_is_an_infrastructure_failure() -> Non
 
 
 def test_a_clean_exit_is_a_success() -> None:
-    verdict = _classify(returncode=0)
+    verdict = classify_test_failure(returncode=0)
     assert verdict.disposition is Disposition.SUCCEEDED and verdict.failure_class is None
 
 
 def test_a_known_failure_signature_is_a_candidate_failure_named_by_the_signature() -> None:
-    verdict = _classify(returncode=1, logs=["", IMPORT_ERROR_LOG])
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=("", IMPORT_ERROR_LOG)))
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, IMPORT_ERROR_REASON)
 
 
 def test_a_non_zero_exit_without_a_known_signature_is_unclear() -> None:
-    verdict = _classify(returncode=1, logs=["segfault somewhere\n"])
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=("segfault somewhere\n",)))
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, "no_known_signature")
 
 
 def test_a_timeout_is_unclear_even_when_the_log_carries_a_signature() -> None:
-    verdict = _classify(returncode=-9, timed_out=True, logs=[IMPORT_ERROR_LOG])
+    verdict = classify_test_failure(returncode=-9, timed_out=True, evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG,)))
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, "timeout")
 
 
@@ -209,19 +229,25 @@ def test_a_timeout_is_unclear_even_when_the_log_carries_a_signature() -> None:
     ["node_fault", "preflight_mismatch", "runner_start_failed", "runner_lost", "archive_failed", "no_spec"],
 )
 def test_runner_and_platform_error_classes_are_infrastructure_whatever_the_log_says(error_class: str) -> None:
-    verdict = _classify(returncode=1, error_class=error_class, logs=[IMPORT_ERROR_LOG])
+    verdict = classify_test_failure(
+        returncode=1, error_class=error_class, evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG,))
+    )
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, error_class)
 
 
 @pytest.mark.parametrize("error_class", ["spec_rejected", "result_rejected"])
 def test_a_rejected_spec_or_result_is_a_program_error_with_no_failure_class(error_class: str) -> None:
-    verdict = _classify(returncode=1, error_class=error_class, logs=[IMPORT_ERROR_LOG])
+    verdict = classify_test_failure(
+        returncode=1, error_class=error_class, evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG,))
+    )
     assert verdict.disposition is Disposition.PROGRAM_ERROR
     assert verdict.failure_class is None and verdict.failure_reason == error_class
 
 
 def test_an_error_class_nobody_handles_is_a_program_error_not_a_candidate_failure() -> None:
-    verdict = _classify(returncode=1, error_class="brand_new_thing", logs=[IMPORT_ERROR_LOG])
+    verdict = classify_test_failure(
+        returncode=1, error_class="brand_new_thing", evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG,))
+    )
     assert verdict.disposition is Disposition.PROGRAM_ERROR
     assert verdict.failure_reason == "unknown_error_class:brand_new_thing"
 
@@ -238,28 +264,35 @@ def test_an_error_class_nobody_handles_is_a_program_error_not_a_candidate_failur
     ],
 )
 def test_the_sentinel_return_codes_classify_by_what_they_mean(returncode, disposition, failure_class, reason) -> None:
-    verdict = _classify(returncode=returncode, logs=[IMPORT_ERROR_LOG])
+    verdict = classify_test_failure(returncode=returncode, evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG,)))
     assert (verdict.disposition, verdict.failure_class, verdict.failure_reason) == (disposition, failure_class, reason)
 
 
 def test_the_same_log_gets_the_same_class_however_much_older_log_comes_before_it() -> None:
-    short = _classify(returncode=1, logs=[IMPORT_ERROR_LOG])
-    long = _classify(returncode=1, logs=["noise line\n" * (LOG_TAIL_CHARS // 4) + IMPORT_ERROR_LOG])
+    short = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG,)))
+    long = classify_test_failure(
+        returncode=1, evidence=FailureEvidence(logs=("noise line\n" * (LOG_TAIL_CHARS // 4) + IMPORT_ERROR_LOG,))
+    )
     assert short == long and short.failure_class is FailureClass.CANDIDATE
 
 
 def test_a_signature_older_than_the_tail_is_not_read() -> None:
     padding = ("y" * 100 + "\n") * (LOG_TAIL_CHARS // 100)
-    verdict = _classify(returncode=1, logs=[IMPORT_ERROR_LOG + padding])
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG + padding,)))
     assert verdict.failure_class is FailureClass.UNCLEAR
 
 
 def test_one_enormous_line_cannot_stall_the_classifier() -> None:
     started = time.monotonic()
-    verdict = _classify(returncode=1, logs=["x" * 1_000_000 + "\n" + IMPORT_ERROR_LOG])
+    verdict = classify_test_failure(
+        returncode=1, evidence=FailureEvidence(logs=("x" * 1_000_000 + "\n" + IMPORT_ERROR_LOG,))
+    )
     assert time.monotonic() - started < 5
     assert verdict.failure_class is FailureClass.CANDIDATE
-    assert _classify(returncode=1, logs=["x" * 1_000_000]).failure_class is FailureClass.UNCLEAR
+    assert (
+        classify_test_failure(returncode=1, evidence=FailureEvidence(logs=("x" * 1_000_000,))).failure_class
+        is FailureClass.UNCLEAR
+    )
 
 
 def test_a_classification_cannot_be_built_incoherent() -> None:
@@ -280,19 +313,30 @@ BIND_LOG = (
 
 
 def test_a_port_taken_between_choosing_and_binding_is_an_infrastructure_failure() -> None:
-    verdict = _classify(returncode=1, logs=[BIND_LOG])
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(BIND_LOG,)))
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, "port_in_use")
 
 
 def test_either_phrase_of_the_bind_failure_is_enough_and_it_beats_a_candidate_signature() -> None:
-    assert _classify(returncode=1, logs=["OSError: Address Already In Use"]).failure_class is FailureClass.INFRA
-    assert _classify(returncode=1, logs=["OSError: [Errno 98]"]).failure_class is FailureClass.INFRA
-    both = _classify(returncode=1, logs=[IMPORT_ERROR_LOG + BIND_LOG])
+    assert (
+        classify_test_failure(
+            returncode=1, evidence=FailureEvidence(logs=("OSError: Address Already In Use",))
+        ).failure_class
+        is FailureClass.INFRA
+    )
+    assert (
+        classify_test_failure(returncode=1, evidence=FailureEvidence(logs=("OSError: [Errno 98]",))).failure_class
+        is FailureClass.INFRA
+    )
+    both = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG + BIND_LOG,)))
     assert both.failure_class is FailureClass.INFRA
 
 
 def test_a_successful_exit_is_not_changed_by_a_bind_message_in_its_log() -> None:
-    assert _classify(returncode=0, logs=[BIND_LOG]).disposition is Disposition.SUCCEEDED
+    assert (
+        classify_test_failure(returncode=0, evidence=FailureEvidence(logs=(BIND_LOG,))).disposition
+        is Disposition.SUCCEEDED
+    )
 
 
 TRACEBACK_LOG = 'Traceback (most recent call last):\n  File "x.py", line 1\nRuntimeError: boom\n'
@@ -313,23 +357,31 @@ TRACEBACK_LOG = 'Traceback (most recent call last):\n  File "x.py", line 1\nRunt
 def test_the_step_a_round_failed_at_names_a_cause_its_log_does_not(step, failure_class, reason) -> None:
     """``port_in_use`` is the suite's own refusal, which leaves no bind error in the log; a traceback is no cause."""
     for logs in ([], [TRACEBACK_LOG]):
-        verdict = _classify(returncode=1, logs=logs, failed_step=step)
+        verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=tuple(logs), failed_step=step))
         assert (verdict.failure_class, verdict.failure_reason) == (failure_class, reason)
 
 
 def test_a_stalled_server_is_unclear_and_does_not_settle_the_test_whatever_its_log_says() -> None:
-    verdict = _classify(returncode=1, logs=[TRACEBACK_LOG, IMPORT_ERROR_LOG], failed_step=FailedStep.SERVER_STALLED)
+    verdict = classify_test_failure(
+        returncode=1,
+        evidence=FailureEvidence(logs=(TRACEBACK_LOG, IMPORT_ERROR_LOG), failed_step=FailedStep.SERVER_STALLED),
+    )
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, "server_stalled")
     assert not decides_test(verdict)
 
 
 def test_a_boot_timeout_step_yields_to_a_cause_its_log_names_as_its_return_code_does() -> None:
-    verdict = _classify(returncode=1, logs=[IMPORT_ERROR_LOG], failed_step=FailedStep.SERVER_BOOT_TIMEOUT)
+    verdict = classify_test_failure(
+        returncode=1, evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG,), failed_step=FailedStep.SERVER_BOOT_TIMEOUT)
+    )
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, IMPORT_ERROR_REASON)
 
 
 def test_a_hub_refusal_still_beats_the_step() -> None:
-    verdict = _classify(returncode=1, client_logs=[HUB_REFUSED_CLIENT_LOG], failed_step=FailedStep.SERVER_STALLED)
+    verdict = classify_test_failure(
+        returncode=1,
+        evidence=FailureEvidence(client_logs=(HUB_REFUSED_CLIENT_LOG,), failed_step=FailedStep.SERVER_STALLED),
+    )
     assert verdict.failure_reason == f"{failures.HUB_RATE_LIMITED}: {HUB_REFUSAL}"
 
 
@@ -338,7 +390,9 @@ def test_a_hub_refusal_still_beats_the_step() -> None:
 )
 @pytest.mark.parametrize("logs", [[], [TRACEBACK_LOG], [IMPORT_ERROR_LOG]])
 def test_a_step_about_the_candidate_leaves_the_verdict_to_the_log(step, logs) -> None:
-    assert _classify(returncode=1, logs=logs, failed_step=step) == _classify(returncode=1, logs=logs)
+    assert classify_test_failure(
+        returncode=1, evidence=FailureEvidence(logs=tuple(logs), failed_step=step)
+    ) == classify_test_failure(returncode=1, evidence=FailureEvidence(logs=tuple(logs)))
 
 
 @pytest.mark.parametrize(
