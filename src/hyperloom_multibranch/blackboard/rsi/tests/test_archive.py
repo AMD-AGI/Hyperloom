@@ -397,6 +397,7 @@ def test_a_write_only_session_reads_no_archive_and_still_archives_into_it(
 def test_an_archived_tree_is_readable_by_every_account_of_the_deployment_s_group_and_its_folder_is_the_group_s(
     snapshot: BlackboardSnapshot, tmp_path: Path
 ) -> None:
+    tmp_path.chmod(0o2775)  # the deployment's archive storage, set up to be shared
     archive = TreeArchive(tmp_path / "archive")
 
     archive.put(tree_from_snapshot(snapshot, METRIC))

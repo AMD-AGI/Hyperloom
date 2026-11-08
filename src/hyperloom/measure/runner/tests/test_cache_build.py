@@ -578,6 +578,7 @@ def test_the_entry_is_built_out_of_the_cache_and_appears_whole_in_one_step(
     download, copy, copy_file = cache_build._download_wheels, cache_build._copy_tree, cache_build._copy_file
     seen: list[tuple[bool, set[str], bool]] = []
     copied: list[tuple[set[str], bool]] = []
+    private: list[int] = []
     filling: set[int] = set()
 
     def watching_download(lock: Path, wheels: Path, pins: list[LockPin], options: BuildOptions) -> dict[str, str]:
@@ -585,11 +586,12 @@ def test_the_entry_is_built_out_of_the_cache_and_appears_whole_in_one_step(
         assert not (wheels.parent / MANIFEST_NAME).exists()
         return download(lock, wheels, pins, options)
 
-    def watching_copy(source: Path, directory: int, last: str = "") -> None:
-        copy(source, directory, last)
+    def watching_copy(source: Path, directory: int, last: str = "", **flags: bool) -> None:
+        copy(source, directory, last, **flags)
         if last:
             (pending,) = cache.glob(f".{rig.cache.sha}.tmp-*")
             copied.append(({path.name for path in pending.iterdir()}, final.exists()))
+            private.append(stat.S_IMODE(pending.stat().st_mode) & 0o777)
 
     def watching_copy_file(source: Path, directory: int, name: str, mode: int) -> None:
         filling.add(stat.S_IMODE(os.fstat(directory).st_mode) & 0o077)
@@ -606,6 +608,7 @@ def test_the_entry_is_built_out_of_the_cache_and_appears_whole_in_one_step(
     ((names, final_existed),) = copied
     assert filling == {0}
     assert {MANIFEST_NAME, SOURCE_ARCHIVE} <= names and not final_existed
+    assert private == [0o700], "whole, the copy is still the builder's alone until the rename"
     assert (final / MANIFEST_NAME).is_file()
     assert _names(cache) == {rig.cache.sha, f".{rig.cache.sha}.flock"}
 

@@ -26,9 +26,10 @@ The agent runs commands, not containers: a ``docker`` on its ``PATH`` (:data:`DO
 ``docker cp`` in place, for an agent written to drive a container, and refuses everything else.
 
 The agent's sandbox, this host and the next leg may be different accounts of one group, so what is made here for the
-agent is the group's: directories ``2775``, files ``664`` and replaced by rename, the shim among them, and git makes the
-checkout under umask ``002``. The checkout is then the agent's to write, its ``.git`` included, so no git of this host
-obeys its config: no hook, fsmonitor, pager, external diff or filter driver of it runs
+agent is the group's below shared storage: directories ``2775``, files ``664`` and replaced by rename, the shim among
+them, and git makes the checkout under umask ``002``; elsewhere the umask decides
+(:func:`~hyperloom_common.shared_storage.child_umask`). The checkout is then the agent's to write, its ``.git``
+included, so no git of this host obeys its config: no hook, fsmonitor, pager, external diff or filter driver of it runs
 (:mod:`~hyperloom_multibranch.repo.isolated_git`).
 """
 
@@ -48,7 +49,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Protocol
 
-from hyperloom_common.shared_storage import SHARED_CHILD_UMASK, make_shared_dirs, write_shared_text
+from hyperloom_common.shared_storage import child_umask, make_shared_dirs, write_shared_text
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_common.git_safety import NO_PROGRAMS
 from hyperloom_multibranch.repo.isolated_git import NO_LAZY_FETCH, blank_driver_programs, leading_options, trusting
@@ -446,9 +447,9 @@ async def _checkout_git(argv: list[str], checkout: Path) -> CommandResult:
 
 
 async def _git(argv: list[str], cwd: Path) -> CommandResult:
-    """``argv`` (``git <args>``) in ``cwd``, under umask ``002``; no program the config of the repository there names
-    runs, its filter drivers included (:mod:`~hyperloom_multibranch.repo.isolated_git`), as the agent writes that
-    config."""
+    """``argv`` (``git <args>``) in ``cwd``, under umask ``002`` below shared storage; no program the config of the
+    repository there names runs, its filter drivers included (:mod:`~hyperloom_multibranch.repo.isolated_git`), as the
+    agent writes that config."""
 
     make_shared_dirs(cwd)
     env = {**os.environ, **NO_LAZY_FETCH}
@@ -465,7 +466,7 @@ async def _git(argv: list[str], cwd: Path) -> CommandResult:
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        umask=SHARED_CHILD_UMASK,
+        umask=child_umask(cwd),
     )
     output, _ = await process.communicate()
     return CommandResult(process.returncode or 0, output.decode(errors="replace"))

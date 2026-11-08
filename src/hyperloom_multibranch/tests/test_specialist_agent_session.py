@@ -1473,6 +1473,7 @@ async def test_a_run_that_ends_keeps_a_long_dev_lease_whose_process_runs_and_its
 
 
 async def test_the_workspace_a_session_makes_is_the_group_s_for_the_dev_sandboxes_and_the_next_leg(rig):
+    rig.workspace.parent.chmod(0o2775)  # the session directory, set up to be shared
     session = rig.session()
     running = asyncio.create_task(session.run())
 

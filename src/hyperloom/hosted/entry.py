@@ -39,6 +39,7 @@ application. A ``multibranch`` flow is handed to its command before this check.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import shutil
@@ -53,7 +54,12 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
-from hyperloom_common.shared_storage import make_shared_dirs, setgid_warnings, writable_problems
+from hyperloom_common.shared_storage import (
+    make_shared_dirs,
+    open_shared_replacement,
+    setgid_warnings,
+    writable_problems,
+)
 from hyperloom.common import confinement
 from hyperloom.common.agent_isolation import IsolationRefused, require_agent_isolation
 from hyperloom.common.owner_scope import local_owner_scope
@@ -95,7 +101,8 @@ RETURNCODE_REFUSED = 2
 ENCODING = "utf-8"
 #: Where install.sh and the run keep their runtime state; a hosted leg defaults it to the container's own disk.
 ENV_RUNTIME_DIR = "HYPERLOOM_RUNTIME_DIR"
-_DURABLE = WriteOptions(fsync=True)
+#: ``exit.json`` and ``session.json``: replaced by rename on every leg, readable by the group (the next leg's account).
+_DURABLE = WriteOptions(fsync=True, shared=True)
 _USAGE = "usage: hyperloom hosted run"
 
 
@@ -155,8 +162,10 @@ def _run() -> int:
     session_dir = _prepare_session_dir(spec, info)
     try:
         archive = ensure_archive_root(session_dir)
-    except PermissionError as exc:
-        raise Refused(str(exc)) from None
+    except OSError as exc:
+        if not isinstance(exc, PermissionError) and exc.errno != errno.ELOOP:
+            raise
+        raise Refused(str(exc)) from None  # a link another account put on the way stays until someone removes it
     os.environ[ENV_PACKAGE_DEST_ROOT] = str(archive)  # the package outlives the container
     os.environ[ENV_IMAGE] = spec.framework_image
     _announce_grant(info)
@@ -280,12 +289,15 @@ def _run_installer(state_dir: Path) -> None:
 
     The script comes from the installed wheel, so it is of the commit that runs.  It is idempotent and runs on every leg.
     Its output goes to a file, never a pipe: the Ray daemon it starts would hold a pipe open.  The log is only the
-    script's own output; the entry adds nothing from the environment.
+    script's own output; the entry adds nothing from the environment.  Each leg's log is a new file of its own, renamed
+    over ``install.log`` before the script starts (:func:`~hyperloom_common.shared_storage.open_shared_replacement`):
+    the previous leg's, which may be another account's, and whatever a member of the group put there are replaced,
+    never opened.
     """
     log_path = state_dir / INSTALL_LOG
     print(f"[hosted] running {INSTALL_SCRIPT.name}; log {log_path}", flush=True)
     try:
-        with log_path.open("wb") as log:
+        with os.fdopen(open_shared_replacement(log_path), "wb") as log:
             returncode = subprocess.run(
                 ["bash", str(INSTALL_SCRIPT)],
                 stdin=subprocess.DEVNULL,
