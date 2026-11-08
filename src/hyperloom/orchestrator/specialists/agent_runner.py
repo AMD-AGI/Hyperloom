@@ -491,7 +491,7 @@ class LocalAgentRunner:
         liveness: Liveness = Liveness(),
         host: RunnerHost = RunnerHost(),
     ) -> None:
-        self._log = ResourceLog(session_dir / RESOURCES_RELATIVE_PATH)
+        self._log = ResourceLog(session_dir, RESOURCES_RELATIVE_PATH.parts)
         self._poll_interval = float(poll_interval_seconds)
         self._lost_after = float(liveness.lost_after_seconds)
         self._monotonic = host.monotonic

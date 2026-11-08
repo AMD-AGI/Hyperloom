@@ -46,16 +46,6 @@ def test_siblings_are_ordered_by_pid_whatever_the_listing_order(
     assert [pid for pid, _ in proctree.descendants(10)] == [12, 11, 13, 15, 14]
 
 
-@pytest.mark.parametrize("listing", ["ascending", "descending"])
-def test_siblings_are_ordered_by_pid_whatever_the_listing_order(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listing: str
-) -> None:
-    parents = {10: 1, 11: 10, 12: 11, 13: 10, 14: 10, 15: 14}
-    _procfs(tmp_path, monkeypatch, parents, listing=listing)
-
-    assert [pid for pid, _ in proctree.descendants(10)] == [12, 11, 13, 15, 14]
-
-
 def test_a_parent_cycle_ends_the_walk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A sandbox's PID view can list a process as its own parent, or two as each other's.
     _procfs(tmp_path, monkeypatch, {10: 1, 11: 10, 12: 13, 13: 12, 1: 1, 14: 11})

@@ -49,6 +49,7 @@ from hyperloom_multibranch.toolbox.tests.test_toolbox_kinds_gpu import CARDS, MO
 #: The artifact test's skips, and its autouse fixture that sets the process environment, apply to the tests here too.
 pytestmark = test_kernel_artifact_gpu.pytestmark
 workload_environment = test_kernel_artifact_gpu.workload_environment
+USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 
 MODEL_TABLE = Path(DEFAULT_CONFIGS) / "model_configs" / "qwen3_8b_bf16_tuned_gemm.csv"
 #: What a row of a bf16 table is told apart by; the test's own reading of the image's tables, not the toolbox's.

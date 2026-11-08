@@ -45,6 +45,7 @@ from hyperloom.measure.failures import (
     SANDBOX_ACQUIRE_TIMEOUT,
     Disposition,
     FailureClassification,
+    FailureEvidence,
     classify_test_failure,
 )
 from hyperloom.measure.hosted_live import LiveOutputs, finite_number
@@ -138,8 +139,6 @@ _VERIFIED, _ARCHIVED, _MATERIALIZED, _JIT_PUBLISHED, _ROUNDS_READ = (
 )
 _LANDING_SEC = "landing_sec"
 _LOG_SUFFIX = ".log"
-
-EventEmitter = Callable[[str, Mapping[str, Any]], None]
 
 
 class HostedStartError(RuntimeError):
@@ -1068,7 +1067,9 @@ def _failure_of(out: Any) -> FailureClassification:
         return FailureClassification(Disposition.FAILED, FailureClass(out.failure_class), out.failure_reason)
     if out.timed_out:
         return classify_test_failure(returncode=out.returncode, timed_out=True)
-    return classify_test_failure(returncode=out.returncode, logs=[out.stderr_tail, out.stdout_tail])
+    return classify_test_failure(
+        returncode=out.returncode, evidence=FailureEvidence(logs=(out.stderr_tail, out.stdout_tail))
+    )
 
 
 def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ...]:

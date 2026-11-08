@@ -37,7 +37,7 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
 | **The benchmark's rules** | Writes its rules into the config's `directives`, each starting `Host rule (MB)`: the workload it holds fixed and the variables it owns, how it keeps a change, its accuracy rule. | Every agent reads them. The dossier copies them into part 4's `## The benchmark's rules` table. |
 | **The optimization loop** | None. | Agent turns, its own server, the bench, GSM8K and the short-prompt check, and its own KEEP or REVERT. |
 | **A KEEP** | Imports the snapshot, tests it on its own measurement pool, judges it, lands it on the branch and merges it into integration. | Writes an atomic snapshot to `keeps/NNNN/`. |
-| **Numbers of record** | MB's toolbox: InferenceX or AgentX, through Magpie. | Its own measurements decide only its own KEEPs. |
+| **Numbers of record** | MB's toolbox: InferenceX or AgentX, through InferenceSuite. | Its own measurements decide only its own KEEPs. |
 | **Feedback** | Rewrites `component.notes` whenever integration moves. Reads the ledger's FACT and DEAD_END records as learnings. | Reads the notes at every iteration. Writes the ledger. |
 | **Liveness** | Polls every 5 s. A stall is 30 min with no output, transcript or file write. Stops with SIGTERM, then SIGKILL after 30 s. | Writes a heartbeat every 5 min, exits within 25 s of SIGTERM, and records why it ended. |
 | **LLM** | Passes its environment on: all of it locally; in a hosted sandbox, only the gateway, proxy and CA variables. | Its agents use that environment. |
@@ -172,7 +172,9 @@ before the Arbor branches open </how-to/multibranch-review-gate>`.
 - **No merge across operating points:** each point's session ends with its own recipe. Nothing combines them.
 - **A dropped flag of the resolved launch:** a KEEP that runs without a flag the `--agent-launch` file sets now
   removes it, and the recipe keeps the removal (`LaunchConfig.remove_args`, `b9d65167d` and
-  after). Only on AgentX, though: there Magpie applies it; on InferenceX such a removal is refused.
+  after). Only on AgentX, though: there the round removes it from the launch it resolves; on InferenceX such a removal is refused.
+- **A base launch record checks the whole launch:** an Arbor served a record with `--agent-launch` refuses to start
+  when the root recipe adds anything to the record's launch, since its check compares the whole launch with the record.
 - **One Arbor without the review:** with `--no-review-gate` and no `--agent-directions`, a lone Arbor gets no
   dossier pass and makes its own dossier inside its branch.
 - **Each Arbor measures the root itself:** one server boot and the full GSM8K per Arbor session. For a large model,

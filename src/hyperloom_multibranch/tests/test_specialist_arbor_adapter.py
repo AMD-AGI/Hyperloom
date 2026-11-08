@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -74,6 +75,8 @@ from hyperloom_multibranch.tests.agent_rig import (
     _spec,
     _write,
 )
+from hyperloom_multibranch.tests.base_records import base_record, write_record
+from inference_suite.contracts import Workload as LaunchWorkload
 
 
 def _filled(command: str, port: int, out: str) -> str:
@@ -558,11 +561,89 @@ def test_a_launch_file_the_adapter_cannot_use_is_refused_with_why(tmp_path: Path
     assert said.split("; ")[0] in str(refused.value) and said.split("; ")[-1] in str(refused.value)
 
 
-def test_the_repository_s_launch_template_is_a_launch_file_the_adapter_reads() -> None:
-    launch = read_launch(TEMPLATE)
+def test_the_repository_s_launch_template_has_a_launch_file_s_keys_and_is_refused_until_filled(tmp_path: Path) -> None:
+    template = json.loads(TEMPLATE.read_text(encoding="utf-8"))
+    filled = {**RESOLVED, "client": "", "server_flags": f"{RESOLVED['server_flags']} --reasoning-start-str <think>"}
 
-    assert set(json.loads(TEMPLATE.read_text(encoding="utf-8"))) == set(LAUNCH_KEYS)
-    assert launch.server_flags and launch.server_env and launch.client == ""
+    with pytest.raises(ArborRefused) as refused:
+        read_launch(TEMPLATE)
+
+    assert set(template) == set(LAUNCH_KEYS)
+    assert "server_flags, server_env, model_name still hold the template's placeholders" in str(refused.value)
+    assert read_launch(Path(_launch_file(tmp_path, filled))).server_flags == filled["server_flags"]
+
+
+#: Where the repository vendors Arbor, whose start check a record's config must pass.
+VENDORED_ARBOR = Path(__file__).parents[2] / "hyperloom_arbor"
+
+
+def _arbor_start_check(config: Mapping[str, object]) -> list[str]:
+    """What the vendored Arbor's own start check (arbor/base_launch.py) refuses ``config`` for."""
+
+    script = (
+        "import json, sys; from arbor import base_launch; print(json.dumps(base_launch.check(json.load(sys.stdin))[1]))"
+    )
+    run = subprocess.run(
+        [sys.executable, "-c", script],
+        input=json.dumps(config),
+        cwd=VENDORED_ARBOR,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(run.stdout)
+
+
+def test_a_base_launch_record_is_served_as_the_gate_seeds_its_launch_with_its_golden_layer(tmp_path: Path) -> None:
+    record = write_record(tmp_path / "record" / "base_launch.json")
+
+    launch = read_launch(record)
+
+    assert launch.server_flags == (
+        "--tensor-parallel-size 2 --max-num-seqs 128 --chat-template 'a b'"
+        ' --speculative-config {"method":"mtp","num_speculative_tokens":3}'
+    )
+    assert launch.server_env == {"VLLM_ROCM_USE_AITER": "1", "VLLM_SIMULATE_ACC": "3"}
+    assert (launch.record, launch.digest, launch.entrypoint) == (str(record), base_record().digest(), ("vllm", "serve"))
+    assert (launch.model_name, launch.client) == ("", "")
+
+
+def test_arbor_s_own_start_check_passes_a_branch_served_a_record_on_the_base_and_refuses_another(
+    tmp_path: Path,
+) -> None:
+    # The record names no served model and no client: the gate's client gives both.
+    record = write_record(tmp_path / "record" / "base_launch.json")
+    spec = replace(_spec(tmp_path, launch=str(record)), server_args="", envs={})
+
+    config = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
+    differs = arbor_config(replace(spec, envs={"VLLM_ROCM_USE_AITER": "0"}), tmp_path / "checkout", BRANCH_RUN)
+
+    assert config["model_name"] == "Qwen/Qwen3-14B-FP8"
+    assert config["component"]["bench_command"] == bench_command(spec.client)
+    assert _arbor_start_check(config) == []
+    assert _arbor_start_check(differs) == [
+        "the launch differs from the host's base launch: the variable VLLM_ROCM_USE_AITER is 0 in Arbor's environment"
+        " and 1 in the host's"
+    ]
+
+
+def test_a_base_launch_record_that_cannot_be_used_is_refused_with_why(tmp_path: Path) -> None:
+    tampered = write_record(tmp_path / "tampered.json", args=["--max-num-seqs", "64"])
+    scriptable = base_record(
+        query=replace(base_record().query, workload=LaunchWorkload.SCRIPTABLE, concurrencies=(8,), tp=None),
+        entrypoint=("bash", "bench.sh"),
+        source=replace(base_record().source, files={"bench.sh": "c" * 64}),
+        args=(),
+        env={},
+        golden_al=None,
+        client=None,
+    )
+    script = write_record(tmp_path / "script.json", scriptable)
+
+    with pytest.raises(ArborRefused, match="base_digest_mismatch"):
+        read_launch(tampered)
+    with pytest.raises(ArborRefused, match="runs a script and launches no server"):
+        read_launch(script)
 
 
 @pytest.mark.parametrize(

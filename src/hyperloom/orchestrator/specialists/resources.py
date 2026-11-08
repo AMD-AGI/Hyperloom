@@ -24,6 +24,7 @@ from pathlib import Path
 from stat import S_ISDIR
 from typing import Any, Mapping
 
+from hyperloom_common.fs_utils import append_text_nofollow
 from hyperloom_common.proctree import descendants
 
 __all__ = [
@@ -251,17 +252,18 @@ def dir_usage_bytes(path: Path) -> int | None:
 
 @dataclass
 class ResourceLog:
-    """Append-only ``agents/resources.jsonl``; one JSON object per line."""
+    """Append-only ``base/<rel...>`` (``agents/resources.jsonl`` of a session); one JSON object per line.
 
-    path: Path
+    No component below ``base`` is followed as a link, and a file with another link is refused: a specialist that
+    writes the session tree could otherwise point the app's append at a file of the app's.
+    """
+
+    base: Path
+    rel: tuple[str, ...]
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def append(self, record: Mapping[str, Any]) -> None:
         line = json.dumps(dict(record), sort_keys=True, separators=(",", ":")) + "\n"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.base.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            try:
-                os.write(fd, line.encode("utf-8"))
-            finally:
-                os.close(fd)
+            append_text_nofollow(self.base, self.rel, line)
