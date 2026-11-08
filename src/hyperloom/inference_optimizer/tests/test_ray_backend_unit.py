@@ -1639,13 +1639,14 @@ def test_serving_actor_env_removes_secrets_and_preserves_ray_devices(
     captured: dict[str, Any] = {}
 
     class _CaptureProcess:
-        def start(self, cmd, *, env=None, cwd=None, log_path=None, stdin_path=None):
+        def start(self, cmd, *, env=None, cwd=None, log_path=None, stdin_path=None, log_identity=None):
             captured.update(
                 cmd=cmd,
                 env=dict(env or {}),
                 cwd=cwd,
                 log_path=log_path,
                 stdin_path=stdin_path,
+                log_identity=log_identity,
             )
             return 4321
 
