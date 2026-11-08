@@ -48,6 +48,7 @@ from typing import Any
 from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.measure.jit.modules import module_build_limit_sec
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
+from inference_suite.contracts import DEFAULT_PRE_READY_SILENCE_SEC
 from inference_suite.contracts.layout import READY_STAMP, SERVER_LOG
 
 __all__ = [
@@ -262,7 +263,8 @@ def _booted_in(stamp: Path) -> float:
 SERVER_READY_KEY = "server_ready"
 #: The ``error_class`` of a test that went silent before its server was ready.
 HUNG_BEFORE_READY = "hung_before_ready"
-PRE_READY_SILENCE_SEC = 900.0
+#: As long as the round's own bound, so the round reports its silence before the application calls the test hung.
+PRE_READY_SILENCE_SEC = float(DEFAULT_PRE_READY_SILENCE_SEC)
 #: The runner's phase once the measurement has ended; nothing after it is bounded here.
 _COLLECTING = "collecting"
 #: A log written within this many seconds of the last write seen is the same write, seen again through the clock jitter

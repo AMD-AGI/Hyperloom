@@ -126,7 +126,7 @@ def test_round_trip_through_json(config):
 
     assert document["schema"] == CONFIG_SCHEMA
     assert document["eval"]["max_tokens_cap"] == 4096
-    assert document["deadlines"]["pre_ready_silence_sec"] == 900
+    assert document["deadlines"]["pre_ready_silence_sec"] == DEFAULT_PRE_READY_SILENCE_SEC
     assert SuiteConfig.from_document(document) == config
     assert SuiteConfig.from_document(document).to_document() == document
 
@@ -382,3 +382,9 @@ def test_added_args_are_normalized():
 
 def test_only_reuse_and_external_rounds_find_their_server_running() -> None:
     assert {mode for mode in LifecycleMode if mode.finds_server} == {LifecycleMode.REUSE, LifecycleMode.EXTERNAL}
+
+
+def test_a_round_without_a_pre_ready_silence_bound_waits_1800_s_for_a_cold_jit_boot():
+    deadlines = Deadlines(boot_sec=60, round_sec=60, eval_sec=60, silence_sec=60)
+
+    assert deadlines.pre_ready_silence_sec == DEFAULT_PRE_READY_SILENCE_SEC == 1800
