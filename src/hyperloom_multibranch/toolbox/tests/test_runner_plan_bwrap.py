@@ -61,6 +61,12 @@ def area() -> Iterator[Path]:
     shutil.rmtree(made, ignore_errors=True)
 
 
+def _hub_from_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The plan's hub cache is the default one below ``HOME``: no variable of this process's names another."""
+    for name in ("HF_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _home_and_model(area: Path) -> tuple[Path, Path]:
     """A home with logins, a file and a directory a model may link to, and the default hub cache (in the home's
     ``.cache``, beside the hub's login); a model directory whose links lead to those, to data beside the home, and to
@@ -141,7 +147,8 @@ def test_a_model_linking_into_the_home_shows_its_test_what_the_links_name_and_no
     data = area / "data"
     monkeypatch.setenv("HOME", str(home))
     session = area / "session"
-    plan = runner_plan(session, model, {}, sys.executable, {"HOME": str(home)})
+    _hub_from_home(monkeypatch)
+    plan = runner_plan(session, model, {}, sys.executable)
     reads = {
         "config": str(model / "config.json"),
         "tokenizer": str(model / "tokenizer" / "tok.json"),
@@ -190,7 +197,8 @@ def test_a_model_linking_to_a_login_in_the_home_never_runs_its_test_confined_wit
     (model / name).symlink_to(home / login)
     monkeypatch.setenv("HOME", str(home))
     session = area / "session"
-    plan = runner_plan(session, model, {}, sys.executable, {"HOME": str(home)})
+    _hub_from_home(monkeypatch)
+    plan = runner_plan(session, model, {}, sys.executable)
     confined_, refused = _refused_twice(plan, session, monkeypatch, caplog, probe.path)
 
     why = f"{model / name} links to {home / login}, in {home / login}, a hidden entry of a home"
@@ -216,8 +224,9 @@ def test_a_hub_cache_above_the_home_masks_the_home_s_logins_and_a_model_link_to_
     model.mkdir()
     (model / "tokenizer").symlink_to(home / "tokdir")
     monkeypatch.setenv("HOME", str(home))
-    environ = {"HOME": str(home), "HF_HUB_CACHE": str(hub)}
-    plan = runner_plan(session, model, {}, sys.executable, environ)
+    _hub_from_home(monkeypatch)
+    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+    plan = runner_plan(session, model, {}, sys.executable)
     reads = {"tokenizer": str(model / "tokenizer" / "tok.json"), "ssh": str(home / ".ssh" / "id_rsa")}
     confined_, seen = _read_in_sandbox(plan, session, reads)
 
@@ -226,7 +235,7 @@ def test_a_hub_cache_above_the_home_masks_the_home_s_logins_and_a_model_link_to_
     assert seen == {"tokenizer": "ok:tokenizer", "ssh": "EACCES"}
 
     (model / "keys").symlink_to(home / ".ssh")
-    plan = runner_plan(session, model, {}, sys.executable, environ)
+    plan = runner_plan(session, model, {}, sys.executable)
     confined_, refused = _refused_twice(plan, area / "session-2", monkeypatch, caplog, probe.path)
 
     why = f"{model / 'keys'} links to {home / '.ssh'}, in {home / '.ssh'}, a hidden entry of a home"

@@ -88,8 +88,8 @@ def _given(isolation: BwrapIsolation | NoIsolation) -> Callable[..., BwrapIsolat
     """``choose_test_isolation`` that gives ``isolation`` for a provider and decides a sandbox's refusal as the real
     one does."""
 
-    def choose(*, probe: Callable[[str | None], BwrapProbe] | None = None) -> BwrapIsolation | NoIsolation:
-        return isolation if probe is None else agent_isolation.choose_test_isolation(probe=probe)
+    def choose(*, known: BwrapProbe | None = None) -> BwrapIsolation | NoIsolation:
+        return isolation if known is None else agent_isolation.choose_test_isolation(known=known)
 
     return choose
 
@@ -278,11 +278,7 @@ def test_where_bubblewrap_cannot_sandbox_a_test_tests_run_as_before_and_that_is_
     area: Path, providers: list[LocalSandboxProvider], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     missing = BwrapProbe(None, None, ("bubblewrap: not found on PATH",))
-    monkeypatch.setattr(
-        confined,
-        "choose_test_isolation",
-        lambda probe=None: agent_isolation.choose_test_isolation(probe=lambda _path: missing),
-    )
+    monkeypatch.setattr(agent_isolation, "bwrap_probe", lambda _path: missing)
     code = (
         "import os, signal; os.kill(int(os.environ['APP_PID']), 0); print('app pid seen', flush=True); signal.pause()"
     )
@@ -320,8 +316,7 @@ def test_a_probe_that_gave_no_answer_in_time_leaves_only_that_launch_unconfined(
         asked.append(answers.pop(0))
         return asked[-1]
 
-    real = agent_isolation.choose_test_isolation
-    monkeypatch.setattr(confined, "choose_test_isolation", lambda probe=None: real(probe=probe or answer))
+    monkeypatch.setattr(agent_isolation, "bwrap_probe", answer)
     with caplog.at_level(logging.WARNING):
         provider = LocalSandboxProvider(
             [_runner(gpus=0)], base_dir=area / "sandboxes", users=ProcessUsers(plan=RunnerPlan())
@@ -345,8 +340,7 @@ def test_a_probe_that_answered_no_is_not_asked_again(
         asked.append(path)
         return missing
 
-    real = agent_isolation.choose_test_isolation
-    monkeypatch.setattr(confined, "choose_test_isolation", lambda probe=None: real(probe=probe or answer))
+    monkeypatch.setattr(agent_isolation, "bwrap_probe", answer)
     provider = LocalSandboxProvider(
         [_runner(gpus=0)], base_dir=area / "sandboxes", users=ProcessUsers(plan=RunnerPlan())
     )
@@ -582,11 +576,13 @@ def test_a_runner_whose_policy_bubblewrap_must_not_launch_is_refused_and_never_r
 def test_how_a_local_test_is_launched_is_named_with_why(monkeypatch: pytest.MonkeyPatch) -> None:
     ok = BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ())
     denied = BwrapProbe("/usr/bin/bwrap", (0, 11, 1), ("bwrap: setting up uid map: Permission denied",))
-    assert local_test_isolation(probe=lambda _path: ok) == (BWRAP, ())
-    how, why = local_test_isolation(probe=lambda _path: denied)
+    monkeypatch.setattr(agent_isolation, "bwrap_probe", lambda _path: ok)
+    assert local_test_isolation() == (BWRAP, ())
+    monkeypatch.setattr(agent_isolation, "bwrap_probe", lambda _path: denied)
+    how, why = local_test_isolation()
     assert how == NONE and why == (
         f"running them as an account: {TEST_ACCOUNT}",
         "bubblewrap (/usr/bin/bwrap, 0.11.1): bwrap: setting up uid map: Permission denied",
     )
     monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process(hosted=True, layer_bwrap="/usr/bin/bwrap"))
-    assert local_test_isolation(probe=lambda _path: denied) == (REFUSED, why)
+    assert local_test_isolation() == (REFUSED, why)

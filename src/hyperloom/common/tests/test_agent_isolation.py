@@ -53,19 +53,26 @@ NOT_SET = f"running them as an account: {SPECIALIST_USER_ENV} is not set"
 
 
 class Probes:
-    """A stand-in for ``bwrap_probe``: answers ``answer`` and records the path each call asked about."""
+    """A stand-in for ``bwrap_probe``, put in its place for every test: answers ``answer`` and records the path each
+    call asked about; with no answer set, bubblewrap must not be probed at all."""
 
-    def __init__(self, answer: BwrapProbe) -> None:
-        self.answer = answer
+    def __init__(self) -> None:
+        self.answer: BwrapProbe | None = None
         self.asked: list[str | None] = []
 
     def __call__(self, path: str | None) -> BwrapProbe:
         self.asked.append(path)
+        if self.answer is None:
+            raise AssertionError(f"bubblewrap must not be probed here (asked for {path})")
         return self.answer
 
 
-def _never(path: str | None) -> BwrapProbe:
-    raise AssertionError(f"bubblewrap must not be probed here (asked for {path})")
+@pytest.fixture(autouse=True)
+def probe(monkeypatch: pytest.MonkeyPatch) -> Probes:
+    """The module's ``bwrap_probe``, replaced: no test here probes the real one."""
+    stand_in = Probes()
+    monkeypatch.setattr(agent_isolation, "bwrap_probe", stand_in)
+    return stand_in
 
 
 @pytest.fixture(autouse=True)
@@ -92,70 +99,75 @@ def account(monkeypatch: pytest.MonkeyPatch):
 # ---- a local run: bubblewrap where it works, else unconfined and said so ----
 
 
-def test_a_local_launch_without_an_account_runs_under_the_bubblewrap_on_path():
-    probes = Probes(ON_PATH)
-    assert choose_agent_isolation(probe=probes) == BwrapIsolation(ON_PATH, (NOT_SET,))
-    assert probes.asked == [None], "the bubblewrap on PATH"
+def test_a_local_launch_without_an_account_runs_under_the_bubblewrap_on_path(probe):
+    probe.answer = ON_PATH
+    assert choose_agent_isolation() == BwrapIsolation(ON_PATH, (NOT_SET,))
+    assert probe.asked == [None], "the bubblewrap on PATH"
     assert not isolation_required()
 
 
-def test_a_local_launch_where_neither_tier_works_runs_unconfined_naming_both():
-    found = choose_agent_isolation(probe=Probes(DENIED))
+def test_a_local_launch_where_neither_tier_works_runs_unconfined_naming_both(probe):
+    probe.answer = DENIED
+    found = choose_agent_isolation()
     assert found == NoIsolation(
         (NOT_SET, "bubblewrap (/usr/bin/bwrap, 0.11.1): bwrap: setting up uid map: Permission denied")
     )
     assert found.why == "; ".join(found.reasons)
 
 
-def test_a_probe_line_that_names_bubblewrap_is_kept_verbatim():
-    assert choose_agent_isolation(probe=Probes(MISSING)).reasons == (NOT_SET, "bubblewrap: not found on PATH")
+def test_a_probe_line_that_names_bubblewrap_is_kept_verbatim(probe):
+    probe.answer = MISSING
+    assert choose_agent_isolation().reasons == (NOT_SET, "bubblewrap: not found on PATH")
 
 
-def test_a_local_probe_that_gave_no_answer_runs_this_launch_unconfined_never_refused():
-    assert choose_agent_isolation(probe=Probes(NO_ANSWER)).reasons == (NOT_SET, *NO_ANSWER.problems)
+def test_a_local_probe_that_gave_no_answer_runs_this_launch_unconfined_never_refused(probe):
+    probe.answer = NO_ANSWER
+    assert choose_agent_isolation().reasons == (NOT_SET, *NO_ANSWER.problems)
 
 
 @pytest.mark.parametrize("value", ["", "   "])
-def test_a_blank_account_is_no_account(monkeypatch, value):
+def test_a_blank_account_is_no_account(monkeypatch, value, probe):
     monkeypatch.setenv(SPECIALIST_USER_ENV, value)
-    assert isinstance(choose_agent_isolation(probe=Probes(DENIED)), NoIsolation)
+    probe.answer = DENIED
+    assert isinstance(choose_agent_isolation(), NoIsolation)
     assert not isolation_required()
 
 
 # ---- a hosted run: required, and only the hosting layer's bubblewrap ----
 
 
-def test_a_hosted_run_uses_the_layers_bubblewrap_by_path_for_every_later_launch():
-    probes = Probes(IN_LAYER)
-    assert require_agent_isolation(bwrap=LAYER, probe=probes) == BwrapIsolation(IN_LAYER, (NOT_SET,))
+def test_a_hosted_run_uses_the_layers_bubblewrap_by_path_for_every_later_launch(probe):
+    probe.answer = IN_LAYER
+    assert require_agent_isolation(bwrap=LAYER) == BwrapIsolation(IN_LAYER, (NOT_SET,))
     assert isolation_required()
-    assert isinstance(choose_agent_isolation(probe=probes), BwrapIsolation)
-    assert isinstance(choose_sandbox_isolation(probe=probes), BwrapIsolation)
-    assert probes.asked == [LAYER, LAYER, LAYER], "never the one on PATH"
+    assert isinstance(choose_agent_isolation(), BwrapIsolation)
+    assert isinstance(choose_sandbox_isolation(), BwrapIsolation)
+    assert probe.asked == [LAYER, LAYER, LAYER], "never the one on PATH"
 
 
 @pytest.mark.parametrize("named", [None, ""])
 def test_a_hosted_run_that_names_no_layer_bubblewrap_refuses_without_probing_path(named):
     """An empty path, as a caller reading an unset setting passes, would send the probe to the one on PATH."""
     with pytest.raises(IsolationRefused) as refused:
-        require_agent_isolation(bwrap=named, probe=_never)
+        require_agent_isolation(bwrap=named)
     assert refused.value.reasons == (NOT_SET, NO_LAYER_BWRAP)
     for later in (choose_agent_isolation, choose_sandbox_isolation):
         with pytest.raises(IsolationRefused):
-            later(probe=_never)
-    assert bwrap_isolation(probe=_never) == NoIsolation((NO_LAYER_BWRAP,))
+            later()
+    assert bwrap_isolation() == NoIsolation((NO_LAYER_BWRAP,))
 
 
 @pytest.mark.parametrize("named", ["bwrap", "bin/bwrap"])
 def test_a_hosted_run_given_a_relative_layer_bubblewrap_refuses_without_probing(named):
     with pytest.raises(IsolationRefused) as refused:
-        require_agent_isolation(bwrap=named, probe=_never)
+        require_agent_isolation(bwrap=named)
     assert refused.value.reasons == (NOT_SET, f"bubblewrap at {named} is not an absolute path")
 
 
-def test_a_hosted_run_where_no_tier_works_refuses_at_start_up_naming_both():
+def test_a_hosted_run_where_no_tier_works_refuses_at_start_up_naming_both(probe):
+    probe.answer = LAYER_DENIED
     with pytest.raises(IsolationRefused) as refused:
-        require_agent_isolation(bwrap=LAYER, probe=Probes(LAYER_DENIED))
+        require_agent_isolation(bwrap=LAYER)
     assert isinstance(refused.value, RunAsError), "every launch path that refuses on a RunAsError refuses on this"
     assert str(refused.value) == (
         f"agents cannot be isolated on this host: running them as an account: {SPECIALIST_USER_ENV} is not set; "
@@ -164,16 +176,19 @@ def test_a_hosted_run_where_no_tier_works_refuses_at_start_up_naming_both():
     assert refused.value.transient is False
 
 
-def test_a_hosted_probe_that_gave_no_answer_refuses_as_transient():
+def test_a_hosted_probe_that_gave_no_answer_refuses_as_transient(probe):
+    probe.answer = NO_ANSWER
     with pytest.raises(IsolationRefused) as refused:
-        require_agent_isolation(bwrap=LAYER, probe=Probes(NO_ANSWER))
+        require_agent_isolation(bwrap=LAYER)
     assert refused.value.transient is True
 
 
-def test_a_hosted_run_refuses_an_unconfined_sandbox_too():
-    require_agent_isolation(bwrap=LAYER, allow_account=True, probe=Probes(IN_LAYER))
+def test_a_hosted_run_refuses_an_unconfined_sandbox_too(probe):
+    probe.answer = IN_LAYER
+    require_agent_isolation(bwrap=LAYER, allow_account=True)
+    probe.answer = LAYER_DENIED
     with pytest.raises(IsolationRefused) as refused:
-        choose_sandbox_isolation(probe=Probes(LAYER_DENIED))
+        choose_sandbox_isolation()
     assert refused.value.reasons[0] == f"running them as an account: {SANDBOX_ACCOUNT}"
 
 
@@ -194,43 +209,44 @@ def _ray_path_refuses(reason: str) -> str:
     ids=["denied", "no-answer", "none-named"],
 )
 def test_a_hosted_run_with_an_account_warns_once_that_the_ray_path_refuses_where_bubblewrap_cannot_confine(
-    account, caplog, bwrap, answer, reason
+    account, caplog, probe, bwrap, answer, reason
 ):
-    probes = Probes(answer) if answer else _never
+    probe.answer = answer  # none: bubblewrap must not be probed at all
     with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
-        assert require_agent_isolation(bwrap=bwrap, probe=probes) == AccountIsolation(ACCOUNT)
+        assert require_agent_isolation(bwrap=bwrap) == AccountIsolation(ACCOUNT)
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.WARNING, _ray_path_refuses(reason))]
     if answer:
-        assert probes.asked == [bwrap], "the layer's bubblewrap, by its path"
+        assert probe.asked == [bwrap], "the layer's bubblewrap, by its path"
     with pytest.raises(IsolationRefused) as refused:
-        choose_agent_isolation(allow_account=False, probe=probes)
+        choose_agent_isolation(allow_account=False)
     assert reason in refused.value.reasons, "the Ray GPU actor path refuses for the reason the warning gave"
-    assert choose_agent_isolation(probe=probes) == AccountIsolation(ACCOUNT), "every other specialist: the account"
+    assert choose_agent_isolation() == AccountIsolation(ACCOUNT), "every other specialist: the account"
 
 
-def test_a_hosted_run_with_an_account_and_a_layer_bubblewrap_that_confines_says_nothing_more(account, caplog):
-    probes = Probes(IN_LAYER)
+def test_a_hosted_run_with_an_account_and_a_layer_bubblewrap_that_confines_says_nothing_more(account, caplog, probe):
+    probe.answer = IN_LAYER
     with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
-        assert require_agent_isolation(bwrap=LAYER, probe=probes) == AccountIsolation(ACCOUNT)
-    assert caplog.records == [] and probes.asked == [LAYER]
+        assert require_agent_isolation(bwrap=LAYER) == AccountIsolation(ACCOUNT)
+    assert caplog.records == [] and probe.asked == [LAYER]
 
 
 # ---- the order of the tiers ----
 
 
 def test_a_usable_account_is_the_first_tier(account):
-    assert choose_agent_isolation(probe=_never) == AccountIsolation(ACCOUNT)
+    assert choose_agent_isolation() == AccountIsolation(ACCOUNT)
     assert isolation_required()
 
 
-def test_an_account_that_does_not_resolve_falls_to_bubblewrap_and_warns_once(account, monkeypatch, caplog):
+def test_an_account_that_does_not_resolve_falls_to_bubblewrap_and_warns_once(account, monkeypatch, caplog, probe):
     def refuse(name: str) -> RunAs:
         raise RunAsError(f"{SPECIALIST_USER_ENV}={name!r}: no such user")
 
     monkeypatch.setattr(agent_isolation, "resolve_run_as", refuse)
+    probe.answer = ON_PATH
     with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
-        found = choose_agent_isolation(probe=Probes(ON_PATH))
-        choose_agent_isolation(probe=Probes(ON_PATH))
+        found = choose_agent_isolation()
+        choose_agent_isolation()
     note = f"running them as an account: {SPECIALIST_USER_ENV}='hl-specialist': no such user"
     assert found == BwrapIsolation(ON_PATH, (note,))
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
@@ -238,104 +254,133 @@ def test_an_account_that_does_not_resolve_falls_to_bubblewrap_and_warns_once(acc
     ]
 
 
-def test_an_account_this_process_cannot_signal_falls_to_bubblewrap(account):
+def test_an_account_this_process_cannot_signal_falls_to_bubblewrap(account, probe):
     account(["CAP_KILL"])
-    assert choose_agent_isolation(probe=Probes(ON_PATH)).notes == (
+    probe.answer = ON_PATH
+    assert choose_agent_isolation().notes == (
         "running them as an account: running a specialist as another user needs root or CAP_KILL",
     )
 
 
-def test_no_account_configured_logs_no_warning_when_bubblewrap_is_used(caplog):
+def test_no_account_configured_logs_no_warning_when_bubblewrap_is_used(caplog, probe):
+    probe.answer = ON_PATH
     with caplog.at_level(logging.WARNING, logger=agent_isolation.__name__):
-        choose_agent_isolation(probe=Probes(ON_PATH))
+        choose_agent_isolation()
     assert caplog.records == []
 
 
-def test_the_ray_actor_path_never_gets_the_account_tier(account):
-    found = choose_agent_isolation(allow_account=False, probe=Probes(ON_PATH))
+def test_the_ray_actor_path_never_gets_the_account_tier(account, probe):
+    probe.answer = ON_PATH
+    found = choose_agent_isolation(allow_account=False)
     assert found == BwrapIsolation(ON_PATH, (f"running them as an account: {RAY_ACTOR_PATH}",))
 
 
-def test_a_configured_account_makes_a_specialist_launch_required_on_the_ray_path_too(account):
+def test_a_configured_account_makes_a_specialist_launch_required_on_the_ray_path_too(account, probe):
+    probe.answer = DENIED
     with pytest.raises(IsolationRefused) as refused:
-        choose_agent_isolation(allow_account=False, probe=Probes(DENIED))
+        choose_agent_isolation(allow_account=False)
     assert refused.value.reasons == (
         f"running them as an account: {RAY_ACTOR_PATH}",
         "bubblewrap (/usr/bin/bwrap, 0.11.1): bwrap: setting up uid map: Permission denied",
     )
 
 
-def test_a_configured_account_where_neither_tier_works_refuses(account):
+def test_a_configured_account_where_neither_tier_works_refuses(account, probe):
     account(["CAP_SETUID", "CAP_KILL"])
+    probe.answer = MISSING
     with pytest.raises(IsolationRefused) as refused:
-        choose_agent_isolation(probe=Probes(MISSING))
+        choose_agent_isolation()
     assert refused.value.reasons == (
         "running them as an account: running a specialist as another user needs root or CAP_SETUID, CAP_KILL",
         "bubblewrap: not found on PATH",
     )
 
 
-def test_an_explicit_user_wins_over_the_environment(account):
-    assert isinstance(choose_agent_isolation("", probe=Probes(DENIED)), NoIsolation)
+def test_an_explicit_user_wins_over_the_environment(account, probe):
+    probe.answer = DENIED
+    assert isinstance(choose_agent_isolation(""), NoIsolation)
 
 
 # ---- sandboxes and the compile's second tier ----
 
 
-def test_a_local_sandbox_is_never_refused_even_with_an_account_configured(account):
-    found = choose_sandbox_isolation(probe=Probes(DENIED))
+def test_a_local_sandbox_is_never_refused_even_with_an_account_configured(account, probe):
+    probe.answer = DENIED
+    found = choose_sandbox_isolation()
     assert isinstance(found, NoIsolation)
     assert found.reasons[0] == f"running them as an account: {SANDBOX_ACCOUNT}"
 
 
 def test_a_local_test_sandbox_is_bubblewrapped_where_it_works_and_never_refused_even_with_an_account_configured(
-    account,
+    account, probe
 ):
-    assert choose_test_isolation(probe=Probes(ON_PATH)) == BwrapIsolation(
-        ON_PATH, (f"running them as an account: {TEST_ACCOUNT}",)
-    )
-    found = choose_test_isolation(probe=Probes(DENIED))
+    probe.answer = ON_PATH
+    assert choose_test_isolation() == BwrapIsolation(ON_PATH, (f"running them as an account: {TEST_ACCOUNT}",))
+    probe.answer = DENIED
+    found = choose_test_isolation()
     assert isinstance(found, NoIsolation) and found.reasons == (
         f"running them as an account: {TEST_ACCOUNT}",
         "bubblewrap (/usr/bin/bwrap, 0.11.1): bwrap: setting up uid map: Permission denied",
     )
 
 
-def test_a_hosted_run_refuses_an_unconfined_test_sandbox_and_probes_only_its_layer_bubblewrap():
-    require_agent_isolation(bwrap=LAYER, allow_account=True, probe=Probes(IN_LAYER))
-    probes = Probes(LAYER_DENIED)
+def test_a_hosted_run_refuses_an_unconfined_test_sandbox_and_probes_only_its_layer_bubblewrap(probe):
+    probe.answer = IN_LAYER
+    require_agent_isolation(bwrap=LAYER, allow_account=True)
+    probe.answer = LAYER_DENIED
+    probe.asked.clear()
     with pytest.raises(IsolationRefused) as refused:
-        choose_test_isolation(probe=probes)
+        choose_test_isolation()
     assert refused.value.reasons[0] == f"running them as an account: {TEST_ACCOUNT}"
-    assert probes.asked == [LAYER]
+    assert probe.asked == [LAYER]
 
 
-def test_a_sandbox_runs_under_bubblewrap_where_it_works(account):
-    assert choose_sandbox_isolation(probe=Probes(ON_PATH)) == BwrapIsolation(
-        ON_PATH, (f"running them as an account: {SANDBOX_ACCOUNT}",)
+def test_an_answer_the_caller_already_has_is_decided_as_a_fresh_probe_s_and_probes_nothing(probe):
+    failed = BwrapProbe(LAYER, (0, 13, 1), ("the sandbox's own paths cannot be bound safely",))
+    found = choose_test_isolation(known=failed)
+    assert isinstance(found, NoIsolation) and found.reasons[1:] == (
+        f"bubblewrap ({LAYER}, 0.13.1): the sandbox's own paths cannot be bound safely",
     )
+    assert isinstance(choose_sandbox_isolation(known=failed), NoIsolation)
+    probe.answer = IN_LAYER
+    require_agent_isolation(bwrap=LAYER)
+    probe.asked.clear()
+    with pytest.raises(IsolationRefused):
+        choose_sandbox_isolation(known=failed)
+    assert probe.asked == [], "the answer given, not a probe of the module's"
 
 
-def test_bubblewrap_alone_names_its_probe_s_reasons_where_it_finds_a_problem():
-    assert bwrap_isolation(probe=Probes(DENIED)) == NoIsolation(
+def test_a_sandbox_runs_under_bubblewrap_where_it_works(account, probe):
+    probe.answer = ON_PATH
+    assert choose_sandbox_isolation() == BwrapIsolation(ON_PATH, (f"running them as an account: {SANDBOX_ACCOUNT}",))
+
+
+def test_bubblewrap_alone_names_its_probe_s_reasons_where_it_finds_a_problem(probe):
+    probe.answer = DENIED
+    assert bwrap_isolation() == NoIsolation(
         ("bubblewrap (/usr/bin/bwrap, 0.11.1): bwrap: setting up uid map: Permission denied",)
     )
-    assert bwrap_isolation(probe=Probes(MISSING)) == NoIsolation(("bubblewrap: not found on PATH",))
-    assert bwrap_isolation(probe=Probes(NO_ANSWER)) == NoIsolation(
-        (f"bubblewrap at {LAYER}: no answer in 10 s",), transient=True
-    ), "a probe that gave no answer in time is not a final answer"
-    assert bwrap_isolation(probe=Probes(ON_PATH)) == BwrapIsolation(ON_PATH)
-    require_agent_isolation(bwrap=LAYER, probe=Probes(IN_LAYER))
-    probes = Probes(IN_LAYER)
-    assert bwrap_isolation(probe=probes) == BwrapIsolation(IN_LAYER)
-    assert probes.asked == [LAYER]
+    probe.answer = MISSING
+    assert bwrap_isolation() == NoIsolation(("bubblewrap: not found on PATH",))
+    probe.answer = NO_ANSWER
+    assert bwrap_isolation() == NoIsolation((f"bubblewrap at {LAYER}: no answer in 10 s",), transient=True), (
+        "a probe that gave no answer in time is not a final answer"
+    )
+    probe.answer = ON_PATH
+    assert bwrap_isolation() == BwrapIsolation(ON_PATH)
+    probe.answer = IN_LAYER
+    require_agent_isolation(bwrap=LAYER)
+    probe.asked.clear()
+    assert bwrap_isolation() == BwrapIsolation(IN_LAYER)
+    assert probe.asked == [LAYER]
 
 
 # ---- the report and the start-up line ----
 
 
-def test_the_report_of_an_unconfined_local_run_names_both_tiers():
-    report = agent_isolation_report(probe=Probes(DENIED))
+def test_the_report_of_an_unconfined_local_run_names_both_tiers(probe):
+    probe.answer = DENIED
+    report = agent_isolation_report()
     reasons = (
         NOT_SET,
         "bubblewrap (/usr/bin/bwrap, 0.11.1): bwrap: setting up uid map: Permission denied",
@@ -352,31 +397,35 @@ def test_the_report_of_an_unconfined_local_run_names_both_tiers():
     assert report.line() == "agent isolation: specialists none, sandboxes none: " + "; ".join(reasons)
 
 
-def test_the_report_names_the_bubblewrap_in_use():
-    report = agent_isolation_report(probe=Probes(ON_PATH))
+def test_the_report_names_the_bubblewrap_in_use(probe):
+    probe.answer = ON_PATH
+    report = agent_isolation_report()
     assert (report.specialists, report.sandboxes, report.bwrap) == ("bwrap", "bwrap", "0.13.1 /usr/bin/bwrap")
     assert report.line().startswith(
         "agent isolation: specialists bwrap, sandboxes bwrap (bubblewrap 0.13.1 /usr/bin/bwrap): "
     )
 
 
-def test_the_report_records_a_refusal_instead_of_raising(account):
+def test_the_report_records_a_refusal_instead_of_raising(account, probe):
     account(["CAP_KILL"])
-    report = agent_isolation_report(probe=Probes(DENIED))
+    probe.answer = DENIED
+    report = agent_isolation_report()
     assert (report.specialists, report.sandboxes, report.required) == ("refused", "none", True)
 
 
-def test_an_account_for_specialists_and_a_bubblewrap_sandbox_report_both(account):
-    report = agent_isolation_report(probe=Probes(ON_PATH))
+def test_an_account_for_specialists_and_a_bubblewrap_sandbox_report_both(account, probe):
+    probe.answer = ON_PATH
+    report = agent_isolation_report()
     assert (report.specialists, report.sandboxes, report.required) == ("account", "bwrap", True)
     assert report.bwrap == "0.13.1 /usr/bin/bwrap"
     assert report.reasons == (f"running them as an account: {SANDBOX_ACCOUNT}",)
 
 
-def test_start_up_says_once_with_a_warning_that_agents_run_unconfined(caplog):
+def test_start_up_says_once_with_a_warning_that_agents_run_unconfined(caplog, probe):
+    probe.answer = MISSING
     with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
-        report = announce_agent_isolation(probe=Probes(MISSING))
-        announce_agent_isolation(probe=Probes(MISSING))
+        report = announce_agent_isolation()
+        announce_agent_isolation()
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert warnings == [
         "agents run unconfined on this host, as before: they can read this account's files and credentials "
@@ -384,44 +433,52 @@ def test_start_up_says_once_with_a_warning_that_agents_run_unconfined(caplog):
     ]
 
 
-def test_start_up_names_only_the_unconfined_sandboxes_when_specialists_have_an_account(account, caplog):
+def test_start_up_names_only_the_unconfined_sandboxes_when_specialists_have_an_account(account, caplog, probe):
+    probe.answer = MISSING
     with caplog.at_level(logging.WARNING, logger=agent_isolation.__name__):
-        announce_agent_isolation(probe=Probes(MISSING))
+        announce_agent_isolation()
     assert [r.getMessage().split(",")[0] for r in caplog.records] == ["agent sandboxes run unconfined on this host"]
 
 
-def test_start_up_says_one_info_line_when_every_agent_is_confined(caplog):
+def test_start_up_says_one_info_line_when_every_agent_is_confined(caplog, probe):
+    probe.answer = ON_PATH
     with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
-        report = announce_agent_isolation(probe=Probes(ON_PATH))
+        report = announce_agent_isolation()
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.INFO, report.line())]
 
 
-def test_start_up_warns_once_naming_specialists_that_would_be_refused(account, caplog):
+def test_start_up_warns_once_naming_specialists_that_would_be_refused(account, caplog, probe):
     account(["CAP_KILL"])
+    probe.answer = DENIED
     with caplog.at_level(logging.WARNING, logger=agent_isolation.__name__):
-        report = announce_agent_isolation(probe=Probes(DENIED))
+        report = announce_agent_isolation()
     assert [r.getMessage() for r in caplog.records] == [
         "agent sandboxes run unconfined on this host, as before: they can read this account's files and credentials; "
         f"specialists will be refused: they must be isolated here, and no tier can ({'; '.join(report.reasons)})"
     ]
 
 
-def test_start_up_of_a_hosted_run_that_cannot_isolate_warns_that_every_agent_would_be_refused(caplog):
+def test_start_up_of_a_hosted_run_that_cannot_isolate_warns_that_every_agent_would_be_refused(caplog, probe):
+    probe.answer = LAYER_DENIED
     with pytest.raises(IsolationRefused):
-        require_agent_isolation(bwrap=LAYER, probe=Probes(LAYER_DENIED))
+        require_agent_isolation(bwrap=LAYER)
     with caplog.at_level(logging.WARNING, logger=agent_isolation.__name__):
-        report = announce_agent_isolation(probe=Probes(LAYER_DENIED))
+        report = announce_agent_isolation()
     assert (report.specialists, report.sandboxes, report.required) == ("refused", "refused", True)
     assert [r.getMessage().split(" (")[0] for r in caplog.records] == [
         "specialists and agent sandboxes will be refused: they must be isolated here, and no tier can"
     ]
 
 
-def test_a_launch_that_runs_unconfined_after_start_up_found_bubblewrap_warns_once_and_the_report_counts_it(caplog):
+def test_a_launch_that_runs_unconfined_after_start_up_found_bubblewrap_warns_once_and_the_report_counts_it(
+    caplog, probe
+):
     """A probe that passed at start-up and gave no answer in time at a launch: nothing said agents run unconfined."""
     with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
-        report = announce_agent_isolation(probe=Probes(ON_PATH))
-        later = choose_agent_isolation(probe=Probes(NO_ANSWER))
+        probe.answer = ON_PATH
+        report = announce_agent_isolation()
+        probe.answer = NO_ANSWER
+        later = choose_agent_isolation()
         assert isinstance(later, NoIsolation)
         unconfined_launch(later)
         unconfined_launch(later)
@@ -436,10 +493,11 @@ def test_a_launch_that_runs_unconfined_after_start_up_found_bubblewrap_warns_onc
     )
 
 
-def test_a_launch_after_start_up_warned_that_agents_run_unconfined_adds_no_second_warning(caplog):
+def test_a_launch_after_start_up_warned_that_agents_run_unconfined_adds_no_second_warning(caplog, probe):
+    probe.answer = MISSING
     with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
-        report = announce_agent_isolation(probe=Probes(MISSING))
-        unconfined_launch(choose_agent_isolation(probe=Probes(MISSING)))
+        report = announce_agent_isolation()
+        unconfined_launch(choose_agent_isolation())
     assert [r.levelno for r in caplog.records].count(logging.WARNING) == 1
     assert session_isolation_lines() == (
         report.line(),
@@ -447,8 +505,9 @@ def test_a_launch_after_start_up_warned_that_agents_run_unconfined_adds_no_secon
     )
 
 
-def test_a_process_that_announced_nothing_and_launched_nothing_unconfined_reports_nothing():
-    choose_agent_isolation(probe=Probes(ON_PATH))
+def test_a_process_that_announced_nothing_and_launched_nothing_unconfined_reports_nothing(probe):
+    probe.answer = ON_PATH
+    choose_agent_isolation()
     assert session_isolation_lines() == ()
 
 
