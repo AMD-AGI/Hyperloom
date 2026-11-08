@@ -51,7 +51,6 @@ Layout under `NFS_SHARED_ROOT` (replace `${NFS_SHARED_ROOT}` with the real mount
 
 ```text
 ${NFS_SHARED_ROOT}/models/Qwen3-30B-A3B/   # --model
-${NFS_SHARED_ROOT}/InferenceX/             # INFERENCEX_PATH
 ${NFS_SHARED_ROOT}/inference-suite-tools/  # INFERENCE_SUITE_TOOL_CACHE
 ${NFS_SHARED_ROOT}/TraceLens/              # TRACELENS_ROOT
 ```
@@ -102,7 +101,6 @@ path.
 RANDOM_RANGE_RATIO=0.8
 SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=1200
 SGLANG_DISAGGREGATION_WAITING_TIMEOUT=1200
-INFERENCEX_PATH=${NFS_SHARED_ROOT}/InferenceX
 TRACELENS_ROOT=${NFS_SHARED_ROOT}/TraceLens
 INFERENCE_SUITE_TOOL_CACHE=${NFS_SHARED_ROOT}/inference-suite-tools
 ```
@@ -159,7 +157,6 @@ Optional model pins (omit to use the deployment defaults):
 
 ```text
 RANDOM_RANGE_RATIO=0.8
-INFERENCEX_PATH=${NFS_SHARED_ROOT}/InferenceX
 TRACELENS_ROOT=${NFS_SHARED_ROOT}/TraceLens
 INFERENCE_SUITE_TOOL_CACHE=${NFS_SHARED_ROOT}/inference-suite-tools
 ```

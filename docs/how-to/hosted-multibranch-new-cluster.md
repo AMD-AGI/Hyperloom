@@ -36,7 +36,7 @@ These are set in the app container's environment.
 | `HYPERLOOM_SOURCE_REPO` | yes | Where the run's Hyperloom source is fetched from: `OWNER/NAME` on GitHub, any git URL, or a local path (for example a mirror on shared storage when the app host has no GitHub egress). |
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
 | `HYPERLOOM_RSI_ARCHIVE` | yes, for the hosted multi-branch entry | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. |
-| `INFERENCEX_PATH` | yes, for the hosted multi-branch entry, unless `install.sh` left a checkout | A writable InferenceX checkout at the commit Hyperloom pins. Without one the session refuses to start, naming `INFERENCEX_PATH`. |
+| `INFERENCE_SUITE_TOOL_CACHE` | no | The tool cache `install.sh` staged the pinned InferenceX client in. Default `inference-suite-tools` under the dependency cache. Without a staging there that verifies, the session refuses to start, naming `python -m inference_suite stage --tool-cache <dir>`. |
 
 The model is named by the campaign spec (`model.path`), not by a variable. The app host reads the model's tokenizer
 files at that path.
