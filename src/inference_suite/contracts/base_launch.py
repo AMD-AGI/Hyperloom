@@ -617,9 +617,8 @@ class BaseLaunch:
 
     @property
     def cards(self) -> int:
-        """The GPUs its launch occupies: ``tp`` for each data-parallel replica that holds cards of its own."""
-        data_parallel = framework_facts(Framework(self.framework)).data_parallel
-        return self.topology.tp * (1 if data_parallel is None else data_parallel.replicas(self.args))
+        """The GPUs its launch occupies (:meth:`FrameworkFacts.cards`)."""
+        return framework_facts(Framework(self.framework)).cards(self.topology.tp, self.args)
 
     @property
     def script(self) -> str:

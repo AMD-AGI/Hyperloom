@@ -98,6 +98,11 @@ class FrameworkFacts:
     parser_source: str | None = None
     metrics_flag: str | None = None
 
+    def cards(self, tp: int, args: Sequence[str]) -> int:
+        """The GPUs a launch at ``tp`` running ``args`` occupies: ``tp`` for each data-parallel replica that holds
+        cards of its own."""
+        return tp * (1 if self.data_parallel is None else self.data_parallel.replicas(args))
+
 
 # vLLM 0.30 moved the serve parser from ``entrypoints.openai`` to ``entrypoints.launchers``.
 _VLLM_PARSER_SOURCE = (

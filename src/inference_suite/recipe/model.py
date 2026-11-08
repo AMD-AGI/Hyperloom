@@ -318,6 +318,11 @@ class SourceLaunch:
     stripped: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
 
+    @property
+    def cards(self) -> int:
+        """The GPUs the launch occupies, as the base launch it resolves to counts them."""
+        return framework_facts(Framework(self.framework)).cards(self.topology.tp, self.args)
+
 
 @dataclass(frozen=True)
 class SourceMiss:
