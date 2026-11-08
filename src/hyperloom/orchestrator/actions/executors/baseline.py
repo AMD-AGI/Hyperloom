@@ -3,7 +3,7 @@
 
 """Real ``baseline`` ActionRunner — runs the benchmark rounds of a baseline measurement.
 
-Every round runs on inference_suite with the base launch its session froze (:func:`._suite_config.suite_route`).
+Every round runs on inference_suite with the base launch its session froze (:func:`._suite.rounds.suite_route`).
 ``BenchmarkRunExecutor`` is the benchmark round shared by every action that runs one; ``BaselineExecutor`` adds the
 baseline timeline event and the benchmark watchdog.
 """
@@ -43,7 +43,7 @@ from inference_suite.contracts import FailedStep
 
 from . import _server_lifecycle as _lifecycle
 from ._grid_base import GridRound, run_grid_suite_round
-from ._suite_config import SuiteRoundRefused, SuiteRoute, suite_route
+from ._suite.rounds import SuiteRoundRefused, SuiteRoute, suite_route
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
 # back, how a round's cap is clamped to the budget, how the two session bounds are resolved, and the hygiene every

@@ -20,9 +20,10 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
-from hyperloom.orchestrator.actions.executors import _suite_config, baseline
-from hyperloom.orchestrator.actions.executors._suite_config import MEASURED_SEED, WARMUP_SEED
-from hyperloom.orchestrator.actions.executors._suite_config import RUN_DIR_PREFIX, TOOL_CACHE_ENV
+from hyperloom.orchestrator.actions.executors import baseline
+from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
+from hyperloom.orchestrator.actions.executors._suite.config import MEASURED_SEED, WARMUP_SEED
+from hyperloom.orchestrator.actions.executors._suite.rounds import RUN_DIR_PREFIX, TOOL_CACHE_ENV
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _MODEL, _base
 from hyperloom.orchestrator.rehearsal import READY, STAGE_FAILED, LaunchAttempt, LaunchScenario, ScriptedRounds
@@ -65,8 +66,8 @@ def suite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     (cache / "staging_manifest.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv(TOOL_CACHE_ENV, str(cache))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(tmp_path / "leaks"))
-    monkeypatch.setattr(_suite_config, "_resolve_probe_python", lambda framework: sys.executable)
-    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: None)
+    monkeypatch.setattr(suite_rounds, "_resolve_probe_python", lambda framework: sys.executable)
+    monkeypatch.setattr(suite_rounds, "client_only_server_url", lambda: None)
 
     stopped: list[Path] = []
     monkeypatch.setattr(baseline, "stop", lambda pid_dir: stopped.append(Path(pid_dir)) or Reaped((), ()))
@@ -81,7 +82,7 @@ class _ThroughputOnly(BaselineExecutor):
 
 def _play(monkeypatch, suite: SimpleNamespace, *attempts: LaunchAttempt, **params) -> tuple[dict, ScriptedRounds]:
     rounds = ScriptedRounds(scenario=LaunchScenario(attempts=attempts), clock=VirtualClock(), launch=_launch())
-    monkeypatch.setattr(_suite_config, "run_round", rounds.run_round)
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
     executor = _ThroughputOnly(
         default_config_path=suite.point,
         session_dir=suite.session,
@@ -176,7 +177,7 @@ def test_an_eval_failure_of_a_suite_round_is_eval_rooted() -> None:
 def test_a_multi_node_round_restarts_the_cluster_and_measures_it_externally_after_a_discarded_pass(monkeypatch, suite):
     from hyperloom.orchestrator.actions.executors import _multi_node_env
 
-    monkeypatch.setattr(_suite_config, "client_only_server_url", lambda: "http://10.0.0.2:30000")
+    monkeypatch.setattr(suite_rounds, "client_only_server_url", lambda: "http://10.0.0.2:30000")
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
     monkeypatch.setattr(_multi_node_env, "mn_bench_warmup_enabled", lambda: True)
     restarts: list[str] = []
@@ -218,7 +219,7 @@ def test_an_agentx_baseline_is_measured_once_on_a_server_it_owns(monkeypatch, su
         played.append(config)
         raise ScenarioError("the round is not played")
 
-    monkeypatch.setattr(_suite_config, "run_round", run_round)
+    monkeypatch.setattr(suite_rounds, "run_round", run_round)
     executor = _ThroughputOnly(
         default_config_path=suite.point,
         session_dir=suite.session,
