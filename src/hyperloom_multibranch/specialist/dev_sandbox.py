@@ -48,7 +48,7 @@ from typing import Any, Protocol
 
 from hyperloom.hosted.mcp_server import CallContext, InvalidParamsError, McpServer, ToolError
 from hyperloom.measure.compile import COMPONENT_LAYOUTS
-from hyperloom.measure.ports import DEV_SANDBOX_PORTS
+from hyperloom.common.ports import DEV_SANDBOX_PORTS
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
