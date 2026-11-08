@@ -22,6 +22,7 @@ import pytest
 
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts, theirs
 from hyperloom.measure.runner import cache_build
+from hyperloom.measure.runner.cache_build_lock import exclusive
 from hyperloom.measure.runner.cache_build import (
     BuildOptions,
     CacheBuildError,
@@ -134,7 +135,8 @@ def test_the_lock_is_not_opened_through_another_accounts_link_on_its_way(
     theirs(cache, monkeypatch)
     path = build_lock(cache, "0" * 40)
     with pytest.raises(CacheBuildError, match=f"cannot open the build lock {path} for writing: "):
-        os.close(cache_build._open_lock(path))
+        with exclusive(path, 1.0):
+            pass
     assert list(elsewhere.iterdir()) == []
 
 
