@@ -200,11 +200,29 @@ def test_an_eval_only_point_runs_the_eval_and_no_load_on_the_held_server() -> No
     assert "EVAL_ONLY" not in config.server.user.env_set
 
 
-def test_without_a_gpu_mask_the_round_takes_the_first_tp_gpus() -> None:
+def test_without_any_gpu_mask_the_round_takes_the_first_tp_gpus(monkeypatch) -> None:
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     point = _point("sglang")
     del point["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"]
 
     assert suite_config(point, _base("sglang"), _settings()).server.gpus == (0, 1)
+
+
+def test_a_point_without_a_gpu_mask_takes_the_first_cards_of_the_process_mask(monkeypatch) -> None:
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+    point = _point("sglang")
+    del point["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"]
+
+    assert suite_config(point, _base("sglang"), _settings()).server.gpus == (4, 5)
+
+
+def test_a_process_mask_narrower_than_the_launch_is_refused(monkeypatch) -> None:
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "7")
+    point = _point("sglang")
+    del point["benchmark"]["envs"]["ROCR_VISIBLE_DEVICES"]
+
+    with pytest.raises(ConfigError, match="ROCR_VISIBLE_DEVICES='7' holds 1 GPUs; the launch needs 2"):
+        suite_config(point, _base("sglang"), _settings())
 
 
 def test_a_round_takes_the_cards_its_topology_needs_from_the_front_of_a_wider_mask() -> None:

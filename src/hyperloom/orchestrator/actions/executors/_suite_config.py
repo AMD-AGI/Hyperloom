@@ -112,7 +112,7 @@ from ..cancel_channel import cancel_scope_listener
 from ._accuracy_gate import ACCURACY_DIR
 from ._benchmark_interpreter import _resolve_probe_python
 from ._failed_step import failed_step_error_class
-from ._gpu_pin import ROCR_AUTOFILL_ENV
+from ._gpu_pin import ROCR_AUTOFILL_ENV, session_cards_mask
 from ._gpu_power import round_gpu_telemetry
 from ._workload_envs import QUALITY_REF_ENVS
 from ._multi_node_env import client_only_server_url
@@ -327,14 +327,21 @@ def _user_args(point: _Point) -> tuple[tuple[str, ...], tuple[str, ...]]:
 
 
 def _gpus(point: _Point, cards: int) -> tuple[int, ...]:
-    """The first ``cards`` GPUs of the point's mask: the mask may be the whole session's, not the round's."""
+    """The first ``cards`` GPUs of the point's mask, or of the session's when the point names none.
+
+    The server drops the masks it inherits and runs on these ids as absolute cards, so a point without a mask (an
+    AgentX point never carries one) must still land on the session's cards rather than on ``0..cards-1``.
+    """
     mask = point.text(_GPU_MASK_ENV)
+    source = "the point's" if mask is not None else "the process's"
+    if mask is None:
+        mask = ",".join(session_cards_mask(cards))
     try:
-        gpus = tuple(range(cards)) if mask is None else tuple(int(gpu) for gpu in mask.split(","))
+        gpus = tuple(int(gpu) for gpu in mask.split(","))
     except ValueError:
-        raise ConfigError(f"the point's {_GPU_MASK_ENV} is not a list of GPU indices: {mask!r}") from None
+        raise ConfigError(f"{source} {_GPU_MASK_ENV} is not a list of GPU indices: {mask!r}") from None
     if len(gpus) < cards:
-        raise ConfigError(f"the point's {_GPU_MASK_ENV}={mask!r} holds {len(gpus)} GPUs; the launch needs {cards}")
+        raise ConfigError(f"{source} {_GPU_MASK_ENV}={mask!r} holds {len(gpus)} GPUs; the launch needs {cards}")
     return gpus[:cards]
 
 
