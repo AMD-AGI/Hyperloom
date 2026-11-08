@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from hyperloom_common.fs_utils import append_nofollow
 from hyperloom_common.proctree import TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 
@@ -297,8 +298,11 @@ class ManagedServerProcess:
         cwd: str | None = None,
         log_path: str | None = None,
         stdin_path: str | None = None,
+        log_identity: tuple[int, int] | None = None,
     ) -> int:
-        """Launch the subprocess and return its pid."""
+        """Launch the subprocess and return its pid. With ``log_identity`` the log is the file the caller created at
+        ``log_path`` (:func:`~hyperloom_common.fs_utils.append_nofollow`), appended to and never followed through a
+        link; else ``log_path`` is created or truncated."""
         if self._proc is not None and self._proc.poll() is None:
             raise RuntimeError("ManagedServerProcess already running")
         stdin: Any = subprocess.DEVNULL
@@ -309,7 +313,13 @@ class ManagedServerProcess:
             if stdin_path:
                 stdin_fh = open(stdin_path, "rb")
                 stdin = stdin_fh
-            if log_path:
+            if log_path and log_identity is not None:
+                stdout_fh = append_nofollow(log_path, log_identity)
+                # Dated now, as the file this used to create was: the caller made it before Ray placed the actor,
+                # and a reaper reads its age as the CLI's silence.
+                os.utime(stdout_fh.fileno())
+                stdout = stdout_fh
+            elif log_path:
                 os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
                 stdout_fh = open(log_path, "w", encoding="utf-8")
                 stdout = stdout_fh
@@ -388,13 +398,16 @@ class ManagedServerProcess:
 
 @dataclass(frozen=True)
 class ActorLaunch:
-    """A subprocess a ServingActor launches; it runs in ``env`` alone, plus the visible-device keys Ray set."""
+    """A subprocess a ServingActor launches; it runs in ``env`` alone, plus the visible-device keys Ray set.
+    ``log_identity``: the log is the file the caller created at ``log_path``, which the actor only appends to
+    (:meth:`ManagedServerProcess.start`)."""
 
     cmd: list[str]
     env: dict[str, str] | None = None
     cwd: str | None = None
     log_path: str | None = None
     stdin_path: str | None = None
+    log_identity: tuple[int, int] | None = None
 
 
 def _child_env_for(launch: ActorLaunch) -> dict[str, str]:
@@ -428,6 +441,7 @@ def _serving_actor_body() -> Any:
                 "env": _child_env_for(launch),
                 "cwd": launch.cwd,
                 "log_path": launch.log_path,
+                "log_identity": launch.log_identity,
             }
             if launch.stdin_path is not None:
                 start_kwargs["stdin_path"] = launch.stdin_path

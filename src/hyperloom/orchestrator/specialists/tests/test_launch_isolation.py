@@ -34,6 +34,7 @@ from hyperloom.common.agent_isolation import (
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env_safety import RunAs
 from hyperloom_common.proctree import REAP_MARK_ENV, running
+from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
 from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss
 from hyperloom.orchestrator.specialists.agent_cli_config import SpecialistAgentUnavailableError
@@ -773,3 +774,77 @@ def test_the_reap_reads_each_tiers_marks_its_own_way(monkeypatch):
     PreparedLaunch(AccountIsolation(RunAs("u", 1, 1, (1,), "/h"))).marked_pids("c")
 
     assert seen == ["app:a", "app:b", "as:c"]
+
+
+class _ActorHere:
+    """A Ray GPU lease whose actor is this process: the actor's process manager starts the launch it is given, after
+    ``before`` (given the log's path) has run."""
+
+    def __init__(self, before: Any = None) -> None:
+        self.manager = ManagedServerProcess()
+        self.before = before
+        self.pid: int | None = None
+
+    def start_async(self, launch: Any) -> None:
+        if self.before is not None:
+            self.before(Path(launch.log_path))
+        self.pid = self.manager.start(
+            launch.cmd,
+            env=launch.env,
+            cwd=launch.cwd,
+            log_path=launch.log_path,
+            stdin_path=launch.stdin_path,
+            log_identity=launch.log_identity,
+        )
+
+    def poll_started(self) -> int | None:
+        return self.pid
+
+    def is_alive(self) -> bool:
+        return self.manager.is_alive()
+
+    def exit_code(self) -> int | None:
+        return self.manager.exit_code()
+
+    def stop(self) -> bool:
+        return self.manager.stop()
+
+    def close(self) -> bool:
+        return self.manager.stop()
+
+
+_SAYS = """#!/bin/sh
+cat > /dev/null
+echo agent-output
+echo '{"summary": "ran", "proposal_set": []}' > specialist_done.json
+"""
+
+
+async def test_a_ray_actor_writes_the_agents_output_to_a_log_made_fresh_and_never_through_a_link_left_there(
+    tmp_path: Path,
+) -> None:
+    """A retry of a task finds its workspace as the last agent left it: a link at ``process.log`` is replaced, not
+    followed, and one put there after the app made the log, before the actor opens it, is refused."""
+    victim = tmp_path / "victim.txt"
+    victim.write_text("the app's own\n", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "process.log").symlink_to(victim)
+    cli = tmp_path / "cli" / "claude"
+    cli.parent.mkdir()
+    cli.write_text(_SAYS, encoding="utf-8")
+    cli.chmod(0o755)
+
+    ran = await _login_dispatcher(cli).run(replace(_login_spawn(workspace), gpu_lease=_ActorHere()))
+
+    def swap(log: Path) -> None:
+        log.unlink()
+        log.symlink_to(victim)
+
+    raced = await _login_dispatcher(cli).run(replace(_login_spawn(tmp_path / "ws2"), gpu_lease=_ActorHere(swap)))
+
+    assert ran.error == "" and ran.exit_code == 0 and ran.done_payload["summary"] == "ran"
+    log = workspace / "process.log"
+    assert not log.is_symlink() and "agent-output" in log.read_text(encoding="utf-8")
+    assert raced.error == "failed to submit specialist GPU actor: OSError(40, 'Too many levels of symbolic links')"
+    assert victim.read_text(encoding="utf-8") == "the app's own\n"
