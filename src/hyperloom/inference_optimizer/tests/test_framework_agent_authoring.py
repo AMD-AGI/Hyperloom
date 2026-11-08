@@ -742,6 +742,7 @@ def test_config_levers_helper_extracts_from_proposal_set():
     }
     levers = _framework_config_levers_from_done(done)
     assert levers == {
+        "name": "mtp-spec-decode",
         "extra_server_args": "--speculative-num-steps 3 --enable-mtp",
         "extra_envs": {"VLLM_USE_MTP": "1"},
     }

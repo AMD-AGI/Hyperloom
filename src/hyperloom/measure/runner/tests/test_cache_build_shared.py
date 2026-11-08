@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
+from hyperloom_common.tests.shared_accounts import Accounts, other_accounts, theirs
 from hyperloom.measure.runner import cache_build
 from hyperloom.measure.runner.cache_build import (
     BuildOptions,
@@ -42,6 +42,7 @@ from hyperloom.measure.runner.tests.bootstrap_rig import Rig, copy_cache
 
 _SRC = str(Path(cache_build.__file__).parents[3])
 _SHARED_WRITE = stat.S_IWGRP | stat.S_IWOTH
+_ENTRY_READ = stat.S_IRGRP | stat.S_IXGRP
 
 
 def _modes(tree: Path) -> dict[str, int]:
@@ -62,19 +63,45 @@ def _modes(tree: Path) -> dict[str, int]:
 def test_the_lock_and_the_cache_let_the_group_write_and_the_entry_no_one_but_its_builder(
     rig: Rig, tmp_path: Path, umask: int, lock: int, cache: int
 ) -> None:
-    root = tmp_path / "cache"
+    # Storage set up to be shared: setgid, group-writable, not writable by others.
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o2775)
+    root = shared / "cache"
     command = [sys.executable, "-m", "hyperloom.measure.runner.cache_build", "--sha", rig.cache.sha]
     command += ["--repo", str(rig.repo), "--out", str(root), "--no-index", "--find-links", str(rig.wheelhouse)]
     done = subprocess.run(command, capture_output=True, text=True, timeout=300, umask=umask, check=False)
     assert done.returncode == 0, done.stderr
     assert stat.S_IMODE(build_lock(root, rig.cache.sha).stat().st_mode) == lock
     assert stat.S_IMODE(root.stat().st_mode) == cache
-    # The entry is readable as the builder's umask lets others read, and writable by its builder alone, even under a
-    # umask that lets the group write what the builder makes; its own directory the group may always read and enter, so
-    # it is never 0700 like a builder's unfinished copy.
+    # The entry is readable by others as the builder's umask lets them, by the group always (the other accounts'
+    # builders check and use it), and writable by its builder alone, even under a umask that lets the group write what
+    # the builder makes; so its own directory is never 0700 like a builder's unfinished copy.
     entry = _modes(root / rig.cache.sha)
     assert (entry["."], entry[BOOTSTRAP_NAME]) == (0o755 & ~umask | 0o050, 0o755)
     assert {name for name, mode in entry.items() if mode & _SHARED_WRITE} == set()
+    assert {name for name, mode in entry.items() if mode & stat.S_IRGRP == 0} == set()
+    tree = root / rig.cache.sha
+    assert {name for name in entry if (tree / name).is_dir() and entry[name] & stat.S_IXGRP == 0} == set()
+
+
+@pytest.mark.parametrize("parent", [0o755, 0o2755, 0o2777, 0o1777], ids=["0755", "2755", "2777", "1777"])
+@pytest.mark.parametrize("umask", [0o022, 0o077], ids=["umask-022", "umask-077"])
+def test_the_lock_and_the_cache_stay_private_where_the_storage_is_not_set_up_to_be_shared(
+    rig: Rig, tmp_path: Path, parent: int, umask: int
+) -> None:
+    private = tmp_path / "private"
+    private.mkdir()
+    private.chmod(parent)
+    root = private / "cache"
+    command = [sys.executable, "-m", "hyperloom.measure.runner.cache_build", "--sha", rig.cache.sha]
+    command += ["--repo", str(rig.repo), "--out", str(root), "--no-index", "--find-links", str(rig.wheelhouse)]
+    done = subprocess.run(command, capture_output=True, text=True, timeout=300, umask=umask, check=False)
+    assert done.returncode == 0, done.stderr
+    # A directory made in a setgid one inherits the bit from the kernel, not from the builder.
+    inherited = parent & stat.S_ISGID
+    assert stat.S_IMODE(build_lock(root, rig.cache.sha).stat().st_mode) == 0o666 & ~umask
+    assert stat.S_IMODE(root.stat().st_mode) == inherited | 0o777 & ~umask
 
 
 @pytest.mark.parametrize("lock", ["link", "read-only"])
@@ -93,6 +120,22 @@ def test_a_lock_that_cannot_be_opened_for_writing_is_named(rig: Rig, tmp_path: P
     with pytest.raises(CacheBuildError, match=f"cannot open the build lock {path} for writing: "):
         ensure_runner_cache(rig.repo, rig.cache.sha, cache, rig.build_options())
     assert not (cache / rig.cache.sha).exists()
+
+
+def test_the_lock_is_not_opened_through_another_accounts_link_on_its_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cache directory swapped for a link after it was made: the lock goes the walk's way, so the link of another
+    account below ``/tmp`` (which every account can write) is not followed to where the lock would be made."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    cache = tmp_path / "cache"
+    cache.symlink_to(elsewhere)
+    theirs(cache, monkeypatch)
+    path = build_lock(cache, "0" * 40)
+    with pytest.raises(CacheBuildError, match=f"cannot open the build lock {path} for writing: "):
+        os.close(cache_build._open_lock(path))
+    assert list(elsewhere.iterdir()) == []
 
 
 def test_the_entry_is_built_where_only_its_builder_can_reach(
@@ -240,6 +283,65 @@ def test_a_finished_entry_renamed_to_a_leftovers_name_is_never_swept_whatever_th
     assert again.returncode == 0, again.stderr
     assert (renamed / MANIFEST_NAME).is_file(), "a finished entry is never swept"
     assert {path.name for path in cache.iterdir()} == {sha, build_lock(cache, sha).name, renamed.name}
+
+
+#: The builder dies just after its copy is renamed into place, before the ``fchmod`` that gives the group its read.
+_KILLED_AFTER_THE_RENAME = """
+import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+from hyperloom.measure.runner import cache_build
+real_rename = os.rename
+def rename_then_die(source, target, **kwargs):
+    real_rename(source, target, **kwargs)
+    if kwargs.get("src_dir_fd") is not None and ".tmp-" in source:  # the copy's rename into place
+        os.kill(os.getpid(), signal.SIGKILL)
+cache_build.os.rename = rename_then_die
+cache_build.main(sys.argv[2:])
+"""
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o077])
+def test_a_builder_killed_between_the_rename_and_its_fchmod_leaves_an_entry_the_next_build_sets_aside_and_sweeps(
+    rig: Rig, tmp_path: Path, umask: int
+) -> None:
+    cache = tmp_path / "cache"
+    sha = rig.cache.sha
+    killed = subprocess.run(
+        _build_command(rig, cache, _KILLED_AFTER_THE_RENAME),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        umask=umask,
+        check=False,
+    )
+    assert killed.returncode == -signal.SIGKILL, killed.stderr
+    assert stat.S_IMODE((cache / sha).stat().st_mode) & 0o777 == 0o700, "in place, but no other account can read it"
+
+    done = subprocess.run(
+        _build_command(rig, cache), capture_output=True, text=True, timeout=300, umask=umask, check=False
+    )
+    assert done.returncode == 0, done.stderr
+    assert f"set aside {cache / sha}" in done.stderr
+    assert {path.name for path in cache.iterdir()} == {sha, build_lock(cache, sha).name}, "set aside, then swept"
+    assert stat.S_IMODE((cache / sha).stat().st_mode) & _ENTRY_READ == _ENTRY_READ
+
+
+def test_a_builders_leftover_renamed_into_place_is_set_aside_and_the_entry_built_again(
+    rig: Rig, tmp_path: Path
+) -> None:
+    """An account of the group can rename a builder's unfinished copy to the entry's name; the next builder must not
+    take it for a conflicting entry that stays for ever."""
+    cache = tmp_path / "cache"
+    sha = rig.cache.sha
+    cache.mkdir()
+    _own_dir(cache / sha, 0o700, "half")
+
+    done = subprocess.run(
+        _build_command(rig, cache), capture_output=True, text=True, timeout=300, umask=0o022, check=False
+    )
+    assert done.returncode == 0, done.stderr
+    assert (cache / sha / MANIFEST_NAME).is_file()
+    assert {path.name for path in cache.iterdir()} == {sha, build_lock(cache, sha).name}
 
 
 _PLANT_PTH = """

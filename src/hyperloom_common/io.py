@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json as _json
 import os
-import shutil
 import stat
 import tempfile
 from collections.abc import Iterator
@@ -16,7 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs, open_shared_append
+from hyperloom_common.shared_storage import (
+    SHARED_FILE_MODE,
+    Flush,
+    make_shared_dirs,
+    open_shared_append,
+    parent_is_shared,
+    write_shared_bytes,
+)
 
 _UTF8 = "utf-8"
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -84,14 +90,22 @@ class WriteOptions:
     is ignored when ``mode`` is given. ``group_read`` lets the directory's group read a
     new file when the directory is shared with that group (setgid and group-readable);
     never other-readable, and ignored when ``mode`` or ``preserve_mode`` applies.
-    ``shared`` is the one exception to owner-only: the new file is ``0o664``
+    ``shared`` is the one exception to owner-only, and only where the storage is set up to
+    be shared (the nearest existing directory is setgid, group-writable and not writable by
+    others): there the new file is ``0o664``
     (:data:`~hyperloom_common.shared_storage.SHARED_FILE_MODE`), for a tree the accounts of
     one group write in turn, and the rename replaces the file whoever owned it; the three
-    options above are then ignored, and the parents ``make_parents`` creates are ``2775``
-    (:func:`~hyperloom_common.shared_storage.make_shared_dirs`). Never use it for a file that holds a credential or
-    that anything executes or sources. ``share_parents`` makes the parents ``make_parents`` creates ``2775`` while the
-    file keeps its own mode: a file only its owner may read still lives in a directory the group can write.
-    ``fsync`` and ``fsync_dir`` raise the ``OSError`` of a flush that fails: a caller that asks for durability learns
+    options above are then ignored. The parents ``make_parents`` creates follow
+    :func:`~hyperloom_common.shared_storage.make_shared_dirs` (``2775`` there, the umask
+    elsewhere). Anywhere else ``shared`` widens nothing and the file has the mode the other
+    options ask for. Shared or not, no link is followed on the way below a directory other
+    accounts can write (:func:`~hyperloom_common.shared_storage.write_shared_bytes`). Never
+    use it for a file that holds a credential or that anything executes or sources.
+    ``share_parents`` makes the parents ``make_parents`` creates follow ``make_shared_dirs``
+    as well while the file keeps its own mode: a file only its owner may read still lives in
+    a directory the group can write.
+    ``fsync`` and ``fsync_dir`` raise the
+    ``OSError`` of a flush that fails: a caller that asks for durability learns
     when it did not get it.
     """
 
@@ -132,28 +146,46 @@ class JsonLineFormat:
 _JSON_WRITE = WriteOptions(make_parents=True)
 
 
-def _share_with_directory_group(file: Path, directory: Path) -> None:
-    """Grant ``file`` its directory's group read bit when the directory is a setgid shared tree."""
-    shared = directory.stat().st_mode
-    if shared & stat.S_ISGID:
-        os.chmod(file, stat.S_IRUSR | stat.S_IWUSR | (shared & stat.S_IRGRP))
-
-
 def _owner_mode(tmp: Path, path: Path, options: WriteOptions) -> None:
+    os.chmod(tmp, _private_mode(path, options))
+
+
+def _private_mode(path: Path, options: WriteOptions) -> int:
+    """The mode of a new file at ``path`` (a ``shared`` write's outside shared storage): owner-only, ``options.mode``
+    with group and other bits stripped, an existing file's with ``preserve_mode``, or with ``group_read`` the group's
+    read of a setgid directory."""
     if options.mode is not None:
         # Strip group/other bits: written files may hold sensitive payloads, so never expose them beyond the owner
         # regardless of caller intent.
-        os.chmod(tmp, options.mode & 0o700)
-    elif options.preserve_mode and path.is_file():
-        shutil.copymode(path, tmp)
-    elif options.group_read:
-        _share_with_directory_group(tmp, path.parent)
+        return options.mode & 0o700
+    if options.preserve_mode and path.is_file():
+        return stat.S_IMODE(path.stat().st_mode)
+    if options.group_read:
+        directory = path.parent.stat().st_mode
+        if directory & stat.S_ISGID:
+            return stat.S_IRUSR | stat.S_IWUSR | (directory & stat.S_IRGRP)
+    return stat.S_IRUSR | stat.S_IWUSR
 
 
 def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions = WriteOptions()) -> None:
     """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``)."""
     path = Path(path)
-    if options.make_parents and (options.shared or options.share_parents):
+    if options.shared:
+        # judged before the parents are made: a parent made under a umask that leaves group write in a setgid
+        # directory would look shared itself, and the file would be widened where the call alone would not be
+        widened = not options.make_parents or parent_is_shared(path)
+        if options.make_parents:
+            make_shared_dirs(path.parent)
+        private_mode = _private_mode(path, options)  # once the parents are there: group_read asks the parent
+        write_shared_bytes(
+            path,
+            data,
+            mode=SHARED_FILE_MODE if widened else private_mode,
+            private_mode=private_mode,
+            flush=Flush(file=options.fsync, directory=options.fsync_dir),
+        )
+        return
+    if options.make_parents and options.share_parents:
         make_shared_dirs(path.parent)
     elif options.make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -162,12 +194,9 @@ def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions =
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
-            if options.shared:
-                os.fchmod(fh.fileno(), SHARED_FILE_MODE)
             if options.fsync:
                 _fsync_handle(fh)
-        if not options.shared:
-            _owner_mode(tmp, path, options)
+        _owner_mode(tmp, path, options)
         os.replace(tmp, path)
         if options.fsync_dir:
             fsync_directory(path.parent)

@@ -10,7 +10,9 @@ directory by byte offset relies on three guarantees kept here:
   an unfinished write and never an event;
 * ``id`` is a decimal string that strictly increases within the app run, across restarts: on start the last
   complete line of the last segment gives the id to continue after, and a half-written tail left by a crash is
-  cut off first (the segment is replaced by a copy of its complete lines, never cut in place);
+  cut off first (the segment is replaced by a copy of its complete lines, never cut in place); what is no regular file
+  at a segment's name is passed over, and so is a newer segment this account cannot read (one only its owner may
+  read), after which the id continues past the most it could hold (:data:`_MAX_EVENTS_PER_SEGMENT`);
 * each start of the writer begins a new segment, made new (``O_EXCL``, never through a link) with mode ``0664``:
   the next leg of a hosted run may be another account of the directory's group, which reads the earlier segments but
   never opens one of another account's for writing;
@@ -24,7 +26,6 @@ Emitting is best effort: a failure is logged and the run continues.
 
 from __future__ import annotations
 
-import errno
 import json
 import logging
 import os
@@ -33,9 +34,15 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
-from hyperloom_common.shared_storage import create_new_shared_file, make_shared_dirs, write_shared_bytes
+from hyperloom_common.shared_storage import (
+    create_new_shared_file,
+    make_shared_dirs,
+    open_directory,
+    read_directory,
+    write_shared_bytes,
+)
 from hyperloom.plugs.socket import PlugContext
 
 log = logging.getLogger(__name__)
@@ -51,6 +58,12 @@ DATA_CONTENT_TYPE = "application/json"
 _OVERSIZE_KEYS = 20
 #: How many taken names past the last segment a new one is tried at before the writer gives up.
 _NEW_SEGMENT_TRIES = 64
+#: Fewer bytes than any event line takes (the fixed fields alone are longer).
+_MIN_EVENT_BYTES = 64
+#: The most events a segment can hold: it is cut at :data:`SEGMENT_MAX_BYTES`, and no line is longer than
+#: :data:`EVENT_MAX_BYTES`, which is less.
+_MAX_EVENTS_PER_SEGMENT = SEGMENT_MAX_BYTES // _MIN_EVENT_BYTES
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
 def segment_name(number: int) -> str:
@@ -60,10 +73,14 @@ def segment_name(number: int) -> str:
 
 def segment_numbers(events_dir: Path) -> list[int]:
     """The segment numbers present in ``events_dir``, ascending."""
+    return _segment_numbers(entry.name for entry in events_dir.iterdir())
+
+
+def _segment_numbers(names: Iterable[str]) -> list[int]:
     found = []
-    for entry in events_dir.iterdir():
-        stem = entry.name[: -len(SEGMENT_SUFFIX)]
-        if entry.name.endswith(SEGMENT_SUFFIX) and len(stem) == SEGMENT_DIGITS and stem.isdigit():
+    for name in names:
+        stem = name[: -len(SEGMENT_SUFFIX)]
+        if name.endswith(SEGMENT_SUFFIX) and len(stem) == SEGMENT_DIGITS and stem.isdigit():
             found.append(int(stem))
     return sorted(found)
 
@@ -93,37 +110,76 @@ def _cut_unfinished_tail(path: Path, raw: bytes, keep: int) -> None:
         write_shared_bytes(path, raw[:keep])
 
 
-def _read_segment(path: Path) -> bytes | None:
-    """What the segment file ``path`` holds, or ``None`` when it is not a regular file (a link a member of the group
-    put there, a pipe): such a name is never read, written or taken for a segment with events."""
+class _Unreadable:
+    """What :func:`_read_segment` returns for a segment file this account cannot read."""
+
+
+_UNREADABLE = _Unreadable()
+
+
+def _read_segment(directory: int, name: str) -> bytes | _Unreadable | None:
+    """What the segment file ``name`` of the directory open as ``directory`` holds; ``None`` when it is not a regular
+    file (a link or a directory a member of the group put there, a pipe), which is no segment, and
+    :data:`_UNREADABLE` for a regular file this account cannot read (only its owner may: a segment of a writer from
+    before segments were the group's to read). Such a name is never read, written or taken for a segment with events."""
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        descriptor = os.open(name, _READ_FLAGS, dir_fd=directory)
     except OSError as exc:
-        if exc.errno == errno.ELOOP:
+        return _not_read(directory, name, exc)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            log.warning("events: passing over %s, which is not a regular file", name)
             return None
-        raise
-    with os.fdopen(descriptor, "rb") as handle:
-        return handle.read() if stat.S_ISREG(os.fstat(descriptor).st_mode) else None
+        chunks = []
+        while chunk := os.read(descriptor, SEGMENT_MAX_BYTES):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except OSError as exc:
+        return _not_read(directory, name, exc)
+    finally:
+        os.close(descriptor)
+
+
+def _not_read(directory: int, name: str, exc: OSError) -> _Unreadable | None:
+    log.warning("events: passing over %s, which cannot be read: %s", name, exc.strerror or type(exc).__name__)
+    try:
+        regular = stat.S_ISREG(os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode)
+    except OSError:
+        return None
+    return _UNREADABLE if regular else None
 
 
 def _resume_point(events_dir: Path) -> tuple[int, int]:
     """``(last segment number, last id)`` to continue after; ``(0, 0)`` for an empty directory.  The newest segment
-    that is a regular file has its unfinished tail cut first (:func:`_cut_unfinished_tail`)."""
-    numbers = segment_numbers(events_dir)
-    newest = True
-    for number in reversed(numbers):
-        path = events_dir / segment_name(number)
-        raw = _read_segment(path)
-        if raw is None:
-            continue
-        lines, keep = _complete_lines(raw)
-        if newest:
-            _cut_unfinished_tail(path, raw, keep)
-            newest = False
-        last = _last_id(lines)
-        if last is not None:
-            return numbers[-1], last
-    return (numbers[-1] if numbers else 0), 0
+    that is a regular file has its unfinished tail cut first (:func:`_cut_unfinished_tail`).  For each newer segment
+    this account cannot read (:func:`_read_segment`) the id continues after the most events it could hold, so no id it
+    may hold is used again."""
+    directory = open_directory(events_dir)
+    try:
+        listing = read_directory(directory)
+        try:
+            numbers = _segment_numbers(os.listdir(listing))
+        finally:
+            os.close(listing)
+        passed_over = 0
+        newest = True
+        for number in reversed(numbers):
+            raw = _read_segment(directory, segment_name(number))
+            if raw is None:
+                continue
+            if isinstance(raw, _Unreadable):
+                passed_over += 1
+                continue
+            lines, keep = _complete_lines(raw)
+            if newest:
+                _cut_unfinished_tail(events_dir / segment_name(number), raw, keep)
+                newest = False
+            last = _last_id(lines)
+            if last is not None:
+                return numbers[-1], last + passed_over * _MAX_EVENTS_PER_SEGMENT
+        return (numbers[-1] if numbers else 0), passed_over * _MAX_EVENTS_PER_SEGMENT
+    finally:
+        os.close(directory)
 
 
 def _utc_now() -> str:

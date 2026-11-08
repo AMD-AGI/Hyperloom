@@ -62,6 +62,17 @@ os.unlink(sys.argv[1])
 os.symlink(sys.argv[2], sys.argv[1])
 """
 
+#: And to the session: a file of its own choosing that the next leg packages, and a link where the archive's copy of it
+#: goes, to a directory of the next leg's account, for that account to write the file into.
+_PLANT_ON_THE_WAY = """
+import os, sys
+session, archive, victim = sys.argv[1:]
+os.makedirs(os.path.join(session, "runs", "planted"))
+with open(os.path.join(session, "runs", "planted", "summary.txt"), "w") as chosen:
+    chosen.write("chosen by another account\\n")
+os.symlink(victim, os.path.join(archive, "runs", "planted"))
+"""
+
 
 def _private_dir(accounts: Accounts, name: str, uid: int) -> Path:
     path = accounts.root / name
@@ -125,11 +136,21 @@ def test_a_leg_of_another_account_of_the_group_takes_over_everything_the_previou
         victim.write_text("kept\n")
         os.chown(victim, second, second)
         accounts.run(first, f"import sys\nsys.argv[1:] = [{str(state / 'install.log')!r}, {str(victim)!r}]\n{_PLANT}")
+        # And a link at a directory of the archive, to a directory of the next leg's account holding a file the
+        # package's copy would replace.
+        kept = victim.parent / "summary.txt"
+        kept.write_text("the next account's own\n")
+        os.chown(kept, second, second)
+        kept.chmod(0o600)
+        planted = [str(session), str(archive), str(victim.parent)]
+        accounts.run(first, f"import sys\nsys.argv[1:] = {planted!r}\n{_PLANT_ON_THE_WAY}", umask=0o002)
 
         out = _leg(accounts, second, "leg-2", env, installer)
 
         assert "[hosted] starting session" in out
         assert victim.read_text() == "kept\n", "the planted link is replaced, never written through"
+        assert kept.read_text() == "the next account's own\n", "a link on the way is never followed"
+        assert sorted(path.name for path in victim.parent.iterdir()) == ["kept", "summary.txt"]
         assert (state / "install.log").read_text() == f"installer ran as {second}\n"
         assert json.loads((state / "exit.json").read_text()) == {"final": True, "returncode": 0, "stop_reason": None}
         for written in (state / "install.log", state / "exit.json", state / "session.json"):

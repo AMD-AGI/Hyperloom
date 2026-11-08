@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import contextlib
+import errno
 import logging
 import os
 import hashlib
@@ -63,15 +63,16 @@ ARCHIVE_MODE = 0o2770
 #: shown to a specialist.  Whatever copies a session directory elsewhere must leave these out.
 PRIVATE_SESSION_SUBDIRS: tuple[str, ...] = (ARCHIVE_DIRNAME,)
 
-#: The workspace root and its ``runtime/``, where the installer puts the env files that later steps source: the group
-#: may enter and read them, only their owner may change them, so no other account can swap what a run sources. The
-#: session directory below the root, with its own ``runtime/`` (lock, ledger, breakdown), is ``2775`` instead.
+#: The workspace root and its ``runtime/``, where the installer puts what later steps source or run (GEAK litellm config,
+#: source mirrors): the group may enter and read them, only their owner may change them, so no other account can swap
+#: what a run uses. The session directory below the root, with its own ``runtime/`` (lock, ledger, breakdown), is
+#: ``2775`` instead.
 _INSTALL_OWNED_MODE = 0o2755
 
 # Workspace-shared layout (one copy per $USER_DATA_PATH), with each entry's mode. mkdir-ed by install.sh + reused for
 # every session_dir launched from this workspace.
 _WORKSPACE_SKELETON: dict[str, int] = {
-    "runtime": _INSTALL_OWNED_MODE,  # install-generated env files (kernel-agent.env.sh, GEAK litellm config)
+    "runtime": _INSTALL_OWNED_MODE,  # install-generated runtime state (GEAK litellm config, source mirrors)
     # Workspace-level KB root; it only coincides with the KB path when session_dir == workspace_root. What the accounts
     # of a run write there is a marker nothing sources.
     "runtime/recipe_kb": SHARED_DIR_MODE,
@@ -167,8 +168,12 @@ def ensure_archive_root(session_dir: Path) -> Path:
     """
     make_shared_dirs(session_dir)
     root = archive_root(session_dir)
-    with contextlib.suppress(FileExistsError):  # what already stands there, a link included, is judged below
+    try:
         make_shared_dirs(root, mode=ARCHIVE_MODE)
+    except OSError as exc:
+        if exc.errno not in (errno.EEXIST, errno.ELOOP):
+            raise
+        # what already stands there, a link included, is judged below
     info = os.lstat(root)
     if not stat.S_ISDIR(info.st_mode):
         raise PermissionError(f"the archive {root} is not a directory (a link to one is refused too)")
@@ -269,7 +274,7 @@ def asset_prompt_references_dir() -> Path:
 
 # Workspace-/session-scoped artefact helpers.
 def runtime_dir() -> Path:
-    """``<workspace_root>/runtime/`` — workspace-shared writable runtime (kernel-agent env file, GEAK litellm config)."""
+    """``<workspace_root>/runtime/`` — workspace-shared writable runtime (GEAK litellm config, source mirrors)."""
     return workspace_root() / "runtime"
 
 

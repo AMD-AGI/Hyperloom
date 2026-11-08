@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_common.tests.shared_accounts import theirs
 from hyperloom.hosted import entry, host_info
 from hyperloom.hosted.host_info import Var
 from hyperloom.hosted.tests.test_campaign import FULL, MINIMAL
@@ -122,6 +123,7 @@ def _session_json(run):
 
 # -- a fresh run -------------------------------------------------------------------------------------------------
 def test_a_fresh_run_gets_its_session_dir_the_plug_profile_and_a_group_shared_archive(run, monkeypatch):
+    run.work.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     fake = FakeOptimize(monkeypatch, stop_reason="target_reached")
     assert entry.main(["run"]) == 0
     (argv,) = fake.calls
@@ -391,6 +393,20 @@ def test_an_archive_an_earlier_leg_left_unusable_ends_the_run_finally_naming_it(
         "returncode": 2,
         "error": f"the archive {archive} is not a directory (a link to one is refused too)",
     }
+    assert len(fake.calls) == 1
+
+
+def test_a_link_another_account_put_on_the_way_to_the_session_ends_the_run_finally_naming_it(run, monkeypatch):
+    fake = FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    sessions = Path(_session_json(run)).parent
+    sessions.rename(sessions.with_name("moved"))
+    sessions.symlink_to(sessions.with_name("moved"))
+    theirs(sessions, monkeypatch)
+    run.restart()
+    assert entry.main(["run"]) == 2
+    error = _exit(run)["error"]
+    assert "is not followed past a directory another account can write or owns" in error and str(sessions) in error
     assert len(fake.calls) == 1
 
 
@@ -731,6 +747,7 @@ def test_the_installer_output_goes_to_a_log_in_the_state_dir(run, monkeypatch):
 
 def test_each_legs_installer_log_is_a_new_file_renamed_over_the_last_never_one_opened_in_place(run, monkeypatch):
     """The previous leg's log may be another account's, and a member of the group may have put a link there."""
+    run.state.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     _recording_installer(run, None)
     _record_optimize(run, monkeypatch)
     entry.main(["run"])
@@ -754,6 +771,7 @@ def test_each_legs_installer_log_is_a_new_file_renamed_over_the_last_never_one_o
 
 
 def test_exit_and_session_json_are_readable_by_the_group_and_replaced_never_rewritten(run, monkeypatch):
+    run.state.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     FakeOptimize(monkeypatch)
     entry.main(["run"])
     for name in (entry.EXIT_FILE, entry.SESSION_FILE):
