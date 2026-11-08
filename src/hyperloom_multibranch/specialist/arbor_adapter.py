@@ -627,11 +627,17 @@ def host_rules(spec: AgentSpec) -> list[str]:
     point = ", ".join(f"{key} {value}" for key, value in _operating_point(spec.workload).items())
     owned = ", ".join(sorted({*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}))
     kind = str(spec.workload.get("kind") or "the session's workload")
+    kept = (
+        "in one measurement, which is final unless a guard (p90 interactivity, output throughput, failed requests)"
+        " holds it for a retest"
+        if kind == AGENTX
+        else "that a second measurement confirms"
+    )
     rules = [
         f"{HOST_RULE}: the workload is fixed: {kind}{f' at {point}' if point else ''}, measured by MB's client, the"
         f" only bench of record. A change never sets {owned}: MB owns them and refuses a launch that does.",
         f"{HOST_RULE}: MB keeps a change only on its own measurement of {spec.metric} on its own cards, a gain above"
-        " its bar that a second measurement confirms; Arbor's numbers decide only Arbor's own KEEPs.",
+        f" its bar {kept}; Arbor's numbers decide only Arbor's own KEEPs.",
     ]
     if kind == AGENTX:
         rules.append(
