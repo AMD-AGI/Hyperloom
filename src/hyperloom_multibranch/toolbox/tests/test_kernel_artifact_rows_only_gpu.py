@@ -9,8 +9,8 @@ own Qwen3-8B table tunes with ``triton``; qkv and o, which other models' tables 
 table does. Without the override aiter would rewrite the table files and raise ``Found N duplicate shape entries``
 before the server started. What must hold: the server boots and the test succeeds; ``framework_base.json`` says which
 rows were taken out of which of the image's tables, as many as the tables hold; the server's log shows the rows hit, the
-overridden shapes read as ``torch``; no duplicate-entry error in any log; the shared tables and ``/tmp/aiter_configs``
-as they were. What was measured is printed (``PROBE``).
+overridden shapes read as ``torch``; no duplicate-entry error in any log; the merged table the server read in a directory
+of the test's own; the shared tables and ``/tmp/aiter_configs`` as they were. What was measured is printed (``PROBE``).
 
 Needs what ``test_kernel_artifact_gpu`` needs, with ``HL_GPU_CARDS`` naming one card.
 """
@@ -28,9 +28,15 @@ from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, RecipeDelta
 from hyperloom.contracts.measurement import TABLE_EXERCISED, TABLE_NOT_EXERCISED, TestResult, Validity
 from hyperloom.measure.framework.base import DEFAULT_CONFIGS, tree_files
 from hyperloom.measure.framework.merge import PRIVATE
+from hyperloom.measure.runner.own_tmp import OWN_TMP_PREFIX
 from hyperloom_multibranch.toolbox.tests.integration_inputs import baseline_recipe
 from hyperloom_multibranch.toolbox.tests.integration_rig import Specialist, build_stack
-from hyperloom_multibranch.toolbox.tests.test_framework_isolation_parallel_gpu import AITER_MERGE_DIR, SHARED, VARIABLE
+from hyperloom_multibranch.toolbox.tests.test_framework_isolation_parallel_gpu import (
+    AITER_CORE,
+    AITER_MERGE_DIR,
+    SHARED,
+    VARIABLE,
+)
 from hyperloom_multibranch.toolbox.tests import test_kernel_artifact_gpu
 from hyperloom_multibranch.toolbox.tests.test_kernel_artifact_gpu import (
     ENVS,
@@ -104,6 +110,20 @@ def _tuned_as(lookups: list[str], row: dict[str, str]) -> list[str]:
     """The libtype of each lookup the server logged for the shape of ``row``."""
     wanted = f"shape is M:{row['M']}, N:{row['N']}, K:{row['K']} "
     return [m.group(1) for line in lookups if wanted in line and (m := re.search(r"libtype is (\w+)", line))]
+
+
+def _assert_merged_view_is_the_tests_own(base: dict[str, Any], lookups: list[str]) -> None:
+    """The merged table the server read is in a directory of the test's own. An aiter that writes it to the literal
+    ``/tmp/aiter_configs`` has it redirected by the start-up hook to the test's merge directory; a newer one writes it to
+    ``tempfile.gettempdir()/aiter_configs``, leaves the hook nothing to redirect, and the runner points that at the
+    test's own temporary directory (``hyperloom.measure.runner.own_tmp``)."""
+    parents = {Path(name).parent for name in _named_tables(lookups)}
+    if str(AITER_MERGE_DIR) in AITER_CORE.read_text(encoding="utf-8"):
+        assert Path(base["merge_dir"]) in parents, parents
+        assert base["merge_isolation"] == PRIVATE, base["merge_reason"]
+    else:
+        own = {p for p in parents if p.name == AITER_MERGE_DIR.name and p.parent.name.startswith(OWN_TMP_PREFIX)}
+        assert own, parents
 
 
 @dataclass
@@ -187,8 +207,8 @@ async def test_rows_put_with_rows_only_are_read_over_the_image_tables_and_overri
         "the by-hand count of the hit lines of the rows put"
     )
     assert 1 <= hits.rows_hit <= len(rows) and len(result.runtime_findings) == 1
-    assert Path(base["merge_dir"]) in {Path(name).parent for name in _named_tables(facts["lookups"])}
-    assert base["merge_isolation"] == PRIVATE and base["isolation"] == "private_copies"
+    _assert_merged_view_is_the_tests_own(base, facts["lookups"])
+    assert base["isolation"] == "private_copies"
     assert base["framework_base_changed"] is False and base["matches_session"] is True
     assert tree_files(Path(DEFAULT_CONFIGS)) == tables_before, "the shared tables are as they were"
     assert tree_files(AITER_MERGE_DIR) == merged_before, "nothing reached /tmp/aiter_configs"
