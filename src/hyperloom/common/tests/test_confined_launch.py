@@ -310,7 +310,7 @@ def test_a_login_the_host_replaces_or_makes_after_the_launch_is_not_shown(outsid
     visible = _write(tools / "kube/visible", "shown")
     env = {"PATH": "/usr/bin:/bin", "HF_HOME": str(hf), "KUBECONFIG": str(kube)}
     readable = (*toolchain_paths(env, sys.executable, writable=(work,)), tools)
-    masked = credential_paths(env, app_environ={}, allowed=(*readable, work), writable=(work,))
+    masked = credential_paths(env, allowed=(*readable, work), writable=(work,))
     assert {kube, hf / "token"} <= set(masked)
     policy = Confinement(writable=(work,), readable=readable, masked=masked).policy(chdir=work)
     paths = {"kube": kube, "token": hf / "token", "model": model, "visible": visible}
@@ -331,6 +331,62 @@ def test_a_login_the_host_replaces_or_makes_after_the_launch_is_not_shown(outsid
     seen = json.loads(out)
     assert seen == {"kube": "ENOENT", "token": "ENOENT", "model": "ok:weights", "visible": "ok:shown", "write": "EROFS"}
     assert not (hf / "new").exists()
+
+
+#: Where Hugging Face writes a login made after the launch (``huggingface_hub``'s resolution), in a data tree that has
+#: none of it yet: the settings, and the login files ``hf auth login`` then writes.
+HF_LATER = {
+    "token_path": ({"HF_TOKEN_PATH": "{data}/secrets/hf_token"}, ["secrets/hf_token", "secrets/stored_tokens"]),
+    "hf_home": ({"HF_HOME": "{data}/.hf"}, [".hf/token", ".hf/stored_tokens"]),
+    "xdg_cache": ({"XDG_CACHE_HOME": "{data}/.cache"}, [".cache/huggingface/token"]),
+    "home": ({"HOME": "{data}/home"}, ["home/.cache/huggingface/token", "home/.cache/huggingface/stored_tokens"]),
+}
+
+
+@pytest.mark.parametrize("bound", ["derived", "whole"])
+@pytest.mark.parametrize("whose", ["app", "child"])
+@pytest.mark.parametrize("location", list(HF_LATER))
+def test_a_hugging_face_login_made_after_the_launch_where_nothing_was_is_not_shown(
+    outside_tmp, monkeypatch, location, whose, bound
+):
+    """``MODEL_PATH`` is a tree that holds where Hugging Face would keep its login, not made yet, its directories
+    neither: the host logs in while the sandbox runs, making them, and the agent reads none of it, while the model
+    beside it reads. The tree is readable as the toolchain derives it, or whole, as a caller handing it over names
+    it: the masks keep the login out either way."""
+    isolation = BwrapIsolation(usable_bwrap())
+    data, work = outside_tmp / "data", outside_tmp / "work"
+    work.mkdir()
+    model = _write(data / "model/weights.txt", "weights")
+    settings, logins = HF_LATER[location]
+    for name in ("HF_TOKEN_PATH", "HF_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    env = {"PATH": "/usr/bin:/bin", "MODEL_PATH": str(data)}
+    named = {name: value.format(data=data) for name, value in settings.items()}
+    if whose == "app":
+        for name, value in named.items():
+            monkeypatch.setenv(name, value)
+    else:
+        env.update(named)
+    readable = (*toolchain_paths(env, sys.executable, writable=(work,)), *((data,) if bound == "whole" else ()))
+    policy = Confinement(writable=(work,), readable=readable, masked=credential_paths(env, allowed=readable)).policy(
+        chdir=work
+    )
+    paths = {"model": model, **{login: data / login for login in logins}}
+    argv = [sys.executable, "-I", "-S", "-c", LATER, _named(paths), str(work / "out")]
+    command, child_env = isolation.launch(argv, policy, env)
+    with subprocess.Popen(
+        command, env=child_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    ) as child:
+        try:
+            assert child.stdout.readline().strip() == "ready", child.stderr.read()
+            for login in logins:
+                _write(data / login, "SECRET-HF")
+            out, err = child.communicate("go\n", timeout=60)
+        finally:
+            child.kill()
+    assert child.returncode == 0, err
+    assert "SECRET" not in out + err
+    assert json.loads(out) == {"model": "ok:weights", **dict.fromkeys(logins, "ENOENT"), "write": "ok:3"}
 
 
 @pytest.mark.parametrize("variable", ["PATH", "PYTHONPATH"])

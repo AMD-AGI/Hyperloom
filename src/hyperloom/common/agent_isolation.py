@@ -80,8 +80,6 @@ BWRAP = "bwrap"
 NONE = "none"
 REFUSED = "refused"
 
-ProbeBwrap = Callable[[str | None], BwrapProbe]
-
 
 class IsolationRefused(RunAsError):
     """No tier can isolate an agent that must be. A :class:`RunAsError`, so every launch path that refuses on one
@@ -239,18 +237,18 @@ def _account(name: str, allow_account: bool) -> tuple[RunAs | None, str]:
     return run_as, ""
 
 
-def _bwrap(probe: ProbeBwrap) -> BwrapProbe:
+def _bwrap() -> BwrapProbe:
     """The probe of the bubblewrap this process may use: a hosted run's layer one, else the one on ``PATH``. A hosted
     run whose layer path is empty or relative is refused without a probe, which takes an empty path for the
     bubblewrap on ``PATH``."""
     if not _STATE.hosted:
-        return probe(None)
+        return bwrap_probe(None)
     layer = _STATE.layer_bwrap
     if not layer:
         return BwrapProbe(None, None, (NO_LAYER_BWRAP,))
     if not os.path.isabs(layer):
         return BwrapProbe(layer, None, (f"bubblewrap at {layer} is not an absolute path",))
-    return probe(layer)
+    return bwrap_probe(layer)
 
 
 def _bwrap_reasons(found: BwrapProbe) -> tuple[str, ...]:
@@ -260,10 +258,10 @@ def _bwrap_reasons(found: BwrapProbe) -> tuple[str, ...]:
     return tuple(line if line.startswith("bubblewrap") else prefix + line for line in found.problems)
 
 
-def _unaccounted(account_reason: str, *, required: bool, warn: bool, probe: ProbeBwrap) -> BwrapIsolation | NoIsolation:
+def _unaccounted(account_reason: str, *, required: bool, warn: bool) -> BwrapIsolation | NoIsolation:
     """Bubblewrap, else a refusal (``required``) or unconfined; ``warn`` logs once that an account was asked for."""
     note = f"running them as an account: {account_reason}"
-    found = _bwrap(probe)
+    found = _bwrap()
     if found.ok:
         if warn:
             _log_once(logging.WARNING, f"agents run under bubblewrap: {note}")
@@ -275,9 +273,7 @@ def _unaccounted(account_reason: str, *, required: bool, warn: bool, probe: Prob
     return NoIsolation(reasons)
 
 
-def choose_agent_isolation(
-    user: str | None = None, *, allow_account: bool = True, probe: ProbeBwrap = bwrap_probe
-) -> AgentIsolation:
+def choose_agent_isolation(user: str | None = None, *, allow_account: bool = True) -> AgentIsolation:
     """How to launch a specialist now (see the module doc). ``user`` defaults to ``HYPERLOOM_SPECIALIST_USER``;
     ``allow_account=False`` (the Ray GPU actor path) never gives the account tier.
 
@@ -288,29 +284,27 @@ def choose_agent_isolation(
     run_as, reason = _account(name, allow_account)
     if run_as is not None:
         return AccountIsolation(run_as)
-    return _unaccounted(reason, required=isolation_required(name), warn=bool(name), probe=probe)
+    return _unaccounted(reason, required=isolation_required(name), warn=bool(name))
 
 
-def choose_sandbox_isolation(*, probe: ProbeBwrap = bwrap_probe) -> BwrapIsolation | NoIsolation:
+def choose_sandbox_isolation() -> BwrapIsolation | NoIsolation:
     """How to launch an agent sandbox's commands now: bubblewrap, else unconfined, which only a hosted run refuses.
 
     Raises:
         IsolationRefused: In a hosted run, where bubblewrap cannot run a sandbox.
     """
-    return _unaccounted(SANDBOX_ACCOUNT, required=_STATE.hosted, warn=False, probe=probe)
+    return _unaccounted(SANDBOX_ACCOUNT, required=_STATE.hosted, warn=False)
 
 
-def bwrap_isolation(*, probe: ProbeBwrap = bwrap_probe) -> BwrapIsolation | NoIsolation:
+def bwrap_isolation() -> BwrapIsolation | NoIsolation:
     """Bubblewrap alone, for a launcher with an account tier of its own (a native compile), which decides what to do
     without it; where its probe finds a problem, :class:`NoIsolation` naming bubblewrap's reasons, ``transient`` where
     the probe gave no answer in time."""
-    found = _bwrap(probe)
+    found = _bwrap()
     return BwrapIsolation(found) if found.ok else NoIsolation(_bwrap_reasons(found), found.transient)
 
 
-def require_agent_isolation(
-    *, bwrap: str | None, allow_account: bool = True, probe: ProbeBwrap = bwrap_probe
-) -> AgentIsolation:
+def require_agent_isolation(*, bwrap: str | None, allow_account: bool = True) -> AgentIsolation:
     """At a hosted run's start-up: mark this process as one whose agents must be isolated, with the hosting layer's
     bubblewrap at ``bwrap`` (an absolute path; ``None`` or empty when the run has none, which refuses every launch
     bubblewrap would make) and no other, and choose now, so a host where neither tier works refuses before anything
@@ -322,7 +316,7 @@ def require_agent_isolation(
     with _STATE.lock:
         _STATE.hosted = True
         _STATE.layer_bwrap = bwrap
-    return choose_agent_isolation(allow_account=allow_account, probe=probe)
+    return choose_agent_isolation(allow_account=allow_account)
 
 
 @dataclass(frozen=True)
@@ -347,11 +341,11 @@ def _decided(choose: Callable[[], AgentIsolation]) -> _Decision:
     return _Decision(NONE, found.reasons)
 
 
-def agent_isolation_report(*, probe: ProbeBwrap = bwrap_probe) -> IsolationReport:
+def agent_isolation_report() -> IsolationReport:
     """How a specialist and an agent sandbox launched now would be isolated, and why not as an account; never
     raises."""
-    specialists = _decided(lambda: choose_agent_isolation(probe=probe))
-    sandboxes = _decided(lambda: choose_sandbox_isolation(probe=probe))
+    specialists = _decided(choose_agent_isolation)
+    sandboxes = _decided(choose_sandbox_isolation)
     in_use = specialists.bwrap or sandboxes.bwrap
     return IsolationReport(
         specialists=specialists.how,
@@ -362,10 +356,10 @@ def agent_isolation_report(*, probe: ProbeBwrap = bwrap_probe) -> IsolationRepor
     )
 
 
-def announce_agent_isolation(*, probe: ProbeBwrap = bwrap_probe) -> IsolationReport:
+def announce_agent_isolation() -> IsolationReport:
     """Say once at start-up how this process's agents are isolated: one WARNING when some run unconfined or would be
     refused, naming which and why, else one INFO line. Returns the report."""
-    report = agent_isolation_report(probe=probe)
+    report = agent_isolation_report()
     decisions = (("specialists", report.specialists), ("agent sandboxes", report.sandboxes))
     unconfined = [name for name, how in decisions if how == NONE]
     refused = [name for name, how in decisions if how == REFUSED]
