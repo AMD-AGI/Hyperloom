@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The cache build publishes the inference_suite staging with the commit's own inference_suite, and fails without it."""
+"""The cache build publishes the inference_suite staging with the commit's own inference_suite, and fails without it; a
+local session publishes the one this interpreter imports."""
 
 from __future__ import annotations
 
@@ -10,9 +11,14 @@ from pathlib import Path
 
 import pytest
 
+import inference_suite
 from hyperloom.measure.runner import cache_build
 from hyperloom.measure.runner.cache_build import CacheEntry
-from hyperloom.measure.runner.suite_publish import SuitePublishError, publish_inference_suite
+from hyperloom.measure.runner.suite_publish import (
+    SuitePublishError,
+    publish_inference_suite,
+    publish_own_inference_suite,
+)
 
 _FAKE_MAIN = """
 import json, os, sys
@@ -46,6 +52,20 @@ def test_the_commits_own_inference_suite_publishes_into_the_runner_caches_infere
     assert seen["argv"] == ["publish", "--stagings", str(cache / "inference-suite")]
     assert Path(seen["module"]).is_relative_to(source / "src")
     assert not list(source.rglob("__pycache__")), "the entry's source is checked file by file on reuse"
+
+
+def test_the_inference_suite_this_interpreter_imports_publishes_for_runners_started_from_this_installation(
+    tmp_path, monkeypatch
+):
+    packages = _commit_source(tmp_path) / "src"
+    monkeypatch.setattr(inference_suite, "__file__", str(packages / "inference_suite" / "__init__.py"))
+    cache = tmp_path / "cache"
+    cache.mkdir()
+
+    assert publish_own_inference_suite(cache) == cache / "inference-suite" / "k"
+    seen = json.loads((cache / "seen.json").read_text())
+    assert seen["argv"] == ["publish", "--stagings", str(cache / "inference-suite")]
+    assert Path(seen["module"]).is_relative_to(packages)
 
 
 def test_a_failed_publish_is_an_error_naming_its_staging_missing_line(tmp_path, monkeypatch):

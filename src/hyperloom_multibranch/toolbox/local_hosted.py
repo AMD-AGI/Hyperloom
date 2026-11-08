@@ -112,6 +112,7 @@ __all__ = [
     "build_local_toolbox",
     "host_tool_repos",
     "private_jit_store",
+    "runner_cache_dir",
 ]
 
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once.
@@ -422,14 +423,16 @@ def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTempl
     return replace(template, envs={**template.envs, **pack})
 
 
+def runner_cache_dir(environ: Mapping[str, str]) -> Path:
+    """This host's runner cache as its runners are told it, made absolute: a runner starts elsewhere. It holds the
+    inference_suite staging every test runs and the check sets."""
+    return cache_root(environ).expanduser().resolve()
+
+
 def _shared_dirs(jit_store: Path | None, eval_sets: bool, environ: Mapping[str, str]) -> dict[str, str]:
     """The host directories the runners are told, by the variable each reads, for the shared stores that are on: the
-    compiled-code cache, and the runner cache the check sets are read from when a check is on (made absolute: a runner
-    starts elsewhere)."""
-    named = {
-        JIT_CACHE_ENV: jit_store,
-        RUNNER_CACHE_ENV: cache_root(environ).expanduser().resolve() if eval_sets else None,
-    }
+    compiled-code cache, and the runner cache the check sets are read from when a check is on."""
+    named = {JIT_CACHE_ENV: jit_store, RUNNER_CACHE_ENV: runner_cache_dir(environ) if eval_sets else None}
     return {name: str(path) for name, path in named.items() if path is not None}
 
 

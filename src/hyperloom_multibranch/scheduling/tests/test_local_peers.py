@@ -104,6 +104,8 @@ from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox
 from hyperloom_multibranch.tests.fakes import RefusingCritic
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
 from hyperloom.inference_optimizer.cli import base_launch as cli_base_launch
+from hyperloom.measure.runner import suite_publish
+from hyperloom.measure.runner.suite_publish import SuitePublishError
 from hyperloom.measure.tests.bundle_factory import base_launch
 from hyperloom.orchestrator.state.base_launch import freeze_base, frozen_base
 from inference_suite import SourceSnapshot
@@ -550,6 +552,48 @@ def test_the_specialists_recall_past_sessions_lessons_from_the_pool_beside_the_a
     recall = specialist_recall(tmp_path / "reports")
 
     assert recall.knows(lesson.lesson_id) and recall.past_revision() != ""
+
+
+@pytest.fixture(autouse=True)
+def publishes_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test here fetches the staging a local session publishes for its runners."""
+
+    monkeypatch.setattr(suite_publish, "publish_own_inference_suite", _Publishes())
+
+
+class _Publishes:
+    """Publishes the runners' staging by name only, recording the runner cache of each publish."""
+
+    def __init__(self, refusal: str = "") -> None:
+        self.caches: list[Path] = []
+        self.refusal = refusal
+
+    def __call__(self, cache_root: Path) -> Path:
+        if self.refusal:
+            raise SuitePublishError(self.refusal)
+        self.caches.append(cache_root)
+        return cache_root / "inference-suite" / "key"
+
+
+async def test_a_local_session_publishes_the_staging_its_runners_read_into_their_runner_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(tmp_path / "runner-cache"))
+    publishes = _Publishes()
+    monkeypatch.setattr(suite_publish, "publish_own_inference_suite", publishes)
+
+    async with _peers(tmp_path / "workspace", monkeypatch, WORKLOAD):
+        assert publishes.caches == [(tmp_path / "runner-cache").resolve()]
+
+
+async def test_a_local_session_whose_staging_cannot_be_published_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(suite_publish, "publish_own_inference_suite", _Publishes("exited 2: staging_missing: offline"))
+
+    with pytest.raises(PeersUnavailable, match="cannot be published: exited 2: staging_missing: offline"):
+        async with _peers(tmp_path, monkeypatch, WORKLOAD):
+            pass
 
 
 async def test_a_fresh_session_freezes_its_base_launch_in_the_toolbox_directory_before_any_test(
