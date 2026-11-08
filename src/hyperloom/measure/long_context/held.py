@@ -14,8 +14,9 @@ flush (sglang's ``/flush_cache``). A server that exposes none, or refuses the fl
 are then disjoint from what the benchmark sent, being the staged synthetic sets, which share at most a chat template's
 first tokens with a trace. Which of the two held is a note on the test.
 
-A test whose server is not held up (a framework the lifecycle cannot hold, a fallback that restarted the server per level)
-runs the checks on no server: :class:`NoServer` makes each one record the reason, never a pass and never a second boot.
+A test whose server is not held up for them (a framework the lifecycle cannot hold, a fallback that restarted the server
+per level, an AgentX test: ``BenchmarkPoint.holds_accuracy_checks``) runs the checks on no server: :class:`NoServer`
+makes each one record the reason, never a pass and never a second boot.
 """
 
 from __future__ import annotations
