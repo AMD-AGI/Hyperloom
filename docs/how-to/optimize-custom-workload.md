@@ -104,9 +104,9 @@ A scriptable workload has no server, and therefore no accuracy benchmark. The
 fail-closed:
 
 ```{important}
-A missing or unparseable `quality_gate` scores 0.0 accuracy, which **rejects
-every candidate** the run produces. The symptom is a run that completes, reports
-speedups, and keeps nothing.
+A baseline whose report carries no `quality_gate` **stops the run at once** with
+`stop_reason: baseline_accuracy_failed`; the log line names the report it read.
+A candidate whose report has no gate scores 0.0 accuracy and is rejected.
 ```
 
 Run your entrypoint by hand once and confirm the key is actually present in
@@ -313,7 +313,7 @@ denominator. For the full artifact schema, see
 |---------|-------|
 | Missing-path error at launch | `--framework-path` or `--benchmark-scripts-dir` not given; `custom` has no shipped entrypoint to fall back on |
 | Entrypoint not resolved | The directory has no `custom_<gpu-type>.sh` and does not contain exactly one `.sh` |
-| Run completes but keeps no optimization | The report carries no `quality_gate`, so accuracy scores 0.0 and every candidate is rejected |
+| Run stops after the baseline with `baseline_accuracy_failed` | The report carries no `quality_gate`; the stop line names the report |
 | Whole budget spent in `PRELUDE` | Credentials not exported from the launching shell; every orchestration turn returns 401 |
 | Specialist patches never land | `--framework-path` not given, so PolicyGate does not recognize the tree |
 | Baseline higher than expected | `--extra-env` pins optimization switches, so the search is incrementing on already-optimized code |

@@ -568,3 +568,27 @@ def test_eval_enablement_quality_ref_exempt_not_routed(monkeypatch):
     executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("sglang", rec, {"quality_ref_exempt": True}), result)
     assert rec.stop_reason == ""
     assert BASELINE_EVAL_FAILED_KEY not in result
+
+
+def test_scriptable_baseline_without_a_quality_gate_stops_instead_of_enablement(tmp_path, caplog):
+    """An operator script that writes no ``quality_gate`` is no capability gap a specialist can fix: stop at once."""
+    from hyperloom.orchestrator.actions.executors._accuracy_gate import parse_eval_results
+    from hyperloom.orchestrator.actions.executors._round_folder import BENCHMARK_REPORT_FILE
+    from hyperloom.orchestrator.actions.executors.benchmark_run.records import record_eval_score
+
+    attempt = tmp_path / "runs" / "baseline" / "attempt"
+    attempt.mkdir(parents=True)
+    report = attempt / BENCHMARK_REPORT_FILE
+    report.write_text(json.dumps({"status": "success", "throughput": 22793.17}), encoding="utf-8")
+    result = {"status": "succeeded", "output_dir": str(attempt)}
+    record_eval_score(result, parse_eval_results(attempt, framework="custom"))
+
+    rec = SharedState(enablement_mode="all")
+    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.actions.executors._accuracy_gate"):
+        BaselineExecutor()._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("custom", rec), result)
+
+    assert rec.stop_reason == "baseline_accuracy_failed"
+    assert BASELINE_EVAL_FAILED_KEY not in result
+    stop_line = next(r.getMessage() for r in caplog.records if "stopping run" in r.getMessage())
+    assert "quality_gate" in stop_line
+    assert str(report) in stop_line

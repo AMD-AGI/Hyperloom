@@ -197,7 +197,16 @@ def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] 
 
 #: What ``record_eval_score`` writes about the score itself; the definition digest travels with it, since a score
 #: graded without the definition it was taken under compares with no baseline.
-EVAL_SCORE_KEYS = ("accuracy", "accuracy_task", "accuracy_metric", "accuracy_source", ACCURACY_DEFINITION_DIGEST_KEY)
+#: The ``parse_eval_results`` kind of a score that judges the round report rather than the model; ``""`` otherwise.
+ACCURACY_EVAL_KIND_KEY = "accuracy_eval_kind"
+EVAL_SCORE_KEYS = (
+    "accuracy",
+    "accuracy_task",
+    "accuracy_metric",
+    "accuracy_source",
+    ACCURACY_DEFINITION_DIGEST_KEY,
+    ACCURACY_EVAL_KIND_KEY,
+)
 
 
 def carry_eval_score(result: dict[str, Any], scored: Mapping[str, Any]) -> None:
@@ -215,6 +224,7 @@ def record_eval_score(result: dict[str, Any], eval_data: Mapping[str, Any]) -> b
     result["accuracy_metric"] = eval_data.get("metric", "")
     result["accuracy_source"] = eval_data.get("source_file", "")
     result[ACCURACY_DEFINITION_DIGEST_KEY] = eval_data.get(EVAL_DEFINITION_DIGEST_KEY, "")
+    result[ACCURACY_EVAL_KIND_KEY] = eval_data.get("kind", "")
     result["eval_runtime_sec"] = eval_data.get("eval_runtime_sec")
     return True
 
