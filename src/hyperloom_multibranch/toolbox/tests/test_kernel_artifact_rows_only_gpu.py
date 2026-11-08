@@ -27,12 +27,9 @@ from typing import Any
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, RecipeDelta
 from hyperloom.contracts.measurement import TABLE_EXERCISED, TABLE_NOT_EXERCISED, TestResult, Validity
 from hyperloom.measure.framework.base import DEFAULT_CONFIGS, tree_files
-from hyperloom.measure.framework.merge import PRIVATE
-from hyperloom.measure.runner.own_tmp import OWN_TMP_PREFIX
 from hyperloom_multibranch.toolbox.tests.integration_inputs import baseline_recipe
 from hyperloom_multibranch.toolbox.tests.integration_rig import Specialist, build_stack
 from hyperloom_multibranch.toolbox.tests.test_framework_isolation_parallel_gpu import (
-    AITER_CORE,
     AITER_MERGE_DIR,
     SHARED,
     VARIABLE,
@@ -43,6 +40,7 @@ from hyperloom_multibranch.toolbox.tests.test_kernel_artifact_gpu import (
     SHAPE_ROW,
     TARGET,
     TORCH_ROW,
+    _assert_merged_view_is_the_tests_own,
     _facts,
     _linear_shapes,
     _named_tables,
@@ -110,20 +108,6 @@ def _tuned_as(lookups: list[str], row: dict[str, str]) -> list[str]:
     """The libtype of each lookup the server logged for the shape of ``row``."""
     wanted = f"shape is M:{row['M']}, N:{row['N']}, K:{row['K']} "
     return [m.group(1) for line in lookups if wanted in line and (m := re.search(r"libtype is (\w+)", line))]
-
-
-def _assert_merged_view_is_the_tests_own(base: dict[str, Any], lookups: list[str]) -> None:
-    """The merged table the server read is in a directory of the test's own. An aiter that writes it to the literal
-    ``/tmp/aiter_configs`` has it redirected by the start-up hook to the test's merge directory; a newer one writes it to
-    ``tempfile.gettempdir()/aiter_configs``, leaves the hook nothing to redirect, and the runner points that at the
-    test's own temporary directory (``hyperloom.measure.runner.own_tmp``)."""
-    parents = {Path(name).parent for name in _named_tables(lookups)}
-    if str(AITER_MERGE_DIR) in AITER_CORE.read_text(encoding="utf-8"):
-        assert Path(base["merge_dir"]) in parents, parents
-        assert base["merge_isolation"] == PRIVATE, base["merge_reason"]
-    else:
-        own = {p for p in parents if p.name == AITER_MERGE_DIR.name and p.parent.name.startswith(OWN_TMP_PREFIX)}
-        assert own, parents
 
 
 @dataclass
