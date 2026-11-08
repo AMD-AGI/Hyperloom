@@ -53,7 +53,7 @@ from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.framework.base import SESSION_SNAPSHOT_DIR, framework_envs, image_configs
-from hyperloom.measure.local_templates import image_env, local_runner_template
+from hyperloom.measure.local_templates import host_hf_env, image_env, local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
@@ -413,11 +413,12 @@ def host_tool_repos(environ: Mapping[str, str] | None = None) -> dict[str, str]:
 
 
 def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTemplate:
-    """The runner template: the image's variables, the host's tool repositories (:func:`host_tool_repos`), ``runner_envs``
-    over both, and the variable that names the session's rule pack. ``runner_envs`` add to the image's variables, never
+    """The runner template: the image's variables, the host's Hugging Face settings
+    (:func:`~hyperloom.measure.local_templates.host_hf_env`) and tool repositories (:func:`host_tool_repos`),
+    ``runner_envs`` over them, and the variable that names the session's rule pack. ``runner_envs`` add to the image's variables, never
     replace them: without ``ROCM_PATH`` and ``LD_LIBRARY_PATH`` the runner cannot import torch on an image whose ROCm
     libraries are not in the loader's path."""
-    envs = {**image_env(), **host_tool_repos(), **(options.runner_envs or {})}
+    envs = {**image_env(), **host_hf_env(), **host_tool_repos(), **(options.runner_envs or {})}
     template = local_runner_template(f"runner-{session.tp}", gpus=session.tp, python=options.python, envs=envs)
     pack = rule_pack_envs(Path(session.session_dir) / _RULE_PACK)
     return replace(template, envs={**template.envs, **pack})
