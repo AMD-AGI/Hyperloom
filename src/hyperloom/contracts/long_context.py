@@ -200,6 +200,7 @@ class LongContextResult:
     not read states no prompt: ``n`` is 0 and ``score`` is ``None``, never a score of zero. ``length`` is the prompts' token
     length, ``served_context`` the context the launch serves when it states one, ``seconds`` the time the questions took and
     ``prefill_tokens`` the prompt tokens of the answered prompts. ``outputs`` is where the raw answers are in the bundle.
+    ``bound`` is the context bound the prompt set was built under (``None`` for a set that records none).
     """
 
     status: str
@@ -219,6 +220,7 @@ class LongContextResult:
     trigger: tuple[str, ...] = ()
     outputs: str = ""
     root: LongContextRoot | None = None
+    bound: int | None = None
 
     def __post_init__(self) -> None:
         if self.root is not None and not isinstance(self.root, LongContextRoot):
@@ -235,6 +237,7 @@ class LongContextResult:
         ):
             _int(value, what, minimum=1)
         _optional_int(self.served_context, "served_context")
+        _optional_int(self.bound, "bound")
         self._check_counts()
         _strings(self.trigger, "trigger")
         _relative_dir(self.outputs, "outputs")
@@ -281,6 +284,7 @@ class LongContextResult:
             "trigger": list(self.trigger),
             "outputs": self.outputs,
             **({} if self.root is None else {"root": self.root.to_document()}),
+            **({} if self.bound is None else {"bound": self.bound}),
         }
 
     @classmethod
@@ -288,7 +292,7 @@ class LongContextResult:
         f = _mapping(document, "a long-context result")
         scalars = (
             "status reason prompt_set_sha256 length max_new_tokens concurrency served_context n passed score seconds "
-            "prefill_tokens outputs"
+            "prefill_tokens outputs bound"
         ).split()
         return cls(
             tasks=tuple(map(LongContextTask.from_document, _items(f.get("tasks"), "tasks"))),

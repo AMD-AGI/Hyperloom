@@ -12,7 +12,8 @@ from hyperloom.contracts.long_context import PROMPT_ERROR, PROMPT_NOT_RUN, PROMP
 from hyperloom.measure.long_context.outputs import read_outputs
 from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR, OUTPUTS_FILE
 from hyperloom.measure.long_context.rounds import run_long_context
-from hyperloom.measure.long_context.tests.support import MODEL, FakeServer, prompt_set, staged_plan
+from hyperloom.measure.long_context.prompts import PER_TASK
+from hyperloom.measure.long_context.tests.support import MODEL, PROMPTS, FakeServer, prompt_set, staged_plan
 from hyperloom.measure.short_prompts.rounds import PassFailed, Serving
 
 
@@ -48,11 +49,11 @@ def test_every_prompt_is_asked_greedily_as_text_and_its_answer_is_recorded(tmp_p
         found = _run(tmp_path, host, served=4096)
 
     assert (host.started, host.stopped) == (1, 1), "one server, stopped after the questions"
-    assert len(server.requests) == 64 and {r["model"] for r in server.requests} == {MODEL}
+    assert len(server.requests) == PROMPTS and {r["model"] for r in server.requests} == {MODEL}
     first = server.requests[0]
     assert (first["temperature"], first["max_tokens"], first["stream"]) == (0, 128, False)
     assert isinstance(first["prompt"], str), "the text is sent as it is, not as token ids"
-    assert [e.status for e in found.prompts] == [PROMPT_OK] * 64 and found.stopped == ""
+    assert [e.status for e in found.prompts] == [PROMPT_OK] * PROMPTS and found.stopped == ""
     assert found.prompts[0].text and found.served_context == 4096
     assert (tmp_path / "out" / LONG_CONTEXT_DIR / OUTPUTS_FILE).is_file()
 
@@ -79,7 +80,7 @@ def test_a_launch_that_serves_exactly_what_is_needed_is_asked(tmp_path: Path) ->
     with FakeServer() as server:
         found = _run(tmp_path, _Host(server), served=2048 + 128)
 
-    assert found.stopped == "" and len(server.requests) == 64
+    assert found.stopped == "" and len(server.requests) == PROMPTS
 
 
 def test_a_server_that_does_not_come_up_leaves_every_prompt_unrun_with_the_reason(tmp_path: Path) -> None:
@@ -100,7 +101,7 @@ def test_a_request_the_server_answers_with_an_error_is_that_prompts_error_and_th
     statuses = {e.status for e in found.prompts}
     assert statuses == {PROMPT_OK, PROMPT_ERROR}
     errors = [e for e in found.prompts if e.status == PROMPT_ERROR]
-    assert {e.task for e in errors} == {"common_words"} and len(errors) == 16
+    assert {e.task for e in errors} == {"common_words"} and len(errors) == PER_TASK
     assert all(e.reason == "the server answered HTTP 500" and e.text == "" for e in errors)
 
 
@@ -110,6 +111,6 @@ def test_the_phase_cap_leaves_the_prompts_it_did_not_reach_unrun_and_says_so(tmp
 
     done = [e for e in found.prompts if e.status == PROMPT_OK]
     unrun = [e for e in found.prompts if e.status == PROMPT_NOT_RUN]
-    assert done and unrun and len(done) + len(unrun) + sum(e.status == PROMPT_ERROR for e in found.prompts) == 64
+    assert done and unrun and len(done) + len(unrun) + sum(e.status == PROMPT_ERROR for e in found.prompts) == PROMPTS
     assert found.stopped == "the phase cap ended the check before every prompt was sent"
     assert read_outputs(tmp_path / "out").stopped == found.stopped
