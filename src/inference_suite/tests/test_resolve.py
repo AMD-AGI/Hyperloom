@@ -398,12 +398,12 @@ def test_an_unversioned_image_needs_a_release_that_names_a_version():
 
 
 _ROWS = [
-    ("sglang", {"gfx942"}, "--trust-remote-code --mem-fraction-static 0.8 --disable-radix-cache",
+    ("sglang", {"gfx942"}, "--trust-remote-code --mem-fraction-static 0.8",
      {"SGLANG_USE_AITER": "1", "SGLANG_AITER_MLA_PERSIST": "1"}),
-    ("sglang", {"gfx950"}, "--trust-remote-code --mem-fraction-static 0.8 --disable-radix-cache",
+    ("sglang", {"gfx950"}, "--trust-remote-code --mem-fraction-static 0.8",
      {"SGLANG_USE_AITER": "1"}),
     ("sglang", {"gfx1151"},
-     "--trust-remote-code --mem-fraction-static 0.5 --disable-radix-cache --attention-backend triton --disable-cuda-graph",
+     "--trust-remote-code --mem-fraction-static 0.5 --attention-backend triton --disable-cuda-graph",
      {"SGLANG_USE_AITER": "0"}),
     ("vllm", {"gfx942", "gfx950"}, "--trust-remote-code --gpu-memory-utilization 0.95",
      {"VLLM_ROCM_USE_AITER": "1"}),

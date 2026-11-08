@@ -95,10 +95,7 @@ _POLL_INTERVAL_S = 6
 
 # The single-node sglang launcher's default args (inference_suite/recipe/defaults/table.yaml), re-applied in multi-node so tput stays comparable to single-node.
 # --mem-fraction-static is 0.75 (vs 0.8) because cross-node RDMA buffers eat headroom.
-_SGLANG_DEFAULT_TOKENS: tuple[tuple[str, str], ...] = (
-    ("--mem-fraction-static", "--mem-fraction-static=0.75"),
-    ("--disable-radix-cache", "--disable-radix-cache"),
-)
+_SGLANG_DEFAULT_TOKENS: tuple[tuple[str, str], ...] = (("--mem-fraction-static", "--mem-fraction-static=0.75"),)
 
 
 def _merge_sglang_defaults(extra_args: str) -> str:
