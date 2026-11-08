@@ -1230,6 +1230,7 @@ def _ended(run: _Run) -> _Ended:
         client_logs=tuple(_client_logs(failing)),
         detail=detail,
         failed_step=_failed_step(failing),
+        unrun=_unrun(failing),
     )
     verdict = classify_test_failure(returncode=returncode, evidence=evidence)
     return _Ended(rounds, returncode, stderr, verdict)
@@ -1243,6 +1244,15 @@ def _failed_step(failing: list[VariantResult]) -> FailedStep | None:
             if step is not None:
                 return step
     return None
+
+
+def _unrun(failing: list[VariantResult]) -> str:
+    """``<error_class>: <error>`` of the first failed round that left neither a workspace nor a server log (it was refused
+    before it ran), else ``""``."""
+    for result in failing:
+        if result.error_class and not result.workspace and not result.server_log_path:
+            return f"{result.error_class}: {result.error}" if result.error else result.error_class
+    return ""
 
 
 def _outcome(run: _Run) -> TestOutcome:
