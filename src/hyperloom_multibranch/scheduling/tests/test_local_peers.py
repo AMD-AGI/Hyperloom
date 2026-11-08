@@ -24,7 +24,7 @@ import yaml
 
 from inference_suite import INFERENCEX_CLIENT_COMMIT
 from inference_suite.staging import INFERENCEX_REQUIRED
-from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path, is_magpie_agentx
+from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path, is_agentx
 from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom_common.env import forge_explicitly_enabled
@@ -465,7 +465,7 @@ async def test_an_agentx_session_measures_the_agentx_benchmark_it_writes_for_its
         toolbox = built.layout.toolbox
         assert benchmark_config_path() == (toolbox / "benchmark.yaml").resolve()
         canonical = yaml.safe_load((toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
-        assert is_magpie_agentx(canonical) and canonical["agentx"]["mode"] == "canonical"
+        assert is_agentx(canonical) and canonical["agentx"]["mode"] == "canonical"
         assert canonical["inferencex_path"] == host.inferencex.path
         assert [(spec.image_digest, spec.gpu_type) for spec in specs] == [(host.image.digest, workload.gpu_type)]
         assert (canonical["model"], canonical["envs"]["MODEL_PATH"]) == (
