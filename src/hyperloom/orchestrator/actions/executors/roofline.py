@@ -144,6 +144,7 @@ _DEGRADING_WARNING_CODES = frozenset(
         "kernel_source_unresolved",
         "trace_split_phase_unconfirmed",
         "trace_split_manifest_missing",
+        "gpu_arch_json_vendor_peak",
     }
 )
 

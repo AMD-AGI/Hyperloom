@@ -438,3 +438,11 @@ def test_an_mlperf_point_a_round_cannot_run_is_refused(envs: dict, bench: dict, 
 
     with pytest.raises(ConfigError, match=message):
         suite_config(point, _base("sglang"), _settings())
+
+
+def test_the_points_rocr_mask_is_the_servers_gpus_and_its_fill_record_stays_out_of_the_server_env() -> None:
+    point = _point("sglang", ROCR_VISIBLE_DEVICES="6,7", HYPERLOOM_ROCR_AUTOFILL="6,7")
+    server = suite_config(point, _base("sglang"), _settings()).server
+
+    assert server.gpus == (6, 7)
+    assert "HYPERLOOM_ROCR_AUTOFILL" not in server.user.env_set

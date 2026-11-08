@@ -112,6 +112,7 @@ from ..cancel_channel import cancel_scope_listener
 from ._accuracy_gate import ACCURACY_DIR
 from ._benchmark_interpreter import _resolve_probe_python
 from ._failed_step import failed_step_error_class
+from ._gpu_pin import ROCR_AUTOFILL_ENV
 from ._gpu_power import round_gpu_telemetry
 from ._workload_envs import QUALITY_REF_ENVS
 from ._multi_node_env import client_only_server_url
@@ -182,6 +183,7 @@ _CONSUMED_ENV = frozenset(
         ENV_EVAL_LIMIT,
         _PORT_ENV,
         _GPU_MASK_ENV,
+        ROCR_AUTOFILL_ENV,
         _RUN_PHASE_ENV,
         _CLIENT_TRUST_ENV,
         _TOKENIZER_MODE_ENV,

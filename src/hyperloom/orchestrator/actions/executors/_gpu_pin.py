@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GPU pin and serving-fidelity resolution for the GEAK handoff."""
+"""GPU pins: the ROCR mask a benchmark point launches on, and the pin and serving fidelity for the GEAK handoff."""
 
 from __future__ import annotations
 
 
+import logging
 import os
 from collections.abc import Mapping
 from typing import Any
 
 from hyperloom_common.env import env_float, env_int
+from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.common.visible_devices import (
     HIP_LEVEL_VARS,
     VISIBLE_DEVICE_VARS,
@@ -22,41 +24,96 @@ from hyperloom.common.visible_devices import (
 from hyperloom.inference_optimizer.gpu_types import geak_identity_pin
 from hyperloom.inference_optimizer.grid_server_args import server_arg_value
 
+log = logging.getLogger(__name__)
+
 #: The pin source GEAK inherits; a mask from it is in force for the servers GEAK launches.
 _PROCESS_ENV = "process_env"
+_BASELINE_RECIPE = "baseline_recipe"
+
+
+#: Records the ROCR mask the materializer filled in, so a later pass tells it from a point's own pin.
+ROCR_AUTOFILL_ENV = "HYPERLOOM_ROCR_AUTOFILL"
+
+
+def pin_rocr_visible_devices(envs: dict[str, Any], *, tp: int) -> None:
+    """Set the ROCR mask a benchmark point launches on, at least ``tp`` cards wide.
+
+    The point's own mask wins; the process's (the session's cards) fills it only when the
+    point names none, and a mask this function filled before (:func:`_is_autofilled_rocr`)
+    is not the point's, so a config re-run in another process lands on that process's
+    cards. ROCR ids are physical, so a point id outside the session's mask would land on
+    another session's card and is refused. A mask narrower than ``tp`` is widened from the
+    session's cards, or from ``0..tp-1`` when the process has no mask. No HIP-level mask is
+    written: the round starts its server on these ids as absolute cards and drops the masks it
+    inherits (``_suite_config``).
+
+    Raises:
+        ValueError: The point's mask names a card outside the process's mask.
+    """
+    value = _mask_value(envs.get(ROCR_VISIBLE_DEVICES_ENV))
+    point = [] if _is_autofilled_rocr(value=value, recipe_envs=envs) else mask_tokens(value)
+    session = mask_tokens(os.environ.get(ROCR_VISIBLE_DEVICES_ENV, ""))
+    outside = _cards_outside(point, session)
+    if outside:
+        raise ValueError(
+            f"benchmark.envs.{ROCR_VISIBLE_DEVICES_ENV}={value!r} names card(s) {','.join(outside)} "
+            f"outside this process's {ROCR_VISIBLE_DEVICES_ENV}={','.join(session)!r}; pin the point to cards "
+            f"inside the session's mask or drop its mask. A config materialized before {ROCR_AUTOFILL_ENV} "
+            "existed carries the mask of the process that wrote it and is read here as a pin: re-materialize "
+            "it from its source config instead of re-running the materialized copy."
+        )
+    mask = point or session
+    if len(mask) < tp:
+        widened = (session or [str(i) for i in range(tp)])[:tp]
+        if mask and widened != mask:
+            log.warning(
+                "ROCR_VISIBLE_DEVICES=%r has %d devices but TP=%d; expanding to %r so the server sees enough GPUs.",
+                ",".join(mask),
+                len(mask),
+                tp,
+                ",".join(widened),
+            )
+        mask = widened
+    envs[ROCR_VISIBLE_DEVICES_ENV] = ",".join(mask)
+    if mask == point:
+        envs.pop(ROCR_AUTOFILL_ENV, None)
+    else:
+        envs[ROCR_AUTOFILL_ENV] = envs[ROCR_VISIBLE_DEVICES_ENV]
+
+
+def _cards_outside(point: list[str], session: list[str]) -> list[str]:
+    """The ``point`` cards a non-empty ``session`` mask does not hold."""
+    session_ids = {_device_key(d) for d in session}
+    return [d for d in point if session and _device_key(d) not in session_ids]
+
+
+def _device_key(token: str) -> str:
+    return str(int(token)) if token.isdigit() else token
 
 
 def _is_autofilled_rocr(*, value: str, recipe_envs: Mapping[str, Any]) -> bool:
     """Is this recipe's ROCR mask the materializer's autofill rather than a pin?
 
-    ``materialize_config_with_envs`` unconditionally writes
-    ``ROCR_VISIBLE_DEVICES=0..tp-1`` into ``benchmark.envs`` whenever the mask
-    is absent or narrower than TP (``_workload_envs.py``). Every materialized
-    recipe therefore carries the key, so a recipe ROCR value that is
-    byte-identical to that default carries no information about where the run
-    is actually pinned — treating it as a pin is what made this resolver
-    override a real ``HIP_VISIBLE_DEVICES`` and re-pin GEAK to cards ``0..tp-1``.
+    :func:`pin_rocr_visible_devices` writes a mask into every materialized recipe and records
+    the ones it filled under ``ROCR_AUTOFILL_ENV``; a fill carries no information about where
+    the point asked to run, so a re-materialization refills it and the GEAK handoff reads the
+    process env instead.
 
-    A hand-authored ``ROCR_VISIBLE_DEVICES: "0,1"`` at ``TP=2`` is
-    indistinguishable from the autofill and is also treated as "not a pin";
-    that is harmless, because the unpinned path emits the same ``gpu_ids`` and
-    merely omits ``gpu_pin``.
-
-    When the recipe carries no usable ``TP`` — a hand-written or pre-clamp YAML
-    — there is no width to compare against, so the test falls back to the SHAPE
-    the materializer always produces: a mask that is exactly ``0..n-1`` for its
-    own length. Returning ``False`` there instead would let the synthetic mask
-    pose as a pin for precisely the recipes that never recorded a TP, which is
-    the hole this function exists to close.
+    A recipe an older materializer wrote carries its autofill, ``0..tp-1``, with no record, so
+    that value is treated as a fill too. A hand-authored
+    ``ROCR_VISIBLE_DEVICES: "0,1"`` at ``TP=2`` is indistinguishable from it; that is
+    harmless, because it lands on the same cards with no process mask and on the session's
+    with one. With no usable ``TP`` the test falls back to the ``0..n-1`` shape of the mask.
 
     Args:
         value: The recipe's ROCR mask, already stripped.
-        recipe_envs: The recipe's ``benchmark.envs`` (read for its resolved TP).
+        recipe_envs: The recipe's ``benchmark.envs`` (read for the record and its TP).
 
     Returns:
-        ``True`` when the value equals the ``0..tp-1`` the materializer would
-        have synthesized — or, absent a recipe TP, the ``0..n-1`` shape of one.
+        ``True`` when the value is the recorded fill or the ``0..tp-1`` default.
     """
+    if value and _mask_value(recipe_envs.get(ROCR_AUTOFILL_ENV)) == value:
+        return True
     tokens = mask_tokens(value)
     if not tokens:
         return False
@@ -113,7 +170,7 @@ def _resolve_inner_hip_mask(
     if not is_rocr_level(var):
         return {}
     for hip_var in HIP_LEVEL_VARS:
-        for source, table in ((_PROCESS_ENV, env), ("baseline_recipe", recipe)):
+        for source, table in ((_PROCESS_ENV, env), (_BASELINE_RECIPE, recipe)):
             raw = table.get(hip_var)
             if raw is None:
                 continue
@@ -187,7 +244,7 @@ def resolve_gpu_pin(
     env = os.environ if environ is None else environ
     recipe = dict(recipe_envs or {})
     for var in VISIBLE_DEVICE_VARS:
-        for source, table in ((_PROCESS_ENV, env), ("baseline_recipe", recipe)):
+        for source, table in ((_PROCESS_ENV, env), (_BASELINE_RECIPE, recipe)):
             raw = table.get(var)
             if raw is None:
                 continue
@@ -214,7 +271,7 @@ def resolve_gpu_pin(
                 # died on that abort at server start.
                 return {"var": var, "value": "", "ids": [], "count": 0, "source": source}
             if (
-                source == "baseline_recipe"
+                source == _BASELINE_RECIPE
                 and is_rocr_level(var)
                 and _is_autofilled_rocr(value=value, recipe_envs=recipe)
             ):
