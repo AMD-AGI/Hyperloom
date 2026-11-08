@@ -251,6 +251,20 @@ def test_a_session_made_below_a_parent_with_group_write_is_2775_all_the_way_up(t
     assert _mode(workspace / "runtime") == 0o2755
 
 
+def test_outside_shared_storage_a_leg_makes_nothing_group_writable_not_even_the_warnings_ledger(tmp_path):
+    workspace = tmp_path / "plain"
+    workspace.mkdir(mode=0o755)
+    session = Path(_as_this_account(_FIRST_LEG, umask=0o022, workspace=workspace).splitlines()[-1])
+    assert (session / "reports" / "sbd_v6" / "write_warnings.jsonl").is_file()
+    writable = [
+        path.relative_to(workspace).as_posix()
+        for path in [workspace, *workspace.rglob("*")]
+        if _mode(path) & (stat.S_IWGRP | stat.S_IWOTH)
+    ]
+    assert writable == []
+    assert _mode(session / "reports" / "sbd_v6" / "write_warnings.jsonl") == 0o644
+
+
 def test_the_install_owned_runtime_is_not_group_writable_but_the_session_subtree_is(tmp_path):
     """Two ``runtime/`` directories: the workspace's (the installer writes what a run sources and runs there) and the
     session's (the lock, the ledger and the breakdown spool): only the second one is shared for writing."""

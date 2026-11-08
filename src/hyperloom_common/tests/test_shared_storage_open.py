@@ -233,3 +233,64 @@ def test_append_shared_jsonl_has_the_signature_of_the_branch_that_calls_it_with_
     append_shared_jsonl(path, {"n": 2}, fsync=True)
     assert len(synced) == 1 and isinstance(synced[0], int)
     assert [json.loads(line)["n"] for line in path.read_text().splitlines()] == [1, 2]
+
+
+# -- an append that follows the shared-storage rule --------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("umask", "expected"), [(0o077, 0o600), (0o022, 0o644), (0o002, 0o664)], ids=["strict", "usual", "permissive"]
+)
+def test_a_file_made_by_open_shared_append_outside_shared_storage_is_what_the_umask_leaves(tmp_path, umask, expected):
+    plain = tmp_path / "plain"
+    plain.mkdir(mode=0o755)
+    _here(
+        "import os\nfrom pathlib import Path\nfrom hyperloom_common.shared_storage import open_shared_append\n"
+        f"os.close(open_shared_append(Path({str(plain / 'ledger.jsonl')!r})))\n"
+        f"os.close(open_shared_append(Path({str(plain / 'a' / 'ledger.jsonl')!r}), make_parents=True))\n",
+        umask=umask,
+    )
+    assert (_mode(plain / "ledger.jsonl"), _mode(plain / "a" / "ledger.jsonl")) == (expected, expected)
+    assert _mode(plain / "a") == 0o777 & ~umask, "the parents the same way: no setgid, no widening"
+
+
+@pytest.mark.parametrize("umask", [0o077, 0o022])
+def test_a_file_made_by_open_shared_append_below_shared_storage_is_664_with_the_parents_2775(tmp_path, umask):
+    shared = _shared(tmp_path / "shared")
+    _here(
+        "import os\nfrom pathlib import Path\nfrom hyperloom_common.shared_storage import open_shared_append\n"
+        f"os.close(open_shared_append(Path({str(shared / 'a' / 'b' / 'ledger.jsonl')!r}), make_parents=True))\n",
+        umask=umask,
+    )
+    assert (_mode(shared / "a"), _mode(shared / "a" / "b"), _mode(shared / "a" / "b" / "ledger.jsonl")) == (
+        0o2775,
+        0o2775,
+        0o664,
+    ), "judged before the parents are made: a parent made under a umask would look shared itself"
+
+
+@pytest.mark.parametrize(("where", "umask", "expected"), [("plain", 0o077, 0o600), ("shared", 0o077, 0o664)])
+def test_append_shared_jsonl_follows_the_same_rule(tmp_path, where, umask, expected):
+    base = _shared(tmp_path / "shared") if where == "shared" else tmp_path / "plain"
+    base.mkdir(exist_ok=True)
+    path = base / "reports" / "write_warnings.jsonl"
+    _here(
+        "from pathlib import Path\nfrom hyperloom_common.io import append_shared_jsonl\n"
+        f"append_shared_jsonl(Path({str(path)!r}), {{'n': 1}}, fsync=True)\n",
+        umask=umask,
+    )
+    assert _mode(path) == expected
+    assert json.loads(path.read_text()) == {"n": 1}
+
+
+def test_a_parent_made_by_the_append_does_not_make_the_file_look_shared(tmp_path):
+    """The directory is setgid but the group cannot write it: not shared. Under a umask that leaves group write, the
+    parent the call makes would look shared itself, and the file would be widened where the call alone would not."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    plain.chmod(0o2755)
+    path = plain / "a" / "ledger.jsonl"
+    _here(
+        "import os\nfrom pathlib import Path\nfrom hyperloom_common.shared_storage import open_shared_append\n"
+        f"os.close(open_shared_append(Path({str(path)!r}), make_parents=True))\n",
+        umask=0o007,
+    )
+    assert (_mode(path.parent) & stat.S_IWGRP, _mode(path)) == (stat.S_IWGRP, 0o660)

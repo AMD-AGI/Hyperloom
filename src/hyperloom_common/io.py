@@ -242,12 +242,11 @@ def append_jsonl(
 
 
 def append_shared_jsonl(path: Path, row: Any, *, fsync: bool = False, fmt: JsonLineFormat = JsonLineFormat()) -> None:
-    """:func:`append_jsonl` to a file the accounts of one group append to in turn: a new file is ``664`` and the parents
-    it creates ``2775``, whatever the umask, and the file is never opened through a link
-    (:func:`~hyperloom_common.shared_storage.open_shared_append`)."""
-    path = Path(path)
-    make_shared_dirs(path.parent)
-    with os.fdopen(open_shared_append(path), "a", encoding=_UTF8) as fh:
+    """:func:`append_jsonl` to a file the accounts of one group append to in turn: below shared storage a new file is
+    ``664`` and the parents it creates ``2775``, whatever the umask, elsewhere as a plain append leaves them; the file is
+    reached as :func:`~hyperloom_common.shared_storage.open_shared_append` reaches it, never through a link a member of
+    the group could have put on the way."""
+    with os.fdopen(open_shared_append(Path(path), make_parents=True), "a", encoding=_UTF8) as fh:
         _write_line(fh, row, fsync, fmt)
 
 
