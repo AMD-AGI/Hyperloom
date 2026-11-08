@@ -1001,14 +1001,32 @@ def test_a_boot_does_not_pin_what_the_point_pins_for_a_graded_round(grid, server
 
 def test_an_agentx_boot_pins_nothing(grid, server, tmp_path, monkeypatch):
     """An AgentX point has no evaluation round and no prompt count, and no backend phase is said for a boot."""
+    _boot_only(grid)
+    _Case(tmp_path, monkeypatch, "exit 0")
     point = _agentx_point(tmp_path, monkeypatch)
 
-    _run(_call(tmp_path, point, prep="conc_sweep"))
+    _run(_call(tmp_path, point, kind="repro", attachments=(_CASE,), timeout_sec=30))
 
-    boot, *measured = grid.calls
+    (boot,) = grid.calls
     assert boot["launch"].lifecycle_boot_only
     assert boot["recipe"].base.extra_envs == {}
-    assert all(c["recipe"].base.extra_envs is None for c in measured)
+
+
+@pytest.mark.parametrize("levels", [(8, 4, 2), (4,)], ids=["levels", "one-level"])
+def test_an_agentx_sweep_boots_a_server_of_its_own_for_each_level(grid, tmp_path, monkeypatch, levels):
+    """Every level replays one trace corpus with one seed: on a server a level before it warmed, it reads its cache."""
+    torn_down: list[Path] = []
+    monkeypatch.setattr(local, "teardown_variant_server", lambda slot: torn_down.append(slot) or [])
+    points = [_agentx_point(tmp_path, monkeypatch, conc=level) for level in levels]
+    assert local.resolve_lifecycle_params(points[0])["eligible"], "the lifecycle could hold an AgentX server"
+
+    outcome = _run(_call(tmp_path, *points, prep="conc_sweep"))
+
+    assert [c["grid"][0].name for c in grid.calls] == [f"c{level}" for level in levels]
+    assert all(_lifecycle(c) is None and not c["launch"].lifecycle_boot_only for c in grid.calls)
+    assert [(r.point, r.phase) for r in outcome.rounds] == [(i, "measure") for i in range(len(levels))]
+    assert "server restarted per level: an AgentX replay is cache-sensitive" in outcome.stderr
+    assert outcome.returncode == 0 and torn_down == []
 
 
 def test_no_call_of_a_sweep_runs_without_the_shared_server(grid, server, tmp_path):
@@ -1185,19 +1203,19 @@ def test_a_patched_test_measures_the_rebuilt_framework_that_the_compile_produced
     assert outcome.sandbox.image_digest == IMAGE
 
 
-def _agentx_point(tmp_path, monkeypatch, **launch_envs: str) -> Path:
-    """The point the toolbox renders for an AgentX session whose recipe launches with ``launch_envs``."""
+def _agentx_point(tmp_path, monkeypatch, conc: int = 4, **launch_envs: str) -> Path:
+    """The point the toolbox renders for an AgentX session at ``conc`` whose recipe launches with ``launch_envs``."""
     from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
     from hyperloom.inference_optimizer.cli.benchmark_config import AgentXWorkload, write_agentx_benchmark
     from hyperloom.orchestrator.actions.executors import LaunchLayer, materialize_benchmark_config
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.setenv(BENCHMARK_CONFIG_ENV, "")
-    source = tmp_path / "agentx.yaml"
-    workload = AgentXWorkload(framework="sglang", model="Qwen/Qwen3-8B", precision="fp8", tp=2, ep=1, conc=4)
+    source = tmp_path / f"agentx-c{conc}.yaml"
+    workload = AgentXWorkload(framework="sglang", model="Qwen/Qwen3-8B", precision="fp8", tp=2, ep=1, conc=conc)
     write_agentx_benchmark(source, workload)
     envs = {**launch_envs, "RUN_EVAL": "false"}
-    return materialize_benchmark_config(source, tmp_path / "agentx", launch=LaunchLayer(extra_envs=envs))
+    return materialize_benchmark_config(source, tmp_path / f"agentx-c{conc}", launch=LaunchLayer(extra_envs=envs))
 
 
 def _agentx_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
