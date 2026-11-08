@@ -60,7 +60,7 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | Variable                                  | Required             | Default                                                            | Description                                                                                                                                                                          |
 |-------------------------------------------|----------------------|--------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `REPO_ROOT`                               | No (recommended)     | `$(pwd)`                           | This Hyperloom checkout. Used to locate `.env`, skills, scripts. Falls back to the current working directory when unset.                                                                                                                     |
-| `INFERENCEX_PATH`                         | Conditional          | Auto-cloned by `install.sh`                                    | Path to the SemiAnalysisAI/InferenceX repo, used by baseline / target analysis. `install.sh` clones it when unset; only required if that auto-clone fails.                                                                                                                                          |
+| `INFERENCEX_PATH`                         | No                   | Unset                                                              | An InferenceX checkout of your own. The research scout reads reference launch scripts under its `benchmarks/single_node/`, and the session manifest records its commit. Benchmark rounds do not read it: they run the InferenceX client `install.sh` stages under `INFERENCE_SUITE_TOOL_CACHE`. Nothing clones it. |
 | `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}/Tr`<br>`aceLens@<resolved-sha>` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` clones the public repo into the repo-local cache root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
 | `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | `$(command -v claude)` after the installer has put the Claude Code CLI on `PATH`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses to the same CLI the specialists run, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Hyperloom's own agents also run it when `HYPERLOOM_CLAUDE_CLI_PATH` is unset. |
 | `HYPERLOOM_`<br>`CLAUDE_CLI_PATH`         | No | Unset | The Claude Code binary Hyperloom's agents run: the in-process backend and subprocess specialists alike. When unset they run `GEAK_CLAUDE_BIN`, then `claude` on `PATH`; the in-process backend leaves the choice to `claude_agent_sdk` only when none is found. |
@@ -199,42 +199,39 @@ depends on the result.
 
 InferenceX runs lm-eval with `max_tokens=min(16384, ctx-4096)`, so a sample that
 does not converge spends that entire budget, and 1319 of them can consume the
-whole baseline timeout. Every generation request is therefore capped, and the
-terminators the model declares are supplied with it — lm-eval carries a single
-`eos_string` and its concurrent request path does not send even that one, so a
-model like Qwen3, which declares `eos_token_id` `[151645, 151643]`, would
-otherwise run with no end-of-turn stop condition at all.
+whole baseline timeout. Every generation is therefore given at most
+`HYPERLOOM_EVAL_MAX_TOKENS` tokens, and never more than the served context
+leaves after 4096 tokens of prompt room (half the context when it is no larger);
+a launch whose context is unknown is refused with `eval_context_too_short`. Generation also stops on every
+terminator the model's `generation_config.json` and `tokenizer_config.json`
+declare — lm-eval's concurrent request path sends none, so a model like Qwen3,
+which declares `eos_token_id` `[151645, 151643]`, would otherwise run with no
+end-of-turn stop condition at all. The task's own stop strings keep their place
+ahead of the model's, since its answer extraction depends on them, and the first
+four are sent; stop token ids have no such limit.
 
-Both are applied inside the eval process rather than passed in, which is what
-keeps them equal across the baseline and candidate arms. **That symmetry is the
-whole point**: the gate compares a *difference* of two scores, so a bound or a
-terminator that reaches only one arm biases the verdict instead of merely
-limiting it. Prefer leaving these alone; if you do change one, change it for the
-whole session rather than a single round.
+A truncation probe counts the generations cut at the token limit. Once their
+share reaches the probe's ratio after its minimum samples, every remaining
+generation is answered empty instead of being sent, so a model that does not
+terminate scores near 0 instead of running the eval out. The round's
+`eval/hyperloom_eval_probe.json` records whether it tripped, how many samples it
+saw and the share cut; check it before concluding a score is low for any other
+reason.
 
-Each run reports what it applied, to stderr as `HYPERLOOM_EVAL_BOUNDS_SUMMARY`
-and to `hyperloom_eval_bounds.json` in the result dir, including how many
-generations hit the ceiling. Check `truncated` there before concluding a score
-is low for any other reason.
+All of these are part of the eval's definition, which keeps them equal across the
+baseline and candidate arms. **That symmetry is the whole point**: the gate
+compares a *difference* of two scores, so a bound that reaches only one arm biases
+the verdict instead of merely limiting it. Prefer leaving these alone; if you do
+change one, change it for the whole session rather than a single round. They are
+read from the benchmark point's environment (`--extra-env`); a number that does not
+parse refuses the round.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_EVAL_MAX_TOKENS` | `4096` | Per-request generation ceiling. Never raises a lower ceiling a task already asked for. `0` disables the cap and restores the full upstream budget — a degenerate model then costs the whole timeout again. An unparseable value falls back to the default rather than to "unbounded". |
-| `HYPERLOOM_EVAL_DERIVE_STOP` | On | Whether to read the model's `generation_config.json` / `tokenizer_config.json` for its terminators. Resolution is cache-only and never downloads, so an uncached repo id simply derives nothing. Set to `0` / `false` / `no` / `off` to reproduce an upstream number exactly, or for a server that rejects `stop_token_ids` (vLLM and SGLang both accept it). |
-| `HYPERLOOM_EVAL_STOP_STRINGS` | Unset (derived) | Explicit terminators, separated by ASCII unit separator `0x1f` — commas and newlines are themselves legitimate stop strings. Outranks the derived values; use it when a checkpoint's metadata is absent or wrong. |
-
-Set explicit terminators like this, quoting so the separator is a real `0x1f`
-byte:
-
-```bash
-export HYPERLOOM_EVAL_STOP_STRINGS=$'<|im_end|>\x1f<|endoftext|>'
-```
-
-Upstream keeps at most four stop strings, and the task's own `until` list is what
-its answer extraction depends on, so that list is never displaced: an explicit
-`HYPERLOOM_EVAL_STOP_STRINGS` goes first, the task's list next, and derived
-terminators last. Derived token ids travel separately as `stop_token_ids`, which
-has no such limit, so nothing is lost on a server that supports it.
+| `HYPERLOOM_EVAL_MAX_TOKENS` | `4096` | Per-generation token ceiling, a positive integer. |
+| `HYPERLOOM_EVAL_PROBE` | On | Set to `0` / `false` / `no` / `off` to let every generation run to its ceiling. |
+| `HYPERLOOM_EVAL_PROBE_MIN_SAMPLES` | `128` | Generations the probe counts before it may trip. |
+| `HYPERLOOM_EVAL_PROBE_LENGTH_RATIO` | `0.75` | Share of generations cut at the ceiling that trips the probe. |
 
 ---
 

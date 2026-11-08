@@ -1,17 +1,15 @@
 # The launch file of an Arbor agent on an AgentX recipe
 
-A stand-in until multi-branch (MB) carries the launch Magpie resolves.
-
-An Arbor agent (`--autonomous-agent` on an Arbor checkout) is served the root recipe's launch. A Magpie AgentX recipe
-holds only what is added to its launch (`extra_server_args`, `extra_envs`): Magpie resolves the rest from the InferenceX
-recipe. Arbor would then serve defaults that MB does not measure, so the adapter refuses an AgentX branch without the
+An Arbor agent (`--autonomous-agent` on an Arbor checkout) is served the root recipe's launch. An AgentX recipe holds
+only what is added to its launch (`extra_server_args`, `extra_envs`): the round resolves the rest from the InferenceX
+recipe. Arbor would then serve defaults that multi-branch (MB) does not measure, so the adapter refuses an AgentX branch without the
 resolved launch. Give it with `--agent-launch FILE`:
 
 ```bash
 hyperloom-multibranch run ... --autonomous-agent <arbor> --agent-pack <pack> --agent-launch launch.json
 ```
 
-Copy [`launch.template.json`](launch.template.json) and fill it from the InferenceX recipe Magpie resolves, at the
+Copy [`launch.template.json`](launch.template.json) and fill it from the InferenceX recipe the round resolves, at the
 workload's concurrency:
 
 | Key | Required | What it holds |
