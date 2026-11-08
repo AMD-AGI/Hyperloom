@@ -120,7 +120,7 @@ In the Hyperloom paths below, `src/hyperloom_multibranch/` is left out. Arbor's 
       - keeps importing until the last KEEP has settled, then stops the branch;
       - at session end, stops any Arbor still running (SIGTERM, then SIGKILL after 30 s) and releases its lease.
     - **Code:** `scheduling/stops.py`, `specialist/agent_watch.py`.
-12. **MB's FINAL.** MB sweeps 0.5x, 1x and 2x the concurrency for the integration head and the best branch head, and picks at the primary concurrency. Arbor plays no part. **Code:** `scheduling/final.py`.
+12. **MB's FINAL.** MB sweeps 0.5x, 1x and 2x the concurrency for the integration head and the best branch head, and picks at the primary concurrency. Each candidate also gets a cold-start reproduction held to within 5% of its recorded value and to the accuracy gate; when integration merged nothing its head is the session root, which is not held to the 5% or the rule's speed gates but still to every other refusal, such as dropped or failed requests. `MB-report.md` names each candidate's gain against its record, what refused it and the speed refusals waived for the root. Arbor plays no part. **Code:** `scheduling/final.py`.
 
 ## Several operating points
 
