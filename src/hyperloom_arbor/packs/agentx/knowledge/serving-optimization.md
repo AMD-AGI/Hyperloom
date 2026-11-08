@@ -2,8 +2,7 @@
 
 ## Profile before every hypothesis
 
-**Before proposing any change, profile the decode step to know where time is actually going**: the `profiler`
-skill gives the per-op GPU time breakdown.
+**Before proposing any change, profile the decode step (rocprofv3) to know where time is actually going.**
 
 **To validate server flags before committing:** run `docker exec $CONTAINER python3 -m sglang.launch_server --help 2>&1 | grep <flag>` to confirm a flag is valid in this build.
 
