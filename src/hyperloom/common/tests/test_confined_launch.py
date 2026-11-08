@@ -310,7 +310,7 @@ def test_a_login_the_host_replaces_or_makes_after_the_launch_is_not_shown(outsid
     visible = _write(tools / "kube/visible", "shown")
     env = {"PATH": "/usr/bin:/bin", "HF_HOME": str(hf), "KUBECONFIG": str(kube)}
     readable = (*toolchain_paths(env, sys.executable, writable=(work,)), tools)
-    masked = credential_paths(env, app_environ={}, allowed=(*readable, work), writable=(work,))
+    masked = credential_paths(env, allowed=(*readable, work), writable=(work,))
     assert {kube, hf / "token"} <= set(masked)
     policy = Confinement(writable=(work,), readable=readable, masked=masked).policy(chdir=work)
     paths = {"kube": kube, "token": hf / "token", "model": model, "visible": visible}
