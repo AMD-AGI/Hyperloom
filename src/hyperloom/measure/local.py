@@ -10,7 +10,8 @@
 * a single-point test whose server the lifecycle cannot hold (a profile, a framework it cannot hold) is ``run_grid``
   with one variant: measured round, the evaluation after its bench when the point asks for one, teardown;
 * one arm of a concurrency sweep boots the inference server once and benches the levels from high to low on it, the
-  way ``conc_sweep`` does, stepping down a level when the boot fails; a graded arm then evaluates once on that server;
+  way ``conc_sweep`` does, stepping down a level when the boot fails; a graded arm then evaluates once on that server.
+  An arm whose levels must not share a server (``BenchmarkPoint.sweeps_on_cold_servers``) boots one per level;
 * accuracy is the ``RUN_EVAL`` switch in the point's own YAML, which must say what the caller asked for.
 
 Nothing in the old flow changes: this file only calls what ``orchestrator.actions.executors`` exports.
@@ -804,6 +805,10 @@ async def _sweep(run: _Run) -> None:
     """One arm: boot once on the highest level that boots, bench every level on that server, evaluate a graded arm once
     after the last bench from the level it booted on (the highest, the quickest to evaluate), tear the server down."""
     order = sorted(range(len(run.call.points)), key=lambda i: -_levels(run.call.points)[i])
+    if _point(run.call.points[0]).sweeps_on_cold_servers:
+        run.notes.append("server restarted per level: an AgentX replay is cache-sensitive")
+        await _sweep_by_restart(run, order)
+        return
     lifecycle = _Lifecycle(run)
     if not lifecycle.eligible:
         run.notes.append(f"server restarted per level: {lifecycle.reason}")
@@ -879,7 +884,7 @@ async def _reuse(run: _Run, lifecycle: _Lifecycle, order: list[int]) -> None:
 
 
 async def _sweep_by_restart(run: _Run, order: list[int]) -> None:
-    """The fallback ``conc_sweep`` has for a framework that cannot hold a server: one server per level."""
+    """One server per level, booted and torn down by the level's own round."""
     for point in order:
         result = await _grid(run, point, f"c{_levels(run.call.points)[point]}", warmup_before_measure=False)
         if not run.add(point, result):

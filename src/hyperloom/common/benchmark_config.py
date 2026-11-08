@@ -119,6 +119,15 @@ class BenchmarkPoint:
         return self.agentx
 
     @property
+    def sweeps_on_cold_servers(self) -> bool:
+        """Whether each level of a concurrency sweep of this point runs on a server booted for that level alone.
+
+        An AgentX replay sends every level the same trace corpus with the same seed, so a level benched on a server
+        another level warmed reads its prefix and KV cache, and is not comparable with a test that booted its own.
+        """
+        return self.agentx
+
+    @property
     def holds_accuracy_checks(self) -> bool:
         """Whether a test of this point keeps its server up after its rounds for the short-prompt and long-context checks.
 
