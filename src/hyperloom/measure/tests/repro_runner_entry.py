@@ -20,6 +20,7 @@ import yaml
 
 from hyperloom.measure import local
 from hyperloom.measure.runner import run as runner_flow
+from hyperloom.measure.tests.bundle_factory import lm_eval_at_its_pin
 from hyperloom.orchestrator.actions.executors import GridRecipe, VariantResult
 
 PORT = 8123
@@ -74,6 +75,7 @@ def main() -> int:
         "reason": "",
     }
     local.teardown_variant_server = lambda slot: []  # type: ignore[assignment]
+    sys.path.insert(0, str(lm_eval_at_its_pin(root / "lm-eval-pin")))
     return runner_flow.run(root / "in", root / "out", scratch=root / "work" / "scratch", spec_wait_sec=60)
 
 

@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import errno
 import importlib
+import shlex
+import sys
 import time
+from pathlib import Path
 
 import pytest
-from inference_suite.contracts import FailedStep
 
 from hyperloom.common import failure_signature
 from hyperloom.measure import failures, returncodes
@@ -22,6 +24,10 @@ from hyperloom.measure.failures import (
     classify_test_failure,
     decides_test,
 )
+from inference_suite import framework_version
+from inference_suite.contracts import FailedStep
+from inference_suite.framework_probe import FrameworkProbeError, probe_install, run_probe
+from inference_suite.frameworks import Framework
 
 IMPORT_ERROR_LOG = (
     "Traceback (most recent call last):\n  File \"x.py\", line 1\nModuleNotFoundError: No module named 'sglang_patch'\n"
@@ -388,6 +394,54 @@ def test_a_flag_refusal_without_a_detail_is_still_a_candidate_serve_flag() -> No
         returncode=1, evidence=FailureEvidence(step_failure=StepFailure(FailedStep.FLAG_UNKNOWN))
     )
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, "serve_flag")
+
+
+def _unknown_framework(detail: str) -> FailureClassification:
+    return classify_test_failure(
+        returncode=1,
+        evidence=FailureEvidence(step_failure=StepFailure(FailedStep.FRAMEWORK_VERSION_UNKNOWN, detail)),
+    )
+
+
+def _bare_interpreter(tmp_path: Path) -> str:
+    """An interpreter that sees the standard library only, so no framework package is importable from it."""
+    script = tmp_path / "bare-python"
+    script.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -S "$@"\n')
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_a_serving_interpreter_without_the_framework_is_the_candidates_import_error(tmp_path: Path) -> None:
+    """The suite probes the install before boot, so no server log says it; the probe's detail is quoted, and the
+    test is settled as a server that died on the import would have settled it."""
+    with pytest.raises(FrameworkProbeError) as refused:
+        probe_install(_bare_interpreter(tmp_path), Framework.SGLANG, {})
+    detail = str(refused.value)
+    verdict = _unknown_framework(detail)
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, f"import_error: {detail}")
+    assert detail.endswith("cannot import sglang") and decides_test(verdict)
+
+
+def test_a_framework_whose_import_raised_in_the_probe_is_the_candidates_import_error_quoting_the_line(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(FrameworkProbeError) as refused:
+        run_probe(_bare_interpreter(tmp_path), "import sglang_patch", (), {})
+    verdict = _unknown_framework(str(refused.value))
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, IMPORT_ERROR_REASON)
+    assert decides_test(verdict)
+
+
+def test_a_probe_that_says_nothing_of_the_framework_leaves_the_verdict_to_the_log(tmp_path: Path) -> None:
+    """A probe that could not start or that failed for another reason, or a version that cannot be read, is not the
+    candidate's import: it is left to the logs as if no step were named, so the test is run again."""
+    details = [framework_version.check(None, "0.5.0").detail]  # type: ignore[union-attr]
+    for python, program in ((str(tmp_path / "no-such-python"), "pass"), (_bare_interpreter(tmp_path), "1/0")):
+        with pytest.raises(FrameworkProbeError) as refused:
+            run_probe(python, program, (), {})
+        details.append(str(refused.value))
+    for detail in details:
+        assert _unknown_framework(detail) == classify_test_failure(returncode=1, evidence=FailureEvidence()), detail
 
 
 def test_a_stalled_server_is_unclear_and_does_not_settle_the_test_whatever_its_log_says() -> None:
