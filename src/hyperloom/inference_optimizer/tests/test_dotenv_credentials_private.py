@@ -634,6 +634,64 @@ def test_shell_and_preflight_hold_a_checkout_to_the_same_rule(tmp_path, containe
     assert preflight == said
 
 
+def _judged_as(uid: int, dotenv: Path) -> tuple[str | None, str | None]:
+    """What runtime_env_dotenv_not_private and preflight's _dotenv_not_private say of ``dotenv`` to the account ``uid``
+    (not root): the shell through setpriv, preflight in a child process that has become that account."""
+    shell = subprocess.run(
+        ["setpriv", f"--reuid={uid}", f"--regid={uid}", "--clear-groups", "--", "bash", "--noprofile", "--norc", "-c"]
+        + ['eval "$RUNTIME_ENV_TEXT"; runtime_env_dotenv_not_private "$1"', "bash", str(dotenv)],
+        env={"PATH": os.environ["PATH"], "RUNTIME_ENV_TEXT": RUNTIME_ENV_SH.read_text(encoding="utf-8")},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    ).stdout
+    read_end, write_end = os.pipe()
+    child = os.fork()
+    if child == 0:
+        status = 1
+        try:
+            os.close(read_end)
+            os.setgroups([])
+            os.setresgid(uid, uid, uid)
+            os.setresuid(uid, uid, uid)
+            said = preflight_env._dotenv_not_private(dotenv)
+            os.write(write_end, ("-" if said is None else "+" + said).encode())
+            status = 0
+        finally:
+            os._exit(status)
+    os.close(write_end)
+    with os.fdopen(read_end, "rb") as reader:
+        answer = reader.read().decode()
+    assert os.waitpid(child, 0)[1] == 0
+    return shell or None, None if answer == "-" else answer[1:]
+
+
+@pytest.mark.parametrize("owner", [_THIRD_UID, _OTHER_UID], ids=["another-accounts-checkout", "its-own-checkout"])
+def test_an_account_that_is_not_root_takes_no_other_owner_for_its_own(owner):
+    """Only root takes the checkout's owner for its own: an account that is not root refuses another account's 0755
+    checkout and 0644 .env in the shell and in preflight alike, and accepts its own."""
+    root = _shared_root()
+    try:
+        checkout = root / "checkout"
+        checkout.mkdir(mode=0o755)
+        dotenv = checkout / ".env"
+        dotenv.write_text("FRAMEWORK=vllm\n", encoding="utf-8")
+        dotenv.chmod(0o644)
+        for entry in (checkout, dotenv):
+            os.chown(entry, owner, owner)
+
+        shell, preflight = _judged_as(_OTHER_UID, dotenv)
+
+        said = None
+        if owner != _OTHER_UID:
+            said = f"{checkout} belongs to uid {owner}, not to this account (uid {_OTHER_UID})"
+        assert shell == said
+        assert preflight == said
+    finally:
+        shutil.rmtree(root)
+
+
 def test_shell_and_preflight_name_the_same_credentials():
     listed = subprocess.run(
         [

@@ -38,6 +38,7 @@ from .test_dotenv_credentials_private import (
     _CREDENTIALS,
     _MARKER,
     _OTHER_UID,
+    _THIRD_UID,
     _assignments,
     _credentials_in,
     _launch_env,
@@ -705,3 +706,91 @@ def test_the_rewrite_keeps_exactly_what_the_loader_lends_from_a_shared_dotenv(tm
         b"HF_HUB_OFFLINE=\"1\"\nHF_DATASETS_OFFLINE='0'   \nHYPERLOOM_LLM_MODE=openai\r\n"
         b"HYPERLOOM_FRAMEWORK_ENV = shared\n# FRAMEWORK=sglang\n\n   \nHYPERLOOM_BENCHMARK_BACKEND=bypass"
     )
+
+
+# Between the rewrite and the install's next write of .env, the other account appends a line to the file the rewrite
+# left, as it would from an inotify watch on the checkout; each attempt is recorded.
+_APPEND_AS_ANOTHER_ACCOUNT_AFTER = """
+{wrapped}() {{
+  _shipped_{wrapped} "$@" || return
+  if setpriv --reuid={uid} --regid={uid} --clear-groups -- sh -c 'printf "%s\\n" "$1" >> "$2"' - "$LATE_LINE" "$DOTENV" \\
+    2>/dev/null; then
+    echo appended >> "$RACE_RECORD"
+  else
+    echo refused >> "$RACE_RECORD"
+  fi
+}}
+"""
+
+
+def _append_after(wrapped: str) -> str:
+    return f'eval "_shipped_$(declare -f {wrapped})"\n' + _APPEND_AS_ANOTHER_ACCOUNT_AFTER.format(
+        wrapped=wrapped, uid=_OTHER_UID
+    )
+
+
+@pytest.mark.parametrize("installer", ["install.sh", "install_baremetal.sh"])
+@pytest.mark.parametrize("planted", [True, False], ids=["with-planted-lines", "lent-lines-only"])
+def test_another_account_cannot_append_to_the_dotenv_the_rewrite_leaves(tmp_path, monkeypatch, installer, planted):
+    """The rewrite leaves a file of mode 0600, even when it removes nothing: a line another account appends right after
+    it is refused, so the install's next write never copies it into a .env the next reader finds private."""
+    if os.geteuid() != 0 or shutil.which("setpriv") is None:
+        pytest.skip("acting as a second account needs root and setpriv")
+    root = _shared_root()
+    try:
+        checkout = root / "checkout"
+        checkout.mkdir(mode=0o755)
+        dotenv = checkout / ".env"
+        text = _PLANTED_IN_A_WRITABLE_DOTENV if planted else "# kept: a comment\nFRAMEWORK=vllm\nHF_HUB_OFFLINE='1'\n"
+        dotenv.write_text(text, encoding="utf-8")
+        dotenv.chmod(0o666)
+        workspace = tmp_path / "workspace"
+        tmp = _our_dir(tmp_path / "tmp")
+        monkeypatch.setenv("TMPDIR", str(tmp))
+        record = tmp_path / "race-record"
+        race = {"LATE_LINE": "NODE_OPTIONS=--require=/tmp/planted-late.js", "RACE_RECORD": str(record)}
+
+        if installer == "install.sh":
+            script = _write_installer(tmp_path / "assets", _append_after("runtime_env_keep_lent_dotenv_lines"))
+            proc = _run(script, checkout, {"USER_DATA_PATH": str(workspace), **_CREDENTIALS, **race})
+            framework = "vllm"
+        else:
+            script = _baremetal(tmp_path / "assets", _append_after("keep_lent_dotenv_lines") + _BAREMETAL_STUBS)
+            proc = _run_baremetal(script, checkout, workspace, tmp, **_BAREMETAL_CREDENTIALS, **race)
+            framework = ""
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        attempts = record.read_text(encoding="utf-8").split()
+        assert attempts
+        assert set(attempts) == {"refused"}
+        assert dotenv.stat().st_mode & 0o777 == 0o600
+        _assert_the_next_load_lends_none_of_it(checkout, workspace, framework=framework)
+    finally:
+        shutil.rmtree(root)
+
+
+@pytest.mark.parametrize("owner", ["the-checkouts-owner", "a-third-account"])
+def test_root_keeps_the_users_own_dotenv_the_users_when_it_rewrites_it(tmp_path, owner):
+    """Root, on a user's checkout whose .env any account can write, replaces it with a 0600 file the user still owns;
+    a .env a third account owns becomes root's."""
+    if os.geteuid() != 0:
+        pytest.skip("only root can give an entry to another account")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir(mode=0o755)
+    os.chown(checkout, _OTHER_UID, _OTHER_UID)
+    dotenv = checkout / ".env"
+    text = "# kept: a comment\nFRAMEWORK=vllm\n"
+    dotenv.write_text(text, encoding="utf-8")
+    dotenv.chmod(0o666)
+    uid = _OTHER_UID if owner == "the-checkouts-owner" else _THIRD_UID
+    os.chown(dotenv, uid, uid)
+
+    proc = _shell('runtime_env_keep_lent_dotenv_lines "$1"', str(dotenv))
+
+    assert proc.returncode == 0, proc.stderr
+    entry = dotenv.stat()
+    assert entry.st_mode & 0o777 == 0o600
+    expected = _OTHER_UID if owner == "the-checkouts-owner" else 0
+    assert (entry.st_uid, entry.st_gid) == (expected, expected)
+    assert dotenv.read_text(encoding="utf-8") == text
+    assert sorted(path.name for path in checkout.iterdir()) == [".env"]

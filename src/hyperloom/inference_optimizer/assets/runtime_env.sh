@@ -281,8 +281,9 @@ runtime_env_dotenv_credentials_elsewhere() {
 # the file (mktemp in its directory), given its mode and renamed over it, so a reader sees the old file or the new one,
 # never part of one. A link is always replaced, never written through: by a regular file of what it kept, or, for a
 # link to anything but a regular file, removed, so no later write of .env lands in what it points to. Nothing is
-# written when there is nothing to remove from a regular file. Status 1 and why on stderr when it cannot be done, a
-# .env this account cannot read or one that is not a regular file included.
+# written when there is nothing to remove from a regular file (runtime_env_keep_lent_dotenv_lines always writes).
+# Status 1 and why on stderr when it cannot be done, a .env this account cannot read or one that is not a regular file
+# included.
 runtime_env_remove_dotenv_credentials() {
   _runtime_env_rewrite_dotenv 0 "$@"
 }
@@ -292,7 +293,9 @@ runtime_env_remove_dotenv_credentials() {
 # continuation lines of a quoted value, and every other line but a blank one or a comment. The install's own writes
 # replace such a .env with a file of this account's, which a later reader may find private: what another account
 # planted there (NODE_OPTIONS, OPENAI_BASE_URL, LD_PRELOAD) must be gone before, or the rewrite lends it from then on.
-# Call it before the first write of such a .env.
+# The file is always replaced, even when nothing is removed, by one of mode 0600 that no other account can append to
+# before the install's next write copies it; as root, it keeps the owner of a .env that the checkout's owner owns, so
+# the user's own .env stays the user's. Call it before the first write of such a .env.
 runtime_env_keep_lent_dotenv_lines() {
   _runtime_env_rewrite_dotenv 1 "$@"
 }
@@ -300,6 +303,7 @@ runtime_env_keep_lent_dotenv_lines() {
 # The two above: $1 is 1 to keep only what a .env another account can write lends, 0 to remove the credentials alone.
 _runtime_env_rewrite_dotenv() {
   local lent_only="$1" dotenv="$2" keys mode=600 tmp line text key value nl quote="" drop=0 removed=0 failed=0 REPLY
+  local owner dir_owner
   shift 2
   keys=" $RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS $RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS $* "
   if [ -L "$dotenv" ] && [ ! -f "$dotenv" ]; then
@@ -313,7 +317,12 @@ _runtime_env_rewrite_dotenv() {
     return 1
   fi
   [ -L "$dotenv" ] || mode="$(stat -c '%a' -- "$dotenv")" || return 1
+  [ "$lent_only" -eq 0 ] || mode=600
   tmp="$(mktemp "$(dirname -- "$dotenv")/.env.XXXXXX")" || return 1
+  if [ "$lent_only" -eq 1 ] && [ "$(id -u)" = 0 ] && [ ! -L "$dotenv" ]; then
+    owner="$(stat -c '%u:%g' -- "$dotenv")" && dir_owner="$(stat -c '%u' -- "$(dirname -- "$dotenv")")" || failed=1
+    if [ "$failed" -eq 0 ] && [ "${owner%%:*}" = "$dir_owner" ]; then chown -- "$owner" "$tmp" || failed=1; fi
+  fi
   while :; do
     nl=$'\n'
     if ! IFS= read -r line; then
@@ -362,7 +371,7 @@ _runtime_env_rewrite_dotenv() {
       "$dotenv" >&2
   elif [ -n "$quote" ]; then
     printf '[runtime-env ERROR] cannot remove the credentials from %s: a quoted value in it never ends\n' "$dotenv" >&2
-  elif { [ "$removed" -eq 0 ] && [ ! -L "$dotenv" ]; } || { chmod -- "$mode" "$tmp" && mv -fT -- "$tmp" "$dotenv"; }; then
+  elif { [ "$removed" -eq 0 ] && [ ! -L "$dotenv" ] && [ "$lent_only" -eq 0 ]; } || { chmod -- "$mode" "$tmp" && mv -fT -- "$tmp" "$dotenv"; }; then
     rm -f -- "$tmp"
     return 0
   fi

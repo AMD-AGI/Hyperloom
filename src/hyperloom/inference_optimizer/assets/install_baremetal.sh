@@ -2320,7 +2320,8 @@ read_dotenv_var() {
 
 # Before each write of a .env another account can write (DOTENV_NOT_PRIVATE): remove what it would not lend
 # (runtime_env_keep_lent_dotenv_lines), so the write, which leaves a file of this account's that a later reader may
-# find private, never keeps a line another account planted. Writes nothing when there is nothing to remove.
+# find private, never keeps a line another account planted, nor one it appends before the write: the file it leaves
+# is 0600.
 keep_lent_dotenv_lines() {
   [ -n "${DOTENV_NOT_PRIVATE:-}" ] || return 0
   runtime_env_keep_lent_dotenv_lines "$DOTENV" ||
