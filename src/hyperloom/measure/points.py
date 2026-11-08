@@ -58,6 +58,7 @@ from hyperloom.orchestrator.actions.executors import (
     materialize_benchmark_config,
 )
 from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile, native_config
+from inference_suite.argv import argv_flag_occurrences, canonical_flag_name
 
 _UTF8 = "utf-8"
 
@@ -186,7 +187,11 @@ def launch_carriers(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], str |
 def _check_removals(config: Mapping[str, Any], launch: LaunchConfig) -> None:
     """Every option the recipe removes from the launch the framework resolves must be among an AgentX point's
     removals, or the round would launch with it. Any other point carries its whole launch in the recipe's own arguments,
-    so a removal it could not make is refused, not left on."""
+    so a removal it could not make is refused, not left on.
+
+    An AgentX launch composed on the session base (``replace_args``) carries the base's whole argv, so a removal is
+    made by leaving the option out of it; the round removes from the base what that argv lacks.
+    """
 
     if not launch.remove_args:
         return
@@ -194,8 +199,12 @@ def _check_removals(config: Mapping[str, Any], launch: LaunchConfig) -> None:
     point = BenchmarkPoint.from_document(config)
     if not point.agentx:
         raise PointError(f"only an AgentX point removes options of the launch it resolves, so {names} would stay")
-    removed = set(point.agentx_launch.remove_args)
-    kept = sorted(name for name in launch.remove_args if name not in removed)
+    if point.agentx_launch.replace_args:
+        carried = {name for name, _value in argv_flag_occurrences(point.agentx_launch.append_args)}
+        kept = sorted(name for name in launch.remove_args if canonical_flag_name(name) in carried)
+    else:
+        removed = set(point.agentx_launch.remove_args)
+        kept = sorted(name for name in launch.remove_args if name not in removed)
     if kept:
         raise PointError(f"the renderer did not remove launch arguments {', '.join(kept)}")
 
