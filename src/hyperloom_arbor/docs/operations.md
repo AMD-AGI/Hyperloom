@@ -26,16 +26,14 @@ fetches Arbor at a ref and submits a job with the campaign's config. One job is 
 6. run `python3 -m arbor run --config ... --cooldown 30`.
 
 A launcher's usual inputs are a cap on chunks, the round-end A/B hook (on or off, and its operating
-points), a calibration and profiles. The round-end A/B is a launcher's own script, set through
-`ARBOR_ROUND_AB` or the config's `round_ab.command`
-([how-it-works.md](how-it-works.md)); so is a rebase of the bar on a new node (dossier campaigns
-only). A document campaign runs on the host, with no GPU.
+points), a calibration and profiles. The round-end A/B is a launcher's own script, and so is a
+rebase of the bar on a new node (dossier campaigns only). A document campaign runs on the host, with
+no GPU.
 
 ## Rolling chunks
 
-On a cluster whose jobs have a short wall (the defaults assume four hours; `ARBOR_ROLL_WALL_MIN`
-and its siblings in `arbor/cluster/handoff.py` change them), a campaign longer than one job moves
-from node to node (`ARBOR_ROLL=1`, set by the launcher):
+On a cluster whose jobs have a short wall (the defaults assume four hours), a campaign longer than
+one job moves from node to node (`ARBOR_ROLL=1`, set by the launcher):
 
 - at 180 minutes the running chunk submits its successor (no dependency, excluding its node and
   `chain/bad_nodes`), which provisions and waits (`handoff wait`, up to 90 minutes);
