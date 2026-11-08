@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -40,7 +41,12 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     materialize_config_with_envs,
 )
+from hyperloom.orchestrator.actions.executors._suite_config import suite_config
 from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
+from hyperloom.orchestrator.actions.executors.tests.test_suite_accuracy_round import _agentx_base
+from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _settings
+from hyperloom.orchestrator.state.base_launch import server_base
+from hyperloom.orchestrator.state.tests._session_base import freeze_base
 
 SERVER_ARGS = "--max-running-requests 77 --enable-dp-attention"
 
@@ -339,6 +345,46 @@ def test_an_agentx_point_is_what_the_main_flow_hands_the_round_for_the_recipe_an
     launch = rendered["benchmark"]["agentx"]["launch_overrides"]
     assert launch["append_args"] == SERVER_ARGS.split()
     assert launch["env"] == {"HSA_FORCE_FINE_GRAIN_PCIE": "1"}
+
+
+def test_an_agentx_point_runs_on_the_sessions_frozen_base_as_the_main_flow_composes_it(
+    tmp_path, model, blobs, monkeypatch
+):
+    base = _agentx_base()
+    base = replace(
+        base,
+        topology=replace(base.topology, tp=2),
+        client=replace(base.client, env={"WEKA_LOADER_OVERRIDE": "corpus"}),
+    )
+    session = tmp_path / "session"
+    freeze_base(session, base)
+    canonical = default_canonical(
+        tmp_path / "canonical",
+        primary_concurrency=32,
+        config_path=agentx_source(tmp_path / "bench" / "benchmark.yaml", 32),
+        model_path=str(model),
+        server_base=server_base(base),
+    )
+    delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS, envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1"}))
+
+    (point,) = generate_points(environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points")
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
+    main_flow = materialize_benchmark_config(
+        agentx_source(tmp_path / "single" / "benchmark.yaml", 32),
+        tmp_path / "main",
+        launch=LaunchLayer(SERVER_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "RUN_EVAL": "false"}),
+        target=BenchmarkTarget(model_path=str(model)),
+    )
+    rendered = load(point)
+    assert rendered == load(main_flow)
+    launch = rendered["benchmark"]["agentx"]["launch_overrides"]
+    assert launch["replace_args"] is True
+    assert launch["append_args"][: len(base.args)] == list(base.args)
+    rendered["benchmark"]["timeout_seconds"] = 7200
+    user = suite_config(rendered, base, _settings()).server.user
+    assert user.args_add == tuple(SERVER_ARGS.split())
+    assert user.env_set["HSA_FORCE_FINE_GRAIN_PCIE"] == "1"
 
 
 #: An option of the launch resolved from the InferenceX recipe, which the recipe's own arguments lack.

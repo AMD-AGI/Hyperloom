@@ -20,30 +20,32 @@ from typing import TYPE_CHECKING
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import Workload
-from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunchError
+from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunch, BaseLaunchError
 from inference_suite.contracts import Workload as LaunchWorkload
 
 if TYPE_CHECKING:
     from hyperloom.inference_optimizer.cli.base_launch import SessionLaunch
 
 
-def freeze_session_base(toolbox: Path, workload: Workload, agent_launch: str) -> None:
-    """Freeze the base launch of a session of ``workload`` in ``toolbox`` unless it froze one; raises
-    :class:`PeersUnavailable` when the frozen one is not what the session recorded, or none can be resolved."""
+def freeze_session_base(toolbox: Path, workload: Workload, agent_launch: str) -> BaseLaunch:
+    """Freeze the base launch of a session of ``workload`` in ``toolbox`` unless it froze one, and return the frozen
+    one; raises :class:`PeersUnavailable` when the frozen one is not what the session recorded, or none can be
+    resolved."""
 
     from hyperloom.inference_optimizer.cli.base_launch import BaseLaunchUnresolved, resolve_server_base
     from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, freeze_base, frozen_base
 
     try:
-        if frozen_base(toolbox) is not None:
-            return
+        frozen = frozen_base(toolbox)
+        if frozen is not None:
+            return frozen.launch
     except (BaseLaunchMismatch, BaseLaunchError) as exc:
         raise PeersUnavailable(f"the session's frozen base launch cannot be read: {exc}") from exc
     try:
         base = resolve_server_base(_session_launch(workload, agent_launch))
     except BaseLaunchUnresolved as exc:
         raise PeersUnavailable(str(exc)) from exc
-    freeze_base(toolbox, base)
+    return freeze_base(toolbox, base).launch
 
 
 def _session_launch(workload: Workload, agent_launch: str) -> SessionLaunch:

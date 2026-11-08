@@ -73,7 +73,7 @@ from hyperloom.inference_optimizer.grid_server_args import validate_server_args_
 from inference_suite.argv import compact_json_server_args, remove_server_args
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-from hyperloom.orchestrator.state.base_launch import session_server_base
+from hyperloom.orchestrator.state.base_launch import ServerBase, session_server_base
 from ._gpu_pin import pin_rocr_visible_devices
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
@@ -1365,7 +1365,11 @@ class BenchmarkTarget:
 
 @dataclass(frozen=True)
 class MaterializeOptions:
-    """Per-run choices for a materialized config beyond its launch layer and target."""
+    """Per-run choices for a materialized config beyond its launch layer and target.
+
+    ``server_base`` is the frozen base an AgentX launch is seeded with; ``None`` reads the current session's, and a
+    renderer outside a session (the multibranch toolbox) names its own.
+    """
 
     out_name: str = "baseline_config.with_envs.yaml"
     establish_quality_ref: bool = False
@@ -1373,6 +1377,7 @@ class MaterializeOptions:
     flydsl_source_dirs: bool = False
     agentx_mode: bool | None = None
     grading: Mapping[str, Any] | None = None
+    server_base: ServerBase | None = None
 
 
 def prepare_grid_benchmark_config(
@@ -1422,7 +1427,9 @@ def materialize_benchmark_config(
         return materialize_config_with_envs(config_path, output_dir, launch=launch, target=target, options=options)
     replacing = launch.args_mode == "replace"
     inherited = "" if replacing else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
-    seed_session_base(config["benchmark"], session_server_base())
+    seed_session_base(
+        config["benchmark"], session_server_base() if options.server_base is None else options.server_base
+    )
     apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), accepted=True)
     from hyperloom_common.env import is_truthy
 

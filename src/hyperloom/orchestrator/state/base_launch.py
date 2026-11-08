@@ -38,7 +38,8 @@ class ServerBase:
     env: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
 
-def _server_base(base: BaseLaunch) -> ServerBase:
+def server_base(base: BaseLaunch) -> ServerBase:
+    """The server half of ``base`` as a launch is seeded with: its argv and the environment a launch may set."""
     golden = base.golden_al
     args = (*base.args, *golden.args) if golden is not None else base.args
     layers = {**base.env, **golden.env} if golden is not None else base.env
@@ -95,7 +96,7 @@ def freeze_base(session: Path, base: BaseLaunch) -> FrozenBase:
 def session_server_base() -> ServerBase:
     """The current session's server base; raises :class:`BaseLaunchMismatch` when the file and the state disagree."""
     frozen = frozen_session_base()
-    return ServerBase() if frozen is None else _server_base(frozen.launch)
+    return ServerBase() if frozen is None else server_base(frozen.launch)
 
 
 __all__ = [
@@ -105,5 +106,6 @@ __all__ = [
     "freeze_base",
     "frozen_base",
     "frozen_session_base",
+    "server_base",
     "session_server_base",
 ]
