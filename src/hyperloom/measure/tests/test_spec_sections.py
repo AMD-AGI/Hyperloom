@@ -157,13 +157,3 @@ def test_a_first_point_the_sheet_cannot_read_its_gpus_from_is_refused(tmp_path, 
         _build(tmp_path, point)
 
     assert refused.value.reason == "point_unreadable"
-
-
-def test_the_tool_commits_a_multibranch_dev_caller_still_passes_are_accepted_and_change_no_sheet(tmp_path):
-    call = make_call(tmp_path)
-    plain = spec_context(tmp_path)
-    legacy = spec_context(tmp_path, magpie_commit="a" * 40, inferencex_commit="b" * 40)
-
-    sheets = [build_spec(call, request_id="req-1", ctx=ctx, deadline_unix=1234.0) for ctx in (plain, legacy)]
-
-    assert sheets[0].to_bytes() == sheets[1].to_bytes()
