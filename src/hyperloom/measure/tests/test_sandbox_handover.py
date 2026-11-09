@@ -47,7 +47,7 @@ class _Sandbox:
 class _Service:
     """A sandbox service that records ``("create", id)``, ``("running", id)`` and ``("close", id)`` in order.
 
-    ``hold`` makes the next create wait until it is set, ``quota`` refuses a create while that many run, ``fail``
+    ``hold`` makes a create set ``creating`` and wait until ``hold`` is set, ``quota`` refuses a create while that many run, ``fail``
     makes a create raise, ``kill_error`` makes a close raise, and ``on_find`` runs at the start of every ``find``.
     """
 
@@ -67,8 +67,8 @@ class _Service:
         self._count = 0
 
     def create(self, template, *, role, timeout_sec, metadata, options=CreateOptions()):
-        self.creating.set()
         if self.hold is not None:
+            self.creating.set()  # a create that waits for the test: not one that went through before
             assert self.hold.wait(10), "the test never let the create through"
         if self.fail is not None:
             raise self.fail
@@ -461,8 +461,8 @@ class _Pending(_Service):
             self._count += 1
             sandbox = _Sandbox(self, f"sbx-{self._count}", dict(metadata))
             self.live[sandbox.sandbox_id] = sandbox
-        self.creating.set()
         if self.hold is not None:
+            self.creating.set()
             assert self.hold.wait(10), "the test never let the create through"
         with self._lock:
             self.events.append(("running", sandbox.sandbox_id))
