@@ -145,11 +145,11 @@ from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.widening import Widening
 from hyperloom_multibranch.specialist.agent_onboarding import ROOT_PROFILE_SOURCE, AttemptFailed
 from hyperloom_multibranch.specialist.arbor_adapter import REVIEW_HOST, REVIEW_OFF, SplitFailed
-from hyperloom_multibranch.specialist.map_session import MapCalls
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierStart
+    from hyperloom_multibranch.specialist.map_session import MapCalls
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +316,7 @@ class Session:
 
     def _peer_setup(self, desk: ForkDesk, services: SessionServices) -> PeerSetup:
         layout, settings = self._layout, self._settings
+        maps = self._map_calls() if settings.agents else None
         return PeerSetup(
             layout,
             settings.workload,
@@ -332,9 +333,16 @@ class Session:
             settings.agent_dossier,
             # The session's review stands in for each Arbor's own; without one, nobody's does.
             REVIEW_HOST if settings.review_gate else REVIEW_OFF,
-            MapCalls(self._map_start, self._map_split) if settings.agents else None,
+            maps,
             settings.agent_share_minutes,
         )
+
+    def _map_calls(self) -> MapCalls:
+        """What a mapping branch's map session calls back: :meth:`_map_start` and :meth:`_map_split`."""
+
+        from hyperloom_multibranch.specialist.map_session import MapCalls
+
+        return MapCalls(self._map_start, self._map_split)
 
     def _score_with_defaults(self) -> None:
         """Score with the defaults for the session's budget, against the trees archived by every other session, and
