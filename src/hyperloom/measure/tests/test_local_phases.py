@@ -23,14 +23,13 @@ from hyperloom.contracts.measurement import PhaseTiming
 from hyperloom.measure import local
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.phases import PhaseRecorder
-from hyperloom.measure.socket import MeasurementTimeout, TestCall
+from hyperloom.measure.socket import MeasurementTimeout, RoundPlan, TestCall
 from hyperloom.measure.tests.phase_rounds import READY_ONLY_LOG, FakeClock, Rounds, Run, Script, StagedGrid, result
-from hyperloom.measure.tests.test_local_backend import (  # noqa: F401 - magpie_backend is the module's autouse fixture
+from hyperloom.measure.tests.test_local_backend import (
     _call,
     _graded_call,
-    _point,
+    _graded_sweep,
     _sweep_call,
-    magpie_backend,
 )
 
 
@@ -41,7 +40,7 @@ def clock(monkeypatch) -> FakeClock:
     monkeypatch.setattr(
         local, "resolve_lifecycle_params", lambda path: {"eligible": True, "port": 8123, "framework": "sglang"}
     )
-    monkeypatch.setattr(local, "teardown_lifecycle_server", lambda **kw: clock.advance(3.0))
+    monkeypatch.setattr(local, "teardown_variant_server", lambda slot: clock.advance(3.0) or [])
     return clock
 
 
@@ -75,29 +74,39 @@ def test_a_graded_test_goes_through_its_phases_in_order_and_they_add_up_to_the_t
         ("server_boot.compile", 10.0, 0),
         ("server_boot.graph_capture", 12.0, 0),
         ("warmup", 60.0, 0),
-        ("accuracy_eval", 50.0, 0),
         ("round_collect", 5.0, 0),
         ("round_setup", 4.0, 0),
         ("measured", 56.0, 0),
-        ("teardown", 40.0, 0),
+        ("round_collect", 40.0, 0),
+        ("round_setup", 3.0, 0),
+        ("accuracy_eval", 52.0, 0),
+        ("teardown", 2.0, 0),
         ("teardown", 3.0, None),
-    ]
+    ], (
+        "the evaluation is a round of its own after the measured bench, its time from the moment it found the server ready"
+    )
     assert sum(p.seconds for p in outcome.phases) == pytest.approx(clock.now - began)
     assert recorder.phases == outcome.phases, "a recorder the runner passed in is the one the backend stamped"
 
 
-def test_the_time_before_the_first_round_is_the_kernel_tables_the_rebuilt_framework_and_the_launchers(
+def test_the_time_before_the_first_round_is_the_kernel_tables_and_the_rebuilt_framework(
     monkeypatch, clock, tmp_path
 ) -> None:
     def slow_round(slot: Path, kwargs: dict[str, Any]):
         clock.advance(2.0)
         return result("test", slot)
 
-    monkeypatch.setattr(local, "install_launchers", lambda points: clock.advance(1.5))
+    traced = local._traced
+
+    def slow_traced(*args):
+        clock.advance(1.5)
+        return traced(*args)
+
+    monkeypatch.setattr(local, "_traced", slow_traced)
 
     outcome, _ = _run(monkeypatch, clock, _call(tmp_path), {"test": slow_round})
 
-    assert _stamped(outcome.phases) == [("kernel_tables", 1.5, None), ("round", 2.0, 0)]
+    assert _stamped(outcome.phases) == [("kernel_tables", 1.5, None), ("round", 2.0, 0), ("teardown", 3.0, None)]
 
 
 # -- an AgentX test -----------------------------------------------------------------------------------------------
@@ -110,23 +119,20 @@ def _agentx_point(tmp_path: Path) -> Path:
     return path
 
 
-def test_an_agentx_test_names_its_warmup_run_and_splits_its_measured_run_at_its_clients_phases(
-    monkeypatch, clock, tmp_path
-) -> None:
-    call = _call(tmp_path, _agentx_point(tmp_path))
+def test_an_agentx_test_is_one_round_that_boots_and_splits_at_its_clients_phases(monkeypatch, clock, tmp_path) -> None:
+    call = _call(tmp_path, _agentx_point(tmp_path), rounds=RoundPlan(warmup_rounds=1))
 
     outcome, _ = _run(monkeypatch, clock, call, Rounds(clock).agentx())
 
     assert _stamped(outcome.phases) == [
-        ("round_setup", 10.0, 0),
+        ("round_setup", 5.0, 0),
         ("server_boot", 80.0, 0),
-        ("warmup", 40.0, 0),
-        ("round_collect", 30.0, 0),
         ("client_start", 15.0, 0),
         ("warmup", 30.0, 0),
         ("measured", 200.0, 0),
         ("round_collect", 15.0, 0),
         ("teardown", 30.0, 0),
+        ("teardown", 3.0, None),
     ]
 
 
@@ -137,7 +143,9 @@ def test_a_test_whose_server_never_got_ready_has_the_phases_up_to_the_failure(mo
     outcome, _ = _run(monkeypatch, clock, _call(tmp_path), Rounds(clock).failing_boot())
 
     assert outcome.returncode != 0
-    assert _stamped(outcome.phases) == [("server_boot", 1000.0, 0)], "no boot stamp: the whole round was the boot"
+    assert _stamped(outcome.phases) == [("server_boot", 1000.0, 0), ("teardown", 3.0, None)], (
+        "no boot stamp: the whole round was the boot"
+    )
 
 
 # -- a sweep arm --------------------------------------------------------------------------------------------------
@@ -187,6 +195,28 @@ def test_a_sweep_arm_boots_once_and_every_level_is_a_measured_round_of_its_own_p
     ], "the points are the call's own (c8, c4, c2 are 1, 2, 0) and the server is stopped once, after the last level"
 
 
+def test_a_graded_sweep_arm_benches_every_level_and_its_one_evaluation_is_a_phase_of_its_own_after_the_last(
+    monkeypatch, clock, tmp_path
+) -> None:
+    scripts = {**_sweep_scripts(clock), "eval": Rounds(clock).graded()["eval"]}
+
+    outcome, _ = _run(monkeypatch, clock, _graded_sweep(tmp_path, 2, 8, 4), scripts)
+
+    assert _stamped(outcome.phases)[10:] == [
+        ("round_setup", 1.0, 2),
+        ("measured", 20.0, 2),
+        ("round_collect", 2.0, 2),
+        ("round_setup", 1.0, 0),
+        ("measured", 20.0, 0),
+        ("round_collect", 2.0, 0),
+        ("round_setup", 3.0, 1),
+        ("accuracy_eval", 52.0, 1),
+        ("teardown", 2.0, 1),
+        ("teardown", 3.0, None),
+    ], "the last level leaves the server up for the evaluation, which runs from the level the server booted on"
+    assert [p.name for p in outcome.phases].count("accuracy_eval") == 1
+
+
 # -- a test that timed out ----------------------------------------------------------------------------------------
 
 
@@ -194,14 +224,19 @@ def test_a_test_that_timed_out_says_the_phases_it_went_through(monkeypatch, cloc
     def timing_out(slot: Path, kwargs: dict[str, Any]):
         clock.advance(3.0)
         Run(clock, slot).boot(30.0, log=READY_ONLY_LOG).end(1500.0)
-        return result("test", slot, status="failed", returncode=None, error="timed out", error_class="magpie_timeout")
+        return result("test", slot, status="failed", returncode=None, error="timed out", error_class="round_timeout")
 
     monkeypatch.setattr(local, "run_grid", StagedGrid({"test": timing_out}))
 
     with pytest.raises(MeasurementTimeout) as raised:
         LocalMeasurementBackend().run_test(replace(_call(tmp_path), phases=PhaseRecorder(clock)))
 
-    assert _stamped(raised.value.phases) == [("round_setup", 3.0, 0), ("server_boot", 30.0, 0), ("measured", 1500.0, 0)]
+    assert _stamped(raised.value.phases) == [
+        ("round_setup", 3.0, 0),
+        ("server_boot", 30.0, 0),
+        ("measured", 1500.0, 0),
+        ("teardown", 3.0, None),
+    ]
 
 
 # -- who owns the recorder ----------------------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 
 """Concrete ActionRunner implementations."""
 
+from ._proposal_identity import content_fingerprint, controls_of, normalize_proposal
 from .baseline import baseline_executor
 from .explore import explore_executor
 from .conc_sweep import conc_sweep_executor
@@ -17,20 +18,12 @@ from ._workload_envs import (
     materialize_benchmark_config,
 )
 from ._grid_base import GridVariant, VariantResult
-from ._profile_setup import SGLANG_PATCH_SERVER_FLAG, VLLM_PATCH_PROFILER_FIELDS
-from ._patch_laying import PatchedServer, is_patched_copy
-from ._server_patcher import ensure_patched_copy, ensure_vllm_patched_for_tracelens, lay_tracelens_patch
-from ._magpie_patcher import LM_EVAL_READY_FN, ensure_lm_eval_install_once
-from ._inferencex_patcher import (
-    benchmark_serving_path_in,
-    ensure_benchmark_lib_patched,
-    ensure_benchmark_serving_patched,
-)
+from ._profile_setup import VLLM_PATCH_PROFILER_FIELDS
+from ._server_patcher import ensure_vllm_patched_for_tracelens
 from ._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabled
-from ._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid
+from ._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid, teardown_variant_server
 from ._ray_backend import strip_visible_devices_from_config
-from ._server_lifecycle import REUSE_PORT_DEFAULT, resolve_lifecycle_params, teardown_lifecycle_server
-from ._server_lifecycle import _assign_free_port as assign_free_port
+from ._server_lifecycle import resolve_lifecycle_params
 from ._subprocess_kill import (
     COOPERATIVE_REAP_BUDGET_SEC,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -41,12 +34,14 @@ from ._subprocess_kill import (
 from .benchmark_result import harvest_leaked_artifacts
 from ._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
 from ._launch_evidence import RequestedLaunch, build_launch_evidence
+from ._round_folder import RoundFolder, is_round_folder
+from ._suite.config import fixed_workload
+from ._suite.rounds import TOOL_CACHE_ENV, SuiteRoundRefused, external_agentx_config, staged_tool_cache
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
-from ._spec_decode_pin import (
-    SPECULATIVE_DECODING_PINNED,
-    SpeculativeDecodingPinnedError,
-    refuse_unpinned_speculative_change,
-)
+from ._spec_decode_pin import SpeculativeDecodingPinnedError, refuse_unpinned_speculative_change
+from ._patch_laying import PatchedServer, is_patched_copy
+from ._profile_setup import SGLANG_PATCH_SERVER_FLAG
+from ._server_patcher import ensure_patched_copy, lay_tracelens_patch
 
 __all__ = [
     "SGLANG_PATCH_SERVER_FLAG",
@@ -54,11 +49,9 @@ __all__ = [
     "PatchedServer",
     "ensure_patched_copy",
     "ensure_vllm_patched_for_tracelens",
+    "PREFIX_CACHE_OFF_ERROR_CLASS",
     "is_patched_copy",
     "lay_tracelens_patch",
-    "ensure_lm_eval_install_once",
-    "LM_EVAL_READY_FN",
-    "PREFIX_CACHE_OFF_ERROR_CLASS",
     "CONTEXT_COPY_REFUSAL",
     "BenchmarkTarget",
     "COOPERATIVE_REAP_BUDGET_SEC",
@@ -69,26 +62,29 @@ __all__ = [
     "LaunchLayer",
     "MaterializeOptions",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
-    "REUSE_PORT_DEFAULT",
     "RequestedLaunch",
+    "RoundFolder",
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
-    "SPECULATIVE_DECODING_PINNED",
     "SpeculativeDecodingPinnedError",
+    "SuiteRoundRefused",
+    "TOOL_CACHE_ENV",
     "TargetAnalysisExecutor",
     "VariantResult",
-    "assign_free_port",
     "baseline_executor",
-    "benchmark_serving_path_in",
     "build_launch_evidence",
     "conc_sweep_executor",
+    "content_fingerprint",
+    "controls_of",
     "context_copy_refusal",
     "default_baseline_config",
-    "ensure_benchmark_lib_patched",
-    "ensure_benchmark_serving_patched",
     "explore_executor",
+    "external_agentx_config",
+    "fixed_workload",
     "harvest_leaked_artifacts",
+    "is_round_folder",
     "materialize_benchmark_config",
+    "normalize_proposal",
     "refuse_cacheless_agentx_baseline",
     "refuse_unpinned_speculative_change",
     "report_executor",
@@ -97,6 +93,7 @@ __all__ = [
     "run_grid_warmup_enabled",
     "run_with_session_kill",
     "session_breakdown_executor",
+    "staged_tool_cache",
     "strip_visible_devices_from_config",
-    "teardown_lifecycle_server",
+    "teardown_variant_server",
 ]

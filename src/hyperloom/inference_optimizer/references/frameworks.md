@@ -1,4 +1,4 @@
-# Framework Selection & GPU Runner Type
+# Framework Selection & GPU Type
 
 ## Framework Selection
 
@@ -16,7 +16,7 @@ python3 -m hyperloom optimize --framework custom --model "$MODEL_PATH" --max-hou
 Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
 
 What this controls:
-- Which Magpie YAML the executors default to —
+- Which workload YAML the executors default to —
   `baseline_{sglang,vllm,atom,xdit,custom}.yaml` and
   `profile_{sglang,vllm,atom,xdit,custom}.yaml`, one pair per framework registered in
   `src/hyperloom/inference_optimizer/framework_registry.py`.
@@ -47,8 +47,8 @@ when you resume a non-default session.
 ### `--framework atom` specifics (IR-8)
 
 Single-node only (`--nodes>=2` fails fast). Shipped configs `baseline_atom.yaml`
-/ `profile_atom.yaml`; the Magpie atom wrapper bridges `PROFILE=1` to atom's
-`--torch-profiler-dir`, and TraceLens consumes the resulting
+/ `profile_atom.yaml`; a profile round passes atom `--torch-profiler-dir`, and
+TraceLens consumes the resulting
 `*.pt.trace.json.gz` unchanged. atom source roots (`/app/ATOM/atom/`) are in
 PolicyGate's allowlist + `_REUSABLE_SOURCE_ROOTS`, and the repo URL
 `https://github.com/ROCm/ATOM.git` is atom's `FrameworkSpec.repo_url` in `framework_registry`. Unlike
@@ -68,7 +68,6 @@ of that, because the workload is yours. It is scriptable (server-less), and two
 paths at launch replace everything the shipped frameworks hardcode:
 
 ```bash
-export HYPERLOOM_BENCHMARK_BACKEND=bypass
 python3 -m hyperloom optimize -v \
   --framework custom \
   --framework-path /path/to/my-framework \
@@ -88,8 +87,9 @@ first benchmark.
 
 The entrypoint is taken as `custom_<gpu-type>.sh`, or the single `.sh` in the
 directory. It **must** emit a `quality_gate` block in its report: for a
-server-less workload that gate is the only correctness signal, and a missing one
-scores zero accuracy, which rejects every candidate the run produces.
+server-less workload that gate is the only correctness signal. A baseline without
+it stops the run with `baseline_accuracy_failed`; a candidate without it scores
+zero accuracy and is rejected.
 
 `--extra-env` carries the knobs your script reads; Hyperloom interprets none of
 them. Whatever you pin there becomes part of the measurement contract — a
@@ -175,7 +175,7 @@ cache hit measures flat on its own; a greedy accept/reject loop rejects it and
 then measures every dependent rewrite against a permanently cold cache, losing
 the bundle rather than the lever.
 
-## GPU Runner Type
+## GPU Type
 
 Pick the GPU explicitly with `--gpu-type` or `$GPU_TYPE`; without either, the
 optimizer auto-detects via `rocm-smi --showproductname` (falling back to
@@ -187,14 +187,12 @@ GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 
 ```
 
 Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`,
-`radeon8060s`. **`mi308x` and
-`mi325x` map to `runner_type=mi300x`** with a warning, since the GPUs share the
-same runner family and Magpie has not shipped MI308X/MI325X-specific SGLang/vLLM
-scripts yet. If you need a true MI308X/MI325X-specific script, uncomment the `benchmark_script:` template in the
-relevant YAML and point it at your script under `InferenceX/benchmarks/...`.
+`radeon8060s`. The GPU type is the board the base launch is resolved for: a
+recipe for another board is used only when both share the gfx target and HBM
+size (`mi350x` / `mi355x` do; `mi300x` / `mi325x` do not), and its point is
+chosen for `--nodes` × `--gpus-per-node` (default 8) GPUs.
 
-`r9700` (Radeon AI PRO R9700, gfx1201) maps to `runner_type=gfx12`, Magpie's
-`vllm_gfx12.sh`, and runs with `--framework vllm` only: pass
+`r9700` (Radeon AI PRO R9700, gfx1201) runs with `--framework vllm` only: pass
 `--framework vllm`, since another framework (including the default) exits
 with code 2 at launch.
 

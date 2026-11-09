@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import CancelledError
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -22,7 +23,10 @@ import pytest
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 
+from hyperloom.common.agent_isolation import AccountIsolation
+from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss
+from hyperloom.orchestrator.specialists.launch_env import PreparedLaunch
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessDispatcher,
     SpecialistSpawn,
@@ -169,15 +173,15 @@ class _SameUidRunAs:
 @pytest.mark.skipif(os.getuid() == 0, reason="pid 1 has to belong to another uid")
 def test_demoted_reap_signals_only_pids_the_specialist_account_owns(monkeypatch):
     """The account can write into the scan's stdout, so a pid it prints is believed only if that account owns it."""
-    from hyperloom.common.proctree import Tree
+    from hyperloom_common.proctree import Tree
 
     own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     roots: list[list[int]] = []
-    monkeypatch.setattr(ss, "_LIST_MARKED_SCRIPT", f"echo 1; echo {own.pid}")
+    monkeypatch.setattr(launch_env, "LIST_MARKED_SCRIPT", f"echo 1; echo {own.pid}")
     monkeypatch.setattr(ss, "collect_tree", lambda pids: roots.append(list(pids)) or Tree((), (), frozenset()))
     monkeypatch.setattr(ss, "kill_tree", lambda tree: True)
     try:
-        SpecialistSubprocessDispatcher._reap_marked("mark", _SameUidRunAs())
+        SpecialistSubprocessDispatcher._reap_marked("mark", PreparedLaunch(AccountIsolation(_SameUidRunAs())))
     finally:
         own.kill()
         own.wait(timeout=5)
@@ -192,7 +196,7 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, dem
     import os
     import signal
     import time
-    from hyperloom.common.proctree import running
+    from hyperloom_common.proctree import running
 
     pid_path = tmp_path / "heartbeat.pid"
     child_code = (
@@ -220,10 +224,10 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, dem
 
     monkeypatch.setattr(ss.subprocess, "Popen", spawn)
     if demoted:
-        monkeypatch.setattr(ss, "resolve_launch_user", lambda lease: _SameUidRunAs())
-        monkeypatch.setattr(ss, "prepare_demote", lambda *args: {})
+        monkeypatch.setattr(ss, "resolve_launch_isolation", lambda lease: AccountIsolation(_SameUidRunAs()))
+        monkeypatch.setattr(launch_env, "_demote", lambda *args: {})
         # The app's uid cannot read a demoted child's environ.
-        monkeypatch.setattr(ss, "marked_pids", lambda key, value: [])
+        monkeypatch.setattr(launch_env, "marked_pids", lambda key, value: [])
     dispatcher = SpecialistSubprocessDispatcher(
         ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
     )
@@ -272,7 +276,7 @@ def test_kill_exited_root_cannot_confirm_descendants(monkeypatch):
 
 @pytest.mark.parametrize("confirmed_dead", [True, False])
 def test_kill_reuses_tree_cleanup_confirmation(monkeypatch, confirmed_dead):
-    from hyperloom.common.proctree import Tree
+    from hyperloom_common.proctree import Tree
 
     proc = Mock(pid=4242)
     proc.poll.return_value = None
@@ -295,7 +299,7 @@ def test_kill_reuses_tree_cleanup_confirmation(monkeypatch, confirmed_dead):
 
 @pytest.mark.parametrize("failure", [OSError("procfs unreadable"), subprocess.TimeoutExpired("specialist", 1)])
 def test_kill_does_not_confirm_failed_collection_or_wait(monkeypatch, failure):
-    from hyperloom.common.proctree import Tree
+    from hyperloom_common.proctree import Tree
 
     proc = Mock(pid=4242)
     proc.poll.return_value = None
@@ -311,7 +315,7 @@ def test_kill_does_not_confirm_failed_collection_or_wait(monkeypatch, failure):
 
 
 def test_kill_missing_process_identity_cannot_confirm_tree(monkeypatch):
-    from hyperloom.common.proctree import Tree
+    from hyperloom_common.proctree import Tree
 
     proc = Mock(pid=4242)
     proc.poll.return_value = None
@@ -411,6 +415,16 @@ async def test_ray_followup_ack_preserves_reap_outcome(monkeypatch, tmp_path, ph
         clock.now += 31.0
 
     monkeypatch.setattr(ss.asyncio, "sleep", advance)
+    real_create = ss.create_nofollow
+
+    def created_long_ago(base, rel):
+        """The launch's log, made fresh as the dispatcher makes it; this test's wall clock never moves, so it is dated
+        before it, as the empty log of a CLI that never wrote is once its heartbeat window has passed."""
+        handle = real_create(base, rel)
+        os.utime(Path(base, *rel), (0.0, 0.0))
+        return handle
+
+    monkeypatch.setattr(ss, "create_nofollow", created_long_ago)
     lease = Mock()
     lease.poll_started.return_value = 4242
     actor = SimpleNamespace(closed=False, alive=phase != "natural")

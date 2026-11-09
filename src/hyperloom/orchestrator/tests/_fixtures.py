@@ -49,6 +49,43 @@ def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
         monkeypatch.setattr(aiter_jit, "AITER_JIT_PROBE_PATHS", ())
     _isolate_ray_head(monkeypatch)
     _isolate_framework_trees(monkeypatch)
+    _isolate_agent_isolation(monkeypatch)
+
+
+def _isolate_agent_isolation(monkeypatch) -> None:
+    """Launch every specialist, and announce at start-up, as on a host without bubblewrap, unless a test picks a tier
+    itself; each test starts with nothing said or counted for the session report.
+
+    The tests of the launch paths run fake CLIs that read and write where a sandbox would not let them, so where
+    bubblewrap works (CI installs it) they would run sandboxed. The account tier and the refusals are unchanged.
+    """
+    import functools
+
+    from hyperloom_common.bwrap import BwrapProbe
+    from hyperloom.common import agent_isolation
+    from hyperloom.orchestrator.specialists import launch_env
+
+    absent = BwrapProbe(None, None, ("bubblewrap: not found on PATH",))
+
+    def without_bwrap(decide):
+        """``decide`` as the module runs it, with its ``bwrap_probe`` finding no bubblewrap while it does."""
+
+        @functools.wraps(decide)
+        def decided(*args, **kwargs):
+            probe = agent_isolation.bwrap_probe
+            agent_isolation.bwrap_probe = lambda *_args: absent
+            try:
+                return decide(*args, **kwargs)
+            finally:
+                agent_isolation.bwrap_probe = probe
+
+        return decided
+
+    monkeypatch.setattr(launch_env, "choose_agent_isolation", without_bwrap(agent_isolation.choose_agent_isolation))
+    monkeypatch.setattr(
+        agent_isolation, "announce_agent_isolation", without_bwrap(agent_isolation.announce_agent_isolation)
+    )
+    monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process())
 
 
 def _isolate_ray_head(monkeypatch) -> None:
@@ -81,11 +118,9 @@ def _isolate_framework_trees(monkeypatch) -> None:
 class NoLaunchBackendInstalled(BaseException):
     """A test launched a subprocess before installing a launch backend.
 
-    A ``BaseException`` on purpose. Several production launch sites sit inside
-    a bare ``except Exception`` -- the Magpie interpreter probe answers "this
-    interpreter cannot import Magpie" that way -- so an ordinary exception here
-    would be swallowed and the test would carry on against a wrong answer
-    instead of stopping.
+    A ``BaseException`` on purpose. A production launch site that sits inside a
+    bare ``except Exception`` would swallow an ordinary exception here, and the
+    test would carry on against a wrong answer instead of stopping.
     """
 
 
@@ -97,7 +132,7 @@ def launch_backend(monkeypatch):
     the definition and the names the eager importers bound are patched, so a
     launch made on a worker thread the test never sees is covered too.
     """
-    from hyperloom.orchestrator.actions.executors import _grid_runner, _subprocess_kill, baseline
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill
 
     installed: list = []
 
@@ -106,8 +141,7 @@ def launch_backend(monkeypatch):
             raise NoLaunchBackendInstalled(f"no launch backend is installed for this test; cmd={list(cmd)[:3]}")
         return installed[-1].run(cmd, **kwargs)
 
-    for module in (_subprocess_kill, _grid_runner, baseline):
-        monkeypatch.setattr(module, "run_with_session_kill", _run)
+    monkeypatch.setattr(_subprocess_kill, "run_with_session_kill", _run)
 
     def _install(backend):
         installed.append(backend)

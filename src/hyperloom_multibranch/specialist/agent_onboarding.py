@@ -24,22 +24,35 @@ last attempt (:class:`ConfigRefused`): another would write the same config.
 
 The agent runs commands, not containers: a ``docker`` on its ``PATH`` (:data:`DOCKER_SHIM`) runs ``docker exec`` and
 ``docker cp`` in place, for an agent written to drive a container, and refuses everything else.
+
+The agent's sandbox, this host and the next leg may be different accounts of one group, so what is made here for the
+agent is the group's below shared storage: directories ``2775``, files ``664`` and replaced by rename, the shim among
+them, and git makes the checkout under umask ``002``; elsewhere the umask decides
+(:func:`~hyperloom_common.shared_storage.child_umask`). The checkout is then the agent's to write, its ``.git``
+included, so no git of this host obeys its config: no hook, fsmonitor, pager, external diff or filter driver of it runs
+(:mod:`~hyperloom_multibranch.repo.isolated_git`).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
 import shutil
+import stat
+import subprocess
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from time import monotonic
 from typing import Protocol
 
+from hyperloom_common.shared_storage import child_umask, make_shared_dirs, write_shared_text
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
+from hyperloom_common.git_safety import NO_PROGRAMS
+from hyperloom_multibranch.repo.isolated_git import NO_LAZY_FETCH, blank_driver_programs, leading_options, trusting
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, ManifestError
 from hyperloom_multibranch.specialist.agent_spec import ROOT_PROFILE_SOURCE, AgentSpec
 from hyperloom_multibranch.specialist.arbor_adapter import (
@@ -73,6 +86,8 @@ GIT_DIR = ".git"
 QUIET = "--quiet"
 REV_PARSE = "rev-parse"
 SHIM_DIR = "bin"
+#: The shim's mode: run by the sandbox's account, rewritten by none (a later attempt replaces it by rename).
+_SHIM_MODE = 0o755
 #: The lines of an output a failure keeps, the end of the output, where the cause usually is.
 TAIL_LINES = 20
 #: The file, in the session of an agent run as a component, that holds the op shares of the session's root profile.
@@ -169,14 +184,16 @@ class OnboardingSetup:
 
 @dataclass(frozen=True)
 class ReadyAgent:
-    """An agent preflight made ready: its manifest, its checkout and the process it runs in, and what its branch should
+    """An agent preflight made ready: its manifest, its checkout and the process it runs in, what its branch should
     note of how it was started (an input its Arbor lacks, :func:`fit_keys`, or a dossier that is gone,
-    :func:`dossier_notes`)."""
+    :func:`dossier_notes`), and ``source_unkept``, the spec's reason no change to the framework's source can be kept
+    when the agent was told it (Arbor, in its host rules), ``""`` when it was told none."""
 
     manifest: AgentManifest
     source_dir: Path
     process: AgentProcess
     notes: tuple[str, ...] = ()
+    source_unkept: str = ""
 
 
 class AttemptFailed(RuntimeError):
@@ -256,8 +273,8 @@ async def _attempt(
     if adapted:
         config, notes = fit_keys(manifest.config, checkout)
         manifest, notes = replace(manifest, config=config), (*notes, *dossier_notes(checkout, spec.dossier))
-    (checkout / manifest.config_file).parent.mkdir(parents=True, exist_ok=True)
-    (checkout / manifest.config_file).write_text(json.dumps(manifest.config, indent=2), encoding=ENCODING)
+    make_shared_dirs((checkout / manifest.config_file).parent)
+    write_shared_text(checkout / manifest.config_file, json.dumps(manifest.config, indent=2))
     env = agent_env(agent_dir)
     await install(manifest, setup, checkout, env)
     process = await setup.sandbox.start(manifest.launch, checkout, env)
@@ -268,7 +285,7 @@ async def _attempt(
     finally:
         if not started:
             await process.kill()
-    return ReadyAgent(manifest, checkout, process, notes)
+    return ReadyAgent(manifest, checkout, process, notes, spec.source_unkept if adapted else "")
 
 
 async def install(manifest: AgentManifest, setup: OnboardingSetup, checkout: Path, env: Mapping[str, str]) -> None:
@@ -310,8 +327,8 @@ def root_profile(shares: OpShares | None, session: Path, source: str = ROOT_PROF
         "shares": dict(shares.shares),
     }
     profile = session / PROFILE_FILE
-    profile.parent.mkdir(parents=True, exist_ok=True)
-    profile.write_text(json.dumps(document, indent=2), encoding=ENCODING)
+    make_shared_dirs(profile.parent)
+    write_shared_text(profile, json.dumps(document, indent=2))
     return profile
 
 
@@ -358,12 +375,14 @@ async def fetch_source(source: str, checkout: Path) -> str:
         if done.returncode != 0:
             raise AttemptFailed(f"fetching {url}: {tail(done.output)}")
         if ref:
-            checked = await _git([GIT, "checkout", QUIET, ref], checkout)
+            checked = await _checkout_git([GIT, "checkout", QUIET, ref], checkout)
             if checked.returncode != 0:
                 # Left in place, the clone would pass the next attempt on its default branch.
                 shutil.rmtree(checkout)
                 raise AttemptFailed(f"checking out {ref}: {tail(checked.output)}")
-    head = await _git([GIT, REV_PARSE, "HEAD"], checkout)
+    head = await _checkout_git([GIT, REV_PARSE, "HEAD"], checkout)
+    if head.returncode != 0:
+        raise AttemptFailed(f"reading the commit of {checkout}: {tail(head.output)}")
     return head.output.strip()
 
 
@@ -383,6 +402,7 @@ async def _commit_tree(tree: Path, checkout: Path) -> None:
     lies in one, since that is the version of what was copied."""
 
     shutil.copytree(tree, checkout, ignore=shutil.ignore_patterns(GIT_DIR, "__pycache__"), dirs_exist_ok=True)
+    _share_copy(checkout)
     enclosing = await _git([GIT, REV_PARSE, "HEAD"], tree)
     at = f" at {enclosing.output.strip()}" if enclosing.returncode == 0 else ""
     # Fixed identity and no signing: the host may have neither a git identity nor a signing key.
@@ -392,17 +412,61 @@ async def _commit_tree(tree: Path, checkout: Path) -> None:
         [GIT, "add", "--all"],
         [*commit, "commit", QUIET, "--no-verify", "--message", f"Copy of {tree}{at}"],
     ):
-        done = await _git(argv, checkout)
+        done = await _checkout_git(argv, checkout)
         if done.returncode != 0:
             # Left in place, the partial repository would pass the next attempt as fetched.
             shutil.rmtree(checkout)
             raise AttemptFailed(f"committing a copy of {tree}: {tail(done.output)}")
 
 
+def _share_copy(checkout: Path) -> None:
+    """Give what :func:`_commit_tree` copied into ``checkout`` -- made just now by this process, with the modes of the
+    tree it copied -- group write, and its directories setgid, never through a link: the agent's sandbox writes it."""
+
+    for directory, _, files in os.walk(checkout):
+        _add_mode(directory, stat.S_IWGRP | stat.S_ISGID)
+        for name in files:
+            _add_mode(os.path.join(directory, name), stat.S_IWGRP)
+
+
+def _add_mode(path: str, bits: int) -> None:
+    """Add ``bits`` to the directory or regular file ``path``; a link, or an entry an earlier attempt of another account
+    left (``EPERM``), is left as it is."""
+
+    mode = os.lstat(path).st_mode
+    if stat.S_ISDIR(mode) or stat.S_ISREG(mode):
+        with contextlib.suppress(PermissionError):
+            os.chmod(path, stat.S_IMODE(mode) | (bits if stat.S_ISDIR(mode) else bits & ~stat.S_ISGID))
+
+
+async def _checkout_git(argv: list[str], checkout: Path) -> CommandResult:
+    """:func:`_git` in the agent's checkout, used whoever owns it: an earlier attempt, or the run's earlier leg, may
+    have been another account of the group."""
+
+    return await _git([argv[0], *trusting(checkout), *argv[1:]], checkout)
+
+
 async def _git(argv: list[str], cwd: Path) -> CommandResult:
-    cwd.mkdir(parents=True, exist_ok=True)
+    """``argv`` (``git <args>``) in ``cwd``, under umask ``002`` below shared storage; no program the config of the
+    repository there names runs, its filter drivers included (:mod:`~hyperloom_multibranch.repo.isolated_git`), as the
+    agent writes that config."""
+
+    make_shared_dirs(cwd)
+    env = {**os.environ, **NO_LAZY_FETCH}
+    try:
+        blanked = await asyncio.to_thread(blank_driver_programs, cwd, env, *leading_options(argv[1:]))
+    except (OSError, subprocess.SubprocessError) as error:
+        return CommandResult(1, f"git config in {cwd} cannot be read to blank its filter drivers: {error}")
     process = await asyncio.create_subprocess_exec(
-        *argv, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        argv[0],
+        *NO_PROGRAMS,
+        *blanked,
+        *argv[1:],
+        cwd=cwd,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        umask=child_umask(cwd),
     )
     output, _ = await process.communicate()
     return CommandResult(process.returncode or 0, output.decode(errors="replace"))
@@ -432,9 +496,8 @@ def agent_env(agent_dir: Path) -> dict[str, str]:
     ``PATH``."""
 
     shim = agent_dir / SHIM_DIR / "docker"
-    shim.parent.mkdir(parents=True, exist_ok=True)
-    shim.write_text(DOCKER_SHIM, encoding=ENCODING)
-    shim.chmod(0o755)
+    make_shared_dirs(shim.parent)
+    write_shared_text(shim, DOCKER_SHIM, mode=_SHIM_MODE)
     return {"PATH": f"{shim.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
 
 

@@ -66,6 +66,8 @@ class _JitServer:
         grid = local.run_grid
 
         async def serve(**kwargs):
+            if kwargs["launch"].server_already_ready:  # the server an earlier round booted builds nothing
+                return await grid(**kwargs)
             jit = Path(os.environ.get("AITER_JIT_DIR") or self.image_jit)
             self.jit_dir = jit
             for module in WANTED:
@@ -144,9 +146,7 @@ def test_a_test_the_cache_gives_a_jit_directory_gets_no_second_one(image, monkey
 def test_a_jit_directory_a_points_server_environment_names_is_left_as_it_is(image, tmp_path) -> None:
     point = tmp_path / "point.yaml"
     point.write_text(yaml.safe_dump({"benchmark": {"envs": {"AITER_JIT_DIR": "/elsewhere"}}}), encoding="utf-8")
-    call = TestCall(
-        points=(point,), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), magpie_python="", task_id="t"
-    )
+    call = TestCall(points=(point,), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), task_id="t")
 
     assert own_aiter_jit(call, None, None, {}, tmp_path / OWN_AITER_JIT_DIR) == {}
     plain = dataclasses.replace(call, points=(_plain_point(tmp_path),))

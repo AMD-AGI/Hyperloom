@@ -7,8 +7,10 @@ Every top-level process of a sandbox runs under a launcher. The launcher marks
 itself a child subreaper (``PR_SET_CHILD_SUBREAPER``), so a descendant that
 detaches (double fork, ``setsid``, an emptied environment) and loses its parent
 is re-parented to the launcher, never to init. The launcher outlives its command
-until the sandbox's reaper kills it, so the reaper can always enumerate every
-process the sandbox ever started by walking from the launcher.
+while any process the command started runs, reaping each as it ends, so the
+reaper can always enumerate every process the sandbox ever started by walking
+from the launcher. Once it has no child left it exits: only a descendant can
+become its child, and it has none.
 """
 
 from __future__ import annotations
@@ -18,12 +20,12 @@ import select
 import subprocess
 import time
 
-__all__ = ["LAUNCHER_SOURCE", "StatusPipe", "launcher_argv"]
+__all__ = ["LAUNCHER_SOURCE", "StatusPipe", "launcher_argv", "runs_launcher"]
 
 #: Self-contained (standard library only) so it runs under any python3 and
 #: under another account.
 LAUNCHER_SOURCE = r"""
-import ctypes, os, signal, sys, time
+import ctypes, os, signal, sys
 status_fd = int(sys.argv[1])
 argv = sys.argv[2:]
 try:
@@ -53,13 +55,22 @@ while True:
     try:
         os.wait()  # reap re-parented orphans as they exit
     except ChildProcessError:
-        time.sleep(0.2)
+        break
 """
 
 
 def launcher_argv(python: str, status_fd: int, argv: list[str]) -> list[str]:
     """Wrap ``argv`` so it runs under a launcher that reports its exit code on ``status_fd``."""
     return [python, "-I", "-c", LAUNCHER_SOURCE, str(status_fd), *argv]
+
+
+def runs_launcher(pid: int) -> bool:
+    """Whether process ``pid`` runs a launcher; ``False`` when it is gone."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            return LAUNCHER_SOURCE.encode() in handle.read().split(b"\0")
+    except OSError:
+        return False
 
 
 class StatusPipe:

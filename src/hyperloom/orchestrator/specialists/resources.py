@@ -21,9 +21,11 @@ import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from stat import S_ISDIR
 from typing import Any, Mapping
 
-from hyperloom.common.proctree import descendants
+from hyperloom_common.fs_utils import append_text_nofollow
+from hyperloom_common.proctree import descendants
 
 __all__ = [
     "ContainerSnapshot",
@@ -59,7 +61,7 @@ def _clock_ticks() -> int:
 class ProcessTreeSampler:
     """Track the memory peak and CPU time of one process tree.
 
-    The tree is the root and its descendants as :func:`hyperloom.common.proctree.descendants`
+    The tree is the root and its descendants as :func:`hyperloom_common.proctree.descendants`
     finds them in ``/proc``; ``proc_root`` is where each member's readings are read.
 
     A process that exits stops counting towards memory the moment it is gone. Its CPU
@@ -232,9 +234,14 @@ def _directory_blocks(directory: Path, subdirs: list[Path]) -> int:
 
 
 def dir_usage_bytes(path: Path) -> int | None:
-    """Disk blocks used under ``path`` (symlinks not followed); ``None`` when it does not exist."""
+    """Disk blocks used under ``path``, following no symlink (one at ``path`` neither); ``None`` (unknown) when ``path``
+    is not a directory of its own: a link a specialist left at its worktree's path would have the app walk whatever
+    directory it names."""
     root = Path(path)
-    if not root.exists():
+    try:
+        if not S_ISDIR(os.lstat(root).st_mode):
+            return None
+    except OSError:
         return None
     total = 0
     stack = [root]
@@ -245,17 +252,18 @@ def dir_usage_bytes(path: Path) -> int | None:
 
 @dataclass
 class ResourceLog:
-    """Append-only ``agents/resources.jsonl``; one JSON object per line."""
+    """Append-only ``base/<rel...>`` (``agents/resources.jsonl`` of a session); one JSON object per line.
 
-    path: Path
+    No component below ``base`` is followed as a link, and a file with another link is refused: a specialist that
+    writes the session tree could otherwise point the app's append at a file of the app's.
+    """
+
+    base: Path
+    rel: tuple[str, ...]
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def append(self, record: Mapping[str, Any]) -> None:
         line = json.dumps(dict(record), sort_keys=True, separators=(",", ":")) + "\n"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.base.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            try:
-                os.write(fd, line.encode("utf-8"))
-            finally:
-                os.close(fd)
+            append_text_nofollow(self.base, self.rel, line)

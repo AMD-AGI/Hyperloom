@@ -13,66 +13,14 @@ from pathlib import Path
 from typing import IO, Callable, Iterator, Sequence
 
 
-# Mounts that can be revoked mid-run: a process whose cwd lives on one sees relative-path writes fail with ENOENT
-# after a flap, so callers place anything they must keep writing to on local disk instead.
-_NETWORK_FS_TYPES: frozenset[str] = frozenset(
-    {
-        "nfs",
-        "nfs4",
-        "cifs",
-        "smb3",
-        "lustre",
-        "glusterfs",
-        "ceph",
-        "fuse.weka",
-        "wekafs",
-        "wekafsgw",
-        "fuse.juicefs",
-        "fuse.s3fs",
-        "fuse.sshfs",
-        "9p",
-    }
-)
-
-
-def _path_fstype(path: str) -> str:
-    """Return the filesystem type backing ``path`` per ``/proc/mounts``."""
-    try:
-        rp = os.path.realpath(path)
-    except OSError:
-        return ""
-    best_mp = ""
-    best_type = ""
-    try:
-        with open("/proc/mounts", encoding="utf-8") as fh:
-            for line in fh:
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                # /proc/mounts octal-escapes spaces in the mountpoint.
-                try:
-                    mp = parts[1].encode("latin-1").decode("unicode_escape")
-                except (UnicodeDecodeError, UnicodeEncodeError):
-                    mp = parts[1]
-                fstype = parts[2]
-                norm = mp.rstrip("/") or "/"
-                is_under = norm == "/" or rp == norm or rp.startswith(norm + "/")
-                if is_under and len(norm) >= len(best_mp):
-                    best_mp = norm
-                    best_type = fstype
-    except OSError:
-        return ""
-    return best_type
-
-
-def is_network_fs(path: str) -> bool:
-    """True when ``path`` is backed by a revocable network filesystem."""
-    return _path_fstype(path).lower() in _NETWORK_FS_TYPES
-
-
 def is_private_dir(directory: Path | str) -> bool:
     """Whether ``directory`` is a directory of this user's, not a link, that its group and others cannot write: in a
-    temporary directory every account shares, no other unprivileged account can have made it or put an entry in it."""
+    temporary directory every account shares, no other unprivileged account can have made it or put an entry in it.
+
+    For local temporary directories only. On shared storage another account of the group may own a directory this one
+    must write, and in a user namespace it shows as the overflow id: ask
+    :func:`~hyperloom_common.shared_storage.writable_problems` there.
+    """
     try:
         info = os.lstat(directory)
     except OSError:
@@ -87,8 +35,12 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 def _open_below(base: Path, parts: Sequence[str], *, create: bool) -> int:
-    """Open ``base`` then each of ``parts`` as a directory, never through a symlink; return the last fd."""
-    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    """Open ``base`` then each of ``parts`` as a directory, never through a symlink; return the last fd.
+
+    ``base`` itself is refused when it is a link (a link above it is followed): a less-privileged process that writes
+    the directory holding it can swap it for a link to anywhere.
+    """
+    fd = os.open(base, _DIR_FLAGS)
     try:
         for name in parts:
             if create:
@@ -141,6 +93,39 @@ def create_nofollow(base: Path, rel: Sequence[str], *, mode: int = _PRIVATE_MODE
     finally:
         os.close(dir_fd)
     return os.fdopen(fd, "w", encoding="utf-8")
+
+
+def file_identity(handle: IO[str]) -> tuple[int, int]:
+    """``(st_dev, st_ino)`` of the open file ``handle``: what :func:`append_nofollow` checks it reopens."""
+    found = os.fstat(handle.fileno())
+    return found.st_dev, found.st_ino
+
+
+def append_nofollow(path: Path | str, identity: tuple[int, int]) -> IO[str]:
+    """Open the file at ``path`` for appending text, only when it is the file ``identity`` names (:func:`file_identity`
+    of the one :func:`create_nofollow` made there).
+
+    Neither ``path`` nor its directory is opened through a link, and whatever else is now at the name (a link, a FIFO,
+    a file with another name elsewhere) is refused: nothing is written through it. A file a less-privileged process
+    made there in its place may reuse the inode number; appending to that one writes only to a file of its own.
+
+    Raises:
+        OSError: ``path`` cannot be opened so, or is not that file.
+    """
+    target = Path(path)
+    dir_fd = os.open(target.parent, _DIR_FLAGS)
+    try:
+        fd = os.open(
+            target.name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd
+        )
+    finally:
+        os.close(dir_fd)
+    found = os.fstat(fd)
+    if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1 or (found.st_dev, found.st_ino) != tuple(identity):
+        os.close(fd)
+        raise OSError(errno.EINVAL, "not the file created there", str(target))
+    os.set_blocking(fd, True)
+    return os.fdopen(fd, "a", encoding="utf-8")
 
 
 def write_text_nofollow(base: Path, rel: Sequence[str], text: str, *, mode: int = _PRIVATE_MODE) -> Path:

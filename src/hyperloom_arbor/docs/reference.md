@@ -9,6 +9,13 @@ code reads them. How the loop uses them: [how-it-works.md](how-it-works.md). The
 | Command | What it does |
 |---|---|
 | `python3 -m arbor run --config C [--max-iters N] [--cooldown S]` | run a campaign; the same command resumes it (`--max-iters 0` = no limit; cooldown 30 s). A new campaign first waits at the review gate ([how-it-works.md](how-it-works.md#before-the-first-iteration-the-review-gate)); `--no-review-gate` starts it without one |
+| `python3 -m arbor run --config C --split processes [...]` | the same campaign, with the master and each worker as a command of its own, in turn ([master-worker.md](master-worker.md#the-commands)) |
+| `python3 -m arbor master --config C [--max-iters N] [--cooldown S] [--no-review-gate]` | the master's side: the setup, the map, a round end; stops once a work order is ready (`ordered`) or the campaign ends (`ended`), saying which in `role_exit.json` |
+| `python3 -m arbor worker --order W [--config C] [--max-iters N] [--cooldown S]` | one worker's stretch from the master's `work_order.json`, in the master's session, or in C's own; stops with its report (`reported`) |
+| `python3 -m arbor.roles split --order W --shares N --out DIR` | a work order in N shares, one worker each |
+| `python3 -m arbor.roles deal (--order W \| --map M) [--reports R ...] [--held ID ...] [--held-order O ...] [--size 2] [--format order\|share] --out FILE` | the next order for a free worker, from the directions no report settled and no worker holds ([master-worker.md](master-worker.md)) |
+| `python3 -m arbor.ab --config C --out DIR --deadline EPOCH [--base REF] [--current REF] [--rounds 3]` | a same-node A/B of two workspace commits for any pack: the round-end hook, or an integration's A/B; writes `DIR/summary.json` ([how-it-works.md](how-it-works.md)) |
+| `python3 -m arbor version [--json]`, `python3 -m arbor --version` | the version; with `--json`, each interface's version, for callers ([master-worker.md](master-worker.md#for-callers-the-version)) |
 | `python3 -m arbor review --session D show\|approve\|reject [--note T] [--by NAME] [--config C]` | review a new campaign before it runs: `show` prints `REVIEW.md` and the status; `approve` checks the edited campaign and lets the run go on; `reject` ends it (`review_rejected`) |
 | `python3 -m arbor run --config C --dry-run [--max-iters 10] [--seed 42]` | the loop on synthetic numbers in a temporary git repo: no GPU, no container, no agent |
 | `python3 -m arbor --help` | the usage |
@@ -36,10 +43,11 @@ people.
 | `identity` | | a label for the campaign |
 | `goal` | | one line, the title of the program the agent reads |
 | `target` | none | a number (the metric to reach), or a dict; reaching it ends a round |
-| `time_budget_minutes` | none | a wall clock for the run (ignored in component mode) |
+| `time_budget_minutes` | none | a wall clock for the session (ignored in component mode). A resume counts what the session already spent (`<session>/clock.json`, written at each iteration's start), so a session that dies and resumes still ends at its budget; to give it more, raise the budget |
 | `review_gate` | `true` | a new session waits for a human's approval before it runs anything; `ARBOR_REVIEW_GATE` and `run --[no-]review-gate` override it |
 | `baseline_record` | none | a JSON file `{mean, runs, mean_secondary}` with a measured baseline |
 | `directives` | `[]` | lines rendered into the program, for the agent |
+| `directions_length` | `long` | how many open directions the dossier's map aims at: `short` 4 to 6, `medium` 8 to 12, `long` 15 to 25. Part 11 and an update round's 11.uK read it from their brief or the program; it is part of the directions skill's reuse key, so a change re-runs part 11 |
 | `space.levels` | `config, framework, kernel, feature` | the tiers, in order |
 | `space.knobs` | | knobs listed for the agent |
 | `mode` | `standalone` | `standalone` or `component` ([hosts.md](hosts.md)) |
@@ -51,9 +59,9 @@ people.
 | `docker_container` | | the container the server and tools run in; `"@host"` runs them where Arbor runs |
 | `workspace_root` | | the served tree (a git repository) the agent edits, as the container sees it |
 | `session_root` | the current directory | where the session's files go ([below](#the-session-directory)) |
-| `session_mount` | `/workspace/sessions` | where the container sees the sessions |
+| `session_mount` | `/workspace/sessions` | where the container sees the sessions: the container's path of `session_root`'s **parent** directory, so a session is at `<session_mount>/<session name>` |
 | `scratch_paths` | `[]` | paths that hold the agent's probes, kept out of `landed.patch` (`arbor/eval`, `eval` and `*.log` always are) |
-| `editable_packages` | `[]` | `[{name, path}]`: other installed packages whose edits a KEEP saves |
+| `editable_packages` | `[]` | `[{name, path}]`: other installed packages the agent may edit. Standalone, each is a git tree from the start (a baseline in `<session>/trees.json`; bytecode and JIT outputs excluded), committed and reverted with every iteration and shown to the critic; a KEEP saves every file it changed there |
 
 **Server**
 | Key | Default | Meaning |
@@ -65,7 +73,8 @@ people.
 | `tp` | 1 | tensor parallelism |
 | `server_flags` | | the launch flags; the agent edits them in the workspace's `arbor/config.json` |
 | `server_env` | `{}` | the launch environment; the same. `GSM8K_LIMIT` and `GSM8K_MIN` here set the correctness check's size and floor |
-| `gpu_ids` | | the campaign's GPUs, physical numbers, `"0,1,2,3"` or a list |
+| `gpu_ids` | | the campaign's GPUs, physical numbers, `"0,1,2,3"` or a list. Before each server start a card that holds 10 GB or more with our server stopped is another process's, and the iteration is NOT_MEASURED, its change kept for later. Under a host, only these cards are read |
+| `server_host_memory_gb` | | the host memory a server pins (a CPU KV offload such as `SimpleCPUOffloadConnector`): with less `MemAvailable` before a start, the iteration is NOT_MEASURED |
 
 **Bench and correctness**
 | Key | Default | Meaning |
@@ -75,11 +84,12 @@ people.
 | `bench_timeout` | 600 | seconds, for the bench and the correctness script |
 | `concurrency`, `num_prompts`, `isl`, `osl` | 14, 640, 1024, 1024 | passed to the bench script |
 | `bench_repeats` | 1 | measured replays per iteration; the pack's `measurement.bench_repeats` wins |
+| `bench_metric_from_agent` | `false` | book the bench agent's `METRIC:` line when the bench wrote no `bench_output.json`. Off, such an iteration is NOT_MEASURED: the file carries the pack's failure checks and `duration_seconds`, and a missing file is usually a `session_mount` that is not the container's path of the session's parent. Under a host's bench command, the agent's number is always taken |
 
 **Rounds, rolling and component mode**
 | Key | Meaning |
 |---|---|
-| `round_ab.command` | the round-end A/B hook; `ARBOR_ROUND_AB` wins. `{out}` and `{deadline}` are filled in |
+| `round_ab.command` | the round-end A/B hook; `ARBOR_ROUND_AB` wins. `{out}` and `{deadline}` are filled in. For any pack: `python3 -m arbor.ab --config <config> --out {out} --deadline {deadline}` ([how-it-works.md](how-it-works.md)) |
 | `cluster.roll.*` | rolling chunks: `wall_min` 240, `successor_at_min` 180, `exit_margin_min` 15, `max_chunks`, `resubmit_limit` 3 |
 | `component.*` | component mode's block ([hosts.md](hosts.md)) |
 
@@ -93,10 +103,14 @@ Parallel mode reads a separate run config ([operations.md](operations.md)).
 | `ARBOR_ROOT` | where `packs/` is found, when the config is not under an Arbor checkout |
 | `ARBOR_ROLL=1` | turn on rolling chunks; `ARBOR_ROLL_WALL_MIN`, `ARBOR_ROLL_SUCCESSOR_AT_MIN`, `ARBOR_ROLL_EXIT_MARGIN_MIN`, `ARBOR_ROLL_MAX_CHUNKS`, `ARBOR_ROLL_EST_DEFAULT_MIN`, `ARBOR_ROLL_EST_FLOOR_MIN` override `cluster.roll` |
 | `ARBOR_ROUND_AB` | the round-end A/B hook (over the config's `round_ab.command`) |
+| `ARBOR_SPLIT` | `processes` makes `arbor run` run the master and each worker as commands of their own, in turn (`--split processes`), so a host that launches `arbor run` needs no other change; `loop` (the default) runs both in one process |
 | `ARBOR_REVIEW_GATE` | `0` starts new campaigns without the review gate, `1` with it; over the config's `review_gate`, under `run --[no-]review-gate` |
-| `ARBOR_SHARE_HOST`, `ARBOR_SHARE_ROOT`, `ARBOR_PROJECT`, `ARBOR_USER` | where the collectors push (`arbor-share`, `/path/to/arbor-share`) |
+| `ARBOR_SHARE_HOST`, `ARBOR_SHARE_ROOT`, `ARBOR_PROJECT`, `ARBOR_USER` | where the collectors push: the shared directory's host and path, the project and the user. The root has no default: a site sets it (here or in `~/.arbor/settings.env`), and without one the collectors write locally and push nothing |
 | `ARBOR_AGENT_BACKEND` | leave unset. Its non-Claude value imports a module that is not in the tree |
-| `SLURM_JOB_ID`, `SPUR_JOB_ID` | read to label rows and rounds |
+| `ARBOR_PROJECTS` | a file of the site's own collector projects, in `arbor/collect/projects.json`'s form, read before the public ones (models not yet public, a customer's); `~` is expanded |
+| `ARBOR_SETTINGS` | a file of the site's own `ARBOR_*` values (default `~/.arbor/settings.env`): one `KEY=VALUE` per line, read when Arbor is imported, for each key the environment does not set. Arbor carries no site's values (a share root, a site's projects); a site keeps them here |
+| `ARBOR_SITE` | a directory of packages for Arbor alone (`pip install --target`), for a host that cannot install into the interpreter's site-packages. Arbor puts it on its own `sys.path` when imported, after its checkout. Never put it on `PYTHONPATH`: a server the agent starts inherits Arbor's environment, and the directory's pydantic, starlette and uvicorn would shadow the image's |
+| `SLURM_JOB_ID` | read to label rows and rounds |
 
 ## The session directory
 
@@ -116,7 +130,9 @@ Parallel mode reads a separate run config ([operations.md](operations.md)).
 | `directions.json` | when the map changes | the map (only the harness writes it) |
 | `stages.json`, `lane_plan.md` | kernel-plan lanes | stage attempts and the pinned plan |
 | `round_end.json`, `rounds/` | round ends | the A/B and the next target |
-| `STOP` | the operator, or the harness | stop after the iteration in flight |
+| `work_order.json`, `worker_report.json`, `WORKER_REPORT.md`, `roles/` | a worker's stretch | what it starts from and what it did, each stretch's pair kept in `roles/` ([master-worker.md](master-worker.md)) |
+| `role_exit.json` | `arbor master`, `arbor worker` | how the command ended: `ordered`, `reported` or `ended` |
+| `STOP` | a person, or the harness | stop after the iteration in flight |
 | `ABORTED.md`, `ROUND_STOP.md`, `MAP_STOP.md` | the harness | why it stopped |
 | `chain/` | rolling chunks | the lease, handoffs, iteration times, `CHAIN_STOP` |
 | `component.json`, `component_exit.json`, `component_refused.json`, `heartbeat.json`, `server/`, `keeps/`, `short_prompts/` | component mode | [hosts.md](hosts.md) |

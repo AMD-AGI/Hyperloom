@@ -143,6 +143,7 @@ The schema stays `v6.1` but drops the keys only the diffusion latency roofline
 or the `bypass` route produced; read `ceiling_available` instead of
 `close.roofline_progress.ceiling_kind`. Each key and its disposition is under
 Versioning in [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
+The trace certificate's `production_*` keys go with them; read `selected_role`.
 
 ### Required: quantization failure exits 4
 
@@ -246,7 +247,7 @@ Earlier launchers might have waited for the Coordinator to emit a
 # launcher.sh
 - python3 -m hyperloom.inference_optimizer.cli optimize ... # expects setup as first action
 + bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
-+ . "$(. "$REPO_ROOT/hyperloom/inference_optimizer/assets/runtime_env.sh"; runtime_env_kernel_agent_env_path)"
++ kernel_agent_env_file="$(. "$REPO_ROOT/hyperloom/inference_optimizer/assets/runtime_env.sh"; runtime_env_kernel_agent_env_path)" && . "$kernel_agent_env_file"
 + ray stop --force; ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true; ray start --head --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false --resources='{"serving_slot":1}'
 + python3 -m hyperloom optimize ...
 ```
@@ -367,9 +368,10 @@ For any minor or patch upgrade:
 2. Re-run `bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"`. The
    installer is idempotent: it picks up new GEAK / TraceLens versions,
    refreshes generated LLM gateway aliases, and regenerates `kernel-agent.env.sh`.
-3. Re-source the env file:
+3. Re-source the env file. `runtime_env.sh` prints it only when `install.sh` wrote it in this
+   container and no other account could have changed it; otherwise it says why and nothing is sourced:
    ```bash
-   . "$(. "$REPO_ROOT/hyperloom/inference_optimizer/assets/runtime_env.sh"; runtime_env_kernel_agent_env_path)"
+   kernel_agent_env_file="$(. "$REPO_ROOT/hyperloom/inference_optimizer/assets/runtime_env.sh"; runtime_env_kernel_agent_env_path)" && . "$kernel_agent_env_file"
    ```
 4. To resume an ongoing session across the upgrade, first check the target
    release's upgrade section: a release that raises the `coordinator.db`

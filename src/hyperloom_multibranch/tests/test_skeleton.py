@@ -23,6 +23,9 @@ import errno
 import json
 import os
 import signal
+import stat
+import subprocess
+import sys
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -31,9 +34,11 @@ from typing import Any, NoReturn
 
 import pytest
 
+import hyperloom_multibranch
 from hyperloom_common.jsonio import read_jsonl
+from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
-from hyperloom.common.proctree import running
+from hyperloom_common.proctree import running
 from hyperloom.common.outside_facts.image_check import FactResult, ImageCheckFailed, ImageCheckMode, ImageCheckReport
 from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
@@ -129,17 +134,20 @@ from hyperloom_multibranch.scheduling import judge
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.integrator import ADOPTING_LEAD
+from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.lifecycle import (
     CUT_SHORT,
     LESSONS_KEY,
+    NO_BASELINE,
     NO_CARDS_LEFT,
     Session,
     SessionHost,
     SessionOutcome,
     SessionServices,
     persisted_run,
+    prelude_landed,
 )
 from hyperloom_multibranch.scheduling.local_peers import workload_rule
 from hyperloom_multibranch.scheduling.manifest import read_manifest
@@ -238,6 +246,15 @@ IMAGE_CHECK = ImageCheckReport(
     "2023-11-14T22:13:20Z",
     {"python": "/usr/bin/python3"},
     (FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone"),),
+)
+#: How the session's peers launch its agents and tests: all unconfined, as no account is configured and no bubblewrap
+#: is found.
+ISOLATION = LaunchIsolation(
+    "none",
+    "none",
+    "none",
+    False,
+    ("running them as an account: HYPERLOOM_SPECIALIST_USER is not set", "bubblewrap: not found"),
 )
 #: The review gate pauses a session with Arbor agents for a person; these sessions open their branches without one,
 #: as ``run --no-review-gate`` does, and the review's own tests turn it on.
@@ -418,6 +435,7 @@ class Stage:
     author: ScriptedCompletion = field(default_factory=ScriptedCompletion)
     learnings: LearningRecall | None = None
     image_check: Callable[[], ImageCheckReport] = lambda: IMAGE_CHECK
+    isolation: LaunchIsolation = ISOLATION
     dossier_pass: DossierPass | None = None
     toolbox: RecordingToolbox = field(init=False)
     sessions: RecordedSessions = field(init=False)
@@ -489,6 +507,7 @@ class Stage:
             digest,
             self.gate,
             self.regression,
+            self.isolation,
             self.dossier_pass,
         )
 
@@ -733,6 +752,9 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert manifest["rule_pack"] == rule_pack_identity()
     assert manifest["image_check"] == IMAGE_CHECK.summary()
     assert json.loads((stage.layout.reports / IMAGE_CHECK_FILE).read_text()) == IMAGE_CHECK.to_json()
+    assert manifest["agent_isolation"] == json.loads(stage.layout.report.read_text())["agent_isolation"]
+    assert read_manifest(stage.layout.manifest).agent_isolation == ISOLATION
+    assert "A" + ISOLATION.line()[1:] in stage.layout.report_markdown.read_text().splitlines()
     judge_calls = len(stage.layout.judge.read_text().splitlines())
     spends = [_judge_state(prompt)["spend"] for prompt in _judge_prompts(stage)]
     assert [spend["scheduler_llm_usd"] for spend in spends[:2]] == [0.0, JUDGE_USD]
@@ -919,6 +941,17 @@ async def test_a_manifest_written_with_the_removed_reuse_prelude_setting_still_r
     assert read_manifest(stage.layout.manifest).settings == stage.settings
 
 
+async def test_a_manifest_an_earlier_build_wrote_reads_with_the_agents_isolation_not_recorded(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    _script(stage)
+    await stage.run()
+    manifest = json.loads(stage.layout.manifest.read_text())
+    del manifest["agent_isolation"]
+    stage.layout.manifest.write_text(json.dumps(manifest))
+
+    assert read_manifest(stage.layout.manifest).agent_isolation is None
+
+
 async def test_a_session_copies_the_reference_material_it_was_given_and_its_manifest_pins_it(tmp_path: Path) -> None:
     knowledge = tmp_path / "GEAK" / "tuning"
     knowledge.mkdir(parents=True)
@@ -976,6 +1009,15 @@ async def test_the_agent_port_of_the_run_reaches_the_peers(tmp_path: Path) -> No
     stage._session()
 
     assert stage.setup.agent_port == 32100
+
+
+async def test_the_inferencex_commit_of_the_run_reaches_the_peers(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.settings = replace(stage.settings, inferencex_commit="8a76a78e41")
+
+    stage._session()
+
+    assert stage.setup.inferencex_commit == "8a76a78e41"
 
 
 @pytest.mark.parametrize(("review_gate", "handed"), [(True, "host"), (False, "off")])
@@ -1703,6 +1745,7 @@ async def test_final_only_validates_the_branches_a_session_that_never_reached_fi
     report = json.loads(stage.layout.report.read_text())
     assert report["final"]["chosen"]["commit"] == head
     assert report["stop_reason"] == SessionStopReason.TIME_EXHAUSTED.value
+    assert report["agent_isolation"] == ISOLATION.to_dict(), "the recovery reports how the session's agents ran"
     [final] = [row for row in _decisions(stage) if row["kind"] == "final"]
     assert float(str(final["at"])) > SessionBudget.from_hours(SETTINGS.max_hours, START).deadline
     # The session that opened the integration branch recorded its STOP; a second one is a conflicting write.
@@ -1754,6 +1797,171 @@ async def test_final_only_finishes_a_session_that_was_killed_before_it_could_clo
 
     with pytest.raises(ValueError, match="already chose"):
         persisted_run(stage.layout.root)
+
+
+class KilledInPreludeToolbox(LeasingToolbox):
+    """A toolbox whose process dies, as a machine that is lost kills it, the moment it has accepted the first root
+    test: no test it accepted ever measures, so nothing lands and PRELUDE records no baseline. It prints where the
+    session is and when it died first. For :func:`_killed_in_prelude`, run in a process of its own."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.executor.gate.clear()
+
+    async def submit_test(self, request: TestRequest) -> str:
+        request_id = await super().submit_test(request)
+        if request.purpose is Purpose.BASELINE:
+            print(json.dumps({"now": self.clock(), "request_id": request_id}), flush=True)
+            os._exit(0)
+        return request_id
+
+
+class HeldToolbox(LeasingToolbox):
+    """The leasing toolbox whose tests never end on their own, as a hosted measurement takes minutes: one taken up
+    from the submit log is still running when the session withdraws it. ``stopped`` holds every running test its
+    executor was told to stop, as the hosted backend is told to end the test's sandbox. Not a placeholder: the fake
+    runs every test at once otherwise."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.executor.gate.clear()
+        self.stopped: list[str] = []
+        self.executor.withdraw = self.stopped.append  # type: ignore[method-assign]
+
+
+def _killed_in_prelude(workspace: Path) -> dict[str, object]:
+    """Run a session in ``workspace`` until its process dies with the first root test accepted and not measured
+    (:class:`KilledInPreludeToolbox`). Never returns: it prints where the session is, the framework checkout it rooted
+    on, and the time it died at and the root test it left as its last line. Run it in a process of its own."""
+
+    framework = framework_checkout(workspace)
+    os.environ[MB_FRAMEWORK_REPO_ENV] = str(framework)
+    stage = _stage(workspace)
+    stage.toolbox_type = KilledInPreludeToolbox
+    print(json.dumps({"root": str(stage.layout.root), "framework": str(framework)}), flush=True)
+    asyncio.run(stage.run())
+    raise AssertionError("the session outlived the kill of its process")
+
+
+def _in_a_process(call: str) -> dict[str, object]:
+    """``call``, an expression of this module's, run in a process of its own that dies in it: what it printed, every
+    line a JSON object, merged."""
+
+    source = Path(hyperloom_multibranch.__file__).parents[1]
+    code = (
+        f"import sys\nfrom pathlib import Path\nsys.path.insert(0, {str(source)!r})\n"
+        f"from hyperloom_multibranch.tests import test_skeleton\ntest_skeleton.{call}"
+    )
+    ran = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600, check=False)
+    assert ran.returncode == 0, ran.stderr
+    printed: dict[str, object] = {}
+    for line in ran.stdout.splitlines():
+        if line.startswith("{"):
+            printed.update(json.loads(line))
+    return printed
+
+
+async def test_a_finish_over_a_session_killed_before_its_baseline_ends_with_no_candidate_and_withdraws_its_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    left = await asyncio.to_thread(_in_a_process, f"_killed_in_prelude(Path({str(tmp_path / 'workspace')!r}))")
+    monkeypatch.setenv(MB_FRAMEWORK_REPO_ENV, str(left["framework"]))
+    root = Path(str(left["root"]))
+    layout = SessionLayout(root)
+    assert not layout.report.exists(), "the process died before CLOSE"
+    _as_another_pod(layout.pids)
+    persisted = persisted_run(root)
+    assert persisted.ended is SessionStopReason.KILLED
+    assert not await asyncio.to_thread(prelude_landed, root), "the rule gate wrote no baseline"
+
+    time = VirtualClock(float(str(left["now"])))
+    recovery = Stage(layout, time, HeldRegistry(layout.pids, time), ScriptedCompletion(), [], settings=SETTINGS)
+    recovery.toolbox_type = HeldToolbox
+    outcome = await recovery.finish(persisted.ended)
+
+    assert (outcome.stop_reason, outcome.final, outcome.error) == (SessionStopReason.KILLED, None, NO_BASELINE)
+    assert outcome.exit_code == 1 and outcome.close is not None and outcome.close.stop.clean
+    report = json.loads(layout.report.read_text())
+    assert (report["stop_reason"], report["final"]) == (SessionStopReason.KILLED.value, None)
+    assert NO_BASELINE in str(report["error"])
+    # The root test the dead process left in flight is taken up from the submit log and stopped while it runs, not
+    # left to hold its sandbox; CLOSE's own session-wide withdrawal follows and finds nothing left.
+    in_flight = str(left["request_id"])
+    assert isinstance(recovery.toolbox, HeldToolbox) and in_flight in recovery.toolbox.stopped
+    assert recovery.toolbox.withdrawals == [SessionStopReason.KILLED.value] * 2
+    record = await recovery.handle(Role.OBSERVER).record(in_flight)
+    assert record.result is None and record.withdrawal_reason == SessionStopReason.KILLED.value
+    assert [row["reason"] for row in _decisions(recovery) if row["kind"] == "final"] == [NO_BASELINE]
+
+
+def _leave_before_final(workspace: Path) -> dict[str, object]:
+    """Run a session in ``workspace`` whose deadline passes before FINAL, as the account this process is: where it is,
+    the time it ended at and the framework checkout it rooted on. Another account runs it through :func:`_as_account`."""
+
+    framework = framework_checkout(workspace)
+    os.environ[MB_FRAMEWORK_REPO_ENV] = str(framework)
+    judge.SETTLED_TESTS = 0
+    stage = _stage(workspace)
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+    asyncio.run(stage.run())
+    return {"root": str(stage.layout.root), "now": stage.time.now(), "framework": str(framework)}
+
+
+def _finish_as_final_only(left: Mapping[str, object]) -> dict[str, object]:
+    """FINAL and CLOSE over the session :func:`_leave_before_final` ``left``, read back as ``final-only`` reads it, as
+    the account this process is: how it ended and the commit it chose."""
+
+    os.environ[MB_FRAMEWORK_REPO_ENV] = str(left["framework"])
+    judge.SETTLED_TESTS = 0
+    persisted = persisted_run(Path(str(left["root"])))
+    time = VirtualClock(float(str(left["now"])))
+    registry = HeldRegistry(persisted.layout.pids, time)
+    recovery = Stage(persisted.layout, time, registry, ScriptedCompletion(), [], settings=persisted.settings)
+    outcome = asyncio.run(recovery.finish(persisted.ended))
+    chosen = None if outcome.final is None or outcome.final.chosen is None else outcome.final.chosen.commit
+    return {"stop_reason": outcome.stop_reason.value, "exit_code": outcome.exit_code, "chosen": chosen}
+
+
+def _as_account(accounts: Accounts, uid: int, call: str) -> dict[str, object]:
+    """``call``, an expression of this module's, evaluated by ``uid`` in a process of its own under umask ``022``: its
+    JSON result."""
+
+    source = Path(hyperloom_multibranch.__file__).parents[1]
+    code = (
+        f"import json, sys\nfrom pathlib import Path\nsys.path.insert(0, {str(source)!r})\n"
+        f"from hyperloom_multibranch.tests import test_skeleton\nprint(json.dumps(test_skeleton.{call}))"
+    )
+    return json.loads(accounts.run(uid, code).splitlines()[-1])
+
+
+def test_a_final_only_of_another_account_of_the_group_finishes_what_one_account_left_before_final() -> None:
+    with other_accounts() as accounts:
+        source = Path(hyperloom_multibranch.__file__).parents[1]
+        if any(not directory.stat().st_mode & stat.S_IXOTH for directory in (source, *source.parents)):
+            pytest.skip(f"another account cannot reach this checkout's {source}")
+        if accounts.python != sys.executable:
+            pytest.skip(f"another account cannot run {sys.executable}, whose environment holds the project's packages")
+        workspace = accounts.shared_dir("workspace")
+        left = _as_account(accounts, accounts.first, f"_leave_before_final(Path({str(workspace)!r}))")
+
+        finished = _as_account(accounts, accounts.second, f"_finish_as_final_only({left!r})")
+
+        assert (finished["stop_reason"], finished["exit_code"]) == (SessionStopReason.TIME_EXHAUSTED.value, 0)
+        root = Path(str(left["root"]))
+        layout = SessionLayout(root)
+        assert json.loads(layout.report.read_text())["final"]["chosen"]["commit"] == finished["chosen"] is not None
+        assert (layout.report.stat().st_uid, layout.decisions.stat().st_uid) == (accounts.second, accounts.first)
+        assert [row["kind"] for row in read_jsonl(layout.decisions)].count("final") == 1, (
+            "the second account appended FINAL's decision to the log the first one made"
+        )
+        directories = [root, *(path for path in root.rglob("*") if path.is_dir() and not path.is_symlink())]
+        assert [path for path in directories if stat.S_IMODE(path.stat().st_mode) != 0o2775] == []
+        records = (layout.roster, layout.decisions, layout.judge, layout.merges, layout.root_recipe, layout.pids)
+        records += (layout.report, layout.report_markdown, layout.reports / FRONTIER_LOG)
+        assert [path for path in records if stat.S_IMODE(path.stat().st_mode) != 0o664] == [], (
+            "every record a later leg reads or appends to is the group's"
+        )
 
 
 async def test_a_stop_signal_during_a_final_only_still_leaves_a_report_within_one_close_grace(

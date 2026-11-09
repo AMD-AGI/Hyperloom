@@ -10,11 +10,13 @@ read from the session's blob store by the hash the recipe pins (the experiment r
 copied out of a checkout when no store is given, and staged under the refs ``value`` names; each is checked against
 its pinned hash, so the KB stores exactly what was measured.
 
-InferenceX sessions compare ``optimized_throughput`` with the champion of their partition. An AgentX session compares,
-as the main flow's AgentX records do, its gain in P50 interactivity over its own baseline (``interactivity_gain_pct``,
-objective ``agentx_keep``), and carries both interactivities beside it, with both total throughputs when the gate
-recorded them, and its provenance says ``outputs_checked: false``: that gate reads speed and the request error rate, so
-a change to what the model says is kept all the same. When the blackboard recorded the final commit's recipe
+InferenceX sessions compare ``optimized_throughput`` with the champion of their partition. An AgentX session compares
+its gain on its objective over its own baseline (objective ``agentx_keep``), and carries both values beside it: one
+graded on P50 interactivity writes, as the main flow's AgentX records do, ``interactivity_gain_pct`` with both
+interactivities, one graded on total token throughput ``total_throughput_gain_pct``; both carry both total
+throughputs when the gate recorded them. A champion on the other objective's gain is not compared with, and the write
+is refused. Its provenance says ``outputs_checked: false``: that gate reads speed and the request error rate, so a
+change to what the model says is kept all the same. When the blackboard recorded the final commit's recipe
 digest, a recipe with another digest is skipped
 (``recipe_digest_mismatch``): CLOSE was handed some other commit's recipe. A recipe that names anything as unexpressed
 does not rebuild what was measured, so it is skipped as well (``incomplete_recipe``).
@@ -38,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom_common.timeutil import epoch_iso
-from hyperloom.common.perf_metric import GRADED_TOTAL
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_TOTAL, TOTAL_TOKEN_THROUGHPUT
 from hyperloom.contracts.recipe import Recipe, RecipeError
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
 from hyperloom.measure.compile import BlobStore
@@ -66,7 +68,6 @@ log = logging.getLogger(__name__)
 KB_METRIC = "optimized_throughput"
 GAIN_METRIC = "validated_e2e_gain"
 OBJECTIVE_SCHEMA = "single_throughput"
-AGENTX_METRIC = "interactivity_gain_pct"
 AGENTX_OBJECTIVE_SCHEMA = "agentx_keep"
 WARMUP_SEED_NOTE = "warmup_round_seed:"
 WARMUP_SEED_UNPATCHED = "run_grid_warmup_seed_unpatched"
@@ -76,11 +77,28 @@ AGENTX = "agentx"
 
 
 @dataclass(frozen=True)
+class AgentXColumns:
+    """How an AgentX record names its gain, the primary metric it is promoted on, and the two values it compares."""
+
+    gain: str
+    candidate: str
+    baseline: str
+
+
+#: The columns of an AgentX record by the metric its session is graded on, named as the main flow names them. No name
+#: has a ``token`` word: the shared-knowledge sanitizer drops such a key as a secret.
+AGENTX_COLUMNS = {
+    GRADED_INTVTY_P50: AgentXColumns("interactivity_gain_pct", "candidate_interactivity", "baseline_interactivity"),
+    TOTAL_TOKEN_THROUGHPUT: AgentXColumns("total_throughput_gain_pct", GRADED_TOTAL, "baseline_total_throughput"),
+}
+
+
+@dataclass(frozen=True)
 class FinalRecipe:
     """The commit CLOSE publishes, its recipe, and where the patch and kernel files the recipe names are read from.
 
-    ``metric`` is the recorded-value metric the session is graded on: output throughput for InferenceX, P50
-    interactivity for AgentX. With ``blobs`` (the session's blob store) every file is read from it by its pinned sha256
+    ``metric`` is the recorded-value metric the session is graded on: output throughput for InferenceX, the
+    objective's metric for AgentX (a key of :data:`AGENTX_COLUMNS`). With ``blobs`` (the session's blob store) every file is read from it by its pinned sha256
     and ``files_root`` is not read; without it the files are taken from the checkout at ``files_root``.
     """
 
@@ -124,8 +142,9 @@ def _metrics(snapshot: BlackboardSnapshot, final: FinalRecipe, scope: RecipeScop
     gain = (value / baseline - 1.0) * 100.0
     if scope.identity_scheme != AGENTX:
         return {KB_METRIC: value, GAIN_METRIC: gain}
-    metrics = {AGENTX_METRIC: gain, "candidate_interactivity": value, "baseline_interactivity": baseline}
-    total, baseline_total = current.get(GRADED_TOTAL), anchor.get(GRADED_TOTAL)
+    columns = AGENTX_COLUMNS[final.metric]
+    metrics = {columns.gain: gain, columns.candidate: value, columns.baseline: baseline}
+    total, baseline_total = current.get(TOTAL_TOKEN_THROUGHPUT), anchor.get(TOTAL_TOKEN_THROUGHPUT)
     if total and baseline_total:
         metrics.update({GRADED_TOTAL: total, "baseline_total_throughput": baseline_total})
     return metrics
@@ -279,7 +298,9 @@ def publish_final_recipe(
         return RemoteWriteResult(SKIPPED, "recipe_digest_mismatch", canonical_id, profile.session_id)
     knowledge = knowledge_document(snapshot, profile, final, scope, rule_pack=rule_pack)
     agentx = scope.identity_scheme == AGENTX
-    metric, objective = (AGENTX_METRIC, AGENTX_OBJECTIVE_SCHEMA) if agentx else (KB_METRIC, OBJECTIVE_SCHEMA)
+    metric, objective = (
+        (AGENTX_COLUMNS[final.metric].gain, AGENTX_OBJECTIVE_SCHEMA) if agentx else (KB_METRIC, OBJECTIVE_SCHEMA)
+    )
     with tempfile.TemporaryDirectory(prefix="hyperloom-multibranch-recipe-") as temporary:
         staging = Path(temporary)
         bundle = KnowledgeBundle(knowledge, stage_files(final.recipe, final.files_root, staging, final.blobs))
@@ -293,7 +314,7 @@ def publish_final_recipe(
 
 
 __all__ = [
-    "AGENTX_METRIC",
+    "AGENTX_COLUMNS",
     "AGENTX_OBJECTIVE_SCHEMA",
     "KB_METRIC",
     "OBJECTIVE_SCHEMA",

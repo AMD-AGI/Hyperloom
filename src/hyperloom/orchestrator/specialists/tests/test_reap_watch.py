@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.proctree import descendants
+from hyperloom_common.proctree import descendants
 from hyperloom.orchestrator.specialists.dsh_launch import dsh_home
 from hyperloom.orchestrator.specialists.reap_watch import cli_alive
 

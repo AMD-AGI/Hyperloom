@@ -20,6 +20,183 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **Each round records its power in one `power.json`, with energy and J per token.**
+  An InferenceSuite round (and a GEAK replay) now writes `power.json` in place
+  of `gpu_power.json` and `gpu_samples.csv`: every card's sysfs power,
+  temperatures, clocks, voltage, busy and memory each second from the start of
+  the round to its end; each card's energy accumulator at every phase mark;
+  every `amd-smi metric` field every 10 s and at every mark; caps, performance
+  level and DPM tables at both ends; and the node's NPM power and the CPU's
+  RAPL or `amd_energy` counters where the node has them (`null` with a reason
+  where it does not). The measured window's energy is computed as InferenceX
+  does: `total_gpu_energy_j`, p75/p90 power, `joules_per_input_token`,
+  `joules_per_output_token`, `joules_per_total_token`,
+  `joules_per_successful_query`, and `power_valid` with InferenceX's reasons. The
+  window now opens at the instant the phase mark carries; on an AgentX round it
+  opened up to one sample interval late. `report.json` gains a `power` section,
+  and a round's measurement gains `gpu_energy_j`, `gpu_power_p75_w`,
+  `gpu_power_p90_w`, the four `joules_per_*` figures and `power_valid` (0/1),
+  which MB rounds publish. `gpu_power_avg_w` and `gpu_power_by_gpu_w` are now
+  the window's energy over its duration and are `null` when `power_valid` is 0,
+  so the power budget refuses such a round as unmeasured. A card `amd-smi`
+  reads as `N/A` is measured from sysfs. With configured cards, only those are
+  asked whether they hold a model; another server on the node's other cards
+  does not invalidate the round. `HYPERLOOM_GPU_POWER_INTERVAL_S` defaults to
+  1 s; above 1.5 s it is refused and the round samples nothing. AgentX counts
+  gain `input_tokens` and `output_tokens`; a report written before reads them,
+  and its `power` section, as `null`.
+- **MB's AgentX bar drops to 2% and its guards follow the objective.**
+  A `hyperloom-multibranch` AgentX session keeps a change on a 2% gain on its
+  objective, not 3%. Under `p50_interactivity` the guards are P90 interactivity
+  and total token throughput (new refusal `total_regressed`); under
+  `total_token_throughput` they are P90 and P50 interactivity (`p50_regressed`).
+  Output throughput no longer guards either, so `output_regressed` is no longer
+  given; it is still recorded. Arbor's directives state the session's bar and
+  guards. A resumed session judges by the new rule. Before, a real 2-3% gain
+  was refused, and a gain was held back when the replayed window's
+  output-length mix lowered output throughput.
+- **Single-lineage AgentX keeps on MB's rule.** `hyperloom optimize` on an
+  AgentX replay now keeps a change on a 2% P50 interactivity gain, not 3%, with
+  P90 interactivity and total token throughput inside the noise band
+  (`HYPERLOOM_PERF_NOISE_PCT`). An output-throughput drop alone no longer
+  refuses: `output_regressed` is no longer given, `total_regressed` is new, and
+  a correctness fix's guard refusal names `total_throughput` instead of
+  `output_throughput`. The GEAK handoff's `workload_spec.acceptance` carries
+  `min_gain_pct` 2 and the P90 guard only, since GEAK records no total-throughput
+  guard. The 1800 s checkpoint's 2% early stop is unchanged. A resumed session
+  judges by the new rule. Before, a real 2-3% median gain was reverted, and a
+  gain was reverted when the window's output-length mix lowered output
+  throughput.
+- **An MB AgentX session can be graded on total token throughput.**
+  `hyperloom-multibranch run --workload agentx --agentx-objective
+  total_token_throughput` keeps a change on the round's `total_token_throughput`
+  instead of `e2e_norm_intvty_p50`; the default, `p50_interactivity`, leaves
+  existing sessions as they were. The retest and the error-rate threshold are
+  the same under either objective. The objective is
+  recorded in the manifest and kept on resume; FINAL, the dashboard and
+  `MB-report.md` name it, and the bar's refusal reads
+  `total_throughput_gain_below_threshold`. Its Recipe KB record carries
+  `total_throughput_gain_pct`, not `interactivity_gain_pct`, and does not
+  replace an interactivity champion. Each Arbor is given the objective as its
+  config's `opt_objective` and optimizes it instead of its pack's metric; an
+  Arbor that cannot (before `9c455df` for P50, `df9b55a` for total token
+  throughput) is refused at preflight, except an older
+  one in a P50 session, which runs on its pack's metric as before.
+  `--agentx-objective` with
+  `--workload inferencex` exits 2. Before, an operator had to patch the source
+  to grade on total throughput.
+- **An MB AgentX session's Recipe KB record carries both total throughputs.**
+  The gate now records `total_token_throughput` on each AgentX judgement, so
+  `total_throughput` and `baseline_total_throughput` are written beside the
+  interactivity gain; before, they were always left out.
+- **An Arbor agent on an AgentX session measures with the gate's own round.**
+  Its `component.bench_command` is now `python -m inference_suite run`
+  against its server, on the session's frozen base, trace corpus, seed,
+  concurrency and trace window, writing `report.json` per run; its bench phase
+  is capped at the trace window plus an hour. Before, MB gave it no client,
+  so Arbor ran its pack's `bench_agentx.sh`, which installs its own aiperf,
+  downloads the trace itself and needs bench variables (`MODEL_PREFIX`,
+  `DURATION`, `INFMAX_CONTAINER_WORKSPACE`, ...) that only a hand-written
+  `--agent-launch` file carried; with `--reference-script` it could not run at
+  all. A session whose base or staged tools cannot run that round now refuses
+  to start, naming why.
+- **A recipe image whose tag names no framework version no longer refuses an
+  older install.** For an untagged image such as
+  `lmsysorg/sglang-rocm:muse-spark-open`, the version InferenceSuite assumes
+  (the framework's latest release at resolve time) is recorded but no longer
+  held as a minimum, and `launch.json` reports `version_check:
+  assumed_not_held` with the installed version. Before, such a round stopped
+  with `framework_version_too_old` even when the server ran exactly the recipe's
+  image. A version read from the image tag is still held.
+- **The base launch can be resolved from InferenceX at a given commit.**
+  `--inferencex-commit SHA` on `hyperloom optimize`, `hyperloom-multibranch
+  run` and `python -m inference_suite resolve`, and
+  `multibranch.inferencex_commit` in a hosted run's campaign spec, read
+  InferenceX at that commit (a full sha, or a prefix of 7 or more hex digits; a pull request's
+  head commit included) instead of the head of `main`, so a session can match
+  a CI run; `base_launch.json` records the full sha. Before, InferenceX was
+  always read at `main`. The cookbooks, vLLM recipes and ATOM catalog are
+  still read at `main`, and a resumed session keeps its frozen base. A commit
+  InferenceX does not have, or one that lacks the functions the resolver runs
+  (such as `acceptance_length`), is refused before the session starts,
+  naming what it lacks; resolve that
+  base elsewhere and pass the frozen `base_launch.json` as
+  `--reference-script`. A hosted run whose spec value is no commit ends for
+  good with exit 2, and one whose commit is refused with exit 1, as `run`
+  does; before, a hosted session that could not resolve its base crashed and
+  was started again. While a commit is pinned, a fixed session never falls
+  back to the default table: a source that cannot be read (InferenceX, the
+  model card, a release list, a cookbook) refuses it, naming the source and its
+  error, and so does no recipe serving it, naming why each source missed. See
+  [Base launch](reference/inference-suite.md#base-launch).
+
+- **A card that another process only opened no longer stops the session
+  with `host_gpus_unavailable`.** Every ROCm process opens all cards and
+  keeps up to a few MiB on each; the pre-boot GPU check now counts a
+  process as holding a card only above 1 GiB of VRAM there (or when
+  `amd-smi` reports none). It used to refuse any card with a nonzero
+  reading, so a scheduler or an idle server elsewhere on the host blocked
+  every card. See [inference-suite](reference/inference-suite.md).
+
+- **`hyperloom-multibranch run` takes the operator's base launch as
+  `--reference-script FILE`, with or without an Arbor agent.** It is the
+  file `hyperloom optimize --reference-script` takes: a shell launch script
+  or a `base_launch.json` frozen elsewhere, which the session freezes as its
+  base without reading any recipe source. Before, only a session with an
+  `--autonomous-agent` could take a base, as an `--agent-launch` record.
+  Every Arbor of such a session is served the frozen base. **Upgrade note:**
+  an `--agent-launch` that is a base launch record, or any `--agent-launch`
+  beside `--reference-script`, now exits 2; pass the record as
+  `--reference-script`. See
+  [Options of `run`](how-to/run-multibranch.md#options-of-run).
+
+- **A serving round's server runs in the interpreter its framework checks
+  read.** The server now starts as `<framework_python> -m sglang.launch_server`
+  (vLLM: `-m vllm.entrypoints.cli.main serve`; ATOM: `-m
+  atom.entrypoints.openai_server`) instead of the base's `python3 -m ...` or
+  `vllm serve` through `PATH`, which could run another install than the one the
+  version probe and flag parser had validated. `launch.json` records the command
+  as `entrypoint` and in `argv`, so launch digests of new rounds differ from
+  earlier ones; base digests and earlier `launch.json` files read as before.
+  **Upgrade note:** a frozen base whose entrypoint is not its framework's
+  default (for example a hand-edited interpreter path) is refused as
+  `config_invalid`; set `framework_python` to that interpreter instead.
+
+- **A `custom` workload's entrypoint is named after the board itself.**
+  `--benchmark-scripts-dir` is searched for `custom_<gpu-type>.sh` with the
+  board as given, so `mi308x`, `mi325x` and `mi350x` now look for
+  `custom_mi308x.sh`, `custom_mi325x.sh` and `custom_mi350x.sh`; they were
+  folded into `custom_mi300x.sh` and `custom_mi355x.sh` before. **Upgrade
+  note:** on those boards, rename the script, or keep it the only `.sh` in
+  the directory; an unresolved entrypoint exits 2 at launch. See
+  [Optimize a custom workload](how-to/optimize-custom-workload.md#the-entrypoint).
+
+- **A fixed-workload session resolves its base launch once and freezes it
+  as `base_launch.json`.** The base comes from `--reference-script`, else
+  InferenceX `main`, else the framework's cookbook `main`, else a default
+  table (with a warning); omitted `--tp` / `--ep` follow the base. Resume
+  reads the frozen file and never refetches. A `--reference-script` flag set
+  from a shell variable, which used to be dropped silently, now exits 2, as
+  does a `# hyperloom-launch-controls:` line or a launch file or default row
+  that needs more GPUs than the session has; `--host`, `--port`,
+  `--served-model-name` and `--result-*` are recorded as stripped. A JSON
+  `base_launch.json` from an earlier session is accepted as the launch file.
+  **Upgrade note:** a session whose state predates `base_launch.json`
+  cannot be resumed; start a new one. A `current_setting.sh` that records
+  launch controls no longer re-feeds as `--reference-script`. See
+  [Choose the base launch](how-to/optimize.md#choose-the-base-launch).
+
+- **Bump validated vLLM stack to 0.33.0 (ROCm 10 docker) and accept the relocated graph-capture marker.**
+  Switches the recommended vLLM image to `docker.io/vllm/vllm-openai-rocm:v0.33.0-rocm100`
+  (docs, examples, `models.tsv`, installer hint), bumps the bare-metal defaults
+  (`VLLM_VERSION=0.33.0`, `VLLM_ROCM_VARIANT=rocm72`, `VLLM_SOURCE_REF` at the `v0.33.0`
+  release commit), and clears the image entrypoint in the Slurm `docker run` branch.
+  The TraceLens patch check now looks for `capture_traces` in `vllm/profiler/wrapper.py`
+  from vLLM 0.32, where the patch writes it, so a correctly patched tree is no longer
+  rolled back. **Upgrade note:** move from
+  `rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0` to
+  `vllm/vllm-openai-rocm:v0.33.0-rocm100` (or match `VLLM_VERSION` and `VLLM_SOURCE_REF` on bare metal).
+
 - **Bump validated SGLang stack to 0.5.23 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
   `lmsysorg/sglang-rocm:v0.5.23-rocm10-*` image tags, `models.tsv`, the

@@ -223,11 +223,10 @@ class FrontierBasis(str, Enum):
 
 class UnfinishedReason(str, Enum):
     """Why a result of the session is worth finishing: a commit of a stopped branch whose merge onto the integration
-    head was not stackable, an explore that kept accuracy and fell just short of its bar, a blocked candidate whose
-    repair never finished, or an explore withdrawn before its result."""
+    head was not stackable, a blocked candidate whose repair never finished, or an explore withdrawn before its
+    result."""
 
     NOT_STACKABLE = _NOT_STACKABLE
-    NEAR_BAR = "near_bar"
     REPAIR_UNFINISHED = "repair_unfinished"
     WITHDRAWN = "withdrawn"
 

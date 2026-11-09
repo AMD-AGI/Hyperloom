@@ -35,9 +35,13 @@ class IntegrateAttempt:
     output_root: Path | None = None
     framework_root: Path | None = None
     applied: list[Path] = field(default_factory=list)
+    #: One ``{patch, strategy, steps}`` row per applied patch that had to be merged onto the kept stack.
+    merged_patches: list[dict[str, Any]] = field(default_factory=list)
     applied_artifacts: list[dict[str, Any]] = field(default_factory=list)
     extra_envs_applied: dict[str, str] = field(default_factory=dict)
     extra_server_args_applied: str = ""
+    #: The round's non-default ``remove_args`` / ``unset_envs`` / ``args_mode``, applied over the base at the bench.
+    launch_controls: dict[str, Any] = field(default_factory=dict)
     dropped_env_overrides: list[str] = field(default_factory=list)
     setup_commands_applied: list[str] = field(default_factory=list)
     switch_manifest: list[dict[str, Any]] = field(default_factory=list)
@@ -48,6 +52,12 @@ class IntegrateAttempt:
         self.localization_action = None
         self.localization_patches = []
         self.localization_touched = []
+
+    @property
+    def changes_framework(self) -> bool:
+        """Whether this attempt put changed framework code where its server imports from: a patch (the localization
+        among them) or an artifact landed in the tree, or a setup command installed into the runtime."""
+        return bool(self.applied or self.applied_artifacts or self.setup_commands_applied)
 
     @property
     def attempt_venv_root(self) -> str:

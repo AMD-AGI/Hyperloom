@@ -14,7 +14,7 @@ import yaml
 
 from hyperloom.measure import local
 from hyperloom.measure.runner.own_tmp import OWN_TMP_PREFIX, own_tmpdir
-from hyperloom.measure.runner.tests.test_run_jit import Rig, _arm, env, key, rig  # noqa: F401 - fixtures
+from hyperloom.measure.runner.tests.test_run_jit import _arm, env, key, rig  # noqa: F401 - fixtures
 from hyperloom.measure.socket import TestCall
 
 MERGED = "aiter_configs/merged.csv"
@@ -23,9 +23,7 @@ MERGED = "aiter_configs/merged.csv"
 def _call(tmp_path: Path, envs: dict[str, str]) -> TestCall:
     point = tmp_path / "point.yaml"
     point.write_text(yaml.safe_dump({"benchmark": {"envs": envs}}), encoding="utf-8")
-    return TestCall(
-        points=(point,), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), magpie_python="", task_id="t"
-    )
+    return TestCall(points=(point,), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), task_id="t")
 
 
 def test_each_run_of_a_test_writes_below_a_temporary_directory_of_its_own_removed_afterwards(rig, monkeypatch) -> None:
@@ -37,6 +35,8 @@ def test_each_run_of_a_test_writes_below_a_temporary_directory_of_its_own_remove
         grid = local.run_grid
 
         async def serve(**grid_kwargs):
+            if grid_kwargs["launch"].server_already_ready:  # aiter merges its tables as the server boots
+                return await grid(**grid_kwargs)
             own = environ.get("TMPDIR", "")
             if own:  # what aiter would do; never into the machine's own /tmp
                 (Path(own) / MERGED).parent.mkdir(parents=True)

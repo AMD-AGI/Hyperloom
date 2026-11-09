@@ -16,33 +16,6 @@ fi
 # below install into its environment.
 export PATH="$(dirname -- "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-# Resolve MAGPIE_PYTHON dynamically. The previous default
-# ${MAGPIE_PATH}/venv/bin/python assumed a Magpie-private venv, but
-# src/hyperloom/inference_optimizer/assets/install.sh's ensure_magpie() pip
-# installs Magpie into the driver Python's site-packages
-# (or the container image pre-installs it that way) — no venv is ever
-# created at $MAGPIE_PATH/venv. Mirrors _resolve_magpie_python() in
-# src/hyperloom/orchestrator/actions/executors/_grid_runner.py:
-#   $MAGPIE_PYTHON env > python3 on PATH that can `import Magpie`
-#     > /opt/venv/bin/python (if it exists) > python3 on PATH.
-_resolve_magpie_python() {
-  if [ -n "${MAGPIE_PYTHON:-}" ]; then
-    printf '%s' "$MAGPIE_PYTHON"
-    return 0
-  fi
-  local candidate
-  candidate="$(command -v python3 2>/dev/null || true)"
-  if [ -n "$candidate" ] && "$candidate" -c "import Magpie" >/dev/null 2>&1; then
-    printf '%s' "$candidate"
-    return 0
-  fi
-  if [ -x /opt/venv/bin/python ]; then
-    printf '%s' /opt/venv/bin/python
-    return 0
-  fi
-  printf '%s' "${candidate:-/opt/venv/bin/python}"
-}
-MAGPIE_PYTHON="$(_resolve_magpie_python)"
 # Join PYTHONPATH-style entries in order, dropping empties and duplicates so
 # repeated composition stays idempotent. Earlier arguments win their position.
 _compose_pythonpath() {
@@ -63,37 +36,22 @@ _compose_pythonpath() {
   done
   printf '%s' "$out"
 }
-# site-packages/dist-packages is already on the import path; keeping it off
-# PYTHONPATH avoids shadowing an isolated vLLM venv's torch (undefined symbol).
-_is_python_package_root() {
-  local p="${1%/}"
-  case "${p##*/}" in
-    site-packages | dist-packages) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-# MAGPIE_PATH belongs on PYTHONPATH only for a source checkout, not a pip
-# install (site-packages, already importable).
-_magpie_pythonpath_arg() {
-  local p="${MAGPIE_PATH:-}"
-  { [ -n "$p" ] && ! _is_python_package_root "$p"; } && printf '%s' "$p"
-}
 # Keep REPO_ROOT on PYTHONPATH so subprocesses can ``import hyperloom`` under a
 # ``pip install --target $REPO_ROOT`` layout (the target dir is not on the
-# default sys.path). Put REPO_ROOT first, then MAGPIE_PATH, then any pre-existing
-# PYTHONPATH, including one install.sh loaded from .env.
-PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "$(_magpie_pythonpath_arg)" "${PYTHONPATH:-}")"
+# default sys.path). Put REPO_ROOT first, then any pre-existing PYTHONPATH,
+# including one install.sh loaded from .env.
+PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "${PYTHONPATH:-}")"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # TraceLens base repo is required; the internal extension is OPTIONAL.
 #   1. AMD-AGI/TraceLens          -> $TRACELENS_ROOT  (base: skills, patches, CLI, analysis orchestrator)
 #   2. TraceLens-internal -> $TRACELENS_INTERNAL_ROOT (optional rehydration module)
-# Default base clones the public repo into the workspace runtime tree,
-# matching Magpie / InferenceX rather than persisting pod-local mirrors.
+# Default base clones the public repo into the workspace runtime tree
+# rather than persisting pod-local mirrors.
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # TraceLens SHA.
-TRACELENS_REF="cf0221e3b1b1915d5272a10e2f5237d2d9c5f0cb"
+TRACELENS_REF="054c15ad1833b863baf32d2279f9ff1799524a93"
 # Operator override iff TRACELENS_ROOT is not a TraceLens@<sha> checkout in the
 # cache root. Installs re-export that path (kernel-agent env, .env), so a
 # presence-only check would freeze a rerun on the old checkout instead of
@@ -202,6 +160,9 @@ case "$GEAK_RUN_MODE_VAL" in
   quick|full) ;;
   *) die "GEAK_RUN_MODE must be 'quick' or 'full'; got '$GEAK_RUN_MODE_VAL'" ;;
 esac
+# GEAK's workflow runtime (interface/runtime/engine) needs Node 20 or newer.
+_GEAK_NODE_MIN_MAJOR=20
+HYPERLOOM_GEAK_NODE_VERSION="${HYPERLOOM_GEAK_NODE_VERSION:-22.23.3}"
 # Split-provider aware per-side credentials: each protocol side keeps its own
 # base URL/key. A dual-protocol gateway simply has both pointed at one host.
 _ANTHROPIC_BASE_URL_VAL="${ANTHROPIC_BASE_URL:-}"
@@ -226,6 +187,9 @@ esac
 upsert_dotenv_var() {
   local key="$1" value="$2" tmp found=0 line stripped
   [ -n "$key" ] || return 0
+  # write_env_file's dotenv_not_private: a .env another account can write lends only what runtime_env_dotenv_lent
+  # allows, so nothing else is written there (the kernel-agent env file carries it).
+  [ -z "${dotenv_not_private:-}" ] || runtime_env_dotenv_lent "$key" "$value" || return 0
   tmp="$(mktemp)"
   if [ -f "$DOTENV" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
@@ -356,7 +320,7 @@ ensure_patch_tools() {
 }
 
 # Pin `ts` (from the `moreutils` Debian/Ubuntu package) so timestamp-prefixed
-# logging in downstream benchmark wrappers (Magpie's `*_mi*.sh` and any
+# logging in downstream benchmark wrappers (any
 # `cmd 2>&1 | ts '[%H:%M:%S]'` shim the optimizer fork-execs) doesn't blow
 # up with `ts: command not found`.
 #
@@ -938,7 +902,7 @@ ensure_tracelens() {
   fi
 }
 
-# Write a pod-local kernel-agent env file users should source so subsequent CLI calls
+# Write the container-local kernel-agent env file users should source so subsequent CLI calls
 # (and Ray workers via runtime_env) pick up the upstream gateway URLs.
 write_env_file() {
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
@@ -977,16 +941,19 @@ write_env_file() {
   if [ -z "${_anthropic_url:-}" ]; then
     warn "LLM gateway URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL"
   fi
-  local env_file="${KERNEL_AGENT_ENV}"
-  mkdir -p "$(dirname "$env_file")"
+  runtime_env_remove_legacy_kernel_agent_env
+  local env_file="${KERNEL_AGENT_ENV}" env_dir written
+  env_dir="$(dirname "$env_file")"
+  runtime_env_private_kernel_agent_env "$env_file" write || die "kernel-agent env file not written"
+  # Written beside the file (mktemp makes it 0600) and renamed over it, so an earlier copy is replaced whoever owns
+  # it, never rewritten in place or chmod-ed.
+  written="$(mktemp "${env_dir}/.kernel-agent.env.XXXXXX")"
   {
     echo '#!/bin/sh'
     echo "# kernel-agent runtime env (regenerated by install.sh)"
     [ -n "${USER_DATA_PATH:-}" ] && echo "export USER_DATA_PATH='${USER_DATA_PATH}'"
     [ -n "${HYPERLOOM_RUNTIME_DIR:-}" ] && echo "export HYPERLOOM_RUNTIME_DIR='${HYPERLOOM_RUNTIME_DIR}'"
     [ -n "${KERNEL_AGENT_ENV:-}" ] && echo "export KERNEL_AGENT_ENV='${KERNEL_AGENT_ENV}'"
-    [ -n "${MAGPIE_PATH:-}" ] && echo "export MAGPIE_PATH='${MAGPIE_PATH}'"
-    [ -n "${MAGPIE_PYTHON:-}" ] && echo "export MAGPIE_PYTHON='${MAGPIE_PYTHON}'"
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
     # The kernel-agent drives Claude Code, so only the Anthropic side is
@@ -1023,6 +990,9 @@ write_env_file() {
     # fall back to its older bundled CLI). run_e2e.py maps this to cli_path.
     _geak_claude_bin="$(command -v claude 2>/dev/null || true)"
     [ -n "${_geak_claude_bin}" ] && echo "export GEAK_CLAUDE_BIN='${_geak_claude_bin}'"
+    # GEAK runs bare `node` / `codex` when these are unset, and neither is on a stock image's PATH.
+    [ -n "${_geak_node_bin:-}" ] && echo "export GEAK_NODE_BIN='${_geak_node_bin}'"
+    [ -n "${_geak_codex_bin:-}" ] && echo "export GEAK_CODEX_BIN='${_geak_codex_bin}'"
     # e2e optimizer budget mode (read by the inference_optimizer kernel request
     # handler to pick the backend budget default) + LLM connection for the runner.
     [ -n "${GEAK_RUN_MODE_VAL}" ] && echo "export GEAK_RUN_MODE='${GEAK_RUN_MODE_VAL}'"
@@ -1040,9 +1010,28 @@ write_env_file() {
     [ -n "${GEAK_SCORE_TARGET:-}" ] && echo "export GEAK_SCORE_TARGET='${GEAK_SCORE_TARGET}'"
     [ -n "${GEAK_SKIP_PROFILE:-}" ] && echo "export GEAK_SKIP_PROFILE='${GEAK_SKIP_PROFILE}'"
     [ -n "${GEAK_MAX_BENCHMARK_SHAPES:-}" ] && echo "export GEAK_MAX_BENCHMARK_SHAPES='${GEAK_MAX_BENCHMARK_SHAPES}'"
-  } > "$env_file"
-  chmod 600 "$env_file"
+  } > "$written"
+  mv -f -- "$written" "$env_file"
   log "wrote ${env_file} (source it before running kernel-agent tools)"
+
+  # A checkout another account can write -- a group- or other-writable checkout or .env, one of another account's, or a
+  # link, as a checkout bind-mounted from shared storage is -- keeps no credentials in .env, where that account could
+  # read or rewrite them: they are in the file above alone, and the ones an earlier install or the operator left in .env
+  # (with their retired spellings) are removed first, before any write below copies .env; a link there is replaced, or
+  # removed when it points at anything but a regular file. They were never loaded (load_dotenv_no_clobber skips them
+  # in such a .env), so none of them, another account's included, reached the file above. Readers that took them from
+  # .env take them from that file instead (install.sh preflight_load_dotenv, preflight's _load_dotenv_fallback).
+  # Asked before the first write below, which replaces .env with a file of this account's.
+  # Every other line such a .env would not lend goes with them (runtime_env_keep_lent_dotenv_lines): the writes below
+  # leave a file of this account's, which the next reader may find private, so a line another account planted
+  # (NODE_OPTIONS, OPENAI_BASE_URL) would be lent from then on.
+  local dotenv_not_private
+  dotenv_not_private="$(runtime_env_dotenv_not_private "$DOTENV")"
+  if [ -n "$dotenv_not_private" ]; then
+    runtime_env_keep_lent_dotenv_lines "$DOTENV" ||
+      die "the credentials in ${DOTENV} could not be removed, and another account can write it (${dotenv_not_private}); remove them by hand"
+    log "credentials kept out of ${DOTENV}, which another account can write (${dotenv_not_private}): they are in ${env_file} alone"
+  fi
 
   # .env is shared by every session run from this checkout, so it keeps only the
   # workspace root: a later run without USER_DATA_PATH in its shell still finds
@@ -1055,30 +1044,36 @@ write_env_file() {
   remove_derived_dotenv_path HYPERLOOM_RUNTIME_DIR /runtime
   remove_derived_dotenv_path KERNEL_AGENT_ENV /runtime/kernel-agent.env.sh
   remove_derived_dotenv_path HYPERLOOM_ROOT /runtime/source-mirrors
-  # Derived from the MAGPIE_REF / INFERENCEX_REF pins; a .env copy would read back as an override that skips them.
-  remove_dotenv_var MAGPIE_PATH
-  [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
   [ -n "${PYTHONPATH:-}" ] && upsert_dotenv_var PYTHONPATH "$PYTHONPATH"
   remove_dotenv_var INFERENCEX_PATH
   # Persist each provider's own canonical vars (write when present, clear when
   # absent) so an operator's .env creds survive a re-install. Never cross-write
   # and never persist gateway aliases, so the two providers stay separated.
-  if [ -n "${_anthropic_url}" ]; then
-    upsert_dotenv_var ANTHROPIC_BASE_URL "$_anthropic_url"
+  # Only in a private checkout (see dotenv_not_private above).
+  if [ -z "$dotenv_not_private" ]; then
+    if [ -n "${_anthropic_url}" ]; then
+      upsert_dotenv_var ANTHROPIC_BASE_URL "$_anthropic_url"
+    else
+      remove_dotenv_var ANTHROPIC_BASE_URL
+    fi
+    if [ -n "${_anthropic_key}" ]; then
+      upsert_dotenv_var ANTHROPIC_API_KEY "$_anthropic_key"
+    else
+      remove_dotenv_var ANTHROPIC_API_KEY
+    fi
+    # The subscription token is a credential form of its own, not another
+    # spelling of the API key, so it is persisted beside the slot above rather
+    # than folded into it. Write-only: an unset token means the operator
+    # authenticates some other way this run, not that a stored one should go.
+    if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+      upsert_dotenv_var CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
+    fi
+    [ -z "${HYPERLOOM_DOTENV_CREDENTIALS:-}" ] || remove_dotenv_var HYPERLOOM_DOTENV_CREDENTIALS
   else
-    remove_dotenv_var ANTHROPIC_BASE_URL
-  fi
-  if [ -n "${_anthropic_key}" ]; then
-    upsert_dotenv_var ANTHROPIC_API_KEY "$_anthropic_key"
-  else
-    remove_dotenv_var ANTHROPIC_API_KEY
-  fi
-  # The subscription token is a credential form of its own, not another
-  # spelling of the API key, so it is persisted beside the slot above rather
-  # than folded into it. Write-only: an unset token means the operator
-  # authenticates some other way this run, not that a stored one should go.
-  if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    upsert_dotenv_var CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
+    # The writes above leave a .env of this account's even where another account could write the one they replaced,
+    # and a later reader would take it for a private .env that holds the credentials. This line, no secret, says they
+    # are in the kernel-agent env file (runtime_env_dotenv_credentials_elsewhere).
+    upsert_dotenv_var HYPERLOOM_DOTENV_CREDENTIALS kernel-agent-env
   fi
   # Only the Anthropic side is persisted here. The OpenAI-side entries in the
   # shared .env are owned elsewhere and left untouched -- which is also what
@@ -1092,7 +1087,7 @@ write_env_file() {
   remove_dotenv_var SAFE_API_KEY
   remove_dotenv_var AMD_LLM_API_KEY
   remove_dotenv_var LLM_GATEWAY_KEY
-  # Like MAGPIE_PATH: a pinned cache path written here would read back as an override after the pin moves. The
+  # A pinned cache path written here would read back as an override after the pin moves. The
   # kernel-agent env file carries it to the runtime; an operator's own path is left as written.
   [ -z "${_tracelens_root_was_set:-}" ] && remove_dotenv_var TRACELENS_ROOT
   if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
@@ -1106,6 +1101,8 @@ write_env_file() {
   fi
   [ -n "${GEAK_CLAUDE_MODEL_VAL}" ] && upsert_dotenv_var GEAK_CLAUDE_MODEL "$GEAK_CLAUDE_MODEL_VAL"
   [ -n "${_geak_claude_bin}" ] && upsert_dotenv_var GEAK_CLAUDE_BIN "$_geak_claude_bin"
+  [ -n "${_geak_node_bin:-}" ] && upsert_dotenv_var GEAK_NODE_BIN "$_geak_node_bin"
+  [ -n "${_geak_codex_bin:-}" ] && upsert_dotenv_var GEAK_CODEX_BIN "$_geak_codex_bin"
   [ -n "${GEAK_RUN_MODE_VAL}" ] && upsert_dotenv_var GEAK_RUN_MODE "$GEAK_RUN_MODE_VAL"
   remove_dotenv_var GEAK_API_KEY
   remove_dotenv_var GEAK_BASE_URL
@@ -1240,6 +1237,96 @@ EOF
   fi
 }
 
+# The Codex CLI Hyperloom's own specialists resolve: an operator's GEAK_CODEX_BIN, then PATH, then the
+# runtime bundled with the openai-codex SDK that install.sh installs with Hyperloom.
+_resolve_geak_codex_bin() {
+  "${PYTHON:-python3}" -c 'import os; from hyperloom.common.agent_cli import resolve_codex_executable; print(resolve_codex_executable(os.environ.get("GEAK_CODEX_BIN", "")))' 2>/dev/null || true
+}
+
+# Whether GEAK will take its Node runtime: a backend or profile is named, or the keys are OpenAI-only (as in
+# cli/geak_binaries.py). With none, GEAK keeps its native path, which runs no Node.
+_geak_agent_selected() {
+  [ -n "${GEAK_AGENT_BACKEND:-}${GEAK_AGENT_PROFILE:-}" ] && return 0
+  case "$(printf '%s' "${GEAK_AGENT_AUTO:-1}" | tr '[:upper:]' '[:lower:]')" in 0|false|no) return 1 ;; esac
+  "${PYTHON:-python3}" -c 'import sys; from hyperloom_common.llm.llm_config import is_openai_only; sys.exit(not is_openai_only())' 2>/dev/null
+}
+
+_geak_node_unavailable() {
+  if _geak_agent_selected; then die "$1"; fi
+  warn "$1; GEAK's workflow runtime cannot start until Node ${_GEAK_NODE_MIN_MAJOR}+ is on PATH or GEAK_NODE_BIN is set"
+}
+
+# Pin the Node binary GEAK's workflow runtime runs (GEAK_NODE_BIN). An operator's
+# value is kept, a Node on PATH that is new enough is reused, and otherwise the
+# official build is fetched once into the dependency cache, checked against the
+# release's SHASUMS256.txt.
+ensure_geak_node() {
+  _geak_node_bin=""
+  if [ -n "${GEAK_NODE_BIN:-}" ]; then
+    _geak_node_bin="${GEAK_NODE_BIN}"
+    return 0
+  fi
+  local _found _major
+  _found="$(command -v node 2>/dev/null || true)"
+  if [ -n "$_found" ]; then
+    _major="$("$_found" --version 2>/dev/null || true)"
+    _major="${_major#v}"
+    _major="${_major%%.*}"
+    case "$_major" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$_major" -ge "$_GEAK_NODE_MIN_MAJOR" ]; then
+          _geak_node_bin="$_found"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  local _arch
+  case "$(uname -m)" in
+    x86_64) _arch=x64 ;;
+    aarch64|arm64) _arch=arm64 ;;
+    *) die "no Node build for $(uname -m); set GEAK_NODE_BIN to a Node ${_GEAK_NODE_MIN_MAJOR}+ binary" ;;
+  esac
+  local _name="node-v${HYPERLOOM_GEAK_NODE_VERSION}-linux-${_arch}"
+  local _dir="${_open_source_root}/${_name}"
+  if [ -x "${_dir}/bin/node" ]; then
+    _geak_node_bin="${_dir}/bin/node"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "no Node ${_GEAK_NODE_MIN_MAJOR}+ on PATH or in ${_dir}; GEAK's workflow runtime cannot start"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would fetch ${_name} into ${_open_source_root} for GEAK"
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || { _geak_node_unavailable "curl missing; Node for GEAK cannot be fetched"; return 0; }
+  local _base="https://nodejs.org/dist/v${HYPERLOOM_GEAK_NODE_VERSION}" _tmp
+  mkdir -p "${_open_source_root}"
+  _tmp="$(mktemp -d "${_open_source_root}/.${_name}.XXXXXX")"
+  log "fetching ${_name} for GEAK into ${_dir}"
+  if ! curl -fsSL --connect-timeout 20 -o "${_tmp}/${_name}.tar.xz" "${_base}/${_name}.tar.xz" \
+     || ! curl -fsSL --connect-timeout 20 -o "${_tmp}/SHASUMS256.txt" "${_base}/SHASUMS256.txt"; then
+    rm -rf -- "$_tmp"
+    _geak_node_unavailable "downloading ${_name} from ${_base} failed"
+    return 0
+  fi
+  if ! (cd "$_tmp" && grep " ${_name}.tar.xz\$" SHASUMS256.txt | sha256sum -c - >/dev/null); then
+    rm -rf -- "$_tmp"
+    die "${_name}.tar.xz does not match its SHASUMS256.txt entry"
+  fi
+  # The archive records its builder's uid/gid; root would chown to them, which a one-id user namespace refuses.
+  if ! tar --no-same-owner -xJf "${_tmp}/${_name}.tar.xz" -C "$_tmp"; then
+    rm -rf -- "$_tmp"
+    die "unpacking ${_name}.tar.xz failed (is xz installed?)"
+  fi
+  mv "${_tmp}/${_name}" "$_dir"
+  rm -rf -- "$_tmp"
+  _geak_node_bin="${_dir}/bin/node"
+}
+
 report_status() {
   log "ray: $(python3 - <<'PY' 2>/dev/null || echo missing
 try:
@@ -1283,6 +1370,8 @@ install_kernel_tools() {
   # TraceLens / GEAK clones run under the install lock install.sh holds.
   ensure_tracelens
   ensure_claude_cli
+  ensure_geak_node
+  _geak_codex_bin="$(_resolve_geak_codex_bin)"
 
   # The GEAK e2e whole-pipeline optimizer is always installed; whether it is
   # used at runtime is decided per-session via KERNEL_OPT_BACKEND_ORDER.

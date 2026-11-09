@@ -1,226 +1,42 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the two things measured from the server-ready marker."""
+"""A round's wall-clock split into boot and benchmark, read from the ready stamp the round writes."""
 
 from __future__ import annotations
 
-import sys
 import time
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._subprocess_kill import (
-    DETOKENIZER_STALL_RETURNCODE,
-    RoundWatch,
-    clear_server_ready_stamp,
-    post_ready_runtime_sec,
-    run_with_session_kill,
-)
-
-
-def test_from_ready_excludes_pre_ready_phase(tmp_path):
-    """Pre-ready time is NOT counted: a child that spends > deadline BEFORE the ready marker but only a little AFTER it finishes normally."""
-    log_path = tmp_path / "server.log"
-    # 3s pre-ready boot, then ready, then ~1s post-ready client.
-    script = (
-        "import sys, time\n"
-        "f = open(sys.argv[1], 'w')\n"
-        "f.write('INFO loading weights\\n'); f.flush()\n"
-        "time.sleep(3)\n"
-        "f.write('Application startup complete\\n'); f.flush()\n"
-        "time.sleep(1)\n"
-        "raise SystemExit(0)\n"
-    )
-    start = time.monotonic()
-    cp = run_with_session_kill(
-        [sys.executable, "-c", script, str(log_path)],
-        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=2.0),
-    )
-    elapsed = time.monotonic() - start
-    # Post-ready (~1s) < 2.0s deadline -> not killed despite ~4s wall-clock.
-    assert cp.returncode == 0, f"unexpected returncode={cp.returncode}"
-    assert elapsed >= 3.0, f"child should have run its full pre-ready sleep, got {elapsed:.2f}s"
-
-
-def test_from_ready_fires_after_ready(tmp_path):
-    """Post-ready overrun IS killed: once ready, exceeding the deadline in the client phase reaps the tree with the silence sentinel."""
-    log_path = tmp_path / "server.log"
-    # Ready immediately, then a post-ready run that overruns the deadline.
-    script = (
-        "import sys, time\n"
-        "f = open(sys.argv[1], 'w')\n"
-        "f.write('Application startup complete\\n'); f.flush()\n"
-        "time.sleep(30)\n"
-        "raise SystemExit(0)\n"
-    )
-    start = time.monotonic()
-    cp = run_with_session_kill(
-        [sys.executable, "-c", script, str(log_path)],
-        watch=RoundWatch(timeout=60, server_log_path=str(log_path), silence_timeout_sec=1.0),
-    )
-    elapsed = time.monotonic() - start
-    assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
-    # Killed shortly after ready, not at 30s.
-    assert elapsed < 15.0, f"from-ready silence deadline took {elapsed:.2f}s"
-
-
-def test_scriptable_silence_is_disarmed():
-    cp = run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(.3)"],
-        watch=RoundWatch(timeout=5, silence_timeout_sec=0.1),
-    )
-    assert cp.returncode == 0
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import _round_post_ready_sec
+from inference_suite.contracts import ReadyStamp, RunLayout
 
 
 class TestARoundIsPricedByItsTwoParts:
     """What a round spent booting and what it spent benchmarking, told apart."""
 
     def test_the_boot_is_not_charged_to_the_benchmark(self, tmp_path):
-        """A round that boots for 3s and benchmarks for 1s reports 1s, not 4s."""
-        log_path = tmp_path / "server.log"
-        script = (
-            "import sys, time\n"
-            "f = open(sys.argv[1], 'w')\n"
-            "f.write('INFO loading weights\\n'); f.flush()\n"
-            "time.sleep(3)\n"
-            "f.write('Application startup complete\\n'); f.flush()\n"
-            "time.sleep(1)\n"
-            "raise SystemExit(0)\n"
-        )
+        """A round that boots for 3s and then benchmarks for 1s has the 3s priced as boot and the 1s as benchmark."""
         started_unix = time.time()
-        cp = run_with_session_kill(
-            [sys.executable, "-c", script, str(log_path)],
-            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
-        )
-        runtime_sec = time.time() - started_unix
-        assert cp.returncode == 0
+        RunLayout(tmp_path).write_ready_stamp(ReadyStamp(started_unix + 3.0, 3.0))
 
-        post_ready = post_ready_runtime_sec(
-            str(log_path),
-            started_unix=started_unix,
-            runtime_sec=runtime_sec,
-        )
-        assert post_ready is not None, "the round reported ready but nothing recorded when"
-        # The benchmark's own second, found without the three the boot took.
-        assert 0.5 <= post_ready <= 2.5, f"benchmark share read as {post_ready:.2f}s, expected ~1s"
-        boot_sec = runtime_sec - post_ready
-        assert 2.5 <= boot_sec <= 4.5, f"boot share read as {boot_sec:.2f}s, expected ~3s"
-
-    def test_a_previous_attempts_log_does_not_time_this_rounds_boot(self, tmp_path):
-        """Only bytes this round writes may say when its server came up."""
-        stale = tmp_path / "benchmark_vllm_20200101" / "server.log"
-        stale.parent.mkdir(parents=True)
-        stale.write_text("Application startup complete\n", encoding="utf-8")
-
-        log_path = tmp_path / "server.log"
-        script = (
-            "import sys, time\n"
-            "f = open(sys.argv[1], 'w')\n"
-            "f.write('INFO loading weights\\n'); f.flush()\n"
-            "time.sleep(3)\n"
-            "f.write('Application startup complete\\n'); f.flush()\n"
-            "time.sleep(1)\n"
-            "raise SystemExit(0)\n"
-        )
-        started_unix = time.time()
-        cp = run_with_session_kill(
-            [sys.executable, "-c", script, str(log_path)],
-            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
-        )
-        runtime_sec = time.time() - started_unix
-        assert cp.returncode == 0
-
-        post_ready = post_ready_runtime_sec(
-            str(log_path),
-            started_unix=started_unix,
-            runtime_sec=runtime_sec,
-        )
-        assert post_ready is not None
-        boot_sec = runtime_sec - post_ready
-        assert boot_sec >= 2.5, (
-            f"the stale log timed the boot: read {boot_sec:.2f}s of boot for a round that spent 3s on it"
-        )
-
-    def test_the_split_does_not_depend_on_an_unrelated_watchdog(self, tmp_path):
-        """The stall grace is a hang backstop, not a switch for the cost model."""
-        log_path = tmp_path / "server.log"
-        script = (
-            "import sys, time\n"
-            "f = open(sys.argv[1], 'w')\n"
-            "f.write('INFO loading weights\\n'); f.flush()\n"
-            "time.sleep(2)\n"
-            "f.write('Application startup complete\\n'); f.flush()\n"
-            "time.sleep(1)\n"
-            "raise SystemExit(0)\n"
-        )
-        cp = run_with_session_kill(
-            [sys.executable, "-c", script, str(log_path)],
-            watch=RoundWatch(timeout=30, server_log_path=str(log_path), session_deadline_sec=time.monotonic() + 30.0),
-        )
-        assert cp.returncode == 0
-        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is not None, (
-            "the boot/benchmark split was withdrawn along with the stall watchdog"
-        )
+        assert _round_post_ready_sec(tmp_path, started_unix=started_unix, runtime_sec=4.0) == pytest.approx(1.0)
 
     def test_a_reader_on_another_clock_gets_the_same_boot(self, tmp_path):
-        """The split survives being read where it was not written."""
-        log_path = tmp_path / "server.log"
-        script = (
-            "import sys, time\n"
-            "f = open(sys.argv[1], 'w')\n"
-            "f.write('INFO loading weights\\n'); f.flush()\n"
-            "time.sleep(3)\n"
-            "f.write('Application startup complete\\n'); f.flush()\n"
-            "time.sleep(1)\n"
-            "raise SystemExit(0)\n"
-        )
+        """The boot is a duration, so a reader whose clock runs behind the writer's prices it the same."""
         started_unix = time.time()
-        cp = run_with_session_kill(
-            [sys.executable, "-c", script, str(log_path)],
-            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
-        )
-        runtime_sec = time.time() - started_unix
-        assert cp.returncode == 0
+        RunLayout(tmp_path).write_ready_stamp(ReadyStamp(started_unix + 3.0, 3.0))
 
-        agreed = post_ready_runtime_sec(
-            str(log_path),
-            started_unix=started_unix,
-            runtime_sec=runtime_sec,
-        )
-        # A caller whose clock runs five seconds behind the writer's.
-        skewed = post_ready_runtime_sec(
-            str(log_path),
-            started_unix=started_unix - 5.0,
-            runtime_sec=runtime_sec,
-        )
-        assert agreed is not None
-        assert skewed == pytest.approx(agreed), f"a five-second clock disagreement moved the boot: {skewed} vs {agreed}"
+        agreed = _round_post_ready_sec(tmp_path, started_unix=started_unix, runtime_sec=4.0)
+        skewed = _round_post_ready_sec(tmp_path, started_unix=started_unix - 5.0, runtime_sec=4.0)
+
+        assert agreed is not None and skewed == pytest.approx(agreed)
 
     def test_a_round_that_never_came_up_is_not_priced(self, tmp_path):
-        """No ready marker means no split, reported as unknown rather than guessed."""
-        log_path = tmp_path / "server.log"
-        script = (
-            "import sys, time\n"
-            "f = open(sys.argv[1], 'w')\n"
-            "f.write('INFO loading weights\\n'); f.flush()\n"
-            "time.sleep(1)\n"
-            "raise SystemExit(1)\n"
-        )
-        started_unix = time.time()
-        run_with_session_kill(
-            [sys.executable, "-c", script, str(log_path)],
-            watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
-        )
-        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is None
-        assert (
-            post_ready_runtime_sec(
-                str(log_path),
-                started_unix=started_unix,
-                runtime_sec=time.time() - started_unix,
-            )
-            is None
-        )
+        """No ready stamp means no split, reported as unknown rather than guessed."""
+        assert _round_post_ready_sec(tmp_path, started_unix=0.0, runtime_sec=1.0) is None
+        assert _round_post_ready_sec(None, started_unix=0.0, runtime_sec=1.0) is None
 
     def test_an_earlier_rounds_stamp_is_not_read_as_this_ones(self, tmp_path):
         """A stamp predating the round is unknown, not \"it never booted\"."""
@@ -230,8 +46,8 @@ class TestARoundIsPricedByItsTwoParts:
         (tmp_path / "server_ready_at").write_text(f"{time.time() - 600.0:.3f} 30.000\n", encoding="utf-8")
 
         assert (
-            post_ready_runtime_sec(
-                str(log_path),
+            _round_post_ready_sec(
+                log_path.parent,
                 started_unix=time.time(),
                 runtime_sec=90.0,
             )
@@ -243,14 +59,14 @@ class TestARoundIsPricedByItsTwoParts:
         log_path = tmp_path / "server.log"
         stamp = tmp_path / "server_ready_at"
         stamp.write_text(f"{time.time():.3f} 30.000\n", encoding="utf-8")
-        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is not None
+        assert _round_post_ready_sec(log_path.parent, started_unix=0.0, runtime_sec=1.0) is not None
 
-        clear_server_ready_stamp(str(log_path))
+        RunLayout(log_path.parent).clear_ready_stamp()
 
         assert not stamp.exists()
-        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is None
+        assert _round_post_ready_sec(log_path.parent, started_unix=0.0, runtime_sec=1.0) is None
         # Idempotent: a round whose dir never had one must not fail to start.
-        clear_server_ready_stamp(str(log_path))
+        RunLayout(log_path.parent).clear_ready_stamp()
 
     def test_a_boot_longer_than_the_round_cannot_produce_a_negative_price(self, tmp_path):
         """A corrupt stamp must cost a measurement, never produce a nonsense one."""
@@ -258,8 +74,8 @@ class TestARoundIsPricedByItsTwoParts:
         started_unix = time.time()
         (tmp_path / "server_ready_at").write_text(f"{started_unix + 10.0:.3f} 500.000\n", encoding="utf-8")
 
-        priced = post_ready_runtime_sec(
-            str(log_path),
+        priced = _round_post_ready_sec(
+            log_path.parent,
             started_unix=started_unix,
             runtime_sec=100.0,
         )
@@ -273,8 +89,8 @@ class TestARoundIsPricedByItsTwoParts:
         (tmp_path / "server_ready_at").write_text(f"{started_unix + 10.0:.3f}\n", encoding="utf-8")
 
         assert (
-            post_ready_runtime_sec(
-                str(log_path),
+            _round_post_ready_sec(
+                log_path.parent,
                 started_unix=started_unix,
                 runtime_sec=100.0,
             )

@@ -111,7 +111,7 @@ def test_an_entry_whose_wheels_the_runner_cannot_install_is_refused_before_it_is
         ensure_runner_cache(commit.repo, commit.sha, cache, _options(f"{runner}-manylinux_2_28_x86_64", wheelhouse))
 
     assert "bin-pkg" in str(refused.value).lower().replace("_", "-")
-    assert sorted(path.name for path in cache.iterdir()) == [f".{commit.sha}.lock"]
+    assert sorted(path.name for path in cache.iterdir()) == [f".{commit.sha}.flock"]
 
 
 #: The interpreter running the test: its wheels are what a builder that ignored the target would have fetched, and
@@ -249,9 +249,10 @@ def test_the_lock_of_a_python_is_its_own_when_the_tree_has_one(tmp_path: Path) -
 
 
 def test_the_command_line_takes_the_target_as_one_tag_and_alone(
-    rig: Rig, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    rig: Rig, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     commit, wheelhouse, digests = _commit_with_a_lock_for_cp314(rig, tmp_path)
+    monkeypatch.setattr(cache_build, "publish_inference_suite", lambda source, root: root / "inference-suite" / "k")
     common = ["--sha", commit.sha, "--repo", str(commit.repo), "--out", str(tmp_path / "cache")]
     common += ["--no-index", "--find-links", str(wheelhouse)]
 

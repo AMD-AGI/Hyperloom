@@ -86,7 +86,7 @@ def test_certify_trace_dir_attaches_the_capture_probe(tmp_path):
     _write(tmp_path / "rank0.pt.trace.json", _SOURCE_EVENTS)
     _write(tmp_path / "capture_traces" / "bs_1.trace.json", _capture_events(with_meta=1, without_meta=1))
 
-    record = certify_trace_dir(tmp_path, framework="sglang")
+    record = certify_trace_dir(tmp_path, tmp_path, framework="sglang")
 
     probe = record["trace_dir_level"]["capture_sidecar_probe"]
     assert probe["files_present"] == 1
@@ -99,7 +99,7 @@ def test_a_capture_only_directory_still_gets_its_sidecars_read(tmp_path):
     """The case with no usable trace is the one where knowing what the sidecars hold matters most."""
     _write(tmp_path / "capture_traces" / "bs_1.trace.json", _capture_events(with_meta=2, without_meta=0))
 
-    record = certify_trace_dir(tmp_path, framework="sglang")
+    record = certify_trace_dir(tmp_path, tmp_path, framework="sglang")
 
     assert record["trace_dir_level"]["capture_sidecar_probe"]["cpu_op_with_meta"] == 2
 
@@ -108,7 +108,7 @@ def test_metrics_state_the_terms_they_were_computed_from(tmp_path):
     """A ratio whose basis is missing cannot be judged, so the record carries the basis beside the ratio."""
     _write(tmp_path / "rank0.pt.trace.json", _SOURCE_EVENTS)
 
-    rank = certify_trace_dir(tmp_path, framework="sglang")["rank_level"][0]
+    rank = certify_trace_dir(tmp_path, tmp_path, framework="sglang")["rank_level"][0]
 
     assert rank["parse"]["truncated"] is False
     assert rank["parse"]["truncation_reason"] == ""

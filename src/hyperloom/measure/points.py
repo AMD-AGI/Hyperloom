@@ -23,7 +23,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.outside_facts import (
     ENV_CONC,
@@ -40,13 +40,10 @@ from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeError
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.compile import CompiledEnvironment, EnvironmentCompiler
 from hyperloom.measure.eval_context import check_eval_context
-from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import (
-    SCRIPT_FIELD,
     MeasurementSurface,
-    benchmark_envs,
     check_launch_envs,
     check_point,
     check_surface,
@@ -60,8 +57,8 @@ from hyperloom.orchestrator.actions.executors import (
     default_baseline_config,
     materialize_benchmark_config,
 )
-from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_backend_name
-from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile, native_config
+from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile, native_config
+from inference_suite.argv import argv_flag_occurrences, canonical_flag_name
 
 _UTF8 = "utf-8"
 
@@ -85,7 +82,7 @@ class CanonicalMeasurement:
 
     @property
     def agentx(self) -> bool:
-        """Whether the base configuration is a Magpie AgentX benchmark, the main flow's own test for its workload."""
+        """Whether the base configuration is a native AgentX benchmark, the main flow's own test for its workload."""
 
         return native_config(self.config_path)
 
@@ -162,43 +159,8 @@ def default_canonical(
     canonical = CanonicalMeasurement(base, MeasurementSurface({}), primary_concurrency, materialize)
     evaluation = {} if canonical.agentx else {ENV_RUN_EVAL: "true"}
     config = _render(canonical, out_dir, CANONICAL_FILE, extra_envs={ENV_CONC: str(primary_concurrency), **evaluation})
-    surface = _canonical_surface(config, out_dir / CANONICAL_FILE)
-    return CanonicalMeasurement(base, surface, primary_concurrency, materialize)
-
-
-def _canonical_surface(config: Mapping[str, Any], point: Path) -> MeasurementSurface:
-    """The surface of the canonical ``config`` (rendered at ``point``), its script hashed as the tests will find it.
-
-    Under Magpie the script a test runs is Magpie's own launcher, which Magpie copies into the InferenceX checkout when
-    its first benchmark starts; a checkout whose pinned commit does not track the launcher has none until then. A surface
-    taken before that records no script hash, and every test, which reports the hash of the copy, would differ from it.
-    So the launcher is put there first, by the function the runner and the local backend use before they hash a test's
-    point, and a canonical that still has no hash for a launcher it names is refused: ``None`` is never recorded as the
-    canonical value of a field a test will report. A checkout with no ``benchmarks`` directory has nowhere to put the
-    launcher, for a test either, and is left to the host check that refuses a tree without the benchmark library.
-    """
-
-    under_magpie = resolve_backend_name() == "magpie"
-    if under_magpie:
-        install_launchers([point])
     surface = extract_surface(config)
-    bench = config.get("benchmark") or {}
-    if under_magpie and _launcher_missing(bench, surface):
-        raise PointError(
-            f"the canonical measurement runs {bench['benchmark_script']} from the InferenceX checkout "
-            f"{bench['inferencex_path']}, which has no such file and Magpie has none to put there: a test would report "
-            "a script hash the canonical surface does not hold. Point MAGPIE_PATH at a Magpie that ships the launcher, "
-            "or use a checkout that tracks it"
-        )
-    return surface
-
-
-def _launcher_missing(bench: Mapping[str, Any], surface: MeasurementSurface) -> bool:
-    """Whether ``bench`` names a launcher and a checkout it could be put in, and the surface has no hash for it."""
-
-    checkout = bench.get("inferencex_path")
-    placeable = bool(bench.get("benchmark_script") and checkout) and (Path(str(checkout)) / "benchmarks").is_dir()
-    return placeable and surface.fields.get(SCRIPT_FIELD) is None
+    return CanonicalMeasurement(base, surface, primary_concurrency, materialize)
 
 
 def _concurrencies(requested: Sequence[int], canonical: CanonicalMeasurement) -> tuple[int, ...]:
@@ -215,28 +177,34 @@ def launch_carriers(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], str |
     ``agentx.launch_overrides``; any other in ``benchmark.envs``.
     """
 
-    benchmark = config.get("benchmark") or {}
-    if is_magpie_agentx(benchmark):
-        overrides = benchmark["agentx"]["launch_overrides"]
-        return overrides.get("env") or {}, " ".join(overrides.get("append_args") or [])
-    present = benchmark_envs(config)
-    spec = framework_registry.FRAMEWORKS.get(str(benchmark.get("framework") or "").lower())
-    return present, None if spec is None else str(present.get(spec.extra_args_env, ""))
+    point = BenchmarkPoint.from_document(config)
+    if point.agentx:
+        return point.agentx_launch.env, " ".join(point.agentx_launch.append_args)
+    spec = framework_registry.FRAMEWORKS.get(point.framework.lower())
+    return point.envs, None if spec is None else str(point.envs.get(spec.extra_args_env, ""))
 
 
 def _check_removals(config: Mapping[str, Any], launch: LaunchConfig) -> None:
     """Every option the recipe removes from the launch the framework resolves must be among an AgentX point's
-    removals, or Magpie would launch with it. Any other point carries its whole launch in the recipe's own arguments,
-    so a removal it could not make is refused, not left on."""
+    removals, or the round would launch with it. Any other point carries its whole launch in the recipe's own arguments,
+    so a removal it could not make is refused, not left on.
+
+    An AgentX launch composed on the session base (``replace_args``) carries the base's whole argv, so a removal is
+    made by leaving the option out of it; the round removes from the base what that argv lacks.
+    """
 
     if not launch.remove_args:
         return
     names = ", ".join(launch.remove_args)
-    benchmark = config.get("benchmark") or {}
-    if not is_magpie_agentx(benchmark):
-        raise PointError(f"only a Magpie AgentX point removes options of the launch it resolves, so {names} would stay")
-    removed = set(benchmark["agentx"]["launch_overrides"].get("remove_args") or ())
-    kept = sorted(name for name in launch.remove_args if name not in removed)
+    point = BenchmarkPoint.from_document(config)
+    if not point.agentx:
+        raise PointError(f"only an AgentX point removes options of the launch it resolves, so {names} would stay")
+    if point.agentx_launch.replace_args:
+        carried = {name for name, _value in argv_flag_occurrences(point.agentx_launch.append_args)}
+        kept = sorted(name for name in launch.remove_args if canonical_flag_name(name) in carried)
+    else:
+        removed = set(point.agentx_launch.remove_args)
+        kept = sorted(name for name in launch.remove_args if name not in removed)
     if kept:
         raise PointError(f"the renderer did not remove launch arguments {', '.join(kept)}")
 
@@ -275,7 +243,7 @@ def generate_points(
     """
 
     if accuracy and canonical.agentx:
-        raise PointError("an AgentX workload has no accuracy test: Magpie's replay validity is its check")
+        raise PointError("an AgentX workload has no accuracy test: its report's valid_measurement is its check")
     launch = environment.recipe.launch
     check_launch_envs([*launch.envs, *environment.envs])
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -344,7 +312,7 @@ def generate_profile_point(
     The profile configuration turns the torch profiler on (``PROFILE=1``, ``PROFILE_EXTRA_BODY``, the framework's
     capture flags) and the renderer sizes the capture window from the workload, as the single-lineage profile does.
     The point runs at the primary concurrency without accuracy; apart from the output length the measurement surface
-    must still be the canonical one. An AgentX workload profiles the point it measures: Magpie captures the traces
+    must still be the canonical one. An AgentX workload profiles the point it measures: the round captures the traces
     when the point's ``profiler.torch_profiler`` is enabled, as the single-lineage AgentX profile turns it on.
     """
 
@@ -358,7 +326,7 @@ def generate_profile_point(
     out_dir.mkdir(parents=True, exist_ok=True)
     level = canonical.primary_concurrency
     pins = {ENV_CONC: str(level), ENV_RUN_EVAL: "false"}
-    reference = benchmark_envs(_reference(canonical, pins))
+    reference = BenchmarkPoint.from_document(_reference(canonical, pins)).envs
     workload = {name: str(reference[name]) for name in _PROFILE_PINNED if reference.get(name) is not None}
     config = _render(
         _profile_canonical(canonical),

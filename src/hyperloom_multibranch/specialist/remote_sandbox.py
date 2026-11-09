@@ -12,6 +12,13 @@ beforehand. A file this host made is opened afresh at every
 read, which the shared storage revalidates; a file the sandbox made would show here only after its directory's cache
 expired.
 
+The sandbox's account and this host's, and the next leg's, may be different accounts of one group, so the root is the
+group's: below storage set up to be shared its directories are made ``2775`` and the files this host makes for the
+launcher ``664`` (both by ``fchmod``, whatever the umask; elsewhere the umask decides, and no link is followed on the
+way, :mod:`~hyperloom_common.shared_storage`), its scripts are replaced by rename, never rewritten in place, and the
+launcher runs under umask ``002``, so what the sandbox makes there -- its home, its caches, what a command writes -- is
+the group's too.
+
 Every process a command starts carries :data:`~hyperloom_multibranch.specialist.agent_watch.MARKER` set to the root, and
 :data:`PROCESS_MARKER` set to the root and the command's number, so a kill (:data:`PROCS_SCRIPT`) ends a command's or
 the whole sandbox's processes, whatever session they moved to. The sandbox is a container of its own: nothing else
@@ -42,6 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom_common.shared_storage import create_shared_file, make_shared_dirs, write_shared_text
 from hyperloom.sandbox import RunSettings, Sandbox, SandboxGone, SandboxUnavailable
 from hyperloom_multibranch.specialist.agent_onboarding import ENCODING, CommandResult
 from hyperloom_multibranch.specialist.agent_sandbox import TIMED_OUT, read_tail
@@ -59,15 +67,18 @@ CONTROL_SECONDS = 60.0
 SANDBOX_TMP = "/tmp/hl"
 BIN_DIR, LOG_DIR, RUN_DIR, HOME_DIR, CACHE_DIR = "bin", "logs", "run", "home", "cache"
 LAUNCHER, PROCS = "hl-launch.sh", "hl-procs.sh"
+#: The scripts' mode: run by the sandbox's account, rewritten by none (a new leg's account replaces them by rename).
+_SCRIPT_MODE = 0o755
 #: How long a start waits, in tenths of a second, for the launcher to write its pid.
 _START_TENTHS = 100
 
-#: What a command takes from this host's environment: the LLM gateway, its credentials and models, and the CA bundle,
-#: by prefix and by name.
+#: What a command takes from this host's environment: the LLM gateway, its credentials (a ``claude setup-token`` login
+#: too) and models, and the CA bundle, by prefix and by name.
 FORWARDED_PREFIXES = ("ANTHROPIC_", "OPENAI_")
 FORWARDED_NAMES = frozenset(
     {
         "CLAUDE_MODEL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_CODE_USE_BEDROCK",
         "CODEX_MODEL",
         "GEAK_CLAUDE_MODEL",
@@ -88,7 +99,9 @@ FORWARDED_NAMES = frozenset(
 LAUNCH_SCRIPT = f"""#!/bin/bash
 # hl-launch.sh RUN N LOG CWD: run $HL_COMMAND in CWD, in a session of its own, its output appended to LOG; write
 # "LAUNCHER COMMAND" pids to RUN/N.pid and the exit code to RUN/N.exit. Only the command carries the marks, so a kill
-# leaves the launcher to write how the command ended.
+# leaves the launcher to write how the command ended. What it and the command make on the shared storage is the group's
+# to write, as the next leg's account may be another one of it.
+umask 002
 run=$1 n=$2 log=$3 cwd=$4
 command=$HL_COMMAND
 export PATH="${{HL_PATH_PREFIX:+$HL_PATH_PREFIX:}}$PATH"
@@ -261,14 +274,12 @@ class RemoteAgentSandbox:
 
     def __post_init__(self) -> None:
         for name in (BIN_DIR, LOG_DIR, RUN_DIR, HOME_DIR, CACHE_DIR):
-            (self.root / name).mkdir(parents=True, exist_ok=True)
-        claude_config_dir(self.root).mkdir(exist_ok=True)
+            make_shared_dirs(self.root / name)
+        make_shared_dirs(claude_config_dir(self.root))
         start = max((int(log.name.split("-", 1)[0]) for log in (self.root / LOG_DIR).glob("*-*.log")), default=0)
         self._numbers = itertools.count(start + 1)
         for name, script in ((LAUNCHER, LAUNCH_SCRIPT), (PROCS, PROCS_SCRIPT)):
-            path = self.root / BIN_DIR / name
-            path.write_text(script, encoding=ENCODING)
-            path.chmod(0o755)
+            write_shared_text(self.root / BIN_DIR / name, script, mode=_SCRIPT_MODE)
 
     def env(self, env: Mapping[str, str]) -> dict[str, str]:
         """The environment a command runs with on top of the sandbox's own, ``env`` added; a ``PATH`` in ``env`` is
@@ -329,7 +340,7 @@ class RemoteAgentSandbox:
         number = next(self._numbers)
         process = RemoteProcess(self, number, self.root / LOG_DIR / f"{number:04d}-{kind}.log")
         for path in (process.log, process.pid_file, process.exit_file):
-            path.write_text("", encoding=ENCODING)
+            create_shared_file(path)
         launch = (self.root / BIN_DIR / LAUNCHER, self.root / RUN_DIR, number, process.log, cwd)
         pid = shlex.quote(str(process.pid_file))
         script = (

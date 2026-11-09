@@ -24,12 +24,10 @@ class TestFrameworkRegistry:
         assert "xdit" in fr.names()
         assert fr.is_supported("XDiT") is True
         assert fr.is_scriptable("xdit") is True
-        assert fr.FRAMEWORKS["xdit"].kind == fr.SCRIPTABLE
 
     def test_serving_frameworks_not_scriptable(self):
         for name in ("sglang", "vllm", "atom"):
             assert fr.is_scriptable(name) is False
-            assert fr.FRAMEWORKS[name].kind == fr.SERVING
 
     def test_extra_args_env_and_unit(self):
         assert fr.extra_args_env("xdit") == "EXTRA_XDIT_ARGS"
@@ -199,9 +197,9 @@ class TestQualityGate:
         assert out["accuracy"] == 0.0
         assert out["task"] == "quality_gate"
 
-    def test_parse_eval_results_scriptable_gate_without_passed_fails_closed(self, tmp_path):
+    def test_parse_eval_results_scriptable_gate_without_limits_is_judged_by_hyperloom(self, tmp_path):
         report = tmp_path / "benchmark_report.json"
-        report.write_text(json.dumps({"quality_gate": {"ssim": 0.97}}), encoding="utf-8")
+        report.write_text(json.dumps({"quality_gate": {"ssim": 0.5}}), encoding="utf-8")
         out = ag.parse_eval_results(tmp_path, framework="xdit")
         assert out["accuracy"] == 0.0
 
@@ -326,11 +324,11 @@ def _default_config(kind: str):
 def _per_framework_tables() -> dict[str, dict]:
     from hyperloom.orchestrator.actions.executors.benchmark_run import bringup
     from hyperloom.orchestrator.enablement.runtime import adapters
-    from hyperloom.orchestrator.framework import adapter_parsers
+    from inference_suite.frameworks import Framework, framework_facts
 
     return {
         "_ADAPTERS": adapters._ADAPTERS,
-        "_PARSER_SOURCES": adapter_parsers._PARSER_SOURCES,
+        "parser_source": {item.value: item for item in Framework if framework_facts(item).parser_source is not None},
         "_DISABLE_CUDA_GRAPH_FLAGS": bringup._DISABLE_CUDA_GRAPH_FLAGS,
     }
 
@@ -369,7 +367,7 @@ class TestRegistryOwnsPerFrameworkAssets:
     def test_per_framework_tables_cover_every_serving_framework(self, table):
         """Tables the registry cannot hold still have to name every serving framework, and only registered ones."""
         keys = set(_per_framework_tables()[table])
-        serving = {name for name, spec in fr.FRAMEWORKS.items() if spec.kind == fr.SERVING}
+        serving = {name for name in fr.names() if not fr.is_scriptable(name)}
         assert serving - keys == set()
         assert keys - set(fr.FRAMEWORKS) == set()
 
@@ -481,7 +479,7 @@ class TestRooflineSnapshotUnits:
 
 
 class TestHyperloomArchSpec:
-    """TraceLens arch spec derived from hyperloom's HW_SPECS_ACHIEVABLE."""
+    """TraceLens arch spec derived from the board's vendor peaks."""
 
     def _tab(self):
         from hyperloom.orchestrator.trace_analysis import tracelens_arch_benchmark as tab
@@ -507,11 +505,11 @@ class TestHyperloomArchSpec:
 
     def test_write_spec_roundtrip(self, tmp_path):
         tab = self._tab()
-        out = tab.write_hyperloom_arch_spec(tmp_path, "MI300X", lambda _m: None)
-        assert out is not None and out.is_file()
+        out = tmp_path / "MI300X.json"
+        assert tab.write_vendor_peak_arch_spec(out, "MI300X", lambda _m: None)
 
         data = json.loads(out.read_text())
-        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(708.0)
+        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(1307.4)
 
 
 class TestValidateTraceStructureScriptable:
@@ -605,3 +603,47 @@ class TestQualityGateReportSelection:
         out = ag.parse_quality_gate(tmp_path)
         assert out["quality_gate"]["passed"] is True
         assert "zzz" in out["source_file"]
+
+
+class TestSuiteQualityGate:
+    """A scriptable round on inference_suite: the script's raw scores, judged by Hyperloom's limits (D2)."""
+
+    @staticmethod
+    def _round(tmp_path, quality_gate):
+        from hyperloom.common.tests.test_round_measurement import _fixed
+        from inference_suite.contracts import RunLayout, ScriptableResult, WorkloadKind
+
+        result = {"output_throughput": 0.5, "completed": 4, "quality_gate": quality_gate}
+        report = _fixed(
+            workload_kind=WorkloadKind.SCRIPTABLE, fixed=None, scriptable=ScriptableResult("client/r.json", result)
+        )
+        layout = RunLayout(tmp_path / "round" / "suite_run_0")
+        layout.root.mkdir(parents=True)
+        layout.report.write_text(json.dumps(report.to_document()), encoding="utf-8")
+        return tmp_path / "round"
+
+    @pytest.mark.parametrize(
+        ("scores", "passed"),
+        [
+            ({"lpips": 0.05, "ssim": 0.95, "mse": 0.001}, True),
+            ({"lpips": 0.30, "ssim": 0.95, "mse": 0.001}, False),
+            ({"lpips": None, "ssim": 0.80, "mse": 0.001}, False),
+        ],
+    )
+    def test_raw_scores_are_judged_against_hyperloom_limits(self, scores, passed):
+        assert ag.quality_gate_passed(scores, require=True) is passed
+
+    def test_the_eval_of_a_scriptable_round_is_the_quality_gate_its_report_carries(self, tmp_path):
+        workspace = self._round(tmp_path, {"lpips": 0.30, "ssim": 0.95, "mse": 0.001})
+        out = ag.parse_eval_results(workspace, framework="custom")
+        assert (out["task"], out["accuracy"]) == ("quality_gate", 0.0)
+        assert out["quality_gate"]["lpips"] == 0.30
+
+    def test_a_round_that_established_the_reference_passes_its_gate(self, tmp_path):
+        gate = {"skipped": True, "reason": "reference_established", "reference": "/s/ref.png"}
+        out = ag.parse_eval_results(self._round(tmp_path, gate), framework="xdit")
+        assert out["accuracy"] == 1.0
+
+    def test_a_round_without_a_gate_fails_closed(self, tmp_path):
+        out = ag.parse_eval_results(self._round(tmp_path, None), framework="custom")
+        assert out["accuracy"] == 0.0 and "no quality_gate" in out["error"]

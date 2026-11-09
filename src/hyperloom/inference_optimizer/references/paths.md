@@ -8,8 +8,7 @@ holds shared `runtime/` and `logs/`.
 
 ```text
 $USER_DATA_PATH/                          # workspace_root — set by operator / Claw / SaFE
-├── runtime/                              # workspace-shared env files / config
-│   ├── kernel-agent.env.sh
+├── runtime/                              # workspace-shared config (no credentials)
 ├── logs/                                 # workspace-shared launcher stdout
 └── <model_basename>/                     # e.g. DeepSeek-R1-0528, deepseek-ai-DeepSeek-V3
     └── <UTC_YYYYMMDDTHHMMSSZ>-<rand8>/   # session_dir — manifest.json, state.json, runs/, …
@@ -38,7 +37,10 @@ directory is **platform isolation** (one Claw job). The optimizer then creates
 
 `session/paths.py` is the single authority for Hyperloom paths. The launching
 agent does not need to recreate that logic in shell. Prepare the runtime with
-`install.sh`; optimizer preflight loads `runtime/kernel-agent.env.sh` in process.
+`install.sh`; optimizer preflight loads `kernel-agent.env.sh` (`$KERNEL_AGENT_ENV`) in process.
+It carries credentials, so it lives on the container's own disk in a directory only this
+account can write, never under `$USER_DATA_PATH`, and does not outlive the container; every
+reader refuses a directory or file there that another account could have written.
 Read the session directory from the CLI's launch-info output.
 
 | Concept | Env / helper | Meaning |
@@ -48,7 +50,8 @@ Read the session directory from the CLI's launch-info output.
 
 Open-source dependencies are cloned pod-local, not under `runtime/`:
 `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/`
-contains Magpie, TraceLens, GEAK, and InferenceX.
+contains TraceLens, GEAK, and the InferenceSuite tool cache
+(`$INFERENCE_SUITE_TOOL_CACHE`, default `inference-suite-tools/`).
 
 **Launcher rule:** do not hand-build, create, delete, or repair paths under the
 pod-local open-source root or under `$USER_DATA_PATH/runtime/`. Those assets are

@@ -8,7 +8,7 @@ sys.path.insert(0, '/usr/local/lib/python3.12/dist-packages')
 
 # The optimized kernel registration
 import aiter.ops.flydsl.moe_kernels as _mk
-# Use the actual compiled heuristic fallback kernel for DSv4.1-Flash decode.
+# Use the actual compiled heuristic fallback kernel for the decode shapes.
 DEFAULT_MOE2_KERNEL = 'flydsl_moe2_afp8_wfp4_bf16_t32x128x128_atomic_bnt2'
 
 def parse_args():
@@ -38,8 +38,8 @@ def bench_moe1(args):
     # a per-shape tuned CSV rather than one global config. A decode/verify batch
     # streams a full 128xK weight slab for very few rows of A, so it wants a short
     # tile_m; prefill is compute-bound and wants a tall one. One default cannot
-    # serve both: pinning the prefill tile (below) made every decode-regime shape
-    # run the wrong kernel, measurably slower.
+    # serve both: the prefill tile (below) runs every decode-regime shape on the
+    # wrong kernel.
     #
     # Under the official validator (weakest-of-3, gfx950/MI355X), t16x128x256
     # leads t64x128x256 at decode shapes and trails it at prefill shapes. The
@@ -59,13 +59,13 @@ def bench_moe1(args):
     # while the grid is under-occupied; once tile_n=128 alone fills the
     # machine, the smaller tile is pure MFMA-efficiency loss. Under the
     # official validator, t16x32x256/kw4 wins at the smallest M, ties near
-    # M=64 and loses above it (worst at the DSpark verify shape), so the
+    # M=64 and loses above it (worst at the largest verify shape), so the
     # small-M tile is gated to M<=64 and M=96..256 keeps t16x128x256.
     # Bit-exact vs the validator's reference config under real e8m0 scales.
     if M <= 64:
         _tm, _tn, _kw, _wpe, _bnt = 16, 32, 4, 3, 0    # small-batch decode
     elif M <= 256:
-        _tm, _tn, _kw, _wpe, _bnt = 16, 128, 1, 3, 0   # decode / DSpark verify
+        _tm, _tn, _kw, _wpe, _bnt = 16, 128, 1, 3, 0   # decode / speculative verify
     else:
         _tm, _tn, _kw, _wpe, _bnt = 64, 128, 1, 2, 1   # prefill
     tile_m = int(os.environ.get('FLYDSL_TM', str(_tm)))
@@ -196,9 +196,9 @@ def bench_moe2(args):
     #   3. a2_scale is indexed in SORTED-ROW space, pad32(sorted_token_ids), not
     #      (M, topk, .), and is e8m0 too.  torch.ones() in e8m0 is byte 0x7F =
     #      2^0; a uint8 filled with 1 would mean 2^-126 (~0).
-    # Before this fix every output element was inf/NaN and nondeterministic, so
-    # the SNR gate failed even for the reference kernel compared against itself
-    # - no kernel could ever have passed.  Layout per aiter's own tuner,
+    # Any of these wrong makes every output element inf/NaN and nondeterministic,
+    # so the SNR gate fails even for the reference kernel compared against
+    # itself.  Layout per aiter's own tuner,
     # aiter_meta/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py:1694-1702.
     from aiter.ops.shuffle import shuffle_weight_a16w4
     from aiter.utility.fp4_utils import e8m0_shuffle

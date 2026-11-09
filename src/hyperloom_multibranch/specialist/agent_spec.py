@@ -22,7 +22,8 @@ class AgentSpec:
     server arguments and environment of the commit its branch starts on, ``workspace``, the framework checkout it edits,
     ``cards``, the GPUs it may use, ``seconds``, how long it may run (0: until MB stops it), ``port``, the first of
     the ports its servers may listen on, ``client``, the command the gate measures a server on ``port`` with (empty when
-    the session has none to give), ``baseline``, what the gate measured of the metric on the session's root (``None``
+    the session has none to give), ``client_seconds``, how long one measurement by it may take (``0`` when the
+    agent's own cap bounds it), ``baseline``, what the gate measured of the metric on the session's root (``None``
     before it did), ``knowledge``, the notes on the integration head the agent reads each iteration, and, for an agent
     run as a component, ``deadline``, the clock time it ends by, ``root``, the commit of ``workspace`` its patches
     are made against, and ``root_shares``, the op shares of the session root's profile (``None`` when it has none),
@@ -34,7 +35,8 @@ class AgentSpec:
     ``dossier``, the dossier the session's dossier pass wrote, for its checkout (``None`` without one), and
     ``review``, how its review gate is handed over (:data:`~hyperloom_multibranch.specialist.arbor_adapter.REVIEW_HOST`
     when MB reviews before its branches open, :data:`~hyperloom_multibranch.specialist.arbor_adapter.REVIEW_OFF` when
-    nobody does, ``""`` to leave the config without either); the onboarding model is told none of them."""
+    nobody does, ``""`` to leave the config without either), and ``source_unkept``, why no change to the framework's
+    source can be kept on this image (``""`` when one can); the onboarding model is told none of them."""
 
     model: str
     framework: str
@@ -50,6 +52,7 @@ class AgentSpec:
     seconds: float
     port: int
     client: str = ""
+    client_seconds: float = 0.0
     baseline: float | None = None
     knowledge: str = ""
     deadline: float = 0.0
@@ -63,6 +66,7 @@ class AgentSpec:
     root_shares_source: str = ROOT_PROFILE_SOURCE
     review: str = ""
     remove_args: tuple[str, ...] = ()
+    source_unkept: str = ""
 
     def to_document(self) -> dict[str, object]:
         return {

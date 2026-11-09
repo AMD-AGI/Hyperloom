@@ -10,9 +10,10 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 
@@ -29,6 +30,8 @@ SHARE_MINUTES = 63.0
 #: The first port of the blocks the Arbor agents' servers take, unless the run names another. Sessions that share a
 #: machine each name their own, since every agent serves on the host's network.
 AGENT_PORT = 31100
+#: The axis an AgentX session is graded on unless the run names another.
+DEFAULT_AGENTX_OBJECTIVE = AgentXObjective.P50_INTERACTIVITY
 
 
 def sweep_concs(conc: int) -> tuple[int, ...]:
@@ -68,6 +71,8 @@ class Workload:
     are scoped to. ``inferencex`` is the request shape of an InferenceX workload and ``None`` for an AgentX trace
     replay, whose shape the trace fixes; ``conc`` is the primary operating point of either. ``ep`` is the
     expert-parallel size an AgentX workload is served at; an InferenceX one is served at :data:`DEFAULT_EP`.
+    ``agentx_duration_sec`` is an AgentX workload's trace window, ``None`` for the measuring harness's default.
+    ``agentx_objective`` is the axis an AgentX workload is graded on; an InferenceX one is graded on output throughput.
 
     ``gpu_type`` is named, not detected: the toolbox writes it into every measurement spec, built before PRELUDE runs.
     """
@@ -81,6 +86,8 @@ class Workload:
     kernel_optimizer: KernelOptimizer
     inferencex: InferenceXShape | None
     ep: int = DEFAULT_EP
+    agentx_duration_sec: int | None = None
+    agentx_objective: AgentXObjective = DEFAULT_AGENTX_OBJECTIVE
 
     @property
     def model_basename(self) -> str:
@@ -93,10 +100,10 @@ class Workload:
     @property
     def metric(self) -> str:
         """The metric the session's values are read in: the frontier policy, final selection, the dashboard and the
-        final recipe's metric. AgentX is graded on P50 interactivity, the key its rule gate's baseline is written
+        final recipe's metric. AgentX is graded on its objective's metric, the key its rule gate's baseline is written
         under."""
 
-        return GRADED_INTVTY_P50 if self.inferencex is None else GRADED_OUTPUT
+        return self.agentx_objective.metric if self.inferencex is None else GRADED_OUTPUT
 
     @property
     def profiles_moved_head_on_merge(self) -> bool:
@@ -148,8 +155,11 @@ class RunSettings:
     the host reviewed; off, nothing waits and each Arbor is started with its own gate off.
     ``references`` are the
     directories of reference material the run copies in before its first phase, each with the commit it was taken at.
+    ``reference_script`` is the operator's launch file the session freezes as its base (``""`` to resolve it from the
+    recipe sources; :mod:`~hyperloom_multibranch.scheduling.session_base`).
     ``dev_leases`` is how many dev sandboxes the session lends its specialists at once; 0 lends none. ``playbook`` says
-    which scheduling playbook the session plays."""
+    which scheduling playbook the session plays. ``inferencex_commit`` is the commit a fresh session's base launch reads
+    InferenceX at (``""`` for the head of its ``main``)."""
 
     workload: Workload
     max_hours: float
@@ -160,6 +170,7 @@ class RunSettings:
     user_directions: tuple[str, ...] = ()
     agents: tuple[str, ...] = ()
     references: tuple[ReferenceSource, ...] = ()
+    reference_script: str = ""
     dev_leases: int = 0
     playbook: PlaybookMode = PlaybookMode.AUTO
     agent_directions: str = ""
@@ -171,10 +182,12 @@ class RunSettings:
     stop_after_map: bool = False
     agent_dossier: str = ""
     review_gate: bool = True
+    inferencex_commit: str = ""
 
 
 __all__ = [
     "AGENT_PORT",
+    "DEFAULT_AGENTX_OBJECTIVE",
     "DOSSIER_MINUTES",
     "SHARE_MINUTES",
     "SWEEP_FACTORS",

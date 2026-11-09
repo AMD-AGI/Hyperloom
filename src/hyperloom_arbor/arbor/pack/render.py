@@ -24,15 +24,15 @@ _SKILL_RULES = {
         "It takes precedence over any profiling procedure in the knowledge above. "
         "The validator and the evaluators are unchanged."
     ),
-    "dossier": (
+    "dossier-v1": (
         "read this campaign's dossier before choosing what to work on. The skill "
         "looks it up first and uses it; it refreshes only stale parts, and writes "
         "a dossier only when none exists."
     ),
     # The balanced pack's three reference skills.
     "hardware": (
-        "price every floor, roofline and kernel plan against numbers measured on "
-        "this node, with sources, not the datasheet; its "
+        "price every floor, roofline and kernel plan against what this device "
+        "measurably achieves (its table, with sources), not the datasheet; its "
         "reference pages hold the ISA, LDS and MFMA limits a kernel must respect."
     ),
     "serving-playbook": (
@@ -55,7 +55,7 @@ def _lesson_label(lesson: dict) -> str:
     """`INTENT → VERDICT`, or the annotation's own word.
 
     Used by BOTH the per-iteration line and the header tally, because a
-    document that says "N PROBE" above rows labelled "LEARN → KEEP" makes the
+    document that says "26 PROBE" above rows labelled "LEARN → KEEP" makes the
     reader reconcile two vocabularies — the exact cost the split was meant to
     remove. Annotation rows (BASELINE / ESCALATE / NOTE) are exempt: no gate
     produced them and no intent was declared, so re-deriving a pair would print
@@ -120,8 +120,8 @@ def _render_history(lessons: list[dict]) -> str:
     #
     # Deliberately still a literal, and NOT the rule "verdict != REVERT" that
     # the intent split makes tempting. Those are not the same set: a LEARN that
-    # passed has verdict KEEP, so that rule would pin every probe — a campaign
-    # can run many, almost all of whose artifacts live in `eval/`
+    # passed has verdict KEEP, so that rule would pin every probe, and a
+    # probe's artifacts mostly live in `eval/`
     # rather than in the tree. It would also pin ESCALATE. Which rows are worth
     # permanent prompt budget is a judgement about cost, not something derivable
     # from the verdict, so it stays written down.
@@ -265,10 +265,8 @@ def _render_barren(campaign, state) -> str:
                 f"- `{f.id}` — {str(f.claim)[:150]}"
                 for f in uncited[:_BARREN_LIST_CAP]) + "\n")
 
-    # (2) Re-land candidates. This is the highest-yield move in the corpus and
-    # nothing currently asks for it: one campaign re-landed previously
-    # REVERTed work several times, unprompted, and cleared
-    # a bar every time.
+    # (2) Re-land candidates. Previously REVERTed work, re-landed, can clear a
+    # bar, and nothing else asks for it.
     # Only intents that BOOK. A `LEARN -> REVERT` is a probe that closed no
     # finding, not a change sitting on the shelf — listing those as re-land
     # candidates (the first draft did) points the agent at nothing.
@@ -289,13 +287,12 @@ def _render_barren(campaign, state) -> str:
         f"**Your LEARN budget is {state.learn_budget()} consecutive this "
         f"iteration, not {MAX_CONSECUTIVE_PROBES}.** A LEARN touching only "
         f"`eval/` and the ledger skips the server run entirely — minutes "
-        f"instead of ~45. While this drought lasts, knowledge is the cheapest "
+        f"instead of a full server run. While this drought lasts, knowledge is the cheapest "
         f"thing on the menu.\n")
 
     # THE CLOSING PARAGRAPH IS NOT A HEDGE. A forced-diversity rule is the
-    # obvious move here and it is wrong: one campaign's entire lead came
-    # from going DEEPER on one seam it had already touched (its leading KEEPs
-    # are all the same one). Breadth is the right prior when you do
+    # obvious move here and it is wrong: a lead can come entirely from going
+    # DEEPER on one seam already touched. Breadth is the right prior when you do
     # not know where the cost is; it is the wrong rule once you do.
     parts.append(
         "You are NOT required to change direction. Going deeper on a seam "
@@ -308,12 +305,9 @@ def _render_barren(campaign, state) -> str:
 
 def _skill_description(arbor_root: Path, name: str) -> str:
     """A skill's description, its front matter read as YAML, so a folded one (`>-`) reads as its text; a family's
-    skill (`family:name`) is found in its plugin."""
+    skill (`family:name`) is found in its family's folder."""
     from arbor import skillcheck
-    family, _, skill = name.rpartition(":")
-    if family:
-        return skillcheck.description(arbor_root / skillcheck.PLUGINS_DIR / family / "skills" / skill)
-    return skillcheck.description(arbor_root / skillcheck.SKILLS_DIR / name)
+    return skillcheck.description(skillcheck.resolve(arbor_root, name).parent)
 
 
 def _render_skills(skills: list[str], arbor_root: Path) -> str:
@@ -382,7 +376,10 @@ def _render_switches() -> str:
         "one, with the switch's name, where the kernel dispatches.\n\n"
         "A new variable your change reads that the tree did not name, that the arm leaves unset "
         "and that you did not declare, refuses the KEEP: the harness cannot know how to turn it "
-        "on."
+        "on. Two are not switches: a variable another editable package already reads (AITER's "
+        "`AITER_CONFIG_*`), and one whose unset value runs your new path (an opt-out such as "
+        "`DISABLE_X`), which you declare on its own line as `DEFAULT_ON: DISABLE_X`: the arm's "
+        "own run served that path."
     )
 
 
@@ -402,9 +399,8 @@ def render_program(campaign, state, arbor_root: str | Path,
 
     sections.append(f"# {campaign.pack.name} — {campaign.goal}\n")
 
-    # The regime, stated once at the top. A long drought can stay invisible
-    # when every counter anyone looks at faithfully reports a small
-    # `null_streak`.
+    # The regime, stated once at the top: a long drought stays invisible while
+    # every counter anyone looks at faithfully reports a low `null_streak`.
     if hasattr(state, "diagnose") and state.lessons:
         sections.append(f"_{state.diagnose()}_")
 
@@ -416,10 +412,11 @@ def render_program(campaign, state, arbor_root: str | Path,
     #
     # It was parsed into Pack.description from the beginning but at first
     # never rendered. Packs had been written against the assumption that it
-    # reached the agent, so one pack's header -- its operating point, its
+    # reached the agent, so one pack's header -- its concurrency, its
     # baseline and target, and the warning that the inherited roadmap's
-    # numbers came from another operating point -- was invisible to the
-    # agent it was written for.
+    # numbers were leads from another concurrency -- was invisible to the
+    # agent it was written for, and the distinction survived only in the
+    # config goal and a knowledge file.
     if campaign.pack.description:
         sections.append(campaign.pack.description.strip())
 

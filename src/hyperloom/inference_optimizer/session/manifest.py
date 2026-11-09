@@ -18,6 +18,7 @@ from typing import Any
 
 from hyperloom_common.io import atomic_write_json
 from hyperloom.common.provenance import build_provenance
+from hyperloom.common.url_userinfo import strip_url_userinfo
 from hyperloom_common.timeutil import now_iso, utc_now_compact
 
 from . import paths as _paths
@@ -51,7 +52,7 @@ def _git_revision_at(path: Path) -> str:
 
 def _git_remote_at(path: Path) -> str:
     """Best-effort ``origin`` remote URL at ``path`` (empty when unset/fails)."""
-    return _git_capture(path, ["config", "--get", "remote.origin.url"])
+    return strip_url_userinfo(_git_capture(path, ["config", "--get", "remote.origin.url"]))
 
 
 # Pod-local, non-persistent roots: a dependency checkout under one of these is erased on pod recycle.
@@ -108,9 +109,8 @@ def _describe_dep(*env_vars: str) -> dict[str, str]:
 
 
 def _build_dependencies() -> dict[str, dict[str, str]]:
-    """Provenance (path/commit/remote) for the Magpie / InferenceX trees this session executes against, so debuggers can answer "which upstream?" later."""
+    """Provenance (path/commit/remote) for the InferenceX tree this session executes against, so debuggers can answer "which upstream?" later."""
     return {
-        "magpie": _describe_dep("MAGPIE_PATH"),
         "inferencex": _describe_dep("INFERENCEX_PATH"),
     }
 
@@ -217,8 +217,8 @@ def build_manifest(
         # IR-3 soft-degrade audit.
         "kb_degraded_reason": getattr(args, "kb_degraded_reason", None),
         "pr_degraded_reason": getattr(args, "pr_degraded_reason", None),
-        # Operator-supplied reference recipe source (audit only); the resolved server_args / envs / model are
-        # authoritative in state.json.
+        # Operator-supplied reference recipe source (audit only); the resolved launch is authoritative in
+        # base_launch.json.
         "reference_script": getattr(args, "reference_script", None),
     }
 

@@ -41,6 +41,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
+    TOTAL_TOKEN_THROUGHPUT,
 )
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.toolbox import CLAIM_TTL_SECONDS
@@ -66,6 +67,7 @@ DEFAULT_BASELINE: Mapping[str, float] = {
     GRADED_OUTPUT: 1000.0,
     GRADED_INTVTY_P50: 50.0,
     GRADED_INTVTY: 40.0,
+    TOTAL_TOKEN_THROUGHPUT: 5000.0,
     TTFT_P50: 200.0,
     TPOT_P50: 20.0,
     GRADED_DURATION: 600.0,
@@ -77,6 +79,7 @@ DEFAULT_DIRECTIONS: Mapping[str, Direction] = {
     GRADED_OUTPUT: Direction.UP,
     GRADED_INTVTY_P50: Direction.UP,
     GRADED_INTVTY: Direction.UP,
+    TOTAL_TOKEN_THROUGHPUT: Direction.UP,
     TTFT_P50: Direction.DOWN,
     TPOT_P50: Direction.DOWN,
     GRADED_DURATION: Direction.FIXED,

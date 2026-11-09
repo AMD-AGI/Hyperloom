@@ -46,8 +46,20 @@ def check_http(url: str, timeout: int = 3) -> bool:
     return r.returncode == 0
 
 
-def gpu_vram_used(gpu_ids: list[int] | None = None) -> dict[int, int]:
-    """GPU VRAM used in GB, keyed by GPU index."""
+def _gpu_ids(value) -> list[int] | None:
+    """``gpu_ids`` as a list of ints, from "0,1,2,3" or [0, 1, 2, 3] (a config may write either), as
+    component.gpu_list reads it; None for none. A string reached the membership test below as it
+    was, and ``int in str`` raised: S4's server stop crashed the iteration after its gate."""
+    if value is None:
+        return None
+    items = value if isinstance(value, (list, tuple, set)) else str(value).split(",")
+    ids = [int(g) for g in items if str(g).strip()]
+    return ids or None
+
+
+def gpu_vram_used(gpu_ids: list[int] | str | None = None) -> dict[int, int]:
+    """GPU VRAM used in GB, keyed by GPU index; ``gpu_ids`` in either form a config writes."""
+    gpu_ids = _gpu_ids(gpu_ids)
     r = subprocess.run(["rocm-smi", "--showmeminfo", "vram"], capture_output=True, text=True)
     used: dict[int, int] = {}
     current_gpu = None

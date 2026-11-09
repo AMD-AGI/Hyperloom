@@ -110,6 +110,25 @@ def test_resolve_workload_knobs_resume_explicit_flag_overrides_state():
     assert a.isl == 4096  # unset -> restored from state
 
 
+@pytest.mark.parametrize(
+    ("flags", "env", "state", "expected"),
+    [
+        ({}, {}, None, (None, None)),
+        ({"tp": 8}, {}, None, (8, None)),
+        ({}, {"TP": "4", "EP": "2"}, None, (4, 2)),
+        ({}, {}, SimpleNamespace(tp=8, ep=8), (None, None)),
+    ],
+)
+def test_resolve_workload_knobs_keeps_only_the_operator_topology(monkeypatch, flags, env, state, expected):
+    """A flag or pin is the operator's topology; a default or a recorded value leaves it open for the recipe."""
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    a = _knob_ns(**flags)
+    _resolve_workload_knobs(a, state)
+    assert (a.operator_tp, a.operator_ep) == expected
+    assert a.tp == (expected[0] or getattr(state, "tp", 1))
+
+
 def test_framework_script_mismatch_fails_fast(tmp_path):
     """vllm framework + sglang script must raise before server boot."""
     src = tmp_path / "cfg.yaml"
@@ -123,19 +142,19 @@ def test_framework_script_mismatch_fails_fast(tmp_path):
 
 
 def test_framework_script_match_ok(tmp_path):
-    """vllm framework derives vllm_mi300x.sh; no mismatch raised."""
+    """A vllm script on a vllm point raises no mismatch."""
     src = tmp_path / "cfg.yaml"
-    _write_yaml(src, "vllm")
+    _write_yaml(src, "vllm", benchmark_script="vllm_custom.sh")
     out = materialize_config_with_envs(
         src,
         tmp_path / "out",
         target=BenchmarkTarget(model_path="/m", gpu_type="mi300x"),
     )
     bench = yaml.safe_load(out.read_text())["benchmark"]
-    assert bench["benchmark_script"] == "vllm_mi300x.sh"
+    assert bench["benchmark_script"] == "vllm_custom.sh"
 
 
-def test_r9700_materializes_vllm_gfx12_runner(tmp_path):
+def test_the_board_writes_no_runner_label_or_script(tmp_path):
     src = tmp_path / "cfg.yaml"
     _write_yaml(src, "vllm")
     out = materialize_config_with_envs(
@@ -144,17 +163,15 @@ def test_r9700_materializes_vllm_gfx12_runner(tmp_path):
         target=BenchmarkTarget(model_path="/m", gpu_type="r9700"),
     )
     bench = yaml.safe_load(out.read_text())["benchmark"]
-    assert bench["runner_type"] == "gfx12"
-    assert bench["benchmark_script"] == "vllm_gfx12.sh"
+    assert "runner_type" not in bench
+    assert "benchmark_script" not in bench
 
 
 def test_r9700_materialized_config_is_lifecycle_eligible(tmp_path, monkeypatch):
     """An R9700 session's materialized config may hold one server across rounds (baseline, explore, conc sweep)."""
     from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
-    from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 
-    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
-    monkeypatch.setattr(sl, "_pick_free_port", lambda: 8888)
+    monkeypatch.setattr(sl, "pick_server_port", lambda: 8888)
     src = tmp_path / "cfg.yaml"
     _write_yaml(src, "vllm")
     out = materialize_config_with_envs(

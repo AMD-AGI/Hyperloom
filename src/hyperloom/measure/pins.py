@@ -1,10 +1,8 @@
-"""The tool commits Hyperloom pins and the image the current machine runs.
+"""The image the current machine runs.
 
-A runner installs Magpie and InferenceX by commit, so a placeholder or a moving ref
-cannot be fetched. The only pin lives in the packaged ``install.sh``; it is read from
-there and never copied. The image digest has no file or environment variable the
-platform fills in, so it comes from the caller (the pod status read through the
-Kubernetes API) or from two environment variables the operator sets.
+The image digest has no file or environment variable the platform fills in, so it comes
+from the caller (the pod status read through the Kubernetes API) or from two environment
+variables the operator sets.
 """
 
 from __future__ import annotations
@@ -12,7 +10,6 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from importlib import resources
 from typing import Mapping
 
 from hyperloom.measure.docs import PREFIXED_SHA256_RE
@@ -20,39 +17,20 @@ from hyperloom.measure.docs import PREFIXED_SHA256_RE
 __all__ = [
     "ActiveImage",
     "ImagePinError",
-    "ToolCommits",
-    "ToolPinError",
     "active_image",
     "image_from_pod_status",
-    "pinned_tool_commits",
 ]
 
-MAGPIE_REF_VAR = "MAGPIE_REF"
-INFERENCEX_REF_VAR = "INFERENCEX_REF"
 IMAGE_REF_VAR = "HYPERLOOM_ACTIVE_IMAGE_REF"
 IMAGE_DIGEST_VAR = "HYPERLOOM_ACTIVE_IMAGE_DIGEST"
 
-_INSTALL_SCRIPT = ("assets", "install.sh")
-_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _ZERO_DIGEST = "sha256:" + "0" * 64
 _DIGEST_IN_ID_RE = re.compile(r"@(sha256:[0-9a-f]{64})$")
 _ID_SCHEMES = ("docker-pullable://", "docker://", "containerd://")
 
 
-class ToolPinError(ValueError):
-    """A tool commit could not be read from the shipped pin or is not a 40-hex commit."""
-
-
 class ImagePinError(ValueError):
     """The active image cannot be named by a real digest."""
-
-
-@dataclass(frozen=True)
-class ToolCommits:
-    """The commits a runner installs the measurement tools at."""
-
-    magpie: str
-    inferencex: str
 
 
 @dataclass(frozen=True)
@@ -61,43 +39,6 @@ class ActiveImage:
 
     ref: str
     digest: str
-
-
-def _shipped_default(script: str, var: str) -> str:
-    match = re.search(rf'^{var}="\$\{{{var}:-([^}}"]*)\}}"', script, re.MULTILINE)
-    if match is None:
-        raise ToolPinError(f"the shipped install.sh has no default for {var}")
-    return match.group(1)
-
-
-def _commit(var: str, value: str, origin: str) -> str:
-    if not _COMMIT_RE.fullmatch(value):
-        raise ToolPinError(f"{var} from {origin} is {value!r}, not a 40-hex commit; a runner pins by commit")
-    return value
-
-
-def pinned_tool_commits(env: Mapping[str, str] | None = None) -> ToolCommits:
-    """The Magpie and InferenceX commits, honouring the overrides ``install.sh`` honours.
-
-    A non-empty ``MAGPIE_REF`` / ``INFERENCEX_REF`` wins, as in the script; either value
-    must be a 40-hex commit, so a tag or branch override fails here instead of on a runner.
-    """
-
-    env = os.environ if env is None else env
-    path = resources.files("hyperloom.inference_optimizer").joinpath(*_INSTALL_SCRIPT)
-    try:
-        script = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ToolPinError(f"the packaged install.sh cannot be read: {exc}") from exc
-    values = []
-    for var in (MAGPIE_REF_VAR, INFERENCEX_REF_VAR):
-        override = env.get(var, "")
-        values.append(
-            _commit(var, override, "the environment")
-            if override
-            else _commit(var, _shipped_default(script, var), "install.sh")
-        )
-    return ToolCommits(magpie=values[0], inferencex=values[1])
 
 
 def _image(ref: str, digest: str) -> ActiveImage:

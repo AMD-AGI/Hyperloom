@@ -11,8 +11,8 @@ sends it to the CLI as the next message, so the model goes on with its whole con
 a test of the branch, another branch's profile of its head or its long dev lease's process, the CLI is woken every
 ``WAIT_WAKE_S``: the reaper reads only the CLI's own output, so a CLI silent longer is taken for a hung one. A turn
 that ends with no test of the branch in flight (one waiting on its native builds is) and no process running in its
-long dev lease waits a patience for something to arrive, and is nudged when nothing did;
-``IDLE_TURNS`` such turns in a row end the session with :class:`SessionIdle`, which is no crash. A turn that called
+long dev lease waits a patience for something to arrive, and is nudged when nothing did; as many such turns in a
+row as there are patiences end the session with :class:`SessionIdle`, which is no crash. A turn that called
 tools counts half: a model reading, writing a patch or having a claim refused is working, yet one that never submits
 still ends.
 A session that ends as a session should, its CLI exiting or its deadline reached, is followed by a fresh one: a
@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Protocol
 
 from hyperloom_common.fs_utils import read_text_nofollow, write_text_nofollow
+from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 from hyperloom.contracts.measurement import Purpose, TestKind, Validity
 from hyperloom.orchestrator.specialists.agent_runner import (
@@ -132,9 +133,6 @@ SPECIALIST_SESSION_S = 14 * 24 * 3600.0
 #: How long a turn that ended with no test of its branch running waits for something to arrive before it counts as
 #: idle, one patience per idle turn in a row: a result or a notice often lands minutes after a model stops.
 NUDGE_WAITS_S = (60.0, 180.0, 300.0)
-#: Idle turns in a row that end a session, all but the last nudged: a model that keeps stopping must not be woken
-#: forever.
-IDLE_TURNS = len(NUDGE_WAITS_S)
 #: What an idle turn adds to a session's strain: a silent one twice what one that called tools does.
 _SILENT, _WORKED = 2, 1
 #: A session silent this long, with no log growth, CPU work or tool call in flight, is hung: a test takes about eight
@@ -274,6 +272,11 @@ class AgentSetup:
     branch's lease is given back when its run ends, however it ended, and when it is stopped, unless it is a long one
     with a process running, which only the branch's stop gives back. A CLI waiting on such a process, a test of its
     branch or another branch's profile of its head is woken every ``wait_wake_s``.
+
+    ``readable`` are what every specialist of the session reads besides its worktree and workspace (the session's
+    references, its model), and ``lease_area(branch)`` the directory the roots of ``branch``'s dev leases are made in;
+    where a launch runs in a bubblewrap sandbox, those that exist are shown read-only, with the files the branch's
+    worktree links and its git metadata, and another branch's leases are not.
     """
 
     command: AgentCommand
@@ -292,6 +295,8 @@ class AgentSetup:
     clock: Callable[[], float] = time.time
     dev_leases: DevLeaseHolder | None = None
     wait_wake_s: float = WAIT_WAKE_S
+    readable: tuple[Path, ...] = ()
+    lease_area: Callable[[str], Path] | None = None
 
 
 class SessionBlackboard(BranchLogStore, UsageSink, Inbox, LearningStore, AgentRecords, LineageSink, Protocol):
@@ -543,7 +548,7 @@ class AgentSession:
     def _write_cli(self, cli: _CliState) -> None:
         """Replace the conversation record whole, readable by its owner only: it names a conversation to resume."""
         workspace = self._place.workspace
-        workspace.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(workspace)
         partial = write_text_nofollow(workspace, (f".{CLI_SESSION_FILE}.partial",), json.dumps(asdict(cli)))
         partial.replace(workspace / CLI_SESSION_FILE)
 
@@ -782,7 +787,7 @@ class AgentSession:
 
     def _spec(self, grant: SpecialistGrant, launch: _Launch) -> AgentLaunchSpec:
         setup, workspace, worktree = self._setup, self._place.workspace, self._place.worktree.path
-        workspace.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(workspace)
         done = workspace / DONE_FILE
         done.unlink(missing_ok=True)
         _keep_process_log(workspace)
@@ -807,7 +812,19 @@ class AgentSession:
             backend=setup.command.backend,
             heartbeat_sink=self._sink(grant.heartbeat_sink),
             stdin_open=setup.command.interactive,
+            readable=self._readable(),
+            git_admin=self._place.worktree.admin,
         )
+
+    def _readable(self) -> tuple[Path, ...]:
+        """What the branch's CLI reads besides its worktree and workspace, each absolute path that exists once: the
+        session's references and model, the files its worktree links, and the area of the branch's own dev leases. The
+        launch's plan masks every credential location these show."""
+        setup = self._setup
+        found = [*setup.readable, *self._place.worktree.linked]
+        if setup.lease_area is not None:
+            found.append(setup.lease_area(self._start.branch))
+        return tuple(path for path in dict.fromkeys(found) if path.is_absolute() and path.exists())
 
     def _sink(self, service: HeartbeatSink) -> HeartbeatSink:
         """Keep the launch's ``beat`` for the idle wait, and hand it on to the MCP service's sink."""
@@ -1017,7 +1034,6 @@ def _describe(status: AgentStatus, seconds: float) -> str:
 __all__ = [
     "CLI_SESSION_FILE",
     "IDLE_RESUME_WAIT_S",
-    "IDLE_TURNS",
     "RESUME_CONTEXT_MAX",
     "NUDGE_WAITS_S",
     "SPECIALIST_SESSION_S",

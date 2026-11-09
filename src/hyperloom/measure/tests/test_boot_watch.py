@@ -4,14 +4,14 @@
 """A test whose server does not report ready within its boot limit ends there, as the candidate's failure.
 
 The rounds run a real child under the launcher's own watchdog (``run_with_session_kill``), so the cancellation the
-boot guard raises, the reaping and the ready stamp are the ones a sandbox sees; only ``run_grid`` is a stand-in.
+boot guard raises and the reaping are the ones a sandbox sees; ``run_grid`` is a stand-in whose server writes the ready
+stamp a round writes when its server reports ready.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import os
 import re
 import sys
@@ -24,6 +24,7 @@ import pytest
 import yaml
 
 from hyperloom.measure import boot_watch, local
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.measure.boot_watch import BOOT_SHARE, boot_limit_sec, boot_seconds
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
@@ -44,13 +45,17 @@ TUNING_SERVER = (
     "log.write('[aiter] TunableOp: tuning gemm 17/4096 (M=64, N=5120, K=5120)\\n')\n"
     "time.sleep(300)\n"
 )
+#: The child's lines that report ready: the banner in its log and the round's ready stamp beside it.
+_REPORT_READY = (
+    "log.write('INFO:     Application startup complete.\\n')\n"
+    "open(sys.argv[1].rsplit('/', 1)[0] + '/server_ready_at', 'w').write(f'{time.time():.3f} {time.monotonic() - t0:.3f}\\n')\n"
+)
 #: A server that is ready after a moment and answers for a while.
 READY_SERVER = (
     "import sys, time\n"
+    "t0 = time.monotonic()\n"
     "log = open(sys.argv[1], 'a', buffering=1)\n"
-    "time.sleep(0.3)\n"
-    "log.write('INFO:     Application startup complete.\\n')\n"
-    "time.sleep(2.5)\n"
+    "time.sleep(0.3)\n" + _REPORT_READY + "time.sleep(2.5)\n"
 )
 
 
@@ -67,13 +72,12 @@ def _call(tmp_path: Path, point: Path, timeout_sec: int = 4) -> TestCall:
         output_dir=tmp_path / "out",
         timeout_sec=timeout_sec,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id="t-1",
     )
 
 
 class _ServerGrid:
-    """``run_grid`` with a real child process in place of Magpie and the server it starts."""
+    """``run_grid`` with a real child process in place of the round and the server it starts."""
 
     def __init__(self, script: str) -> None:
         self.script = script
@@ -88,7 +92,7 @@ class _ServerGrid:
         proc = await asyncio.to_thread(
             run_with_session_kill,
             [sys.executable, "-c", self.script, str(log)],
-            watch=RoundWatch(timeout=30, server_log_path=str(log)),
+            watch=RoundWatch(timeout=30),
         )
         stopped = proc.returncode == ORCHESTRATOR_CANCELLED_RETURNCODE
         return [
@@ -104,11 +108,6 @@ class _ServerGrid:
                 error="the round was reaped" if stopped else None,
             )
         ]
-
-
-@pytest.fixture(autouse=True)
-def magpie_backend(monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
 
 
 def _run(monkeypatch, tmp_path: Path, script: str, **point: Any):
@@ -180,24 +179,28 @@ def test_only_a_round_that_boots_a_server_is_watched(monkeypatch, tmp_path) -> N
     assert watched == [2.0]
 
 
+def _benchmark(framework: str, ready_timeout_s: object = None) -> BenchmarkPoint:
+    lifecycle = {"server_ready_timeout_s": ready_timeout_s}
+    return BenchmarkPoint.from_document({"benchmark": {"framework": framework, "server_lifecycle": lifecycle}})
+
+
 def test_the_limit_is_a_share_of_what_the_point_allows_and_never_of_more_than_the_round_may_take() -> None:
-    assert boot_limit_sec({"framework": "sglang"}, 3600) == BOOT_SHARE * 3600 == 1800
-    point_allows = {"framework": "vllm", "server_lifecycle": {"server_ready_timeout_s": 2700}}
-    assert boot_limit_sec(point_allows, 3600) == BOOT_SHARE * 2700
-    assert boot_limit_sec({**point_allows, "server_lifecycle": {"server_ready_timeout_s": 7200}}, 3600) == 1800
+    assert boot_limit_sec(_benchmark("sglang"), 3600) == BOOT_SHARE * 3600 == 1800
+    assert boot_limit_sec(_benchmark("vllm", 2700), 3600) == BOOT_SHARE * 2700
+    assert boot_limit_sec(_benchmark("vllm", 7200), 3600) == 1800
+    assert boot_limit_sec(_benchmark("vllm", 0), 3600) == 1800
 
 
 @pytest.mark.parametrize("framework", ["custom", "xdit", ""])
 def test_a_round_whose_server_never_stamps_a_ready_banner_has_no_limit(framework: str) -> None:
-    assert boot_limit_sec({"framework": framework}, 3600) is None
+    assert boot_limit_sec(_benchmark(framework), 3600) is None
 
 
-def test_the_literals_the_guard_copies_equal_their_definitions() -> None:
-    kill = importlib.import_module("hyperloom.orchestrator.actions.executors._subprocess_kill")
-    engine = importlib.import_module("hyperloom.orchestrator.actions.executors.bypass_engine")
+def test_the_frameworks_the_guard_copies_are_the_serving_frameworks() -> None:
+    from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 
-    assert boot_watch._READY_STAMP == kill._READY_STAMP_NAME
-    assert set(boot_watch._SERVER_FRAMEWORKS) == set(engine.SERVER_FRAMEWORKS)
+    serving = {item.value for item in Framework if framework_facts(item).kind is FrameworkKind.SERVING}
+    assert set(boot_watch._SERVER_FRAMEWORKS) == serving
 
 
 def _stamp(directory: Path, text: str) -> None:
@@ -227,15 +230,16 @@ def test_a_test_with_no_stamp_or_a_stamp_that_cannot_be_read_has_no_boot(tmp_pat
 
 
 #: A server whose boot is an aiter JIT build longer than the boot limit, after which it is ready: aiter prints nothing
-#: between ``start build`` and ``finish build`` (a CK-tile GEMM can take up to 1347 s).
+#: between ``start build`` and ``finish build``, which for a CK-tile GEMM is longer than any other module's.
 BUILDING_SERVER = (
     "import sys, time\n"
+    "t0 = time.monotonic()\n"
     "log = open(sys.argv[1], 'a', buffering=1)\n"
     "log.write('[aiter] [pid=7 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under /j/build\\n')\n"
     "time.sleep(3.5)\n"
     "log.write('[aiter] finish build [module_gemm_a8w8_bpreshuffle_cktile], cost 3.5s\\n')\n"
-    "log.write('INFO:     Application startup complete.\\n')\n"
-    "time.sleep(2.5)\n"
+    + _REPORT_READY
+    + "time.sleep(2.5)\n"
 )
 #: A server whose aiter build never finishes.
 HUNG_BUILD_SERVER = (

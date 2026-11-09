@@ -48,12 +48,14 @@ point GEAK at something else.
 
 ## Credential precedence
 
-Hyperloom reads credentials from two places, in order:
+Hyperloom reads credentials from two places, in order, and from a third on a
+checkout another account can write:
 
 | Source                                      | When used                                                 |
 |---------------------------------------------|-----------------------------------------------------------|
 | Process environment (`export FOO=...`)      | Always — wins unconditionally.                            |
 | `$REPO_ROOT/.env`                           | Only for keys missing from the process environment.       |
+| `$KERNEL_AGENT_ENV` (container-local)       | Only for the Anthropic-side credentials missing from the shell, when `.env` keeps none and lends none ([below](#a-checkout-another-account-can-write)). |
 
 Shell environment variables always win over `.env`.
 Both the inference optimizer CLI dotenv loader and
@@ -75,6 +77,75 @@ Preflight also rejects a *mispaired* configuration: a base URL whose only key
 belongs to the other provider, or a key whose only endpoint would come from the
 other provider. Hyperloom would otherwise send that key to a foreign host. Give
 each side its own `*_BASE_URL` and key, or drop the foreign key.
+
+### A checkout another account can write
+
+The Anthropic-side credentials `install.sh` persists (`ANTHROPIC_BASE_URL`,
+`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and an `ANTHROPIC_CUSTOM_HEADERS`
+you put in `.env`) stay out of the checkout's `.env` when another account can
+write it: the checkout directory or `.env` is writable by a group or others,
+belongs to another account, or `.env` is a link. A source directory bind-mounted
+from shared storage, as the Slurm job's `--source-dir` is, is the usual case. The
+checkout is judged where it is, so one you reach through your own link (`~/hl ->
+/scratch/you/hl`) is as private as the directory it leads to. Root (a container
+started without `--user` on your bind-mounted checkout, as in
+[Docker (source)](../install/install.md#docker-source)) takes the account that owns
+the checkout as its own. There another account could read or rewrite them, so
+`install.sh` writes them into the container-local `kernel-agent.env.sh`
+(`KERNEL_AGENT_ENV`) alone. It also removes those an earlier install, you or
+another account left in `.env`, with their retired spellings
+(`ANTHROPIC_AUTH_TOKEN`, `DEEPSEEK_*`, `SAFE_API_KEY`, `AMD_LLM_API_KEY`,
+`LLM_GATEWAY_KEY`, `GEAK_API_KEY`), and every other line such a `.env` does not
+lend (below), keeping its comments and blank lines byte for byte: its own write
+leaves a `.env` of yours that the next reader may find private, so a line another
+account planted there must be gone first. The rest is written beside `.env` with
+its mode and renamed over it, a link to a file is replaced rather than written
+through, and a link to anything else is removed.
+
+Such a `.env` lends no credential to any reader: a line there may be another
+account's, and a gateway URL or headers of its own would carry your key to it.
+`install.sh` and the CLI preflight skip every one of those keys in it, with a
+warning that names the file and never a value, so a credential you left only in a
+shared `.env` is neither used nor copied into `kernel-agent.env.sh`: export it.
+
+Readers that took the credentials from `.env` take them from that file instead,
+after the shell: `install.sh` itself, so a re-install in the same
+container keeps them, and the CLI preflight, which counts them as `.env`'s when
+it decides whether a single provider side is configured. The documented `source`
+line and the Slurm job load that file anyway. A new container has no such file,
+so export the credentials in the shell that runs `install.sh` there; to rotate a
+key, export the new one and re-run `install.sh`.
+
+Nor does such a `.env` lend anything that would let that account run code as you
+or see your traffic. `install.sh` and the CLI preflight take from it only a few
+choices among values Hyperloom ships, each with one of its listed values:
+`FRAMEWORK` (`atom`, `custom`, `sglang`, `vllm`, `xdit`), `HF_HUB_OFFLINE` and
+`HF_DATASETS_OFFLINE` (`0`, `1`), `HYPERLOOM_RUN_MODE` (`baremetal`, `docker`),
+`HYPERLOOM_LLM_MODE` (`anthropic`, `deepseek`, `openai`),
+`HYPERLOOM_FRAMEWORK_ENV` (`isolated`, `shared`) and `HYPERLOOM_DOTENV_CREDENTIALS`
+(`kernel-agent-env`).
+Every other line is skipped: the loader and interpreter variables (`LD_PRELOAD`,
+`PYTHONPATH`, `NODE_OPTIONS`, `BASH_ENV`, ...), the proxies, what an install
+fetches or runs (`GEAK_REPO`, `GEAK_REF`, `VLLM_ROCM_INDEX`, the `*_REPO` names,
+the interpreter and `*_ROOT` paths), where your key goes (`OPENAI_BASE_URL`,
+`OPENAI_CUSTOM_HEADERS`, `GEAK_BASE_URL`), the model names, the tuning knobs
+and `USER_DATA_PATH`. Each skipped key is named in a warning, never its value;
+export any you need in the shell. Such a `.env` never selects the workspace
+either, even with a `HYPERLOOM_RUN_MODE` line: the `USER_DATA_PATH` you export
+stands. The installers do not write skipped keys there: `install.sh` keeps them
+in `kernel-agent.env.sh`, and `install_baremetal.sh` names each one it leaves
+out. A `.env` only you can write is read as before. `install_baremetal.sh`
+follows the same rules: on such a checkout it reads none of those keys, and
+none of the credentials, from `.env`, and writes the Anthropic-side credentials
+to `kernel-agent.env.sh` alone; an OpenAI key it does not write anywhere.
+
+`install.sh` leaves `HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env` in such a
+`.env`, which is no secret. Its own writes replace a `.env` another account could
+write, in a directory that is yours, with one of yours, and the line tells the
+readers that the credentials are still in the container-local file. The next
+install of that now-private checkout persists them in `.env` as before and drops
+the line. The OpenAI side, which `install.sh` does not write, stays where you put
+it.
 
 ---
 
@@ -241,8 +312,8 @@ side is a second provider rather than part of the same gateway credential.
 ## Path environment
 
 These are *not* secrets. You normally do not hand-export
-`INFERENCEX_PATH` or `TRACELENS_ROOT` — `install.sh` and its chained
-kernel-agent installer clone and pin the open-source checkouts when missing.
+`TRACELENS_ROOT` or `INFERENCE_SUITE_TOOL_CACHE` — `install.sh` and its chained
+kernel-agent installer clone, stage and pin the open-source tools when missing.
 Runtime paths are persisted into `.env` by the installer; the CLI preflight
 loads them and derives `PATH` / `LD_LIBRARY_PATH` from `ROCM_PATH` /
 `VIRTUAL_ENV` / `VLLM_VENV_ROOT` at launch, so no separate file needs sourcing.
@@ -253,8 +324,8 @@ loads them and derives `PATH` / `LD_LIBRARY_PATH` from `ROCM_PATH` /
 |------------------------|------------------|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
 | `USER_DATA_PATH`       | recommended      | `/workspace/hyperloom` if `/workspace` is writable, else `<cwd>/session` | Writable root for session dirs, `runtime/`, `logs/`, optimizer artifacts. Bare-metal hosts without a writable `/workspace` take the second form, which is also what setup offers. |
 | `REPO_ROOT`            | rarely           | auto-detected from script location               | This Hyperloom checkout. Locates `.env`, skills, scripts.                                                        |
-| `KERNEL_AGENT_ENV`     | rarely           | `$USER_DATA_PATH/runtime/kernel-agent.env.sh`    | Output of `install.sh`; exports resolved paths and LLM aliases.                                                  |
-| `HYPERLOOM_RUNTIME_DIR`| rarely           | `$USER_DATA_PATH/runtime`                        | Shared runtime tree (env files, GEAK config, Recipe KB bookkeeping).                                             |
+| `KERNEL_AGENT_ENV`     | rarely           | `${TMPDIR:-/tmp}/hyperloom-<uid>-<key>/kernel-agent.env.sh` | Output of `install.sh`; exports resolved paths, LLM aliases and the Anthropic credentials. Kept on the container's own disk in a mode-`0700` directory, never under `USER_DATA_PATH`; see [Environment variables](environment-variables.md). |
+| `HYPERLOOM_RUNTIME_DIR`| rarely           | `$USER_DATA_PATH/runtime`                        | Shared runtime tree (GEAK config, Recipe KB bookkeeping); no credentials.                                        |
 
 ### Dependency checkout variables
 
@@ -267,11 +338,11 @@ explicit path pointing at a missing directory fails preflight.
 
 | Variable                     | Set by operator? | Default / auto-clone target                                | Description                                                                                                         |
 |------------------------------|------------------|------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_CACHE_DIR`        | rarely           | `$REPO_ROOT/.cache`                                        | Writable, repo-local root for open-source deps (TraceLens, InferenceX, GEAK), cloned per revision as `<name>@<sha>`. |
-| `INFERENCEX_PATH`            | optional override | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/InferenceX@<sha>` | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline and target analysis; the inference_optimizer installer (`src/hyperloom/inference_optimizer/assets/install.sh`) clones it when unset. |
+| `HYPERLOOM_CACHE_DIR`        | rarely           | `$REPO_ROOT/.cache`                                        | Writable, repo-local root for open-source deps: TraceLens and GEAK, cloned per revision as `<name>@<sha>`, and the InferenceSuite tool cache. |
+| `INFERENCEX_PATH`            | optional         | unset                                                      | An [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) checkout of your own, read for reference launch scripts. Benchmark rounds run the client staged in `INFERENCE_SUITE_TOOL_CACHE` instead; nothing clones it. |
 | `TRACELENS_ROOT`             | optional override | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha>` | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) for profiling and kernel detection; the kernel-agent installer clones and pins it when unset. |
 | `TRACELENS_INTERNAL_ROOT`    | optional         | unset (MAF measured on-device)                             | Optional internal TraceLens extension that backfills MAF without an on-device benchmark. When unset, Hyperloom measures MAF on an idle GPU (microbenchmark) — roofline gap / MI355+ MAF analysis is still produced, just measured locally. Hyperloom never clones it. |
-| `MAGPIE_PATH`                | optional override | Resolved from installed `Magpie` package                  | Magpie package root for benchmark wrappers and patch inspection. `install.sh` pip-installs Magpie from `MAGPIE_PACKAGE_SPEC` when it is not importable. |
+| `INFERENCE_SUITE_TOOL_CACHE` | rarely            | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/inference-suite-tools`| Tool cache holding the pinned InferenceX client, GSM8K task and AgentX harness that every benchmark round reads; `install.sh` stages it.                |
 
 ---
 
@@ -321,7 +392,9 @@ These questions cover common credential configuration scenarios.
 **Q: Do I have to put my key in `.env`?**
 
 No. Exporting credentials in your shell is sufficient. `.env` is a
-convenience for persistence between shells.
+convenience for persistence between shells. On a checkout another account can
+write, `install.sh` keeps the Anthropic-side credentials out of `.env`; see
+[A checkout another account can write](#a-checkout-another-account-can-write).
 
 **Q: I exported `OPENAI_API_KEY` but `.env` has a different value. Which wins?**
 

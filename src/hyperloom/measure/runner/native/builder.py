@@ -128,7 +128,8 @@ class LaidTree:
 
     ``tracked`` is the upstream build directory (a ``.hip`` it holds is a source, not hipify's output), ``laid`` the
     paths the stack wrote over it; ``environment`` holds variables the planner chose for this compile, under the recipe's
-    own (which win)."""
+    own (which win); ``linked`` the image's directories the tree's links point into (a farm's mirrors), which the
+    compile reads through them."""
 
     recipe: NativeRecipe
     machine: BuildMachine
@@ -136,6 +137,7 @@ class LaidTree:
     image_root: Path
     laid: frozenset[str]
     environment: Mapping[str, str] = field(default_factory=dict)
+    linked: tuple[Path, ...] = ()
 
 
 def lay_tree(request: BuildRequest, root: EnvRoot, blobs: BlobStore, scratch: Path) -> LaidTree:

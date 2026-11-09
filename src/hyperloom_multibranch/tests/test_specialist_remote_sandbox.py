@@ -6,6 +6,7 @@
 import asyncio
 import os
 import signal
+import stat
 import time
 from pathlib import Path
 
@@ -184,6 +185,7 @@ def test_only_the_gateway_its_credentials_and_the_ca_bundle_are_forwarded():
         "ANTHROPIC_BASE_URL": "u",
         "CLAUDE_MODEL": "m",
         "GEAK_CLAUDE_MODEL": "g",
+        "CLAUDE_CODE_OAUTH_TOKEN": "t",
         "SSL_CERT_FILE": "/tmp/hyperloom-host/ca-bundle.pem",
         "HOME": "/root",
         "PATH": "/usr/bin",
@@ -197,5 +199,56 @@ def test_only_the_gateway_its_credentials_and_the_ca_bundle_are_forwarded():
         "ANTHROPIC_BASE_URL": "u",
         "CLAUDE_MODEL": "m",
         "GEAK_CLAUDE_MODEL": "g",
+        "CLAUDE_CODE_OAUTH_TOKEN": "t",
         "SSL_CERT_FILE": "/tmp/hyperloom-host/ca-bundle.pem",
     }
+
+
+# -- the root is the group's: the sandbox's account, this host's and the next leg's may differ ---------------------
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+def _umask() -> int:
+    with open("/proc/self/status", encoding="ascii") as status:
+        return next(int(line.split()[1], 8) for line in status if line.startswith("Umask:"))
+
+
+async def test_the_root_its_directories_and_the_files_made_for_the_launcher_are_the_groups_whatever_the_umask(tmp_path):
+    assert _umask() & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
+    remote = _remote(tmp_path)
+
+    process = await remote.start("true", tmp_path, {})
+    await _ended(process)
+
+    made = [remote.root, *(remote.root / name for name in ("bin", "logs", "run", "home", "cache"))]
+    for directory in (*made, claude_config_dir(remote.root)):
+        assert _mode(directory) == 0o2775, directory
+    for file in (process.log, process.pid_file, process.exit_file):
+        assert _mode(file) == 0o664, file
+    for script in ("hl-launch.sh", "hl-procs.sh"):
+        assert _mode(remote.root / "bin" / script) == 0o755, script
+
+
+async def test_a_new_leg_replaces_the_scripts_by_rename_never_rewriting_the_file_an_earlier_leg_left(tmp_path):
+    _remote(tmp_path)
+    launcher = tmp_path / "sandbox" / "bin" / "hl-launch.sh"
+    launcher.write_text("#!/bin/bash\nexit 99\n")
+    (tmp_path / "earlier-leg-inode").hardlink_to(launcher)
+
+    done = await _remote(tmp_path).run("echo ran", tmp_path, {}, timeout=10)
+
+    assert done.returncode == 0 and "ran" in done.output
+    assert (tmp_path / "earlier-leg-inode").read_text() == "#!/bin/bash\nexit 99\n", "replaced, never written in place"
+
+
+async def test_what_a_command_makes_below_the_root_is_the_groups_to_write(tmp_path):
+    assert _umask() & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    remote = _remote(tmp_path)
+
+    done = await remote.run("mkdir made && echo x > made/file", remote.root / "home", {}, timeout=10)
+
+    assert done.returncode == 0, done.output
+    assert _mode(remote.root / "home" / "made") & 0o070 == 0o070
+    assert _mode(remote.root / "home" / "made" / "file") & 0o060 == 0o060

@@ -3,7 +3,7 @@
 Uses a local temp git repo as workspace, synthetic bench results, and real
 state management / escalation / gate logic. Completes in ~20 seconds.
 
-    python3 -m arbor run --config configs/agentx-glm52-mi355x.json --dry-run
+    python3 -m arbor run --config <campaign config>.json --dry-run
 
 The temp repo is local, so its commits run here (``@host``): no docker needed.
 """
@@ -137,8 +137,8 @@ def main(argv: list[str]) -> int:
             #
             # The metric key comes from the PACK, not a literal. Hardcoding
             # "output_throughput" made this whole dry run vacuous for any pack
-            # gating on something else: a pack gating on
-            # mean_interactivity had every iteration return
+            # gating on something else: with a pack that gates on
+            # mean_interactivity, every iteration returned
             # "bench output missing metric key" and the run exercised nothing
             # but the not-measured path while still exiting 0.
             noise = rng.gauss(0, 3)

@@ -2,10 +2,10 @@
 
 landed.patch carries the workspace only (save_landed_patch), so an edit a KEEP made to
 another editable package -- AITER, under site-packages -- lived only in its container.
-The model-m launchers rebuild those edits from the agent's own landed_aiter.py, and nothing
-checked that it could: AITER-only KEEPs could miss landed_aiter.py, so a chunk roll
-rebuilt a tree without them, and a round-end A/B then measured the previous round's tree
-as the current round's.
+A campaign's launchers rebuild those edits from the agent's own landed_aiter.py, and
+nothing checked that it could: a KEEP's AITER-only change that landed_aiter.py never
+received is missing from the tree the next chunk rebuilds, and a round-end A/B then
+measures the previous round's tree as the current one's. Hence this guard.
 
 On every KEEP the driver copies each editable package's .py files that differ from the
 container's image (changed or added) to <session>/landed_packages/<name>/, and lists them
@@ -31,6 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from arbor.execute import trees
 from arbor.execute.workspace import HOST, run_in
 
 MANIFEST = "landed_packages.json"
@@ -96,6 +97,15 @@ def capture(container: str, config: dict, session: str | Path, pristine=None) ->
     for p in pkgs:
         name, path = p["name"], str(p["path"])
         img, cur = pristine(path), _sums(_sh(container, f"cd {shlex.quote(path)} && {PY_SUMS}"))
+        # Beside the .py files: every file the tree changed since its baseline (arbor/execute/trees.py), a tuned
+        # table or a config among them, which the .py comparison alone never saw.
+        base = trees.baselines(session).get(path.rstrip("/"))
+        if base:
+            listed = _sh(container, f"cd {shlex.quote(path)} && git diff --name-only --diff-filter=AMR {base} HEAD")
+            more = [f"./{f}" for f in listed.splitlines() if f.strip() and f"./{f}" not in cur]
+            if more:
+                cur.update(_sums(_sh(container, f"cd {shlex.quote(path)} && sha256sum -- "
+                                                + " ".join(shlex.quote(f) for f in more))))
         files = sorted(f for f in cur if img.get(f) != cur[f])
         if files:
             out = tmp / name
