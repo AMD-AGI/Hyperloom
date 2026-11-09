@@ -68,6 +68,10 @@ PRIVATE_SESSION_SUBDIRS: tuple[str, ...] = (ARCHIVE_DIRNAME,)
 #: group can write: SQLite reaches a database, and makes its journal files, by path, so any directory on that path that
 #: another account can rename entries in lets it put a database of its own there while one is opened.
 PRIVATE_DB_DIR_PREFIX = "hyperloom-ledger-"
+#: A directory of this account's, ``0700``, that outlives the container, named instead of the one below ``TMPDIR`` (an
+#: operator prepares it: below a sticky parent, or one only this account can write in): a container's ``TMPDIR`` is its
+#: own disk, so a run resumed in a new container (after a preemption, say) finds no database there.
+ENV_LEDGER_DIR = "HYPERLOOM_LEDGER_DIR"
 
 #: The workspace root and its ``runtime/``, where the installer puts what later steps source or run (GEAK litellm config,
 #: source mirrors): the group may enter and read them, only their owner may change them, so no other account can swap
@@ -257,16 +261,15 @@ def shared_db_path_for(session_dir: Path) -> Path:
 
 def private_db_path_for(session_dir: Path) -> Path:
     """Return the path of this account's own coordinator database for a session, outside the session directory (see
-    :data:`PRIVATE_DB_DIR_PREFIX`); nothing is made there."""
+    :data:`PRIVATE_DB_DIR_PREFIX` and :data:`ENV_LEDGER_DIR`); nothing is made there."""
     resolved = Path(os.path.realpath(session_dir))
     name = re.sub(r"[^A-Za-z0-9_.-]", "_", resolved.name)[:40] or "session"
     key = hashlib.sha256(os.fsencode(resolved)).hexdigest()[:16]
-    return (
-        Path(os.environ.get("TMPDIR") or "/tmp")
-        / f"{PRIVATE_DB_DIR_PREFIX}{os.geteuid()}"
-        / f"{name}-{key}"
-        / "coordinator.db"
+    named = os.environ.get(ENV_LEDGER_DIR, "").strip()
+    ledgers = (
+        Path(named) if named else Path(os.environ.get("TMPDIR") or "/tmp") / f"{PRIVATE_DB_DIR_PREFIX}{os.geteuid()}"
     )
+    return ledgers / f"{name}-{key}" / "coordinator.db"
 
 
 def db_path_for(session_dir: Path) -> Path:
@@ -386,6 +389,7 @@ __all__ = [
     "AssetRootNotFound",
     "DEFAULT_SESSION_DIR",
     "ENV_CURRENT_SESSION_DIR",
+    "ENV_LEDGER_DIR",
     "ENV_OVERRIDE_ASSET_ROOT",
     "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
