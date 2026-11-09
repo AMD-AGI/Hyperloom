@@ -138,4 +138,6 @@ async def test_lanes_of_one_round_copy_their_own_starts_and_share_the_campaign_l
 
     assert seen == {"1": "VALUE = 0\n", "2": "VALUE = 1\n"}
     assert "-VALUE = 0" in results[0].diff and "-VALUE = 1" in results[1].diff
-    assert len(locks) == 1 and campaign_device_lock_path(workspace).name in locks.pop()
+    assert len(locks) == 1
+    (lock_line,) = locks
+    assert campaign_device_lock_path(workspace).name in lock_line
