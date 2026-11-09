@@ -92,6 +92,25 @@ class FailedStep(str, Enum):
     TEARDOWN_INCOMPLETE = "teardown_incomplete"
 
 
+#: The steps a round stops at before it spawns a server, so no server ran and no server log holds the cause.
+STEPS_BEFORE_SPAWN: frozenset[FailedStep] = frozenset(
+    {
+        FailedStep.CONFIG_INVALID,
+        FailedStep.BASE_DIGEST_MISMATCH,
+        FailedStep.FRAMEWORK_VERSION_TOO_OLD,
+        FailedStep.FRAMEWORK_VERSION_UNKNOWN,
+        FailedStep.REUSE_NOT_OWNED,
+        FailedStep.EVAL_CONTEXT_TOO_SHORT,
+        FailedStep.STAGING_MISSING,
+        FailedStep.SOURCE_FILES_CHANGED,
+        FailedStep.FLAG_UNKNOWN,
+        FailedStep.GOLDEN_OWNED_TOUCHED,
+        FailedStep.PORT_IN_USE,
+        FailedStep.GPUS_UNAVAILABLE,
+    }
+)
+
+
 def _optional_digest(value: object, what: str) -> str | None:
     return None if value is None else _FIELDS.matching(_DIGEST, value, what)
 
@@ -809,6 +828,7 @@ __all__ = [
     "GPU_METRIC_KEYS",
     "REPORT_KEYS",
     "REPORT_SCHEMA",
+    "STEPS_BEFORE_SPAWN",
     "AgentxResult",
     "EvalDefinition",
     "EvalResult",
