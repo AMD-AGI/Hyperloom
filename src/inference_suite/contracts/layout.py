@@ -24,8 +24,7 @@ SERVER_PID = "server.pid"
 PHASE_MARKS = "phase_marks.json"
 KV_METRICS = "kv_metrics.json"
 AGENTX_TIMELINE = "agentx_timeline.jsonl"
-GPU_SAMPLES = "gpu_samples.csv"
-GPU_POWER = "gpu_power.json"
+POWER = "power.json"
 GPU_METRICS = "gpu_metrics.json"
 #: Files a host writes from the run_dir into its own round directory; never inside a run_dir.
 HOST_DERIVED = (GPU_METRICS,)
@@ -137,12 +136,8 @@ class RunLayout:
         return self.root / AGENTX_TIMELINE
 
     @property
-    def gpu_samples(self) -> Path:
-        return self.root / GPU_SAMPLES
-
-    @property
-    def gpu_power(self) -> Path:
-        return self.root / GPU_POWER
+    def power(self) -> Path:
+        return self.root / POWER
 
     @property
     def client_dir(self) -> Path:
@@ -255,12 +250,11 @@ __all__ = [
     "EVAL_DIR",
     "GPU_METRICS",
     "GRAPH_CAPTURE_DIR",
-    "GPU_POWER",
-    "GPU_SAMPLES",
     "HOST_DERIVED",
     "KV_METRICS",
     "LAUNCH_FILE",
     "PHASE_MARKS",
+    "POWER",
     "PROFILE_DIR",
     "PROFILE_TRACE_DIRS",
     "READY_STAMP",

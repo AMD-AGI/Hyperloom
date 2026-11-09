@@ -98,6 +98,8 @@ _AGENTX_COUNTS = {
     "warmup_dropped": 14,
     "dropped_total": 22,
     "error_osl_exported": 10,
+    "input_tokens": 900_000,
+    "output_tokens": 45_000,
 }
 
 

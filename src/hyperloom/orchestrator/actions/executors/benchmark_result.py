@@ -631,23 +631,21 @@ def _tag_latency_origins(
 def _round_gpu_power(
     report: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
 ) -> dict[str, Any]:
-    """The round's measured-phase power: ``gpu_power_avg_w`` (mean per serving card) and ``gpu_power_by_gpu_w``.
+    """The round's measured-window power and energy: :data:`~._gpu_power.POWER_FIELDS`, ``gpu_power_by_gpu_w`` and
+    ``power_valid``; only the first two without a recording.
 
-    Hyperloom's own ``gpu_power.json`` wins whenever this round wrote one, including one with no reading: that round
-    was sampled and measured nothing, and substituting the report's figure would replace "unmeasured" with a number
-    from a different window. The report's ``gpu_monitor`` block -- one card, whole-process window on a single node --
-    is the fallback for the mean on rounds no recorder ran on; it reads one card, so such a round has no per-card
-    figure and any per-card or total budget treats it as unmeasured.
+    Hyperloom's own recording wins whenever this round has one, including one whose energy is invalid: that round
+    was sampled and measured nothing trustworthy, and substituting the report's figure would replace "unmeasured" with
+    a number from a different window. The report's ``gpu_monitor`` block -- one card, whole-process window on a single
+    node -- is the fallback for the mean on rounds no recorder ran on; it reads one card, so such a round has no
+    per-card figure and any per-card or total budget treats it as unmeasured.
     """
-    from ._gpu_power import read_measured_gpu_power, read_measured_gpu_power_by_gpu
+    from ._gpu_power import round_power_fields, round_power_summary
 
-    found, watts = read_measured_gpu_power(workspace, subprocess_started_unix=subprocess_started_unix)
-    return {
-        "gpu_power_avg_w": watts if found else gpu_metrics_from_report(report).get("avg_power_w"),
-        "gpu_power_by_gpu_w": read_measured_gpu_power_by_gpu(
-            workspace, subprocess_started_unix=subprocess_started_unix
-        )[1],
-    }
+    summary = round_power_summary(report, workspace, subprocess_started_unix=subprocess_started_unix)
+    if summary is not None:
+        return round_power_fields(summary)
+    return {"gpu_power_avg_w": gpu_metrics_from_report(report).get("avg_power_w"), "gpu_power_by_gpu_w": None}
 
 
 def extract_benchmark_measurement(
@@ -723,7 +721,7 @@ def extract_benchmark_measurement(
 
 
 def _round_folder_measurement(run_dir: Path, subprocess_started_unix: float | None) -> dict[str, Any]:
-    """An inference_suite round's measurement, with the measured-phase power its ``gpu_power.json`` recorded."""
+    """An inference_suite round's measurement, with the measured-window power its report's ``power`` section holds."""
     folder = RoundFolder.read(run_dir)
     measurement = folder.measurement()
     measurement.update(_round_gpu_power(folder.report.to_document(), run_dir, subprocess_started_unix))

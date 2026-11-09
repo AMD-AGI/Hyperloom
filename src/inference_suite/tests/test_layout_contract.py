@@ -45,7 +45,7 @@ def test_run_dir_names(tmp_path: Path) -> None:
     layout = RunLayout(tmp_path)
     relative = {
         name: getattr(layout, name).relative_to(tmp_path).as_posix()
-        for name in ("config", "launch", "report", "server_log", "phase_marks", "gpu_power", "gpu_samples")
+        for name in ("config", "launch", "report", "server_log", "phase_marks", "power")
     }
     assert relative == {
         "config": "config.yaml",
@@ -53,8 +53,7 @@ def test_run_dir_names(tmp_path: Path) -> None:
         "report": "report.json",
         "server_log": "server.log",
         "phase_marks": "phase_marks.json",
-        "gpu_power": "gpu_power.json",
-        "gpu_samples": "gpu_samples.csv",
+        "power": "power.json",
     }
     assert layout.aiperf_request_export.relative_to(tmp_path).as_posix() == (
         "client/aiperf_artifacts/profile_export.jsonl"
