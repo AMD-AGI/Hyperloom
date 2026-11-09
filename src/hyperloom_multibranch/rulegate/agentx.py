@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The AgentX rule: the optimizer's bar on the session's objective, P50 interactivity unless the session names total
-token throughput, and its two guards, retested only when they block a gain."""
+"""The AgentX rule: a bar on the session's objective, P50 interactivity unless the session names total token
+throughput, and the objective's two guards, retested only when they block a gain."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from enum import Enum
 
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
-    AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_DURATION,
     GRADED_ERROR_RATE,
     GRADED_INTVTY,
@@ -30,9 +29,18 @@ from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok
 from hyperloom_multibranch.rulegate.readings import GRADED_SHORT_REQUESTS
 
 
+@dataclass(frozen=True)
+class Guard:
+    """An axis a candidate must hold within the noise band of its parent, and the refusal that says it did not."""
+
+    refusal: str
+    metric: str
+
+
 class AgentXObjective(str, Enum):
-    """The axis an AgentX session is graded on: the round metric its bar reads (:attr:`metric`) and the refusal that
-    says a candidate did not clear it (:attr:`below_threshold`). Both guards and the error-rate bar hold under either."""
+    """The axis an AgentX session is graded on: the round metric its bar reads (:attr:`metric`), the gain that clears
+    it (:attr:`bar_pct`), the refusal that says a candidate did not (:attr:`below_threshold`), and the axes it may not
+    pay for that gain with (:attr:`guards`). The error-rate bar holds under either."""
 
     P50_INTERACTIVITY = "p50_interactivity"
     TOTAL_TOKEN_THROUGHPUT = "total_token_throughput"
@@ -42,8 +50,16 @@ class AgentXObjective(str, Enum):
         return _METRICS[self]
 
     @property
+    def bar_pct(self) -> float:
+        return _BAR_PCT
+
+    @property
     def below_threshold(self) -> str:
         return _BELOW_THRESHOLD[self]
+
+    @property
+    def guards(self) -> tuple[Guard, ...]:
+        return _GUARDS[self]
 
 
 P50_BELOW_THRESHOLD = "p50_gain_below_threshold"
@@ -56,16 +72,23 @@ _BELOW_THRESHOLD = {
     AgentXObjective.P50_INTERACTIVITY: P50_BELOW_THRESHOLD,
     AgentXObjective.TOTAL_TOKEN_THROUGHPUT: TOTAL_BELOW_THRESHOLD,
 }
+# MB's own bar, apart from the single-lineage flow's AGENTX_KEEP_P50_THRESHOLD_PCT.
+_BAR_PCT = 2.0
+_P90_GUARD = Guard("p90_regressed", GRADED_INTVTY)
+# Output throughput guards neither: it follows the trace window's output-length mix, not the server.
+_GUARDS = {
+    AgentXObjective.P50_INTERACTIVITY: (_P90_GUARD, Guard("total_regressed", TOTAL_TOKEN_THROUGHPUT)),
+    AgentXObjective.TOTAL_TOKEN_THROUGHPUT: (_P90_GUARD, Guard("p50_regressed", GRADED_INTVTY_P50)),
+}
 #: The refusals that say only that a candidate did not clear its objective's bar, under any objective.
 BELOW_THRESHOLD = frozenset(_BELOW_THRESHOLD.values())
 # Failing more requests than the parent is a defect of the candidate a repair can look at; the other reasons
 # ``incomparability_reason`` gives mean the pair did not measure the same work. Only unserved requests count: a short
 # answer is the client's quality call, recorded for the specialist and never a refusal.
 _EXTRA_FAILED_REQUESTS = "extra_failed_requests"
-_GUARDS = (("p90_regressed", GRADED_INTVTY), ("output_regressed", GRADED_OUTPUT))
-#: The refusals that say only that the candidate is slower than its parent: the objective's bar and the two speed guards.
-SPEED_GATES = frozenset({*BELOW_THRESHOLD, *(name for name, _ in _GUARDS)})
-#: Every objective's metric is among them, so a judgement records the value its session is graded on.
+#: The refusals that say only that the candidate is slower than its parent: any objective's bar and guards.
+SPEED_GATES = frozenset({*BELOW_THRESHOLD, *(guard.refusal for guards in _GUARDS.values() for guard in guards)})
+#: Every axis any objective's bar or guards read is among them, so a judgement records what its session is graded on.
 _RECORDED_AXES = (
     GRADED_INTVTY_P50,
     TOTAL_TOKEN_THROUGHPUT,
@@ -92,8 +115,7 @@ class _Reading:
 
     @property
     def cleared(self) -> bool:
-        # The single-lineage flow's fixed P50 bar, held the same under either objective.
-        return self.gain >= AGENTX_KEEP_P50_THRESHOLD_PCT
+        return self.gain >= self.objective.bar_pct
 
     @property
     def blocked(self) -> bool:
@@ -111,7 +133,7 @@ def _read(candidate: Mapping[str, float], parent: Mapping[str, float], objective
     gain = gain_pct(value, parent_value)
     if gain is None:
         raise ValueError(f"cannot compare a {metric} of {value!r} against a parent {metric} of {parent_value!r}")
-    defects = [name for name, key in _GUARDS if not _guard_holds(candidate, parent, key)]
+    defects = [guard.refusal for guard in objective.guards if not _guard_holds(candidate, parent, guard.metric)]
     incomparable = incomparability_reason(candidate, parent)
     if incomparable == _EXTRA_FAILED_REQUESTS:
         incomparable = ""
@@ -150,7 +172,7 @@ def compare(
     reading = _read(candidate, parent, objective)
     if reading.blocked:
         verdict = Verdict.NEEDS_CONFIRM
-    elif reading.incomparable or reading.defects or reading.gain <= -AGENTX_KEEP_P50_THRESHOLD_PCT:
+    elif reading.incomparable or reading.defects or reading.gain <= -objective.bar_pct:
         verdict = Verdict.REGRESSED
     elif reading.cleared:
         verdict = Verdict.IMPROVED
@@ -159,7 +181,7 @@ def compare(
     return Judgement(
         verdict,
         reading.gain,
-        AGENTX_KEEP_P50_THRESHOLD_PCT,
+        objective.bar_pct,
         (request_id,),
         _recorded(candidate),
         AccuracyVerdict.measured(reading.accuracy_ok),
@@ -187,7 +209,7 @@ def confirm(
     return Judgement(
         Verdict.BLOCKED if reading.blocked else Verdict.INCONCLUSIVE,
         (first.gain_pct + reading.gain) / 2.0,
-        AGENTX_KEEP_P50_THRESHOLD_PCT,
+        objective.bar_pct,
         (*first.request_ids, request_id),
         recorded,
         AccuracyVerdict.measured(first.accuracy is not AccuracyVerdict.FAILED and reading.accuracy_ok),
@@ -201,6 +223,7 @@ __all__ = [
     "SPEED_GATES",
     "TOTAL_BELOW_THRESHOLD",
     "AgentXObjective",
+    "Guard",
     "compare",
     "confirm",
 ]

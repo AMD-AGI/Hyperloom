@@ -20,12 +20,23 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **MB's AgentX bar drops to 2% and its guards follow the objective.**
+  A `hyperloom-multibranch` AgentX session keeps a change on a 2% gain on its
+  objective, not 3%. Under `p50_interactivity` the guards are P90 interactivity
+  and total token throughput (new refusal `total_regressed`); under
+  `total_token_throughput` they are P90 and P50 interactivity (`p50_regressed`).
+  Output throughput no longer guards either, so `output_regressed` is no longer
+  given; it is still recorded. Arbor's directives state the session's bar and
+  guards. A resumed session judges by the new rule. Before, a real 2-3% gain
+  was refused, and a gain was held back when the replayed window's
+  output-length mix lowered output throughput. Single-lineage
+  `hyperloom optimize` keeps its 3% bar and guards.
 - **An MB AgentX session can be graded on total token throughput.**
   `hyperloom-multibranch run --workload agentx --agentx-objective
   total_token_throughput` keeps a change on the round's `total_token_throughput`
   instead of `e2e_norm_intvty_p50`; the default, `p50_interactivity`, leaves
-  existing sessions as they were. The 3% bar, the P90 and output-throughput
-  guards, the retest and the error-rate threshold are unchanged. The objective is
+  existing sessions as they were. The retest and the error-rate threshold are
+  the same under either objective. The objective is
   recorded in the manifest and kept on resume; FINAL, the dashboard and
   `MB-report.md` name it, and the bar's refusal reads
   `total_throughput_gain_below_threshold`. Its Recipe KB record carries

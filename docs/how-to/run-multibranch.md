@@ -56,10 +56,16 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
   (see [Base launch](../reference/inference-suite.md#base-launch)).
 - **AgentX objective:** `--agentx-objective p50_interactivity|total_token_throughput` (default
   `p50_interactivity`) names the round metric an AgentX session keeps on: `e2e_norm_intvty_p50`, or
-  `total_token_throughput` (per server; a session's TP is fixed, so it ranks changes as the per-GPU figure does). The
-  rest of the rule is the same under either: a 3% bar, P90 interactivity and output throughput held within the noise
-  band, a retest of a gain a guard holds back, and the error-rate threshold. The manifest records it, so a resumed
-  session keeps it; the frontier, FINAL, the dashboard, `MB-report.md` and the Recipe KB record
+  `total_token_throughput` (per server; a session's TP is fixed, so it ranks changes as the per-GPU figure does). A
+  change is kept on a 2% gain on that metric in one measurement, while P90 interactivity and the other axis hold
+  within the noise band (`HYPERLOOM_PERF_NOISE_PCT`, default 5%): total token throughput under `p50_interactivity`
+  (refusal `total_regressed`), P50 interactivity under `total_token_throughput` (`p50_regressed`); P90 refuses as
+  `p90_regressed`. Output throughput is recorded but guards neither, as it follows the trace window's output-length
+  mix. A gain a guard holds back is retested once; the error-rate threshold holds under both. `total_token_throughput`
+  suits a high `--conc` only: at a low one the trace's tool and think time paces the lanes, so a server gain barely
+  moves it (the same stack on GLM-5.3 TP4/EP4 gained +1.8% total per GPU at conc 4 and +7–14% at conc 8–16). The
+  bar and guards are read from the code, so a resumed session judges by the current rule. The manifest records the
+  objective, so a resumed session keeps it; the frontier, FINAL, the dashboard, `MB-report.md` and the Recipe KB record
   (`total_throughput_gain_pct`) all read that metric. Each Arbor is told to optimize it (`opt_objective`); a
   P50 session needs Arbor `9c455df` or later, a `total_token_throughput` one `df9b55a` or later.
 - **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for

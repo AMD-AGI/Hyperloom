@@ -15,7 +15,9 @@ from hyperloom.common.perf_metric import (
 )
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Verdict
 from hyperloom_multibranch.rulegate.agentx import (
+    BELOW_THRESHOLD,
     P50_BELOW_THRESHOLD,
+    SPEED_GATES,
     TOTAL_BELOW_THRESHOLD,
     AgentXObjective,
     compare,
@@ -30,6 +32,7 @@ PARENT = {
     GRADED_OUTPUT: 1000.0,
     GRADED_DURATION: 600.0,
     GRADED_ERROR_RATE: 0.2,
+    TOTAL_TOKEN_THROUGHPUT: 5000.0,
 }
 P90_BROKEN = {GRADED_INTVTY_P50: 106.0, GRADED_INTVTY: 75.2}
 
@@ -43,13 +46,15 @@ def _default_noise_band(monkeypatch):
     ("changes", "verdict", "refused_by"),
     [
         ({GRADED_INTVTY_P50: 104.0}, Verdict.IMPROVED, ()),
-        ({GRADED_INTVTY_P50: 102.0}, Verdict.FLAT, (P50_BELOW_THRESHOLD,)),
-        ({GRADED_INTVTY_P50: 98.0}, Verdict.FLAT, (P50_BELOW_THRESHOLD,)),
-        ({GRADED_INTVTY_P50: 96.0}, Verdict.REGRESSED, (P50_BELOW_THRESHOLD,)),
+        ({GRADED_INTVTY_P50: 102.5}, Verdict.IMPROVED, ()),
+        ({GRADED_INTVTY_P50: 101.5}, Verdict.FLAT, (P50_BELOW_THRESHOLD,)),
+        ({GRADED_INTVTY_P50: 98.5}, Verdict.FLAT, (P50_BELOW_THRESHOLD,)),
+        ({GRADED_INTVTY_P50: 97.5}, Verdict.REGRESSED, (P50_BELOW_THRESHOLD,)),
         (P90_BROKEN, Verdict.NEEDS_CONFIRM, ("p90_regressed",)),
-        ({GRADED_INTVTY_P50: 104.0, GRADED_OUTPUT: 940.0}, Verdict.NEEDS_CONFIRM, ("output_regressed",)),
+        ({GRADED_INTVTY_P50: 104.0, TOTAL_TOKEN_THROUGHPUT: 4700.0}, Verdict.NEEDS_CONFIRM, ("total_regressed",)),
+        ({GRADED_INTVTY_P50: 104.0, GRADED_OUTPUT: 900.0}, Verdict.IMPROVED, ()),
         ({GRADED_INTVTY_P50: 104.0, GRADED_ERROR_RATE: 1.2}, Verdict.NEEDS_CONFIRM, ("extra_failed_requests",)),
-        ({GRADED_INTVTY_P50: 102.0, GRADED_INTVTY: 75.2}, Verdict.REGRESSED, ("p90_regressed", P50_BELOW_THRESHOLD)),
+        ({GRADED_INTVTY_P50: 101.5, GRADED_INTVTY: 75.2}, Verdict.REGRESSED, ("p90_regressed", P50_BELOW_THRESHOLD)),
         ({GRADED_INTVTY_P50: 104.0, GRADED_DURATION: 660.0}, Verdict.REGRESSED, ("duration_drift",)),
     ],
 )
@@ -58,12 +63,12 @@ def test_a_measurement_against_its_parent(changes, verdict, refused_by):
     judgement = compare(candidate, PARENT, "r1", P50)
     assert judgement.verdict is verdict
     assert judgement.refused_by == refused_by
-    assert judgement.threshold_pct == pytest.approx(3.0)
+    assert judgement.threshold_pct == pytest.approx(2.0)
     assert judgement.recorded_value == candidate
     assert judgement.request_ids == ("r1",)
 
 
-THROUGHPUT_PARENT = {**PARENT, TOTAL_TOKEN_THROUGHPUT: 5000.0}
+THROUGHPUT_PARENT = PARENT
 TOTAL_UP = {TOTAL_TOKEN_THROUGHPUT: 5200.0}
 
 
@@ -93,15 +98,47 @@ def test_the_p90_guard_holds_a_gain_back_under_either_objective(objective):
     assert (judgement.verdict, judgement.refused_by) == (Verdict.NEEDS_CONFIRM, ("p90_regressed",))
 
 
-def test_the_output_guard_holds_a_total_throughput_gain_bought_with_output_throughput():
-    gain = {TOTAL_TOKEN_THROUGHPUT: 5200.0, GRADED_OUTPUT: 940.0}
+@pytest.mark.parametrize("objective", [P50, TOTAL])
+def test_a_gain_of_two_and_a_half_percent_on_the_objective_is_kept(objective):
+    gain = {GRADED_INTVTY_P50: 102.5} if objective is P50 else {TOTAL_TOKEN_THROUGHPUT: 5125.0}
+    judgement = compare({**PARENT, **gain}, PARENT, "r1", objective)
+    assert (judgement.verdict, judgement.refused_by) == (Verdict.IMPROVED, ())
+    assert judgement.threshold_pct == pytest.approx(2.0) == objective.bar_pct
+
+
+def test_the_p50_guard_holds_a_total_throughput_gain_bought_with_p50_interactivity():
+    gain = {TOTAL_TOKEN_THROUGHPUT: 5200.0, GRADED_INTVTY_P50: 94.0}
     judgement = compare({**THROUGHPUT_PARENT, **gain}, THROUGHPUT_PARENT, "r1", TOTAL)
-    assert (judgement.verdict, judgement.refused_by) == (Verdict.NEEDS_CONFIRM, ("output_regressed",))
+    assert (judgement.verdict, judgement.refused_by) == (Verdict.NEEDS_CONFIRM, ("p50_regressed",))
+
+
+@pytest.mark.parametrize(("objective", "gain"), [(P50, {GRADED_INTVTY_P50: 104.0}), (TOTAL, TOTAL_UP)])
+def test_output_throughput_guards_neither_objective_and_is_still_recorded(objective, gain):
+    candidate = {**PARENT, **gain, GRADED_OUTPUT: 800.0}
+    judgement = compare(candidate, PARENT, "r1", objective)
+    assert (judgement.verdict, judgement.refused_by) == (Verdict.IMPROVED, ())
+    assert judgement.recorded_value[GRADED_OUTPUT] == 800.0
+
+
+def test_each_objective_guards_p90_and_the_other_objective_s_axis():
+    assert [(guard.refusal, guard.metric) for guard in P50.guards] == [
+        ("p90_regressed", GRADED_INTVTY),
+        ("total_regressed", TOTAL_TOKEN_THROUGHPUT),
+    ]
+    assert [(guard.refusal, guard.metric) for guard in TOTAL.guards] == [
+        ("p90_regressed", GRADED_INTVTY),
+        ("p50_regressed", GRADED_INTVTY_P50),
+    ]
+
+
+def test_the_speed_gates_are_every_objective_s_bar_and_guard_refusals():
+    assert SPEED_GATES == {*BELOW_THRESHOLD, "p90_regressed", "total_regressed", "p50_regressed"}
 
 
 def test_a_run_without_its_objective_metric_is_not_compared():
+    parent = {key: value for key, value in PARENT.items() if key != TOTAL_TOKEN_THROUGHPUT}
     with pytest.raises(ValueError, match=f"cannot compare a {TOTAL_TOKEN_THROUGHPUT}"):
-        compare({**PARENT, GRADED_INTVTY_P50: 110.0}, PARENT, "r1", TOTAL)
+        compare({**parent, GRADED_INTVTY_P50: 110.0}, parent, "r1", TOTAL)
 
 
 def test_the_error_rate_bar_blocks_a_gain_and_fails_the_accuracy_gate():
@@ -114,7 +151,11 @@ def test_the_error_rate_bar_blocks_a_gain_and_fails_the_accuracy_gate():
     ("retest", "verdict", "refused_by"),
     [
         ({GRADED_INTVTY_P50: 105.0, GRADED_INTVTY: 74.0}, Verdict.BLOCKED, ("p90_regressed",)),
-        ({GRADED_INTVTY_P50: 105.0, GRADED_OUTPUT: 940.0}, Verdict.BLOCKED, ("p90_regressed", "output_regressed")),
+        (
+            {GRADED_INTVTY_P50: 105.0, TOTAL_TOKEN_THROUGHPUT: 4700.0},
+            Verdict.BLOCKED,
+            ("p90_regressed", "total_regressed"),
+        ),
         ({GRADED_INTVTY_P50: 105.0}, Verdict.INCONCLUSIVE, ("p90_regressed",)),
         (
             {GRADED_INTVTY_P50: 101.0, GRADED_INTVTY: 74.0},
@@ -144,14 +185,22 @@ def test_a_pair_missing_a_comparability_input_counts_as_regressed():
     assert judgement.refused_by == ("comparability_inputs_missing",)
 
 
-@pytest.mark.parametrize(("guard", "broken"), [(GRADED_INTVTY, "p90_regressed"), (GRADED_OUTPUT, "output_regressed")])
+@pytest.mark.parametrize(
+    ("objective", "guard", "broken"),
+    [
+        (P50, GRADED_INTVTY, "p90_regressed"),
+        (P50, TOTAL_TOKEN_THROUGHPUT, "total_regressed"),
+        (TOTAL, GRADED_INTVTY, "p90_regressed"),
+        (TOTAL, GRADED_INTVTY_P50, "p50_regressed"),
+    ],
+)
 @pytest.mark.parametrize("side", ["candidate", "parent"])
-def test_a_guard_axis_either_side_did_not_report_counts_as_broken(guard, broken, side):
-    gain = {**PARENT, GRADED_INTVTY_P50: 104.0}
+def test_a_guard_axis_either_side_did_not_report_counts_as_broken(objective, guard, broken, side):
+    gain = {**PARENT, GRADED_INTVTY_P50: 104.0, TOTAL_TOKEN_THROUGHPUT: 5200.0}
     unreported = {key: value for key, value in (gain if side == "candidate" else PARENT).items() if key != guard}
     candidate, parent = (unreported, PARENT) if side == "candidate" else (gain, unreported)
 
-    judgement = compare(candidate, parent, "r1", P50)
+    judgement = compare(candidate, parent, "r1", objective)
 
     assert judgement.verdict is Verdict.NEEDS_CONFIRM
     assert judgement.refused_by == (broken,)
@@ -194,3 +243,14 @@ def test_more_failed_requests_refuse_unless_the_unserved_count_shows_none_more(c
     judgement = compare({**candidate, GRADED_INTVTY_P50: 104.0, GRADED_ERROR_RATE: 5.0}, parent, "r1", P50)
     assert judgement.verdict is Verdict.NEEDS_CONFIRM
     assert judgement.refused_by == ("extra_failed_requests",)
+
+
+@pytest.mark.parametrize(
+    ("retest", "verdict"), [({GRADED_INTVTY_P50: 93.0}, Verdict.BLOCKED), ({}, Verdict.INCONCLUSIVE)]
+)
+def test_a_total_throughput_gain_the_p50_guard_held_back_is_retested(retest, verdict):
+    first = compare({**PARENT, TOTAL_TOKEN_THROUGHPUT: 5200.0, GRADED_INTVTY_P50: 94.0}, PARENT, "r1", TOTAL)
+    judgement = confirm(first, {**PARENT, TOTAL_TOKEN_THROUGHPUT: 5200.0, **retest}, PARENT, "r2", TOTAL)
+    assert first.verdict is Verdict.NEEDS_CONFIRM
+    assert (judgement.verdict, judgement.refused_by) == (verdict, ("p50_regressed",))
+    assert judgement.threshold_pct == pytest.approx(2.0)

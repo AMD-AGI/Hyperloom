@@ -287,8 +287,11 @@ def _add_agentx_options(run: argparse.ArgumentParser) -> None:
         "--agentx-objective",
         choices=[objective.value for objective in AgentXObjective],
         default=None,
-        help=f"Axis an agentx workload is graded on, default {DEFAULT_AGENTX_OBJECTIVE.value}; the keep bar, "
-        "guards and error-rate threshold are the same under either. Refused for inferencex.",
+        help=f"Axis an agentx workload is graded on, default {DEFAULT_AGENTX_OBJECTIVE.value}: a "
+        f"{DEFAULT_AGENTX_OBJECTIVE.bar_pct:g}%% gain on it is "
+        "kept while P90 interactivity and the other axis (total token throughput, or P50 interactivity) hold within "
+        "the noise band. total_token_throughput suits a high --conc only: at a low one the trace's tool and think "
+        "time paces the lanes, so a server gain barely moves it. Refused for inferencex.",
     )
 
 
