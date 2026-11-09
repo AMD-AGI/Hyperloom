@@ -247,6 +247,29 @@ def test_the_proxy_goes_through_the_apps_proxy_with_its_login_except_where_no_pr
     assert exempt == b"HTTP/1.1 200 Connection established\r\n\r\necho" and direct_taken == [b"x"]
 
 
+def test_through_the_apps_proxy_an_ipv6_endpoint_is_named_in_brackets(listeners, bridges):
+    upstream, upstream_taken = listeners(_tunnel_ok)
+    env = {
+        "HTTPS_PROXY": f"http://127.0.0.1:{upstream}",
+        "ANTHROPIC_BASE_URL": "https://[2001:DB8::1]:8443/v1",
+        "OPENAI_BASE_URL": "http://[2001:db8::2]:8080/v1",
+    }
+    reach = specialist_reach(["claude"], env, None)
+    assert {("2001:db8::1", 8443), ("2001:db8::2", 8080)} <= reach.remote
+    bridge = bridges(reach, {**env, "HTTP_PROXY": env["HTTPS_PROXY"]})
+
+    tls = _ask(bridge, "proxy.sock", b"CONNECT [2001:db8::1]:8443 HTTP/1.1\r\nHost: [2001:db8::1]:8443\r\n\r\n")
+    plain = _ask(bridge, "proxy.sock", b"GET http://[2001:db8::2]:8080/v1 HTTP/1.1\r\nHost: [2001:db8::2]:8080\r\n\r\n")
+    refused = _ask(bridge, "proxy.sock", b"CONNECT [2001:db8::3]:8443 HTTP/1.1\r\n\r\n")
+
+    assert tls == b"HTTP/1.1 200 Connection established\r\n\r\n"
+    assert plain == b""  # the stand-in answers the tunnel and closes; the origin-form request went inside it
+    assert upstream_taken[0] == b"CONNECT [2001:db8::1]:8443 HTTP/1.1\r\nHost: [2001:db8::1]:8443\r\n\r\n"
+    assert upstream_taken[1] == b"CONNECT [2001:db8::2]:8080 HTTP/1.1\r\nHost: [2001:db8::2]:8080\r\n\r\n"
+    assert len(upstream_taken) == 2
+    assert refused.startswith(b"HTTP/1.1 403 Forbidden") and b"[2001:db8::3]:8443" in refused
+
+
 def test_a_closed_bridge_takes_no_connection(listeners, bridges):
     port, _taken = listeners(_echo)
     bridge = bridges(Reach({port: "127.0.0.1"}))
