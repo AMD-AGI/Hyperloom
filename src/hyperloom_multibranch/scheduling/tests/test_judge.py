@@ -307,6 +307,7 @@ def test_a_branch_row_shows_what_is_known_of_its_specialist_and_a_gave_up_one_is
         "crashes": 4,
         "lost": 1,
         "gave_up": True,
+        "exhausted": "",
         "judge_failed": False,
         "unready": "",
     }
@@ -1038,7 +1039,7 @@ async def test_a_branch_waiting_on_a_native_build_shows_it_once_with_its_compone
     toolbox = FakeToolbox(
         blackboard=LocalBlackboard(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox")), wiring=FakeWiring(builds=driver)
     )
-    for branch, args in (("b01", "--a"), ("b01", "--b"), ("b02", "--c")):
+    for branch, args in (("b01", "--a"), ("b01", "--b"), ("b02", "--f")):
         change = RecipeDelta(config=ConfigDelta(server_args=args))
         await toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, branch, "c-root", delta=change))
     snapshot = await LocalBlackboard(tmp_path / "nb", Writer(Role.OBSERVER, "judge")).snapshot()
