@@ -98,7 +98,7 @@ def restart_remote_main():
             print(json.dumps({"status": "ok", "action": "stop", "pid": 0}))
             return
         if _ppid(pid) == 1:
-            replace_process_image(pid, ["/bin/sleep", "infinity"])
+            replace_process_image(pid, ["/bin/sleep", "infinity"], env_snapshot=pidfile + ".environ")
             open(pidfile, "w", encoding="utf-8").write(str(pid))
             print(json.dumps({"status": "ok", "action": "stop-exec", "pid": pid}))
             return
@@ -119,7 +119,7 @@ def restart_remote_main():
         print(json.dumps({"status": "ok", "action": "spawn", "pid": new_pid}))
         return
     if _ppid(pid) == 1:
-        replace_process_image(pid, ["/bin/bash", launch])
+        replace_process_image(pid, ["/bin/bash", launch], env_snapshot=pidfile + ".environ")
         open(pidfile, "w", encoding="utf-8").write(str(pid))
         print(json.dumps({"status": "ok", "action": "exec", "pid": pid}))
         return

@@ -150,11 +150,27 @@ def read_environ(pid: int) -> list[str]:
     return [part.decode("utf-8", "surrogateescape") for part in raw.split(b"\0") if part]
 
 
-def merged_environ(pid: int, overrides: dict[str, str] | None = None) -> list[str]:
-    """Process environment with ``overrides`` replacing same-named keys."""
+def baseline_environ(pid: int, snapshot_path: str) -> list[str]:
+    """Environment ``pid`` had before its first in-place replacement, recorded at ``snapshot_path`` on first use."""
+    try:
+        raw = open(snapshot_path, "rb").read()
+        return [part.decode("utf-8", "surrogateescape") for part in raw.split(b"\0") if part]
+    except OSError:
+        pass
+    items = read_environ(pid)
+    tmp_path = snapshot_path + ".tmp"
+    with open(tmp_path, "wb") as fh:
+        fh.write(b"".join(item.encode("utf-8", "surrogateescape") + b"\0" for item in items))
+    os.replace(tmp_path, snapshot_path)
+    return items
+
+
+def merged_environ(pid: int, overrides: dict[str, str] | None = None, *, snapshot_path: str = "") -> list[str]:
+    """Process environment, or its pre-replacement snapshot, with ``overrides`` replacing same-named keys."""
     overrides = overrides or {}
     merged: list[str] = []
-    for item in read_environ(pid):
+    base = baseline_environ(pid, snapshot_path) if snapshot_path else read_environ(pid)
+    for item in base:
         key = item.split("=", 1)[0]
         if key in overrides:
             continue
@@ -192,9 +208,17 @@ def descendant_pids(pid: int) -> list[int]:
     return found
 
 
-def replace_process_image(pid: int, argv: list[str], *, env_overrides: dict[str, str] | None = None) -> None:
+def replace_process_image(
+    pid: int,
+    argv: list[str],
+    *,
+    env_overrides: dict[str, str] | None = None,
+    env_snapshot: str = "",
+) -> None:
     """``execve`` ``argv`` inside ``pid``, preserving the pid and its environment.
 
+    With ``env_snapshot`` the new image starts from the environment ``pid`` had
+    before its first replacement, not from the one the current image inherited.
     Descendants are killed while the target is stopped so a waiting parent
     (the container launcher) keeps waiting on the same pid.
     """
@@ -213,7 +237,7 @@ def replace_process_image(pid: int, argv: list[str], *, env_overrides: dict[str,
             err = ctypes.get_errno()
             raise OSError(err, os.strerror(err))
         gadget = _syscall_gadget(pid)
-        env_items = merged_environ(pid, env_overrides)
+        env_items = merged_environ(pid, env_overrides, snapshot_path=env_snapshot)
         # Strings, two pointer arrays, and alignment slack.
         nbytes = 256 + sum(len(item) + 16 for item in argv + env_items)
         slot = _stack_slot(pid, regs.rsp, nbytes)

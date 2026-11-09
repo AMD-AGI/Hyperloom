@@ -234,6 +234,40 @@ def test_replace_process_image_keeps_the_pid_and_applies_env(tmp_path: Path) -> 
     assert marker.read_text(encoding="utf-8") == "kept"
 
 
+def _wait_for_cmdline(pid: int, prefix: bytes) -> None:
+    """Poll until ``pid`` runs a command line starting with ``prefix``."""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if Path(f"/proc/{pid}/cmdline").read_bytes().startswith(prefix):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"pid {pid} never ran {prefix!r}")
+
+
+def test_replace_process_image_drops_env_exported_by_the_previous_image(tmp_path: Path) -> None:
+    marker = tmp_path / "marker"
+    snapshot = str(tmp_path / "engine.environ")
+    pid = os.fork()
+    if pid == 0:
+        os.execve("/bin/sleep", ["/bin/sleep", "30"], {**os.environ, "HL_ORIGINAL": "orig"})
+    try:
+        _wait_for_cmdline(pid, b"/bin/sleep\x0030")
+        replace_process_image(pid, ["/bin/sh", "-c", "export HL_LEAKED=1; exec /bin/sleep 30"], env_snapshot=snapshot)
+        _wait_for_cmdline(pid, b"/bin/sleep\x0030")
+        replace_process_image(
+            pid,
+            ["/bin/sh", "-c", f'printf "%s|%s" "${{HL_ORIGINAL:-}}" "${{HL_LEAKED:-}}" > {marker}'],
+            env_snapshot=snapshot,
+        )
+        os.waitpid(pid, 0)
+    finally:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+    assert marker.read_text(encoding="utf-8") == "orig|"
+
+
 class _FakeCli:
     """Records SSH scripts per IP and answers with a scripted stdout."""
 
