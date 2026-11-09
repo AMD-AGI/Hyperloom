@@ -5,11 +5,12 @@
 
 The base comes from the operator's ``--reference-script`` when one is given, otherwise from the first recipe source
 that serves the session, otherwise, for a fixed workload only, from the default table, which also runs a fixed session
-when a recipe source cannot be read. An AgentX session no recipe serves is refused. Resolving reads every source once,
-here; a resume reads the frozen file instead. A scriptable session launches no server: its base is the script it runs,
-the operator's from ``--benchmark-scripts-dir`` when it holds one, else the one its framework ships. The MLPerf
-AgentX client drives its own traffic at a server that serves any request, so its session resolves a fixed workload's
-base, which the default table always serves.
+when a recipe source cannot be read. An AgentX session no recipe serves is refused, and so is a fixed one under
+``--inferencex-commit``, which never takes the default table. Resolving reads every source once,
+here, InferenceX at ``--inferencex-commit`` when one is given; a resume reads the frozen file instead. A scriptable
+session launches no server: its base is the script it runs, the operator's from ``--benchmark-scripts-dir`` when it
+holds one, else the one its framework ships. The MLPerf AgentX client drives its own traffic at a server that serves
+any request, so its session resolves a fixed workload's base, which the default table always serves.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from hyperloom.common.model_paths import hf_repo_id
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.visible_devices import detect_gpu_count
 from inference_suite import (
+    InferencexCommitRefused,
     LaunchQuery,
     Miss,
     SourceFetchError,
@@ -71,7 +73,8 @@ class SessionLaunch:
     """What a session's base launch is resolved for: the model it serves (a path or a hub id) and the name recipes are
     asked for it by when it was given one, the framework, the target board, the workload and its concurrencies, the
     GPUs the launch may span, the TP and EP the operator fixed (``None`` leaves them to the source), a fixed workload's
-    sequence shape, and the operator's launch file (``""`` for none)."""
+    sequence shape, the operator's launch file (``""`` for none), and the commit InferenceX is read at (``""`` for the
+    head of its ``main``)."""
 
     model: str
     framework: str
@@ -85,6 +88,7 @@ class SessionLaunch:
     osl: int | None = None
     model_display_name: str = ""
     reference: str = ""
+    inferencex_commit: str = ""
 
     @property
     def model_path(self) -> str | None:
@@ -142,6 +146,7 @@ def _session_launch(
         osl=int(args.osl) if fixed else None,
         model_display_name=getattr(args, "model_display_name", "") or "",
         reference=(getattr(args, "reference_script", None) or "").strip(),
+        inferencex_commit=(getattr(args, "inferencex_commit", None) or "").strip(),
     )
 
 
@@ -190,17 +195,20 @@ def _scriptable_base(launch: SessionLaunch, args: argparse.Namespace) -> BaseLau
 
 def resolve_server_base(launch: SessionLaunch) -> BaseLaunch:
     """The base launch of a server session: the operator's launch file when it names one, else the first recipe source
-    that serves it, else, for a fixed workload, the default table; its credential-named env frozen as sha256s.
+    that serves it, else, for a fixed workload with InferenceX unpinned, the default table; its credential-named env
+    frozen as sha256s.
 
     Raises:
-        BaseLaunchUnresolved: The launch file cannot serve as the base, the query is malformed, or no source and no
-            default serves the session (an AgentX session has no default).
+        BaseLaunchUnresolved: The launch file cannot serve as the base, the query is malformed, the InferenceX commit
+            is refused, or no source and no default serves the session (an AgentX session, or one under a pinned
+            InferenceX, has no default).
     """
     try:
         query = launch.query()
         user_file = _read_user_file(launch.reference, launch.framework) if launch.reference else None
-        found = resolve_base(query, fetch_sources(query, user_file=user_file), gpus=launch.gpus)
-    except (OSError, SourceFetchError, UserFileError, BaseLaunchError) as exc:
+        snapshot = fetch_sources(query, user_file=user_file, inferencex_commit=launch.inferencex_commit)
+        found = resolve_base(query, snapshot, gpus=launch.gpus)
+    except (OSError, SourceFetchError, UserFileError, BaseLaunchError, InferencexCommitRefused) as exc:
         raise BaseLaunchUnresolved(f"the base launch could not be resolved: {exc}") from exc
     if isinstance(found, Miss):
         raise BaseLaunchUnresolved("no source serves this session's base launch:\n  " + "\n  ".join(found.reasons()))
@@ -220,8 +228,8 @@ def resolve_base_launch(
     """Resolve the base of a fresh ``framework`` session and freeze it in ``session_dir``.
 
     The session then runs at the base's TP and EP, so this runs before anything records them. Exits 2 when the
-    operator's launch file cannot serve as the base, the query is malformed, no source and no default serves the
-    session (an AgentX session has no default), a scriptable session has no script to run, or a single-node session's
+    operator's launch file cannot serve as the base, the query is malformed, ``--inferencex-commit`` is refused, no
+    source and no default serves the session (an AgentX session has no default), a scriptable session has no script to run, or a single-node session's
     base needs more GPUs than this host sees.
     """
     if is_scriptable(framework):

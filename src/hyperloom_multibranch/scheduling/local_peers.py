@@ -80,6 +80,7 @@ from hyperloom_multibranch.specialist.runtime import RuntimePacing, SpecialistRu
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
+    from hyperloom_multibranch.specialist.gate_client import GateClient
     from pathlib import Path
 
     from hyperloom.hosted.mcp_server import McpServer
@@ -299,10 +300,10 @@ def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> N
 
 def workload_rule(workload: Workload, blackboard: CommitQuery) -> Rule:
     """The rule a session of ``workload`` is judged on: InferenceX throughput at the workload's conc against the
-    PRELUDE bar ``blackboard`` holds, or AgentX P50 interactivity with its guards."""
+    PRELUDE bar ``blackboard`` holds, or the AgentX objective with its guards."""
 
     if workload.inferencex is None:
-        return AgentXRule()
+        return AgentXRule(workload.agentx_objective)
     return InferenceXRule(blackboard, workload.conc)
 
 
@@ -338,7 +339,8 @@ def specialist_recall(reports: Path) -> LessonRecall:
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
     """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`) and
     freezes the base launch every test runs on in ``MB-toolbox`` unless the session froze one
-    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`). Raises :class:`PeersUnavailable`
+    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which its Arbor agents are served
+    when the operator gave it as a reference script. Raises :class:`PeersUnavailable`
     when no base launch can be frozen or the session's canonical measurement cannot be taken.
 
     Called on the event loop the session runs on. The toolbox is built, not started: the session starts it, and its
@@ -355,8 +357,9 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox, host.image.ref)
-    frozen = freeze_session_base(layout.toolbox, workload, setup.agent_launch)
-    base, setup = server_base(frozen.launch), replace(setup, agent_launch=served_launch(frozen, setup.agent_launch))
+    frozen = freeze_session_base(layout.toolbox, workload, setup.reference_script, setup.inferencex_commit)
+    served = served_launch(frozen, setup.reference_script, setup.agent_launch)
+    base, setup = server_base(frozen.launch), replace(setup, agent_launch=served)
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
@@ -624,7 +627,9 @@ def _specialist_role(workload: Workload) -> str:
     """The workload as the specialists' role prompt names it."""
 
     shape = workload.inferencex
-    requests = "AgentX trace replay" if shape is None else f"ISL {shape.isl}, OSL {shape.osl}"
+    requests = (
+        f"AgentX trace replay graded on {workload.metric}" if shape is None else f"ISL {shape.isl}, OSL {shape.osl}"
+    )
     return (
         f"{workload.model_basename} on {workload.framework}, {workload.precision}, TP {workload.tp}, "
         f"{requests}, concurrency {workload.conc}, {workload.gpu_type}"
@@ -638,8 +643,8 @@ AITER = "aiter"
 def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     """Sessions that run ``command`` for every branch's specialist, in a worktree of the workload's framework, and
     each branch's third-party agent in a sandbox leased from the session's toolbox (``wiring.agent_sandboxes``), given
-    the gate's benchmark client when the session's canonical configuration names one; a session that runs no agent
-    reads no canonical.
+    the gate's benchmark client of the session's canonical configuration; a session that runs no agent reads no
+    canonical.
 
     The CLI runs on the main flow's allowlisted specialist environment, through a local AI work socket whose resource
     log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
@@ -650,7 +655,6 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         from hyperloom.orchestrator.specialists.agent_runner import Liveness, LocalAgentRunner, build_specialist_env
         from hyperloom_multibranch.specialist.agent_session import SPECIALIST_LOST_AFTER_S, AgentSetup
         from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
-        from hyperloom_multibranch.specialist.gate_client import GateClient
         from hyperloom_multibranch.specialist.model_sessions import model_sessions
         from hyperloom_multibranch.specialist.prompts import role_prompt
         from hyperloom_multibranch.specialist.worktree import SourceBase
@@ -694,7 +698,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             wiring.toolbox,
             wiring.repo,
             wiring.agent_sandboxes,
-            client=GateClient.read(wiring.canonical) if wiring.setup.agents else None,
+            client=_gate_client(wiring) if wiring.setup.agents else None,
             dossier=wiring.setup.agent_dossier or None,
             maps=wiring.setup.agent_maps,
             least_run_seconds=wiring.setup.agent_share_minutes * 60.0,
@@ -702,6 +706,21 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         return with_agents(sessions, agents, branch_dir=layout.branch_dir, blackboard_for=wiring.blackboards)
 
     return build
+
+
+def _gate_client(wiring: SessionWiring) -> GateClient:
+    """The gate's client of the session's rendered canonical configuration, an AgentX replay bounded as one attempt of
+    a test is; raises :class:`PeersUnavailable` when the session's base or staged tools cannot run one."""
+
+    from hyperloom.orchestrator.actions.executors import SuiteRoundRefused
+    from hyperloom_multibranch.specialist.gate_client import read_gate_client
+
+    try:
+        return read_gate_client(
+            wiring.canonical, wiring.setup.layout.toolbox, attempt_timeout_sec(wiring.setup.workload)
+        )
+    except SuiteRoundRefused as exc:
+        raise PeersUnavailable(f"the gate's client cannot be given to the session's agents: {exc}") from exc
 
 
 def specialist_readable(references: Mapping[str, Path], workload: Workload) -> tuple[Path, ...]:

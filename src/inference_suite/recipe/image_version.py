@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The framework version a recipe's image stands for, which the installed framework must reach (D6).
+"""The framework version a recipe's image stands for (D6).
 
-The version is read from the image tag (``lmsysorg/sglang:v0.5.22-rocm720-mi35x``). A tag that names none -- a
-nightly, ``latest``, ``dev-*``, a placeholder, or no image at all -- stands for the framework's latest release when
-the snapshot was taken, and the base records that release beside the version it gave.
+The version is read from the image tag (``lmsysorg/sglang:v0.5.22-rocm720-mi35x``), and the installed framework must
+reach it. A tag that names none -- a nightly, ``latest``, ``dev-*``, a placeholder, or no image at all -- stands for
+the framework's latest release when the snapshot was taken; the base records that release beside the version it gave,
+and the version is not held, being an assumption.
 """
 
 from __future__ import annotations

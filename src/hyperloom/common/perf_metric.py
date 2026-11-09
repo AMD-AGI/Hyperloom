@@ -32,6 +32,9 @@ GRADED_INTVTY = "e2e_norm_intvty_p90"
 GRADED_INTVTY_P50 = "e2e_norm_intvty_p50"
 GRADED_TOTAL = "total_throughput"
 GRADED_OUTPUT = "output_throughput"
+# Total token throughput as a round measurement records it, per server rather than per GPU; ``graded_axes_of``
+# normalises it onto GRADED_TOTAL.
+TOTAL_TOKEN_THROUGHPUT = "total_token_throughput"
 
 # Every percentile of the interactivity family. A consumer asking "was this graded on interactivity" must read this
 # rather than one axis name, or it silently answers no the next time the graded percentile moves.
@@ -194,7 +197,7 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
     inp = optional_positive_float(source.get("input_throughput"))
     out = optional_positive_float(source.get(GRADED_OUTPUT)) or optional_positive_float(source.get("tput"))
     total = optional_positive_float(source.get(GRADED_TOTAL)) or optional_positive_float(
-        source.get("total_token_throughput")
+        source.get(TOTAL_TOKEN_THROUGHPUT)
     )
     if total is None and inp is not None and out is not None:
         total = inp + out
@@ -272,7 +275,7 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
     if intvty is not None:
         axes[GRADED_INTVTY] = intvty
     total = optional_positive_float(source.get(GRADED_TOTAL)) or optional_positive_float(
-        source.get("total_token_throughput")
+        source.get(TOTAL_TOKEN_THROUGHPUT)
     )
     if total is not None:
         axes[GRADED_TOTAL] = total
@@ -583,6 +586,7 @@ __all__ = [
     "GRADED_OUTPUT_PER_GPU",
     "GRADED_REQUESTS_TOTAL",
     "GRADED_TOTAL",
+    "TOTAL_TOKEN_THROUGHPUT",
     "GRADED_UNSERVED_REQUESTS",
     "INTVTY_OBJECTIVES",
     "INTVTY_V1",

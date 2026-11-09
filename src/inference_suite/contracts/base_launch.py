@@ -73,7 +73,7 @@ class VersionBasis(str, Enum):
 
     TAG = "tag"
     #: The recipe's image tag names no version (a nightly, ``latest``, ``dev-*``), so the framework's latest
-    #: release at resolve time stands in for it.
+    #: release at resolve time stands in for it; the installed framework is not held to it.
     ASSUMED_LATEST = "assumed_latest"
     NOT_APPLICABLE = "not_applicable"
 
@@ -335,7 +335,7 @@ class LaunchPoint:
 @dataclass(frozen=True)
 class ImageFacts:
     """The images on either side of the D6 check: ``framework_version`` is the recipe's, which the installed one
-    must reach. The run image's own version is probed at launch, not recorded here."""
+    must reach when it was read from the tag. The run image's own version is probed at launch, not recorded here."""
 
     run: str | None
     recipe: str | None

@@ -90,6 +90,16 @@ class RunLayout:
     root: Path
 
     @property
+    def framework_cwd(self) -> Path:
+        """Where the serving interpreter starts, for the server and for every probe of its install.
+
+        ``python -c`` and ``python -m`` put the current directory first on the import path. A host's own directory can
+        hold a framework checkout without an ``__init__.py`` (the sglang image starts in ``/sgl-workspace``, beside
+        ``sglang/``), which then imports as an empty namespace package ahead of the editable install.
+        """
+        return self.root
+
+    @property
     def config(self) -> Path:
         return self.root / CONFIG_FILE
 
