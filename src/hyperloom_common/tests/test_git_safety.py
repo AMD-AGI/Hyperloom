@@ -598,10 +598,18 @@ def test_a_worktree_of_another_repository_than_the_caller_names_runs_nothing(tmp
     other.change()
 
     with pytest.raises(OSError, match="is not one of the repository"):
-        app_git(other.worktree, "add", "-A", common=mine.base / ".git")
+        app_git(other.worktree, "add", "-A", admin=git_safety.trusted_admin_dir(other.worktree, mine.base / ".git"))
 
     assert not other.canary.exists()
-    assert app_git(mine.worktree, "status", "--porcelain", common=mine.base / ".git").returncode == 0
+    assert (
+        app_git(
+            mine.worktree,
+            "status",
+            "--porcelain",
+            admin=git_safety.trusted_admin_dir(mine.worktree, mine.base / ".git"),
+        ).returncode
+        == 0
+    )
     assert app_git(other.worktree, "status", "--porcelain").returncode == 0
 
 
@@ -658,7 +666,9 @@ def test_a_symlink_on_the_way_to_the_admin_dir_flipped_after_the_check_reaches_n
 
     monkeypatch.setattr(git_safety, "trusted_admin_dir", check_then_flip)
 
-    done = app_git(tree.worktree, "add", "-A", common=git if common else None)
+    done = app_git(
+        tree.worktree, "add", "-A", admin=git_safety.trusted_admin_dir(tree.worktree, git if common else None)
+    )
 
     assert done.returncode == 0, done.stderr
     assert not tree.canary.exists()

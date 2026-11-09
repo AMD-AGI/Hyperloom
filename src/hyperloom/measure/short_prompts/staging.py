@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.shared_storage import make_shared_dirs
+
 from hyperloom.measure.docs import canonical_json
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.short_prompts.prompts import GENERATOR, Prompt, PromptSetError, parse_prompts, prompts_bytes
@@ -110,7 +112,9 @@ def stage_file(root: Path, raw: bytes, inputs: Mapping[str, Any], *, generator: 
     same one is left as it is.
 
     The data and then the manifest are written into a directory of their own, which becomes the entry in one rename, so
-    a reader never sees half an entry.
+    a reader never sees half an entry. The directory of entries is made as shared storage makes its directories
+    (:func:`~hyperloom_common.shared_storage.make_shared_dirs`): in a runner cache set up to be shared by the accounts of
+    one group it is group-writable, so the next account can stage beside this one's entries.
 
     Raises:
         PromptSetError: An entry with this key exists and differs from what would be written.
@@ -123,7 +127,7 @@ def stage_file(root: Path, raw: bytes, inputs: Mapping[str, Any], *, generator: 
         if (final / MANIFEST_NAME).read_bytes() != manifest or (final / DATA_DIR / PROMPTS_FILE).read_bytes() != raw:
             raise PromptSetError(f"the entry {final} exists and differs from the one that would be written")
         return staged
-    incoming = final.parent / f".incoming-{uuid.uuid4().hex}"
+    incoming = make_shared_dirs(final.parent) / f".incoming-{uuid.uuid4().hex}"
     (incoming / DATA_DIR).mkdir(parents=True, mode=0o755)
     try:
         (incoming / DATA_DIR / PROMPTS_FILE).write_bytes(raw)

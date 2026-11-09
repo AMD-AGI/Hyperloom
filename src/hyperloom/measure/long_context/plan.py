@@ -21,6 +21,7 @@ __all__ = [
     "DEFAULT_CONCURRENCY",
     "DEFAULT_MAX_NEW_TOKENS",
     "DEFAULT_PHASE_CAP_SEC",
+    "LENGTH_BOUND",
     "LONG_CONTEXT_DIR",
     "MAX_LENGTH",
     "MIN_LENGTH",
@@ -40,6 +41,10 @@ DEFAULT_PHASE_CAP_SEC = 2400.0
 REPLY_HEADROOM = 128
 MIN_LENGTH = 1024
 MAX_LENGTH = 1 << 21
+#: The most context a built set's prompts and answers take: a set is built at the context its launch serves, no more than
+#: this, less ``REPLY_HEADROOM``. A 1M-token launch would otherwise check at 1M tokens a prompt, over an hour a test; a
+#: change to it is another set (it is in the entry's key) and the check's record states it.
+LENGTH_BOUND = 131072
 _MAX_CONCURRENCY = 64
 _MAX_TRIGGER_LINES = 32
 _MAX_TRIGGER_CHARS = 200
@@ -60,7 +65,9 @@ class LongContextPlan:
     """One test's long-context check: ``prompt_set`` is the key of the staged entry, ``prompts_sha256`` the hash of its
     prompts file and ``length`` the token length its prompts were built for. Each prompt is answered greedily with at most
     ``max_new_tokens`` tokens, ``concurrency`` requests at a time, and the check ends, incomplete, after ``phase_cap_sec``.
-    ``trigger`` says why the check was asked for."""
+    ``trigger`` says why the check was asked for. ``bound`` is the context bound the set was built under
+    (``LENGTH_BOUND`` for a set the builder made, ``None`` for one that records none): the toolbox's own note for the record,
+    not on the sheet."""
 
     prompt_set: str
     prompts_sha256: str
@@ -69,6 +76,7 @@ class LongContextPlan:
     concurrency: int = DEFAULT_CONCURRENCY
     phase_cap_sec: float = DEFAULT_PHASE_CAP_SEC
     trigger: tuple[str, ...] = ()
+    bound: int | None = None
 
     def __post_init__(self) -> None:
         if not KEY_RE.fullmatch(self.prompt_set):
@@ -87,6 +95,8 @@ class LongContextPlan:
             raise DocumentError(f"long context: at most {_MAX_TRIGGER_LINES} trigger lines")
         for index, line in enumerate(self.trigger):
             _trigger_line(line, f"long context: trigger[{index}]")
+        if self.bound is not None and not _in_range(self.bound, MIN_LENGTH, MAX_LENGTH):
+            raise DocumentError(f"long context: bound must be {MIN_LENGTH} to {MAX_LENGTH}, got {self.bound!r}")
 
     @property
     def needed_context(self) -> int:
