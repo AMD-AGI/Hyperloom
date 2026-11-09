@@ -109,11 +109,14 @@ when `--gpu-type` is omitted.
   (refused on a scriptable one, which runs no server to sample), and
   `--max-per-gpu-power-w GPU_ID W` (repeatable) adds a limit for one card; the
   per-GPU limits must add up to no more than the total. That power is sampled
-  by Hyperloom over the measured phase into each round's `gpu_power.json`;
+  by Hyperloom over the measured window into each round's `power.json`;
   `HYPERLOOM_GPU_POWER_SAMPLING=0` turns the sampler off (the round then falls
   back to the benchmark report's reading, and either power budget is refused at
   launch, since it could not be measured) and `HYPERLOOM_GPU_POWER_INTERVAL_S`
-  sets its cadence (default 2 s, minimum 0.5 s).
+  sets the cadence of its sysfs reads (default 1 s; below 0.5 s it is raised to
+  0.5 s; above 1.5 s it is refused and the round samples nothing, since a late
+  read can put two samples two intervals apart and a gap over 3 s invalidates the
+  window's energy).
 - **GPU power settings:** `--gpu-power-cap-w`, `--gpu-perf-level`,
   `--gpu-sclk-max-mhz`. By default asserted: set them with `amd-smi set` before
   launch; the session refuses to start or resume if a card it uses differs, and

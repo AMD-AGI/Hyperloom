@@ -224,13 +224,71 @@ One round writes one run directory and leaves it unchanged once the round ends.
 | `server.pid` | An `own` round's pidfile while its server runs; `boot` and `reuse` keep theirs in `pid_dir`. |
 | `phase_marks.json` | The instants the round passed from one phase to the next. |
 | `kv_metrics.json`, `agentx_timeline.jsonl` | KV-cache samples and the AgentX request timeline. |
-| `gpu_samples.csv`, `gpu_power.json` | GPU samples over the measured window, and the power summary derived from them. |
+| `power.json` | Every power reading the node gave over the whole round; see [Power](#power). |
 | `client/` | `stdout.log`, `stderr.log`, `agentx_client.log`, `inferencex_result.json`, `aiperf_artifacts/` (`profile_export.jsonl`, `logs/aiperf.log`) and, on an MLPerf round, `mlperf_artifacts/` (the harness's `result_summary.json` and `scores.json`). |
 | `eval/` | `stdout.log`, `stderr.log`, lm-eval's `results_<time>.json`, `hyperloom_eval_probe.json` and `definition.json`. |
 | `profile/` | `torch_trace/`, `capture_traces/`, `graph_capture_profile/` and `capture.json`. |
 
 Hyperloom writes `gpu_metrics.json` from `report.json` into its own round
 directory, never into the run directory.
+
+## Power
+
+A round with GPU telemetry on writes `power.json` (`schema_version` 2): one file
+holding every power reading the node gives, from the start of the round to its
+end.
+
+| Source | Read | Recorded |
+|---|---|---|
+| sysfs, each second | every card's `hwmon` power, junction and memory temperature, sclk, mclk, board voltage; `gpu_busy_percent`, `mem_busy_percent`, VRAM and GTT use | `samples.fast` |
+| `amd-smi metric -E`, at each phase mark and both ends | each card's energy accumulator (J) | `samples.energy` |
+| `amd-smi metric`, every 10 s and at each phase mark | every field, flattened to dotted key paths, with units | `samples.full` |
+| NPM `board/node_power`, `cur_node_power_limit`, each second | the node's power and its enforced limit | `samples.node` |
+| RAPL powercap zones, else `amd_energy` hwmon, each second | CPU energy counters (µJ) | `samples.cpu` |
+| `amd-smi static` and sysfs, at both ends | caps (`power1_cap*`), performance level, `pp_dpm_*` tables, the NPM board files | `static.start`, `static.end` |
+
+Power is read from sysfs because a card can read `N/A` in `amd-smi` while its
+`hwmon` reads. A source the node does not have is `null`, with its reason under
+`recorder.sources`; a read that fails is counted under `errors` and never fails
+the round. The file is rewritten every 60 s while the round runs (`final:
+false`), so a killed round leaves its samples.
+
+`phases` summarizes each phase between the marks the round passed: per card the
+power distribution, energy, temperatures, clocks, busy percentages, peak VRAM
+share and the share of firmware ticks each throttle accumulator counted; the
+node's and the CPU's power where read. Each phase begins at the instant its mark
+carries, not when the recorder heard it.
+
+`energy` is the measured window's, computed as InferenceX does: each configured
+card's power is interpolated at the window's boundaries and integrated by
+trapezoid, giving `total_gpu_energy_j`, `avg/p75/p90_power_w` per card and
+`avg/p75/p90_total_gpu_power_w` (time-weighted quantiles of the summed curve),
+and `joules_per_input_token`, `joules_per_output_token`,
+`joules_per_total_token` and `joules_per_successful_query` from the load's
+counts. `power_valid` is `1` when the energy can be trusted; otherwise every
+figure is `null` and `reasons` says why:
+
+| Reason | Meaning |
+|---|---|
+| `invalid_benchmark_window` | The round never entered its measured phase. |
+| `benchmark_window_not_bracketed`, `insufficient_power_samples` | A card has no sample on one side of the window. |
+| `sampling_gap_exceeded` | A card's samples across the window, its boundaries included, are more than 3 s apart. |
+| `invalid_power_sample` | A card's power did not read inside the window. |
+| `expected_gpu_count_mismatch` | A configured card holds no model or was never read. Cards outside the configured ones are sampled but never counted, so another server on them does not invalidate the round. |
+| `external_server` | The load ran on a server this host does not run; nothing local is its energy. |
+| `aborted` | The round stopped on a failed step. |
+
+A load without a count (`invalid_input_token_count` and its two siblings) nulls
+only the figure it feeds: a scriptable round counts no tokens, an MLPerf round
+no input tokens. The cards' accumulator delta is compared with the integral over
+the same span (`accumulator_check`); beyond 5% it is the warning
+`accumulator_mismatch`, not an invalid energy. `node_energy_j` and
+`cpu_energy_j` cover the same window.
+
+`report.json` carries the summary in its `power` section: the energy figures,
+`per_gpu_avg_power_w`, `accumulator_relative_error`,
+`power_throttle_fraction_max`, `power_valid`, `reasons` and `warnings`.
+`gpu_monitor` is derived from the same samples.
 
 ## report.json
 
@@ -255,3 +313,4 @@ A round that did not complete names one `failed_step`:
 
 Every metric key is fixed: a metric nobody measured is `null`, never `0`. An eval
 records its definition digest, and two scores compare only under one definition.
+
