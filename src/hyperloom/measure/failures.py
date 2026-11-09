@@ -33,6 +33,7 @@ from hyperloom.common.failure_signature import (
     IMPORT_ERROR,
     SERVE_FLAG,
     classify_failure,
+    framework_unimportable_line,
 )
 from hyperloom.contracts.measurement import FailureClass
 from hyperloom.measure import log_causes
@@ -151,12 +152,6 @@ _FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
 }
 #: The steps whose reason quotes the report's ``failure_detail``, as ``<reason>: <detail>``.
 _DETAILED_STEPS = frozenset({FailedStep.FLAG_UNKNOWN})
-#: What the suite's framework probe says, as ``FailedStep.FRAMEWORK_VERSION_UNKNOWN``, when the serving interpreter
-#: finds no package of the framework at all (``framework_probe.probe_install``). With a probe whose import raised, it
-#: is the only probe answer that says the framework cannot be imported; a probe that ran too long or could not start,
-#: or a version it could not read, says nothing of the install and leaves the verdict to the logs. The probe says it as
-#: the whole detail, so it is taken only at the end of the detail.
-_FRAMEWORK_NOT_FOUND = re.compile(r"\scannot import [A-Za-z_][\w.]*\s*\Z")
 #: The two causes an unclear failure names when its log carries them; the reason is ``<prefix>: <the log's line>``.
 #: A failure the log only calls a crashed evaluation names the refused request too, when the log carries one.
 LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
@@ -340,9 +335,10 @@ def _from_step(reported: StepFailure, framework_changed: bool) -> FailureClassif
 def _framework_unimportable(detail: str, changed: bool) -> FailureClassification | None:
     """The probe found no framework or its import raised: the rebuilt framework broke the import when the test laid one,
     else the image's own install cannot be imported. Any other probe failure says neither and is left to the logs."""
-    line = log_causes.one_line(detail) if _FRAMEWORK_NOT_FOUND.search(detail) else log_causes.import_error(detail)
-    if not line:
+    unimportable = framework_unimportable_line(detail)
+    if unimportable is None:
         return None
+    line = log_causes.one_line(unimportable)
     if changed:
         return _candidate(f"{IMPORT_ERROR}: {line}")
     return _infra(f"{FRAMEWORK_UNIMPORTABLE_REASON}: {line}")
