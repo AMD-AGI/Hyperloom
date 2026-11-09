@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The bootstrap's refusals: which inputs end a run for good (a final exit.json) and which are left to a restart."""
+"""The bootstrap's refusals: which inputs end a run for good (a final exit.json) and which are left to a restart; and a
+source on this machine that another account owns, which the fetch alone trusts, by its exact path."""
 
 from __future__ import annotations
 
@@ -179,7 +180,7 @@ fi
 """
 
 
-def _framework_run(tmp_path, source, **env):
+def _framework_run(tmp_path, source, repo=None, **env):
     stub = tmp_path / "framework" / "bin" / "python"
     stub.parent.mkdir(parents=True)
     stub.write_text(_STUB)
@@ -187,7 +188,7 @@ def _framework_run(tmp_path, source, **env):
     log = tmp_path / "calls"
     code, exit_file, stderr = _bootstrap(
         tmp_path,
-        HYPERLOOM_SOURCE_REPO=str(source),
+        HYPERLOOM_SOURCE_REPO=repo or str(source),
         HYPERLOOM_SOURCE_SHA=_git(source, "rev-parse", "HEAD"),
         PYTHON=str(stub),
         FAKE_PREFIX=str(tmp_path / "framework"),
@@ -271,3 +272,138 @@ def test_without_any_python_the_run_ends_for_good(tmp_path):
         *_bootstrap(tmp_path, PATH=str(empty), HYPERLOOM_SOURCE_REPO="o/r", HYPERLOOM_SOURCE_SHA=_SHA),
         "no framework Python was found",
     )
+
+
+# A git that records, for every fetch, the global config it runs with (a copy) and its URL, then runs the real git.
+_RECORDING_GIT = """#!/bin/bash
+if [[ " $* " == *" fetch "* ]]; then
+  n=$(ls "$RECORD" | wc -l)
+  printf '%s\\n' "${@: -2}" >"$RECORD/$n.args"
+  if [[ -n "${GIT_CONFIG_GLOBAL+set}" ]]; then cp "$GIT_CONFIG_GLOBAL" "$RECORD/$n.config"; fi
+elif [[ -n "${GIT_CONFIG_GLOBAL+set}" ]]; then
+  echo "$*" >>"$RECORD/outside-a-fetch"
+fi
+exec "$REAL_GIT" "$@"
+"""
+
+
+def _recording_path(tmp_path: Path) -> tuple[str, Path]:
+    """A PATH whose git records each fetch into the returned directory and is otherwise the git on this PATH."""
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "git").write_text(_RECORDING_GIT)
+    (shim / "git").chmod(0o755)
+    record = tmp_path / "record"
+    record.mkdir()
+    return f"{shim}:{_git_path()}", record
+
+
+def _git_path() -> str:
+    """The PATH the bootstrap runs with: the git this test finds first, then the defaults."""
+    return f"{Path(shutil.which('git')).parent}:{Path(sys.executable).parent}:/usr/bin:/bin"
+
+
+def _safe_directories(config: Path) -> list[str]:
+    done = subprocess.run(
+        ["git", "config", "--file", str(config), "--get-all", "safe.directory"], capture_output=True, text=True
+    )
+    return done.stdout.splitlines()
+
+
+@pytest.fixture
+def mirror(tmp_path, source) -> Path:
+    """A bare mirror of ``source`` reached through a symlink, as a host names its mirror."""
+    real = tmp_path / "mirrors" / "real" / "hyperloom.git"
+    real.parent.mkdir(parents=True)
+    subprocess.run(["git", "clone", "-q", "--mirror", str(source), str(real)], check=True)
+    (tmp_path / "mirrors" / "link").symlink_to(real.parent)
+    return real
+
+
+def _named_through_a_link_then_up(tmp_path: Path, source: Path, mirror: Path) -> tuple[Path, Path]:
+    """``a/link/../hyperloom.git`` with ``a/link`` -> ``mirror``'s directory's ``inner``: physically ``mirror``, while
+    dropping ``link/..`` as text gives ``a/hyperloom.git``, which is made a repository too (the decoy, returned)."""
+    inner = mirror.parent / "inner"
+    inner.mkdir()
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "link").symlink_to(inner)
+    decoy = tmp_path / "a" / "hyperloom.git"
+    subprocess.run(["git", "clone", "-q", "--mirror", str(source), str(decoy)], check=True)
+    return tmp_path / "a" / "link" / ".." / "hyperloom.git", decoy
+
+
+@pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
+@pytest.mark.parametrize("scheme", ["", "file://"], ids=["path", "file-url"])
+@pytest.mark.parametrize("up", [False, True], ids=["through-a-link", "up-after-a-link"])
+def test_a_local_source_is_trusted_for_its_fetch_alone_by_its_exact_resolved_path(tmp_path, source, mirror, scheme, up):
+    path, record = _recording_path(tmp_path)
+    local_tmp = tmp_path / "local-tmp"
+    local_tmp.mkdir()
+    named, decoy = tmp_path / "mirrors" / "link" / "hyperloom.git", None
+    if up:
+        named, decoy = _named_through_a_link_then_up(tmp_path, source, mirror)
+    code, stderr, _, calls = _framework_run(
+        tmp_path,
+        source,
+        repo=f"{scheme}{named}",
+        PATH=path,
+        REAL_GIT=shutil.which("git"),
+        RECORD=str(record),
+        TMPDIR=str(local_tmp),
+    )
+    assert code == 0, stderr
+    assert calls[-1] == "-m hyperloom hosted run"
+    resolved = os.path.realpath(mirror)
+    fetch = sorted(record.glob("*.args"))[0]
+    assert fetch.read_text().splitlines()[0] == f"{scheme}{resolved}", "the fetch names the path it trusts"
+    assert _safe_directories(fetch.with_suffix(".config")) == [resolved, f"{resolved}/.git"]
+    assert decoy is None or str(decoy) not in fetch.read_text(), "the directory a textual '..' names is not fetched"
+    assert not (record / "outside-a-fetch").exists(), "no other git command runs with the trust"
+    assert not list(local_tmp.iterdir()), "the trust is removed once the wheel is built"
+
+
+def test_a_remote_source_is_fetched_with_no_config_of_ours(tmp_path):
+    path, record = _recording_path(tmp_path)
+    code, _, stderr = _bootstrap(
+        tmp_path,
+        HYPERLOOM_SOURCE_REPO="ssh://example.invalid/o/r.git",
+        HYPERLOOM_SOURCE_SHA=_SHA,
+        PATH=path,
+        REAL_GIT=shutil.which("git"),
+        RECORD=str(record),
+        GIT_SSH_COMMAND="false",
+    )
+    assert code == 1 and "cannot fetch the source commit" in stderr
+    assert sorted(p.name for p in record.iterdir()) == ["0.args", "1.args"], "no trust for either fetch"
+    assert (record / "0.args").read_text().splitlines()[0] == "ssh://example.invalid/o/r.git"
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a repository of another owner needs root to chown")
+@pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
+@pytest.mark.parametrize("bare", [True, False], ids=["bare-mirror", "checkout"])
+def test_a_source_another_account_owns_is_fetched_and_no_other_repository_is_trusted(tmp_path, source, mirror, bare):
+    """git builds that check the owner in upload-pack (Ubuntu's 2.34.1 and 2.43.0, 2.45.1 to 2.47) refused this fetch
+    with "detected dubious ownership"; on every build the trust the fetch ran with names no other repository."""
+    other, checkout = tmp_path / "other", tmp_path / "checkout"
+    for clone in (other, checkout):
+        subprocess.run(["git", "clone", "-q", str(source), str(clone)], check=True)
+    served = mirror if bare else checkout
+    for repo in (served, other):
+        for root, dirs, files in os.walk(repo):
+            for name in (root, *(os.path.join(root, entry) for entry in (*dirs, *files))):
+                os.lchown(name, 65534, 65534)
+    path, record = _recording_path(tmp_path)
+    code, stderr, _, calls = _framework_run(
+        tmp_path, source, repo=str(served), PATH=path, REAL_GIT=shutil.which("git"), RECORD=str(record)
+    )
+    assert code == 0, stderr
+    assert calls[-1] == "-m hyperloom hosted run"
+    config = sorted(record.glob("*.config"))[0]
+    trusted = {**os.environ, "GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_NOSYSTEM": "1"}
+
+    def rev_parse(repo: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", "-C", str(repo), "rev-parse"], capture_output=True, text=True, env=trusted)
+
+    assert rev_parse(served).returncode == 0
+    refused = rev_parse(other)
+    assert refused.returncode != 0 and "dubious ownership" in refused.stderr
