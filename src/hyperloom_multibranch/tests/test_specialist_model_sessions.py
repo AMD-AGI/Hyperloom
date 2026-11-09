@@ -26,7 +26,7 @@ from hyperloom_multibranch.specialist.agent_sessions import (
     with_agents,
 )
 from hyperloom_multibranch.specialist.autonomous_session import AutonomousSession
-from hyperloom_multibranch.specialist.gate_client import GateClient
+from hyperloom_multibranch.specialist.gate_client import read_gate_client
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, AgentSetup, BranchPlace
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions, model_sessions
 from hyperloom_multibranch.specialist.prompts import role_prompt
@@ -202,7 +202,7 @@ def _flags(argv: list[str]) -> dict[str | None, object]:
 def test_each_agent_is_given_the_client_the_gate_measures_with_on_its_own_port(tmp_path):
     canonical = tmp_path / "canonical.yaml"
     canonical.write_text(CANONICAL, encoding="utf-8")
-    agents = replace(_agent_sessions(), client=GateClient.read(canonical))
+    agents = replace(_agent_sessions(), client=read_gate_client(canonical, tmp_path, 0))
     places = [
         BranchPlace(SimpleNamespace(path=tmp_path / branch / "worktree"), object(), tmp_path / branch / "session")
         for branch in ("a1", "a2")
@@ -230,11 +230,31 @@ def test_each_agent_is_given_the_client_the_gate_measures_with_on_its_own_port(t
     assert "http://0.0.0.0:31100" in first._setup.spec.client
 
 
-def test_an_agentx_canonical_has_no_client_to_give(tmp_path):
-    canonical = tmp_path / "canonical.yaml"
-    canonical.write_text("benchmark:\n  model: /models/m\n  envs:\n    CONC: '8'\n", encoding="utf-8")
+def test_each_agentx_agent_is_given_the_gate_s_replay_on_its_own_port_bounded_as_the_gate_s_round(
+    tmp_path, monkeypatch
+):
+    from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
+    from hyperloom_multibranch.tests.test_specialist_gate_client import _agentx_session
+    from inference_suite.cli import read_config
 
-    assert GateClient.read(canonical) is None
+    monkeypatch.setenv(TOOL_CACHE_ENV, str(tmp_path / "tools"))
+    canonical, _ = _agentx_session(tmp_path, tmp_path / "tools")
+    agents = replace(_agent_sessions(), client=read_gate_client(canonical, canonical.parent.parent, 4800))
+    places = [
+        BranchPlace(SimpleNamespace(path=tmp_path / branch / "worktree"), object(), tmp_path / branch / "session")
+        for branch in ("a1", "a2")
+    ]
+
+    specs = [
+        agents.session(SessionStart(branch, "c0", 1, BranchTask(agent="agent")), place)._setup.spec
+        for branch, place in zip(("a1", "a2"), places)
+    ]
+
+    for spec in specs:
+        words = shlex.split(spec.client)
+        config = read_config(Path(words[words.index("--config") + 1]), tmp_path / "out")
+        assert (config.server.port, spec.client_seconds) == (spec.port, 4800)
+    assert [spec.port for spec in specs] == [31100, 31110]
 
 
 def test_a_hosted_agent_runs_in_its_lease_s_sandbox_found_again_by_the_lease_alone(tmp_path):
