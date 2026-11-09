@@ -92,6 +92,10 @@ _PERMISSION_DENIED = re.compile(
 #: A path in the Hugging Face Hub cache's own layout, under a repository's directory ``models--<org>--<name>`` (or
 #: ``datasets--``, ``spaces--``), its blobs and snapshots and its lock in ``.locks``, wherever ``HF_HUB_CACHE`` puts it.
 _HUB_CACHE_ENTRY = re.compile(r"/(?:models|datasets|spaces)--[^/]+(?:/|$)")
+#: The locks ``datasets`` takes beside a prepared dataset's directory, ``<dataset>/<config>/<version>/<hash>``, while it
+#: prepares it (``<hash>_builder.lock``) and while it writes its info (``<hash>_info.lock``); ``<dataset>`` is
+#: ``<org>___<name>`` for a Hub repository, the bare name for one without an organisation or a packaged builder.
+_DATASETS_BUILD_LOCK = re.compile(r"/[^/]+/[^/]+/\d+\.\d+\.\d+/[0-9a-f]{16,}_(?:builder|info)\.lock$")
 _HIP_EXCEPTION = re.compile(r"\bHIP (?:runtime )?error: ")
 #: The name of the failed call, on its own line when the exception text was cut (``Search for `hipErrorIllegalAddress'``).
 _HIP_ERROR_TOKEN = re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]+")
@@ -193,8 +197,8 @@ def terminal_error(text: str) -> str | None:
 
 def hf_cache_permission(line: str) -> str | None:
     """The path of a Hugging Face cache whose refusal (``PermissionError: [Errno 13] Permission denied``) ``line``
-    raised: a path with ``huggingface`` in it, one in the Hub cache's layout, or the lock ``datasets`` takes for a dataset
-    it prepares. The cache is shared by every sandbox that mounts it, so no candidate causes the refusal; any other path
+    raised: a path with ``huggingface`` in it, one in the Hub cache's layout, or a lock ``datasets`` takes for a dataset it
+    prepares. The cache is shared by every sandbox that mounts it, so no candidate causes the refusal; any other path
     refused stays what it was.
 
     Each is known by its own shape, never by ``HF_HOME`` and its kin: the process that reads the log is not always the one
@@ -209,8 +213,10 @@ def hf_cache_permission(line: str) -> str | None:
 
 
 def _is_datasets_lock(path: str) -> bool:
-    """Whether ``path`` is the lock ``datasets`` takes for a dataset it prepares: in the cache directory, named after the
-    dataset's directory below it with every ``/`` turned into ``_``
-    (``<cache>/_<cache with _>_openai___gsm8k_main_0.0.0_<hash>.lock``), whatever ``HF_DATASETS_CACHE`` calls the cache."""
+    """Whether ``path`` is a lock ``datasets`` takes for a dataset it prepares, whatever ``HF_DATASETS_CACHE`` calls the
+    cache: the one in the cache directory, named after the dataset's directory below it with every ``/`` turned into ``_``
+    (``<cache>/_<cache with _>_openai___gsm8k_main_0.0.0_<hash>.lock``), or one beside that directory
+    (``<cache>/openai___gsm8k/main/0.0.0/<hash>_builder.lock``, ``..._info.lock``)."""
     directory, _, name = path.rpartition("/")
-    return bool(directory) and name.endswith(".lock") and name.startswith(directory.replace("/", "_") + "_")
+    root_lock = bool(directory) and name.endswith(".lock") and name.startswith(directory.replace("/", "_") + "_")
+    return root_lock or bool(_DATASETS_BUILD_LOCK.search(path))
