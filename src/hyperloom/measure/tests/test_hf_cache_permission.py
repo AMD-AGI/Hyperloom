@@ -158,6 +158,14 @@ def test_the_cache_refusal_that_ends_the_evaluation_is_infra_whatever_the_server
         # named like those locks, but not beside a dataset's version directory, or not named after a hash
         f"/workspace/candidate/{SHA}_builder.lock",
         "/some/cache/openai___gsm8k/main/0.0.0/candidate_builder.lock",
+        # a directory above the hash that is not a version, or a version with no dataset and config above it
+        f"/some/cache/gsm8k/main/latest/{SHA}_builder.lock",
+        f"/cache/0.0.0/{SHA}_builder.lock",
+        # a name shorter than any hash datasets uses, or not in lowercase hex as datasets writes it
+        "/some/cache/gsm8k/main/0.0.0/0123456789abcde_builder.lock",
+        f"/some/cache/gsm8k/main/0.0.0/{SHA.upper()}_builder.lock",
+        # a file named after the lock, not the lock itself
+        f"/some/cache/gsm8k/main/0.0.0/{SHA}_builder.lock.bak",
     ],
 )
 def test_an_ordinary_permission_error_keeps_its_old_class(path: str, monkeypatch: pytest.MonkeyPatch) -> None:
