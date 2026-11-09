@@ -490,7 +490,6 @@ async def _peers(
         dev_leases,
         (),
     )
-    model_sessions, _ = _model_sessions(), _agent_sessions()
     wired: list[SessionWiring] = []
 
     def sessions(wiring: SessionWiring) -> ModelSessions:
@@ -504,7 +503,7 @@ async def _peers(
                 raise AssertionError("no worktree is used here")
             return SimpleNamespace(path=tmp_path / branch, holds=lambda component: False)
 
-        return model_sessions.ModelSessions(factory, worktrees)
+        return SimpleNamespace(factory=factory, worktrees=worktrees, dossier_pass=None)
 
     peers = local_peers(host, sessions, setup)
     [wiring] = wired
@@ -747,7 +746,9 @@ def test_a_hosted_session_lends_the_dev_sandboxes_of_its_grant_on_its_tp_and_run
 ) -> None:
     agent_sessions = _agent_sessions()
     layout = SimpleNamespace(branch_dir=lambda branch: tmp_path / "MB-branches" / branch)
-    setup = SimpleNamespace(layout=layout, workload=replace(WORKLOAD, tp=4), processes=None)
+    setup = SimpleNamespace(
+        layout=layout, workload=replace(WORKLOAD, tp=4), processes=None, agents=("https://agents.example/tuner.git",)
+    )
     worktree = SimpleNamespace(path=tmp_path / "worktree", holds=lambda component: False)
     lease = HostedBranchLease("lease-1", "b01", (0, 1, 2, 3), Path("/app/work"), {}, 4, "dev-4", 3600, object())
 
