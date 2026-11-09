@@ -59,7 +59,6 @@ def clean_process_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "userdata"))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
 
 
 def _planner(tmp_path: Path) -> HostedPlanner:

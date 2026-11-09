@@ -2303,7 +2303,6 @@ class TestRunGemmTuningHandler:
 
         from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
 
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
         monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
         base = tmp_path / "base.yaml"
         base.write_text(yaml.safe_dump({"benchmark": {"framework": "vllm", "model": "/models/m", "envs": {}}}))
