@@ -13,14 +13,12 @@ walk to it holds open, never by a second look up the path. There what this modul
 Anywhere else (a ``0755`` home, a ``1777`` ``/tmp``, a setgid directory the group cannot write, one reached through a
 link at its own name) the umask alone decides, exactly as for a plain ``mkdir`` or ``open``, so what is made there stays
 as private as the account keeps its files; a mode asked for is masked by the umask, never widened. A mode narrower than
-the shared one (``0600`` for a file that holds a credential) is kept as asked, shared or not. Nothing is chowned, and
-an existing entry is never chmodded (another account's would fail ``EPERM``): a file is replaced by rename instead, and
-never opened in place, since a member of the group may have put a link there; the one exception is a file the accounts
-append to in turn (:func:`open_shared_append`), opened without following a link at its name. Nor is a link followed on
-the way to it once the way has passed a directory another account can write or owns (:func:`open_directory`): a member
-of the group, or that owner, could have put one there for any directory of the path. A child process that writes such
-a tree gets :data:`SHARED_CHILD_UMASK` through its own launch (``Popen(umask=...)``); the umask of this process is never
-changed, since its threads share it and it would also open up the files only this account may read.
+the shared one (``0600`` for a file that holds a credential) is kept as asked, shared or not. Nothing is chowned, and an existing entry is never chmodded (another account's would fail ``EPERM``): a file is
+replaced by rename instead, and never opened in place, since a member of the group may have put a link there. Nor is
+a link followed on the way to it once the way has passed a directory another account can write or owns
+(:func:`open_directory`): a member of the group, or that owner, could have put one there for any directory of the path. The umask of
+this process is never changed, since its threads share it and it would also open up the files only this account may
+read.
 
 Nothing the application executes or sources may live in a tree the group can write.
 """
@@ -44,8 +42,6 @@ log = logging.getLogger(__name__)
 
 SHARED_DIR_MODE = 0o2775
 SHARED_FILE_MODE = 0o664
-#: The umask of a child process that creates entries in a shared tree (git, shells, installers).
-SHARED_CHILD_UMASK = 0o002
 
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 #: How each directory of a path is opened on the way (:func:`open_directory`): only to name what is below it, which
@@ -151,12 +147,6 @@ def _exists(directory: int, name: str) -> bool:
     except FileNotFoundError:
         return False
     return True
-
-
-def directory_is_shared(descriptor: int) -> bool:
-    """Whether the directory open as ``descriptor`` is storage set up to be shared (setgid, group-writable, not
-    writable by others): for a writer of its own that walks below a directory it opened without following a link."""
-    return _set_up_to_share(os.fstat(descriptor).st_mode)
 
 
 def _set_up_to_share(mode: int) -> bool:
@@ -510,13 +500,6 @@ def shared_mode(path: Path, mode: int) -> int:
     return mode if parent_is_shared(path) else mode & ~current_umask()
 
 
-def child_umask(directory: Path) -> int:
-    """The umask of a child process that writes below ``directory`` (git, a shell): :data:`SHARED_CHILD_UMASK` where
-    ``directory`` is shared storage (:func:`parent_is_shared` of what is made in it), else ``-1``, this process's
-    (``Popen(umask=-1)`` changes nothing)."""
-    return SHARED_CHILD_UMASK if parent_is_shared(Path(directory) / "-") else -1
-
-
 def open_shared_append(path: Path, *, mode: int = SHARED_FILE_MODE, make_parents: bool = False) -> int:
     """``path`` opened for appending (the caller closes the descriptor), its directory reached as
     :func:`open_directory` reaches it and never through a link at its own name.
@@ -646,15 +629,12 @@ def ownership(path: Path) -> str:
 
 
 __all__ = [
-    "SHARED_CHILD_UMASK",
     "SHARED_DIR_MODE",
     "SHARED_FILE_MODE",
     "Flush",
-    "child_umask",
     "copy_shared_file",
     "create_new_shared_file",
     "current_umask",
-    "directory_is_shared",
     "make_shared_dirs",
     "open_directory",
     "open_shared",
