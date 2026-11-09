@@ -688,17 +688,58 @@ def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(
     assert "at least 0.5" in accuracy and "at most 0.05" in accuracy
     assert "the root it measures itself" in accuracy
     assert "error rate stays at or under 10%" in agentx_rules[2]
-    assert "agentx.e2e_norm_intvty.p50" in agentx_rules[3] and "report.json" in agentx_rules[3]
+    assert "report.json" in agentx_rules[3] and "run_status" in agentx_rules[3] and "completed" in agentx_rules[3]
+    assert not [rule for rule in agentx_rules if "agentx." in rule], "Arbor's harness reads the report's paths"
     total = host_rules(replace(agentx, metric=TOTAL_TOKEN_THROUGHPUT))
-    assert (
-        "agentx.e2e_norm_intvty.p90" in agentx_rules[3]
-        and "agentx.throughput.total_tokens_per_second" in agentx_rules[3]
-    )
-    assert "output_tokens_per_second" not in agentx_rules[3]
-    assert "agentx.throughput.total_tokens_per_second is the total_token_throughput" in total[3]
     assert "e2e_norm_intvty_p90 and e2e_norm_intvty_p50 within 5%" in total[1] and "output" not in total[1]
+    assert not [rule for rule in total if "agentx." in rule]
     unmeasured = host_rules(replace(agentx, client=""))
     assert len(unmeasured) == 3 and "error rate stays at or under 10%" in unmeasured[-1]
+
+
+#: MB's AgentX round as the gate stages it, enough of it for the adapter.
+AGENTX_CLIENT = "python -m inference_suite run --config /s/mb-bench.yaml --run-dir /s/mb-bench"
+
+
+@pytest.mark.parametrize("metric", [GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT])
+def test_an_agentx_arbor_given_mb_s_round_has_its_harness_read_the_round_s_report_by_path(
+    tmp_path: Path, metric: str
+) -> None:
+    spec = _spec(tmp_path, workload=AGENTX_WORKLOAD, metric=metric, client=AGENTX_CLIENT)
+
+    config = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
+
+    read = config["component"]["bench_read"]
+    assert read == {
+        "file": "report.json",
+        "keys": {
+            "e2e_norm_intvty_p50": "agentx.e2e_norm_intvty.p50",
+            "total_token_throughput": "agentx.throughput.total_tokens_per_second",
+            "e2e_norm_intvty_p90": "agentx.e2e_norm_intvty.p90",
+            "output_throughput": "agentx.throughput.output_tokens_per_second",
+        },
+    }
+    assert config[OBJECTIVE_KEY] in read["keys"]
+    assert _arbor_config_errors(config) == []
+
+
+def test_only_an_agentx_arbor_measured_by_mb_s_round_has_its_report_read_by_path(tmp_path: Path) -> None:
+    launch = _launch_file(tmp_path, {**RESOLVED, "client": AGENTX_CLIENT})
+    inferencex = _spec(tmp_path, client=AGENTX_CLIENT)
+    agentx = replace(inferencex, workload=AGENTX_WORKLOAD, metric=GRADED_INTVTY_P50)
+    specs = [
+        inferencex,
+        replace(agentx, client=""),
+        replace(agentx, client="", launch=launch),
+    ]
+
+    components = [arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)["component"] for spec in specs]
+
+    assert [("bench_command" in each, "bench_read" in each) for each in components] == [
+        (True, False),
+        (False, False),
+        (True, False),
+    ]
 
 
 def test_arbor_is_told_its_source_changes_cannot_be_kept_when_the_spec_says_why(tmp_path: Path) -> None:

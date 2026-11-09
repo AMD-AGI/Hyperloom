@@ -20,6 +20,15 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **An Arbor agent on an AgentX session no longer reads the round's numbers
+  itself.** MB writes `component.bench_read`, so Arbor's harness reads the
+  session's objective and its guards (P50 or P90 interactivity, total token
+  throughput) and the output throughput from each run's `report.json` by
+  path, averages them over replays, and books an iteration whose report lacks
+  one as NOT_MEASURED. Before, the bench agent read them at the paths the
+  directives named. Such a session now needs Arbor `6a62def` (`v0.9.5`, the
+  vendored copy) or later: an older pin is refused at preflight naming that
+  commit.
 - **Each round records its power in one `power.json`, with energy and J per token.**
   An InferenceSuite round (and a GEAK replay) now writes `power.json` in place
   of `gpu_power.json` and `gpu_samples.csv`: every card's sysfs power,

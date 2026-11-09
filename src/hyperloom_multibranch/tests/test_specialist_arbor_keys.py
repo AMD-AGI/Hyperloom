@@ -14,6 +14,7 @@ import json
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.specialist.agent_onboarding import make_ready
 from hyperloom_multibranch.specialist.arbor_adapter import (
@@ -71,6 +72,20 @@ def test_a_dossier_pass_on_an_arbor_without_stop_at_is_refused_naming_the_commit
     said = [reason for reason in refusals(config, declared_keys(checkout)) if PINNED in reason]
 
     assert said == [f"{PINNED} has no component.stop_at: pin Arbor {KEY_SINCE['stop_at']} or later"]
+
+
+def test_an_agentx_branch_measured_by_mb_s_round_on_an_arbor_without_bench_read_is_refused_naming_6a62def(
+    tmp_path: Path,
+) -> None:
+    checkout = _checkout(tmp_path, GATED_COMPONENT)
+    client = "python -m inference_suite run --config /s/mb-bench.yaml --run-dir /s/mb-bench"
+    spec = _spec(tmp_path, workload={"kind": "agentx", "conc": 8}, metric=GRADED_INTVTY_P50, client=client)
+    config = arbor_config(spec, checkout, BRANCH_RUN)
+
+    said = [reason for reason in refusals(config, declared_keys(checkout)) if PINNED in reason]
+
+    assert said == [f"{PINNED} has no component.bench_read: pin Arbor 6a62def or later"]
+    assert "bench_read" in fit_keys(config, checkout)[0]["component"]
 
 
 def test_a_branch_on_an_arbor_that_has_its_keys_is_not_refused_for_them(tmp_path: Path) -> None:

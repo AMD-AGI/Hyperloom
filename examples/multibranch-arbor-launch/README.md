@@ -37,7 +37,8 @@ own digest, is refused before PRELUDE, as is a record given as `--agent-launch` 
 
 MB gives every Arbor the gate's own AgentX round as `component.bench_command`: `python -m inference_suite run` against
 Arbor's server, on the session's frozen base, staged tools, trace corpus, seed, concurrency and trace window. Each run
-writes `report.json` in Arbor's output directory; the directives name the keys to read. Neither file needs bench
+writes `report.json` in Arbor's output directory, from which Arbor's harness reads each metric by path
+(`component.bench_read`, Arbor `6a62def` or later; an older Arbor is refused at preflight). Neither file needs bench
 variables (`MODEL_PREFIX`, `DURATION`, `INFMAX_CONTAINER_WORKSPACE` and so on), and the pack's `bench_agentx.sh` does
 not run. Arbor's bench phase is capped at one test attempt: the trace window (`--agentx-duration-sec`, an hour by
 default) plus an hour.
