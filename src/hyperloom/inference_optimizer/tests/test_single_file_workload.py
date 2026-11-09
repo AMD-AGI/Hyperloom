@@ -880,8 +880,6 @@ def test_first_export_is_stacked_although_slower_than_the_baseline(tmp_path):
 
 
 def _snapshot(root, name, content):
-    import json
-
     snapshot = root / name
     (snapshot / "files").mkdir(parents=True)
     (snapshot / "files" / "hook.py").write_text(content)
