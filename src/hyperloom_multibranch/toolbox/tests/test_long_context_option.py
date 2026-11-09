@@ -200,6 +200,36 @@ async def test_a_hosted_toolbox_takes_the_environments_set_and_off_turns_it_off(
     assert _hosted(tmp_path / "off")._acceptance._long_context is None
 
 
+def _staged_with_test_tokenizer(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Stage with the test tokenizer in place of the model's; the lengths staged at."""
+    lengths: list[int] = []
+
+    def built(model_dir: Path, root: Path, *, length: int) -> object:
+        lengths.append(length)
+        return build_entry(model_dir, root, length=length, encode=encode)
+
+    monkeypatch.setattr(long_context_module, "build_entry", built)
+    return lengths
+
+
+async def test_a_hosted_toolbox_that_names_its_runner_cache_stages_the_models_set_when_a_test_first_needs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache, model = tmp_path / "cache", _model(tmp_path)
+    cache.mkdir()
+    monkeypatch.setenv(CACHE_ENV, str(cache))
+    monkeypatch.setenv(MODEL_PATH_ENV, str(model))
+    lengths = _staged_with_test_tokenizer(monkeypatch)
+    (tmp_path / "hosted").mkdir()
+
+    source = _hosted(tmp_path / "hosted")._acceptance._long_context
+
+    assert not (cache / "evalsets").exists(), "nothing is staged before a test says what context its launch serves"
+    setup = source.at(None)  # type: ignore[union-attr]
+    assert setup is not None and setup.length == LENGTH and (cache / "evalsets" / setup.prompt_set).is_dir()
+    assert source.at(None) == setup and lengths == [LENGTH], "staged once, then found"  # type: ignore[union-attr]
+
+
 async def test_the_local_toolbox_stages_the_models_set_when_a_test_first_needs_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
