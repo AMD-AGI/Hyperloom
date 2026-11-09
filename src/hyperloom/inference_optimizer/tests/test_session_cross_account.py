@@ -314,7 +314,7 @@ _OWNER_ONLY_FILES = [
     "manifest.json",
     "state.json",
     "reports/optimization_journal.json",
-    "storage/private/coordinator.db",
+    "storage/coordinator.db",
 ]
 
 
@@ -338,8 +338,8 @@ def test_a_resume_by_an_account_that_cannot_read_an_owner_only_file_is_refused_n
     info = target.stat()
     assert str(raised.value) == (
         f"cannot read {target} (owner {info.st_uid}:{info.st_gid} 0600). A session that holds a credential keeps its "
-        "state, manifest, optimization journal and database where only the account that made it can read them: "
-        "resume it as that account, or start a new session."
+        "state, manifest and optimization journal where only the account that made it can read them, and a session an "
+        "earlier release made keeps its database so: resume it as that account, or start a new session."
     )
 
 
@@ -489,23 +489,22 @@ _BUS_LEG = textwrap.dedent(
         "result": {{"server_argv": server_args.split(), "server_env": env, "enablement_launch_log": "x"}},
     }}
     asyncio.run(coordinator.bus.append_and_seq(Message.new("coordinator", "*", "delegated_result", announcement)))
-    shared, holders, database = [], [], {{}}
+    shared, holders = [], []
     for path in sorted(session.rglob("*")):
         if not path.is_file():
             continue
         mode = stat.S_IMODE(path.stat().st_mode)
-        if path.name.startswith("coordinator.db"):
-            database[path.name] = mode
         if mode & (stat.S_IRGRP | stat.S_IROTH):
             shared.append(path.relative_to(session).as_posix())
             if b"SECRET-KEY-VALUE" in path.read_bytes() or b"hf_live_value_123" in path.read_bytes():
                 holders.append(path.relative_to(session).as_posix())
-    private = session / "storage" / "private"
+    where = paths.db_path_for(session).parent
     print(json.dumps({{
-        "database": database,
+        "database": {{p.name: stat.S_IMODE(p.stat().st_mode) for p in where.iterdir() if p.name.startswith("coordinator.db")}},
         "readable": shared,
         "holders": holders,
-        "private": stat.S_IMODE(private.stat().st_mode) & 0o777 if private.is_dir() else None,
+        "in_session": session in where.parents,
+        "directory_mode": stat.S_IMODE(where.stat().st_mode) & 0o777,
     }}))
     """
 )
@@ -536,16 +535,22 @@ def test_the_operators_credential_reaches_no_file_the_group_can_read_and_the_dat
     tmp_path, server_args, env, exported, database_mode
 ):
     workspace = _setgid_workspace(tmp_path / "claw")
+    own_tmp = tmp_path / "tmp"
+    own_tmp.mkdir(mode=0o700)
     code = _BUS_LEG.format(server_args=server_args, env=env, exported=exported)
-    seen = json.loads(_as_this_account(code, umask=0o077, workspace=workspace).splitlines()[-1])
+    seen = json.loads(_as_this_account(code, umask=0o077, workspace=workspace, TMPDIR=str(own_tmp)).splitlines()[-1])
     assert seen["database"] == dict.fromkeys(
         ("coordinator.db", "coordinator.db-wal", "coordinator.db-shm"), database_mode
     )
     assert seen["holders"] == []
     assert ("storage/coordinator.db" in seen["readable"]) == (database_mode == 0o664)
-    assert seen["private"] == (0o700 if database_mode == 0o600 else None), (
-        "a credential's database is in a 0700 directory"
-    )
+    if database_mode == 0o600:
+        assert seen["in_session"] is False, (
+            "a credential's database is not in the session directory the group can write"
+        )
+        assert seen["directory_mode"] == 0o700
+    else:
+        assert seen["in_session"] is True
 
 
 def test_the_lock_a_foreign_account_left_unwritable_is_named_with_its_owner_and_mode(tmp_path, monkeypatch):

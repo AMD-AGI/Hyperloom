@@ -63,10 +63,11 @@ ARCHIVE_MODE = 0o2770
 #: shown to a specialist.  Whatever copies a session directory elsewhere must leave these out.
 PRIVATE_SESSION_SUBDIRS: tuple[str, ...] = (ARCHIVE_DIRNAME,)
 
-#: The directory below ``storage/`` that only its owner can enter, where the coordinator database lives while the
-#: session holds a credential: the session directory is one the group can write, and SQLite makes its journal files by
-#: path, so a database kept there could be read through a file another account put beside it.
-PRIVATE_STORAGE_DIRNAME = "private"
+#: Where an account keeps the coordinator database of a session that holds a credential, below ``${TMPDIR:-/tmp}``:
+#: ``hyperloom-ledger-<uid>/<session name>-<hash of the session directory>/``. Not in the session directory, which the
+#: group can write: SQLite reaches a database, and makes its journal files, by path, so any directory on that path that
+#: another account can rename entries in lets it put a database of its own there while one is opened.
+PRIVATE_DB_DIR_PREFIX = "hyperloom-ledger-"
 
 #: The workspace root and its ``runtime/``, where the installer puts what later steps source or run (GEAK litellm config,
 #: source mirrors): the group may enter and read them, only their owner may change them, so no other account can swap
@@ -249,17 +250,35 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target
     return sd
 
 
+def shared_db_path_for(session_dir: Path) -> Path:
+    """Return the coordinator database path in the session directory, where every account of the group can open it."""
+    return Path(session_dir) / "storage" / "coordinator.db"
+
+
+def private_db_path_for(session_dir: Path) -> Path:
+    """Return the path of this account's own coordinator database for a session, outside the session directory (see
+    :data:`PRIVATE_DB_DIR_PREFIX`); nothing is made there."""
+    resolved = Path(os.path.realpath(session_dir))
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", resolved.name)[:40] or "session"
+    key = hashlib.sha256(os.fsencode(resolved)).hexdigest()[:16]
+    return (
+        Path(os.environ.get("TMPDIR") or "/tmp")
+        / f"{PRIVATE_DB_DIR_PREFIX}{os.geteuid()}"
+        / f"{name}-{key}"
+        / "coordinator.db"
+    )
+
+
 def db_path_for(session_dir: Path) -> Path:
-    """Return the canonical SQLite database path for a session: ``storage/coordinator.db``, or the one in the owner-only
-    directory (:data:`PRIVATE_STORAGE_DIRNAME`) once the session has made it there."""
-    shared = Path(session_dir) / "storage" / "coordinator.db"
-    private = shared.parent / PRIVATE_STORAGE_DIRNAME / shared.name
+    """Return the coordinator database this account uses for a session: its own outside the session directory once it
+    has made one, else the one in the session directory."""
+    private = private_db_path_for(session_dir)
     try:
         os.stat(private)
     except FileNotFoundError:
-        return shared
+        return shared_db_path_for(session_dir)
     except OSError:
-        return private  # a directory this account cannot enter holds it: the caller is refused when it opens it
+        return private  # not examined: the caller is refused when it opens it
     return private
 
 
@@ -370,8 +389,8 @@ __all__ = [
     "ENV_OVERRIDE_ASSET_ROOT",
     "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
+    "PRIVATE_DB_DIR_PREFIX",
     "PRIVATE_SESSION_SUBDIRS",
-    "PRIVATE_STORAGE_DIRNAME",
     "SESSION_FILES",
     "asset_prompt_references_dir",
     "asset_root",
@@ -386,9 +405,11 @@ __all__ = [
     "make_session_dir",
     "mn_profile_trace_root",
     "deps_cache_root",
+    "private_db_path_for",
     "resolve_dep_dir",
     "runtime_dir",
     "session_dir",
+    "shared_db_path_for",
     "workspace_root",
 ]
 
