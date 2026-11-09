@@ -53,6 +53,7 @@ from hyperloom.measure.hosted_log import (
     STATE_FINISHED,
     STATE_SENT,
     STATE_SUBMITTED,
+    JournalCorrupt,
     MeasurementJournal,
     Record,
     bounded,
@@ -360,6 +361,30 @@ class HostedMeasurementBackend:
             raise HostedStartError("no result archive: set the host information or archive_dir")
         self._journal = MeasurementJournal(self._config.hosted_dir)
 
+    def end_leftovers(self) -> list[str]:
+        """Close the run's ``measurement`` sandboxes that no unfinished attempt of the journal names (its newest line
+        ``submitted`` or ``sent``, which its test re-attaches); returns their ids. Call it after :meth:`start` and before
+        any test of a restarted run: a sandbox an earlier process kept for its next test (make-before-break), or made
+        and never journalled, is no test's, and would hold its GPUs and a slot until its own lifetime ends. A journal
+        that cannot be read closes nothing (logged). Blocks: it asks the service."""
+        try:
+            unfinished = self._unfinished_sandboxes()
+        except JournalCorrupt:
+            log.exception("the journal cannot be read: no sandbox of an earlier process is closed")
+            return []
+        return self._pool.sweep(unfinished)
+
+    def _unfinished_sandboxes(self) -> set[str]:
+        """The sandboxes of the attempts whose newest journal line is ``submitted`` or ``sent``."""
+        newest: dict[str, Record] = {}
+        for record in self.journal.records():
+            newest[record.request_id] = record
+        return {
+            str(record.sandbox_id)
+            for record in newest.values()
+            if record.state in (STATE_SUBMITTED, STATE_SENT) and record.sandbox_id
+        }
+
     def close(self) -> None:
         """Stop accepting tests and close every authoritative sandbox still running."""
         self._stops.close()
@@ -446,7 +471,7 @@ class HostedMeasurementBackend:
             attempt = _Attempt(call, call.task_id, number, spec, spec.to_bytes(), runner, self._clock(), stop, timeline)
             self._submit(attempt)
             outcome = self._finish(attempt)
-            done_with_cards = self._cards_given_back(attempt)
+            done_with_cards = self._config.handover is not None and self._cards_given_back(attempt)
             return outcome
         except SandboxError as exc:
             return self._lost(call, runner, f"{type(exc).__name__}: {exc}")

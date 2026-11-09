@@ -21,7 +21,7 @@ import pytest
 
 from hyperloom.measure import hosted
 from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedMeasurementBackend
-from hyperloom.measure.hosted_log import STATE_FINISHED
+from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, Record
 from hyperloom.measure.sandboxes import Handover
 from hyperloom.measure.socket import TestOutcome
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_call, make_rig, point_yaml
@@ -251,4 +251,58 @@ def test_a_test_stopped_after_its_result_landed_releases_its_sandbox(tmp_path, h
         assert backend.pool.parked is None and _live(rig) == [], "a stopping test keeps no sandbox"
     finally:
         backend.close()
+        rig.provider.close()
+
+
+def test_a_restart_closes_the_sandbox_an_earlier_process_kept_and_not_one_an_unfinished_attempt_names(
+    tmp_path,
+) -> None:
+    """The process dies while it keeps req-1's sandbox for req-2. The journal marks req-1 finished, so nothing would
+    re-attach that sandbox: the next start closes it, and req-2 does not wait behind it for the one slot. A sandbox
+    that an unfinished attempt (``sent``) names is left for its test to re-attach."""
+    rig, recording, backend = _backend(tmp_path, max_parallel_tests=1)
+    restarted: HostedMeasurementBackend | None = None
+    try:
+        backend.pool.note_upcoming({"req-1", "req-2"})
+        assert _run(backend, tmp_path, "req-1").returncode == 0
+        kept = backend.pool.parked
+        assert kept is not None
+        unfinished = rig.provider.create(
+            "runner-1", role="measurement", timeout_sec=600, metadata={"hyperloom.run-id": "run-1"}
+        )
+        backend.journal.append(
+            Record("req-9", 1, STATE_SENT, unfinished.sandbox_id, str(tmp_path / "out" / "req-9"), "req-9", {})
+        )
+        # The process is gone without closing anything; a new one starts on the same run.
+        restarted = HostedMeasurementBackend(recording, rig.config)
+        restarted.start()
+        assert restarted.end_leftovers() == [kept]
+        assert sorted(_live(rig)) == [unfinished.sandbox_id], "the kept sandbox is closed, the unfinished one is not"
+        unfinished.kill()
+        began = time.monotonic()
+        assert _run(restarted, tmp_path, "req-2").returncode == 0
+        assert time.monotonic() - began < 20, "req-2 took the slot at once"
+    finally:
+        if restarted is not None:
+            restarted.close()
+        backend.close()
+        rig.provider.close()
+
+
+def test_without_make_before_break_the_outcome_does_not_wait_for_the_runner_to_exit(tmp_path) -> None:
+    """Local hosted and the consistency tool run without a grant to keep a sandbox in: a test whose result landed
+    returns at once, with no wait of up to ``_RUNNER_EXIT_WAIT_SEC`` for a runner exit nobody needs."""
+    rig = make_rig(tmp_path, gpus=2)
+    asked: list[str] = []
+
+    def cards_given_back(attempt: Any) -> bool:
+        asked.append(attempt.request_id)
+        return True
+
+    rig.backend._cards_given_back = cards_given_back  # type: ignore[method-assign]
+    try:
+        assert _run(rig.backend, tmp_path, "req-1").returncode == 0
+        assert asked == [] and _live(rig) == []
+    finally:
+        rig.backend.close()
         rig.provider.close()
