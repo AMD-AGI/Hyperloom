@@ -48,7 +48,9 @@ does. In `shadow` the test runs to its end and its result carries the ruling (`a
 drop, and `trails`, whether `enforce` would have stopped it); `MB-report.md` says how many explores it judged, how many
 it would have stopped and how those ended (KEEP, REGRESSED, FLAT, ...), and how many ran unjudged for want of a parent
 median. In `enforce` a test that trails by more than 2% is stopped, never retried, and judged REGRESSED with the
-refusal `checkpoint_trailed`; its gain covers the first 1800 s only and it records no value. Confirm, integration,
+refusal `checkpoint_trailed`; its gain covers the first 1800 s only and it records no value. The stop is charged to the candidate before any log
+is read, so a node that slows down within those 1800 s, or a parent median taken on another node, can make a sound
+candidate trail with no retry; that is why `shadow` is the default here. Confirm, integration,
 FINAL and baseline tests, correctness fixes and retractions are never judged, nor is any test under
 `total_token_throughput`, where P50 is only a guard within a 5% band and nothing shows the first half hour predicts a
 throughput verdict.

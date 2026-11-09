@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import replace
@@ -29,7 +30,7 @@ from hyperloom.measure.checkpoint import CheckpointPlan
 from hyperloom.measure.failures import classify_test_failure
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.socket import TestCall, TestOutcome
-from hyperloom.measure.tests.hosted_fixtures import point_yaml
+from hyperloom.measure.tests.hosted_fixtures import make_rig, point_yaml
 from hyperloom_multibranch.contracts.blackboard.interfaces import NotRecorded
 from hyperloom_multibranch.contracts.blackboard.records import RecordedValue
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
@@ -40,7 +41,8 @@ from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup
 from hyperloom_multibranch.toolbox.agentx_checkpoint import CheckpointReferences
 from hyperloom_multibranch.toolbox.attempts import AttemptRunner, TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
-from hyperloom_multibranch.toolbox.tests.helpers import FakePlanner, FakeRepo, req
+from hyperloom_multibranch.toolbox.tests.helpers import FakePlanner, FakeRepo, build, req
+from hyperloom_multibranch.toolbox.tests.test_hosted_executor import POLICY, PointPlanner
 
 P50, TOTAL = AgentXObjective.P50_INTERACTIVITY, AgentXObjective.TOTAL_TOKEN_THROUGHPUT
 RULING = AgentxCheckpointRuling(1800.0, 50.0, 45.0, -10.0, 2.0, trails=True, stopped=True)
@@ -197,3 +199,28 @@ async def test_a_checkpoint_stop_is_never_retried() -> None:
 
     assert len(executor.jobs) == 1 and result.failure_class is FailureClass.CANDIDATE
     assert result.agentx_checkpoint == RULING
+
+
+@pytest.fixture
+def rig(tmp_path: Path):
+    made = make_rig(tmp_path)
+    yield made
+    made.backend.close()
+    made.provider.close()
+
+
+async def test_a_recorded_ruling_the_bundle_does_not_hold_is_named_on_reverify(tmp_path: Path, rig) -> None:
+    point = point_yaml(tmp_path, "planned.yaml", fake_accuracy="0.64")
+    executor = HostedExecutor(rig.backend, tmp_path / "session")
+    tb = build(tmp_path, executor=executor, planner=PointPlanner(point), policy=POLICY)
+    await tb.toolbox.start()
+    request_id = await tb.toolbox.submit_test(req())
+    await asyncio.wait_for(tb.toolbox.drain(), 60)
+    entry = tb.toolbox._log.get(request_id)
+    assert entry is not None and entry.outcome is not None
+    result = TestResult.from_document(entry.outcome["result"])
+    assert result.agentx_checkpoint is None and executor.difference(result) is None
+
+    claimed = replace(result, agentx_checkpoint=RULING)
+
+    assert executor.difference(claimed) == f"agentx_checkpoint: recorded {RULING}, the bundle holds None"
