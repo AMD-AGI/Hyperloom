@@ -32,10 +32,10 @@ it.
   (such as `acceptance_length`), is refused before the session starts,
   naming what it lacks; resolve that
   base elsewhere and pass the frozen `base_launch.json` as
-  `--reference-script`. While a commit is pinned, a source that cannot be
-  read (InferenceX, the model card, a release list, a cookbook) refuses the
-  session, naming the source and its error, instead of falling back to the
-  default table. See
+  `--reference-script`. While a commit is pinned, a fixed session never falls
+  back to the default table: a source that cannot be read (InferenceX, the
+  model card, a release list, a cookbook) refuses it, naming the source and its
+  error, and so does no recipe serving it, naming why each source missed. See
   [Base launch](reference/inference-suite.md#base-launch).
 
 - **A `custom` workload's entrypoint is named after the board itself.**

@@ -535,7 +535,8 @@ def test_a_pinned_commit_holding_the_resolver_s_code_is_read_on(tmp_path: Path, 
 
     snapshot = fetch_sources(_QUERY, inferencex_commit="8a76a78e41")
 
-    assert (snapshot.inferencex, snapshot.unread) == (_main_fixture(), None)
+    assert (snapshot.inferencex, snapshot.unread, snapshot.inferencex_pin) == (_main_fixture(), None, checkout.commit)
+    assert fetch_sources(_QUERY).inferencex_pin == ""
 
 
 def test_a_pinned_commit_serves_an_agentx_shell_user_file_s_corpus_without_the_resolver_s_code(

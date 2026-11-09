@@ -496,6 +496,18 @@ def test_a_fixed_query_no_recipe_serves_runs_the_default_row_with_its_topology()
     assert base.warnings[-1] == "no recipe serves Qwen/Qwen3-8B; the default vllm launch for gfx950 runs it"
 
 
+def test_a_fixed_query_no_recipe_at_a_pinned_inferencex_serves_is_a_miss_naming_each_source():
+    query = _fixed("Qwen/Qwen3-8B", framework="vllm", isl=1024, osl=1024, tp=2, ep=2)
+    pin = "8a76a78e410a412b74c43ebcb969a1bd2fa7549f"
+    unpinned_misses = _base(query).source
+
+    miss = _miss(query, dataclasses.replace(_snapshot(), inferencex_pin=pin))
+
+    assert unpinned_misses.kind is SourceKind.DEFAULT_TABLE
+    assert [reason.partition(":")[0] for reason in miss.reasons()] == ["inferencex", "vllm_recipes", "default_table"]
+    assert miss.reasons()[-1] == f"default_table: not taken while InferenceX is pinned at commit {pin}"
+
+
 def test_no_default_row_or_no_topology_is_a_miss():
     no_row = _miss(_fixed("Qwen/Qwen3-8B", board="r9700", isl=1024, osl=1024))
     assert no_row.reasons()[-1] == "default_table: it has no sglang row for r9700 (gfx1201)"
