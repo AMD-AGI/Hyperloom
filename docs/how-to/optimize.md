@@ -138,16 +138,18 @@ first source that serves the model on your GPU board:
 1. `--reference-script PATH_OR_URL`, when given.
 2. InferenceX `main`, or the commit `--inferencex-commit SHA` pins.
 3. The framework's cookbook `main` (SGLang cookbook, vLLM recipes, ATOM).
-4. A built-in default table, with a warning (fixed workloads only).
+4. A built-in default table, with a warning (fixed workloads without
+   `--inferencex-commit` only).
 
 `--inferencex-commit SHA` resolves from InferenceX at that commit, a full sha
 or a prefix of 7 or more hex digits, for example to match a CI run; the full
 sha is recorded in `base_launch.json`. Only InferenceX is pinned: the
 cookbooks are still read at `main`. The launch exits 2 when InferenceX has no
 such commit, when the commit lacks a function the resolver runs from
-InferenceX's own code (naming what it lacks), or when any source cannot be read
-(naming the source and its error, git's included): a pinned session never runs
-on the default table. To use such a commit, resolve the
+InferenceX's own code (naming what it lacks), when any source cannot be read
+(naming the source and its error, git's included), or when no recipe serves
+the session (naming why each source missed): a pinned session never runs on
+the default table. To use such a commit, resolve the
 base where its code was run and pass that `base_launch.json` as
 `--reference-script`. A resume keeps its frozen base.
 

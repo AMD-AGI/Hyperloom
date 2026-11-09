@@ -307,8 +307,9 @@ def add_base_launch_arguments(opt: argparse.ArgumentParser) -> None:
             "main, e.g. to match a CI run; the full sha is recorded in "
             "base_launch.json. The cookbooks, vLLM recipes and ATOM catalog "
             "are still read at main. Exits 2 when InferenceX has no such "
-            "commit, the commit lacks code the resolver runs, or any source "
-            "cannot be read (no default table is taken); resolve such "
+            "commit, the commit lacks code the resolver runs, any source "
+            "cannot be read, or no recipe serves the session (no default "
+            "table is taken); resolve such "
             "a base elsewhere and pass it as --reference-script. A resume "
             "keeps its frozen base."
         ),

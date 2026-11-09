@@ -640,7 +640,7 @@ def fetch_sources(
             return SourceSnapshot(None, fetched_unix, unread=UnreadSource(_INFERENCEX_SOURCE, str(error)))
         if commit:
             _require_resolver_api(checkout)
-        snapshot = SourceSnapshot(inferencex, fetched_unix)
+        snapshot = SourceSnapshot(inferencex, fetched_unix, inferencex_pin=checkout.commit if commit else "")
         for source, read in _recipe_reads(query, checkout, inferencex, scratch):
             try:
                 snapshot = read(snapshot)

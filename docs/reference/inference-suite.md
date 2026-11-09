@@ -29,7 +29,8 @@ gives the base:
 
 An AgentX session that no recipe and no `--reference-script` serves is refused.
 When a source cannot be read, a fixed session runs the default table, unless
-InferenceX is pinned (below), and an AgentX session is refused. Repositories are read at the head of their `main` and recorded
+InferenceX is pinned (below), and an AgentX session is refused. A pinned fixed
+session no recipe serves is refused too, naming why each source missed. Repositories are read at the head of their `main` and recorded
 with that commit; the vLLM recipes site has no commit and is recorded as the
 response it was read from.
 

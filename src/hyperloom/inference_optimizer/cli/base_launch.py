@@ -5,7 +5,8 @@
 
 The base comes from the operator's ``--reference-script`` when one is given, otherwise from the first recipe source
 that serves the session, otherwise, for a fixed workload only, from the default table, which also runs a fixed session
-when a recipe source cannot be read. An AgentX session no recipe serves is refused. Resolving reads every source once,
+when a recipe source cannot be read. An AgentX session no recipe serves is refused, and so is a fixed one under
+``--inferencex-commit``, which never takes the default table. Resolving reads every source once,
 here, InferenceX at ``--inferencex-commit`` when one is given; a resume reads the frozen file instead. A scriptable
 session launches no server: its base is the script it runs, the operator's from ``--benchmark-scripts-dir`` when it
 holds one, else the one its framework ships. The MLPerf AgentX client drives its own traffic at a server that serves
@@ -194,11 +195,13 @@ def _scriptable_base(launch: SessionLaunch, args: argparse.Namespace) -> BaseLau
 
 def resolve_server_base(launch: SessionLaunch) -> BaseLaunch:
     """The base launch of a server session: the operator's launch file when it names one, else the first recipe source
-    that serves it, else, for a fixed workload, the default table; its credential-named env frozen as sha256s.
+    that serves it, else, for a fixed workload with InferenceX unpinned, the default table; its credential-named env
+    frozen as sha256s.
 
     Raises:
         BaseLaunchUnresolved: The launch file cannot serve as the base, the query is malformed, the InferenceX commit
-            is refused, or no source and no default serves the session (an AgentX session has no default).
+            is refused, or no source and no default serves the session (an AgentX session, or one under a pinned
+            InferenceX, has no default).
     """
     try:
         query = launch.query()
