@@ -32,7 +32,8 @@ it.
   `total_throughput_gain_pct`, not `interactivity_gain_pct`, and does not
   replace an interactivity champion. Each Arbor is given the objective as its
   config's `opt_objective` and optimizes it instead of its pack's metric; an
-  Arbor that cannot (before `9c455df`) is refused at preflight, except an older
+  Arbor that cannot (before `9c455df` for P50, `df9b55a` for total token
+  throughput) is refused at preflight, except an older
   one in a P50 session, which runs on its pack's metric as before.
   `--agentx-objective` with
   `--workload inferencex` exits 2. Before, an operator had to patch the source
