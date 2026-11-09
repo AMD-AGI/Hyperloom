@@ -738,7 +738,9 @@ def test_a_launcher_that_outlives_its_wait_is_collected_by_its_popen_alone(make,
             identity = proctree.proc_identity(proc.pid)
             assert identity is not None
             launchers.append((proc.pid, identity[1]))
-        _immortal(monkeypatch, procs[0].pid)  # its wait times out, as while the kernel still tears it down
+        # Its wait times out, as while the kernel still tears it down; stopped, it cannot end once its tree has.
+        os.kill(procs[0].pid, signal.SIGSTOP)
+        _immortal(monkeypatch, procs[0].pid)
         named.append(kill_launchers(procs, **kw))
         return named[-1]
 
