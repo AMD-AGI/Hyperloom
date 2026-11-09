@@ -35,6 +35,7 @@ import functools
 import hashlib
 import itertools
 import json
+import logging
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -81,6 +82,8 @@ if TYPE_CHECKING:
     from hyperloom_multibranch.blackboard.learning_search import LearningFinder
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 SPECIALIST_TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
 _OBJECT = "object"
@@ -210,7 +213,8 @@ _TEST_RESULT_GUIDE = (
     "of all n prompts that passed (tasks and prompts give the per-task and per-prompt outcomes); status incomplete, "
     "with a reason, means a prompt errored or never ran (for example a launch that serves too little context) and is "
     "never a pass and never blocks. root is the session root's reading (its tests' complete checks pooled, with the "
-    "score's 95% interval ci_low..ci_high); the rule gate refuses a drop of more than 3 of 64 items under ci_low. The "
+    "score's 95% interval ci_low..ci_high); the rule gate refuses a drop under ci_low of more than the check's sampling noise, "
+    "0.5 + 0.3125 * sqrt(n) items (3 of 64, 1.75 of 16). The "
     "scores are findings, not a verdict."
 )
 _KERNEL_TUNE_PARAMS_NOTE = (
@@ -614,9 +618,12 @@ class _Feed:
     end: str
 
     def after(self, count: int) -> str:
-        """The cursor that resumes after the first ``count`` of the items."""
+        """The cursor that resumes after the first ``count`` of the items. A page cursor names the last item returned
+        before it, so where none was (no item of this feed and none of an earlier page) it is the base cursor itself."""
         if count >= len(self.items):
             return self.end
+        if not count and not self.skipped:
+            return self.base
         anchor = _fingerprint(self.items[count - 1]) if count else self.anchor
         return f"{_PAGE_CURSOR}{self.skipped + count}:{anchor}:{self.base}"
 
@@ -704,12 +711,34 @@ def reply_inbox(blackboards: BlackboardFor) -> ReplyAnnotator:
     first call or a restarted service starts from the end. The cursor is the blackboard's own, kept by the service per
     token, apart from ``poll_inbox``'s. A ``poll_inbox`` reply carries no block, and only the items it returned count
     as seen: the cursor moves past the leading ones of the unread items that it returned, and no further.
+
+    A kept cursor the feed cannot read (one the blackboard no longer knows, or one a defect made) would fail every later
+    reply of its token, so the annotator reads from a safe point instead and the next cursor it hands back is a good
+    one: the blackboard cursor a page cursor was read from, or else the start of the feed. Never the end: that would drop
+    what arrived since the last good reply; a safe point at or before it repeats some items in one block, which the
+    block bounds at :data:`REPLY_INBOX_LINES` lines. The first such cursor of a token is logged, by its kind, length
+    and a short hash, never in full.
     """
+    warned: set[tuple[str, str]] = set()
 
     async def annotate(call: ReplyCall, cursor: str | None) -> ReplyNote:
         branch = call.principal.branch
         blackboard = blackboards(branch)
-        unread = await _read_feed(blackboard, branch, cursor or "")
+        try:
+            unread = await _read_feed(blackboard, branch, cursor or "")
+        except InvalidParamsError:
+            if not cursor:
+                raise
+            unread = await _read_from_safe_point(blackboard, branch, cursor)
+            who = (call.principal.subject, branch)
+            if who not in warned:
+                warned.add(who)
+                logger.warning(
+                    "inbox cursor of %s on %s unreadable (%s); its replies read from %s",
+                    *who,
+                    _describe_cursor(cursor),
+                    "the cursor it paged from" if unread.base else "the start of the feed",
+                )
         if call.tool == _POLL_INBOX_TOOL and cursor is not None:
             returned = set() if call.is_error else await _returned_by_poll(blackboard, call)
             seen = sum(1 for _ in itertools.takewhile(returned.__contains__, unread.items))
@@ -718,6 +747,24 @@ def reply_inbox(blackboards: BlackboardFor) -> ReplyAnnotator:
         return ReplyNote(_inbox_block([item for item in unread.items if item.pointer != asked]), unread.end)
 
     return annotate
+
+
+async def _read_from_safe_point(blackboard: Blackboard, branch: str, cursor: str) -> _Feed:
+    """The feed of ``branch`` from a point no later than ``cursor``, which the feed could not read: the blackboard
+    cursor ``cursor`` names after its page prefix when the feed reads that, else the start of the feed."""
+    if cursor.startswith(_PAGE_CURSOR):
+        base = cursor[len(_PAGE_CURSOR) :].split(":", 2)[-1]
+        if base and not base.startswith(_PAGE_CURSOR):
+            with contextlib.suppress(InvalidParamsError):
+                return await _read_feed(blackboard, branch, base)
+    return await _read_feed(blackboard, branch, "")
+
+
+def _describe_cursor(cursor: str) -> str:
+    """``cursor`` as a log line may name it: its kind, its length and a short hash, not its text."""
+    kind = "page" if cursor.startswith(_PAGE_CURSOR) else "blackboard"
+    digest = hashlib.sha256(cursor.encode()).hexdigest()[:_FINGERPRINT_CHARS]
+    return f"{kind} cursor, {len(cursor)} characters, sha256 {digest}"
 
 
 async def _returned_by_poll(blackboard: Blackboard, call: ReplyCall) -> set[InboxItem]:

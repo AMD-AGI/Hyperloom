@@ -47,6 +47,21 @@ def test_a_run_dir_is_measured_through_the_mapper(tmp_path: Path) -> None:
     assert measurement["valid_measurement"] is True
 
 
+def test_a_run_dir_with_a_power_section_is_measured_from_it(tmp_path: Path) -> None:
+    from inference_suite.contracts import PowerSummary
+    from inference_suite.tests.test_report_contract import _POWER_JSON
+
+    run_dir = _run_dir(tmp_path, power=PowerSummary.of("power.json", _POWER_JSON))
+    measurement = extract_benchmark_measurement(None, workspace=run_dir)
+    assert (measurement["gpu_power_avg_w"], measurement["gpu_energy_j"], measurement["power_valid"]) == (
+        650.0,
+        130_000.0,
+        1,
+    )
+    assert measurement["gpu_power_by_gpu_w"] == {"0": 700.0, "1": 600.0}
+    assert measurement["joules_per_output_token"] == 1.3 and measurement["joules_per_input_token"] is None
+
+
 def test_a_round_refused_before_its_launch_reads_without_one(tmp_path: Path) -> None:
     run_dir = _run_dir(
         tmp_path, launch=False, run_status=RunStatus.FAILED, failed_step=FailedStep.CONFIG_INVALID, fixed=None

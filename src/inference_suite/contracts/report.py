@@ -12,7 +12,7 @@ the caller's mapper (D2).
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -140,6 +140,14 @@ def _complete(document: object, keys: tuple[str, ...], what: str) -> Mapping[str
     return fields
 
 
+def _with_unread(document: object, keys: Iterable[str]) -> object:
+    """``document`` with ``keys`` read as ``null`` where it lacks them: reports written before those keys existed
+    still read, as unmeasured."""
+    if not isinstance(document, Mapping):
+        return document
+    return {**dict.fromkeys(keys), **document}
+
+
 def _measured(values: Mapping[str, object], keys: tuple[str, ...], integers: frozenset[str], what: str) -> None:
     if not isinstance(values, Mapping) or set(values) != set(keys):
         got = sorted(values) if isinstance(values, Mapping) else values
@@ -220,6 +228,158 @@ class GpuMonitorBlock:
         return cls(gpu=fields["gpu"], sample_count=fields["sample_count"], **metrics)
 
 
+#: The ``power.json`` energy figures the report carries, under the names InferenceX gives them.
+POWER_METRIC_KEYS = (
+    "total_gpu_energy_j",
+    "avg_power_w",
+    "p75_power_w",
+    "p90_power_w",
+    "avg_total_gpu_power_w",
+    "p75_total_gpu_power_w",
+    "p90_total_gpu_power_w",
+    "joules_per_input_token",
+    "joules_per_output_token",
+    "joules_per_total_token",
+    "joules_per_successful_query",
+    "node_energy_j",
+    "cpu_energy_j",
+)
+_POWER_GPU_LISTS = ("serving_gpus", "energy_gpus", "unread_gpus")
+POWER_SUMMARY_KEYS = (
+    "file",
+    "window_s",
+    *_POWER_GPU_LISTS,
+    *POWER_METRIC_KEYS,
+    "per_gpu_avg_power_w",
+    "accumulator_relative_error",
+    "power_throttle_fraction_max",
+    "power_valid",
+    "reasons",
+    "warnings",
+)
+_POWER = "the power summary"
+
+
+def _gpu_list(value: object, what: str) -> tuple[int, ...]:
+    return tuple(_FIELDS.integer(gpu, f"an entry of {what}", minimum=0) for gpu in _FIELDS.items(value, what))
+
+
+@dataclass(frozen=True)
+class PowerSummary:
+    """The measured window's energy, as ``power.json`` (named by ``file``) records it; the file holds the rest.
+
+    ``power_valid`` is 1 when the energy is; every energy figure is then measured, and otherwise ``None``. A per-token
+    figure is ``None`` also when its count is, with its reason listed.
+    """
+
+    file: str
+    window_s: float | None
+    serving_gpus: tuple[int, ...]
+    energy_gpus: tuple[int, ...]
+    unread_gpus: tuple[int, ...]
+    metrics: Mapping[str, float | None]
+    per_gpu_avg_power_w: Mapping[str, float] | None
+    accumulator_relative_error: float | None
+    power_throttle_fraction_max: float | None
+    power_valid: int
+    reasons: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _FIELDS.text(self.file, "the power file")
+        _FIELDS.optional_number(self.window_s, "the power window")
+        for name in _POWER_GPU_LISTS:
+            _gpu_list(getattr(self, name), f"the power {name}")
+        _measured(self.metrics, POWER_METRIC_KEYS, frozenset(), _POWER)
+        for gpu, watts in (self.per_gpu_avg_power_w or {}).items():
+            _FIELDS.text(gpu, "a power card")
+            _FIELDS.number(watts, f"card {gpu}'s power")
+        _FIELDS.optional_number(self.accumulator_relative_error, "the accumulator error")
+        _FIELDS.optional_number(self.power_throttle_fraction_max, "the power throttle fraction")
+        if self.power_valid not in (0, 1) or isinstance(self.power_valid, bool):
+            raise ReportError(f"power_valid is 0 or 1, got {self.power_valid!r}")
+        _text_tuple(self.reasons, "the power reasons")
+        _text_tuple(self.warnings, "the power warnings")
+
+    @classmethod
+    def of(cls, file: str, document: Mapping[str, object]) -> PowerSummary:
+        """The summary of a ``power.json`` document."""
+        energy = _section(document, "energy")
+        scope = _section(document, "scope")
+        duration = _section(energy, "window").get("duration_s")
+        valid = energy.get("power_valid") == 1
+        return cls.from_document(
+            {
+                "file": file,
+                "window_s": duration,
+                **{name: scope.get(name) or [] for name in _POWER_GPU_LISTS},
+                **{key: energy.get(key) for key in POWER_METRIC_KEYS},
+                "per_gpu_avg_power_w": _per_gpu_watts(_section(energy, "per_gpu"), duration) if valid else None,
+                "accumulator_relative_error": _section(energy, "accumulator_check").get("relative_error"),
+                "power_throttle_fraction_max": _throttle_max(document, scope.get("energy_gpus")),
+                "power_valid": int(valid),
+                "reasons": energy.get("reasons") or [],
+                "warnings": energy.get("warnings") or [],
+            }
+        )
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "file": self.file,
+            "window_s": self.window_s,
+            **{name: list(getattr(self, name)) for name in _POWER_GPU_LISTS},
+            **_ordered(self.metrics, POWER_METRIC_KEYS),
+            "per_gpu_avg_power_w": None if self.per_gpu_avg_power_w is None else dict(self.per_gpu_avg_power_w),
+            "accumulator_relative_error": self.accumulator_relative_error,
+            "power_throttle_fraction_max": self.power_throttle_fraction_max,
+            "power_valid": self.power_valid,
+            "reasons": list(self.reasons),
+            "warnings": list(self.warnings),
+        }
+
+    @classmethod
+    def from_document(cls, document: object) -> PowerSummary:
+        fields = _complete(document, POWER_SUMMARY_KEYS, _POWER)
+        watts = fields["per_gpu_avg_power_w"]
+        return cls(
+            file=fields["file"],
+            window_s=fields["window_s"],
+            **{name: _gpu_list(fields[name], f"the power {name}") for name in _POWER_GPU_LISTS},
+            metrics={key: fields[key] for key in POWER_METRIC_KEYS},
+            per_gpu_avg_power_w=None if watts is None else dict(_FIELDS.mapping(watts, "the per-card power")),
+            accumulator_relative_error=fields["accumulator_relative_error"],
+            power_throttle_fraction_max=fields["power_throttle_fraction_max"],
+            power_valid=fields["power_valid"],
+            reasons=_FIELDS.strings(fields["reasons"], "the power reasons"),
+            warnings=_FIELDS.strings(fields["warnings"], "the power warnings"),
+        )
+
+
+def _section(document: Mapping[str, object], name: str) -> Mapping[str, object]:
+    section = document.get(name)
+    return section if isinstance(section, Mapping) else {}
+
+
+def _per_gpu_watts(cards: Mapping[str, object], duration: object) -> dict[str, float] | None:
+    if not isinstance(duration, (int, float)) or duration <= 0:
+        return None
+    watts = {}
+    for gpu, card in cards.items():
+        joules = card.get("integral_j") if isinstance(card, Mapping) else None
+        if not isinstance(joules, (int, float)):
+            return None
+        watts[gpu] = round(joules / duration, 3)
+    return watts or None
+
+
+def _throttle_max(document: Mapping[str, object], gpus: object) -> float | None:
+    measured = _section(_section(document, "phases"), "measured")
+    cards = _section(measured, "per_gpu")
+    listed = gpus if isinstance(gpus, (list, tuple)) else ()
+    shares = [_section(_section(cards, str(gpu)), "throttle").get("ppt") for gpu in listed]
+    return max((share for share in shares if isinstance(share, (int, float))), default=None)
+
+
 #: The fixed workload's metrics, named as Hyperloom's benchmark result normalises them.
 FIXED_METRIC_KEYS = (
     "output_throughput",
@@ -283,7 +443,12 @@ AGENTX_COUNT_KEYS = (
     "warmup_dropped",
     "dropped_total",
     "error_osl_exported",
+    "input_tokens",
+    "output_tokens",
 )
+#: Summed over the successful profiling requests; ``None`` when one of them carries no length, so no partial sum is
+#: ever mistaken for the whole.
+_AGENTX_TOKEN_COUNTS = frozenset({"input_tokens", "output_tokens"})
 AGENTX_THROUGHPUT_KEYS = (
     "request_throughput",
     "output_tokens_per_second",
@@ -301,7 +466,7 @@ AGENTX_INTVTY_KEYS = ("p50", "p90")
 class AgentxResult:
     """The AgentX client's raw counts and timings; validity and the error rate are the mapper's (D2)."""
 
-    counts: Mapping[str, int]
+    counts: Mapping[str, int | None]
     throughput: Mapping[str, float | None]
     latency_seconds: Mapping[str, float | None]
     e2e_norm_intvty: Mapping[str, float | None]
@@ -312,8 +477,8 @@ class AgentxResult:
 
     def __post_init__(self) -> None:
         _measured(self.counts, AGENTX_COUNT_KEYS, frozenset(AGENTX_COUNT_KEYS), "the AgentX counts")
-        if any(value is None for value in self.counts.values()):
-            raise ReportError(f"the AgentX counts are always counted, got {dict(self.counts)!r}")
+        if any(value is None for key, value in self.counts.items() if key not in _AGENTX_TOKEN_COUNTS):
+            raise ReportError(f"the AgentX request counts are always counted, got {dict(self.counts)!r}")
         _measured(self.throughput, AGENTX_THROUGHPUT_KEYS, frozenset(), "the AgentX throughput")
         _measured(self.latency_seconds, AGENTX_LATENCY_KEYS, frozenset(), "the AgentX latency")
         _measured(self.e2e_norm_intvty, AGENTX_INTVTY_KEYS, frozenset(), "the AgentX e2e_norm_intvty")
@@ -355,7 +520,9 @@ class AgentxResult:
                 f"is not {AGENTX_ERROR_RATE_DEFINITION}"
             )
         return cls(
-            counts=dict(_complete(fields["counts"], AGENTX_COUNT_KEYS, "the AgentX counts")),
+            counts=dict(
+                _complete(_with_unread(fields["counts"], _AGENTX_TOKEN_COUNTS), AGENTX_COUNT_KEYS, "the AgentX counts")
+            ),
             throughput=dict(_complete(fields["throughput"], AGENTX_THROUGHPUT_KEYS, "the AgentX throughput")),
             latency_seconds=dict(_complete(fields["latency_seconds"], AGENTX_LATENCY_KEYS, "the AgentX latency")),
             e2e_norm_intvty=dict(_complete(fields["e2e_norm_intvty"], AGENTX_INTVTY_KEYS, "the AgentX intvty")),
@@ -676,6 +843,7 @@ REPORT_KEYS = (
     "ended_unix",
     "server",
     "gpu_monitor",
+    "power",
     "fixed",
     "agentx",
     "scriptable",
@@ -716,6 +884,7 @@ class Report:
     concurrency: int | None = None
     server: ServerFacts | None = None
     gpu_monitor: tuple[GpuMonitorBlock, ...] = ()
+    power: PowerSummary | None = None
     fixed: FixedMetrics | None = None
     agentx: AgentxResult | None = None
     scriptable: ScriptableResult | None = None
@@ -757,6 +926,8 @@ class Report:
         ):
             raise ReportError(f"gpu_monitor must be a tuple of GpuMonitorBlock, got {self.gpu_monitor!r}")
         _FIELDS.unique([block.gpu for block in self.gpu_monitor], "monitored GPU")
+        if self.power is not None and not isinstance(self.power, PowerSummary):
+            raise ReportError(f"the power section must be a PowerSummary, got {self.power!r}")
         for name, kind_type in _SECTION_TYPES.items():
             section = getattr(self, name)
             if section is not None and not isinstance(section, kind_type):
@@ -787,12 +958,13 @@ class Report:
             "ended_unix": self.ended_unix,
             "server": None if self.server is None else self.server.to_document(),
             "gpu_monitor": [block.to_document() for block in self.gpu_monitor],
+            "power": None if self.power is None else self.power.to_document(),
             **{name: None if section is None else section.to_document() for name, section in sections.items()},
         }
 
     @classmethod
     def from_document(cls, document: object) -> Report:
-        fields = _complete(document, REPORT_KEYS, "a round report")
+        fields = _complete(_with_unread(document, ("power",)), REPORT_KEYS, "a round report")
         if fields["schema"] != REPORT_SCHEMA:
             raise ReportError(f"round report schema {fields['schema']!r} is not {REPORT_SCHEMA}")
         monitor = _FIELDS.items(fields["gpu_monitor"], "gpu_monitor")
@@ -814,6 +986,7 @@ class Report:
             ended_unix=fields["ended_unix"],
             server=None if fields["server"] is None else ServerFacts.from_document(fields["server"]),
             gpu_monitor=tuple(GpuMonitorBlock.from_document(block) for block in monitor),
+            power=None if fields["power"] is None else PowerSummary.from_document(fields["power"]),
             **sections,
         )
 
@@ -839,6 +1012,9 @@ __all__ = [
     "LogRange",
     "MetricStats",
     "MlperfResult",
+    "POWER_METRIC_KEYS",
+    "POWER_SUMMARY_KEYS",
+    "PowerSummary",
     "ProbeOutcome",
     "ProfileResult",
     "Report",

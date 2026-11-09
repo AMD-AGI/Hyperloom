@@ -51,6 +51,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
 )
 from hyperloom_multibranch.contracts.blackboard.vocab import COMMITTING, Conclusion
 from hyperloom_multibranch.blackboard.knowledge.lessons import direction, later_retractions
+from hyperloom_multibranch.rulegate.agentx import partial_window
 
 MAPPING_PATH = Path(__file__).with_name("mappings") / "multibranch-notebook-v1.yaml"
 MULTIBRANCH_MAPPING_PATH = Path(__file__).with_name("mappings") / "multibranch-recipe-v1.yaml"
@@ -163,7 +164,8 @@ def _learn(learnt: str, logged: str, undone: Sequence[str]) -> tuple[str, str]:
 
 
 def _decision(record: TestRecord) -> str:
-    if record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED:
+    """A failed candidate the gate judged all the same, one the AgentX checkpoint stopped, was reverted, not broken."""
+    if record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED and record.judgement is None:
         return "failed"
     return "keep" if record.conclusion in COMMITTING else "revert"
 
@@ -190,7 +192,7 @@ def _accuracy(record: TestRecord, others: Sequence[TestRecord] = ()) -> dict[str
 
 def _measured(record: TestRecord, metric: str) -> dict[str, object]:
     judged = record.judgement
-    if judged is None:
+    if judged is None or partial_window(judged):
         return {"outcome_value": None, "interval": None, "interval_text": "", "tests": [record.request_id]}
     low, high = judged.gain_pct - judged.threshold_pct, judged.gain_pct + judged.threshold_pct
     return {

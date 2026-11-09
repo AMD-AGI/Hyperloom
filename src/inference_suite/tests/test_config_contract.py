@@ -212,6 +212,12 @@ def test_unknown_key_is_refused_at_every_level(path):
         SuiteConfig.from_document(document)
 
 
+@pytest.mark.parametrize("interval", [1.6, 3.0])
+def test_a_gpu_sampling_interval_too_long_to_keep_the_energy_window_valid_is_refused(interval):
+    with pytest.raises(ConfigError, match="GPU power sampling interval"):
+        GpuTelemetry(enabled=True, interval_sec=interval)
+
+
 def test_unknown_schema_is_refused():
     with pytest.raises(ConfigError, match="schema"):
         SuiteConfig.from_document({**_config().to_document(), "schema": "inference-suite-config/2"})

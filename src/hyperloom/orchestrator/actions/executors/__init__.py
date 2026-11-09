@@ -32,6 +32,7 @@ from ._subprocess_kill import (
     run_with_session_kill,
 )
 from .benchmark_result import harvest_leaked_artifacts
+from ._agentx_checkpoint import CHECKPOINT_ARTIFACT_NAME, AgentxCheckpoint
 from ._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
 from ._launch_evidence import RequestedLaunch, build_launch_evidence
 from ._round_folder import RoundFolder, is_round_folder
@@ -58,6 +59,8 @@ __all__ = [
     "GridLaunch",
     "GridRecipe",
     "GridStop",
+    "AgentxCheckpoint",
+    "CHECKPOINT_ARTIFACT_NAME",
     "GridVariant",
     "LaunchLayer",
     "MaterializeOptions",

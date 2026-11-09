@@ -145,6 +145,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     HostedExit,
     arm_grant_stop,
     campaign_spec,
+    earlier_session,
     grant_deadline,
     grant_tests_that_fit,
     hosted_storage,
@@ -198,6 +199,7 @@ from hyperloom_multibranch.scheduling.settings import (
     PlaybookMode,
     RunSettings,
     Workload,
+    session_early_stop,
 )
 from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_INDEX, ArborRefused, read_launch
 from inference_suite import UserFileError, parse_inferencex_commit, parse_user_file
@@ -831,6 +833,7 @@ def settings_from(
         agent_dossier=_agent_dossier(args.agent_dossier, args.agent_directions),
         review_gate=args.review_gate,
         inferencex_commit=parse_inferencex_commit(args.inferencex_commit) if args.inferencex_commit else "",
+        agentx_early_stop=session_early_stop(os.environ),
     )
 
 
@@ -951,10 +954,15 @@ async def _final_only(persisted: PersistedRun, peer_factory: PeerFactory, servic
     clock = Clock()
     layout = persisted.layout
     print(layout.root, flush=True)
-    logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
-    host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
-    session = Session(persisted.settings, peer_factory, host, services)
-    return (await session.finish(persisted.ended)).exit_code
+    handler = _file_handler(layout.scheduler_log)
+    logging.getLogger().addHandler(handler)
+    try:  # a hosted run that closes this session goes on to start another, which logs to its own directory
+        host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
+        session = Session(persisted.settings, peer_factory, host, services)
+        return (await session.finish(persisted.ended)).exit_code
+    finally:
+        logging.getLogger().removeHandler(handler)
+        handler.close()
 
 
 def _file_handler(path: Path) -> logging.Handler:
@@ -1029,29 +1037,43 @@ def hosted_run() -> int:
 
 
 def _hosted_start(host: HostInfo) -> HostedStart:
-    """A new session of the spec, or ``final-only`` over the session ``session.json`` names, measured where the spec
-    says; raises ValueError when the spec or that session is refused, ImportError when a package of the ``hosted``
-    extra is missing, and what :func:`require_hosted_isolation` and :func:`ready_session` raise."""
+    """A new session of the spec, or the close or finish of the one ``session.json`` names (:func:`earlier_session`);
+    raises ValueError when the spec or that session is refused, ImportError when a ``hosted`` package is missing,
+    and what :func:`require_hosted_isolation` and :func:`ready_session` raise."""
 
     deadline = grant_deadline(host, datetime.now(timezone.utc))
     spec = campaign_spec(host)
     require_hosted_isolation(spec, os.environ)
     require_local_image(spec, os.environ)
-    previous = recorded_session(host.state_dir)
-    persisted = None if previous is None else persisted_run(previous)
+    earlier = earlier_session(host.state_dir)
+    if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
+        return HostedStart(lambda: EXIT_FAILED, deadline)
+    persisted = earlier.finish
     settings = _hosted_settings(host, spec, deadline.session_hours) if persisted is None else persisted.settings
     require_session_environment(settings, os.environ)
     ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
     if persisted is not None:
         run = partial(final_only, persisted, ready.peer_factory, ready.services)
+    elif earlier.left is not None:
+        run = partial(_start_again, earlier.left, settings, ready, host.state_dir)
     else:
         run = partial(run_session, settings, ready.peer_factory, ready.services, partial(_record_root, host.state_dir))
     return HostedStart(run, deadline)
 
 
+def _start_again(left: PersistedRun, settings: RunSettings, ready: ReadySession, state_dir: Path) -> int:
+    """Close ``left``, which ended before its baseline was recorded, with :func:`final_only`, which ends the sandboxes
+    of the tests it left, then start the spec's session on ``settings`` unless a stop during the close ended the run."""
+
+    log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", left.layout.root)
+    closed = final_only(left, ready.peer_factory, ready.services)
+    if reported_stop_reason(left.layout.root) != left.ended.value:
+        return closed
+    return run_session(settings, ready.peer_factory, ready.services, partial(_record_root, state_dir))
+
+
 def _stop_before_grant_ends(deadline: GrantDeadline) -> None:
-    """Arm the stop of this process one CLOSE grace before ``deadline``'s grant ends, at once when that has passed;
-    nothing when the grant states no runtime."""
+    """Arm this process's stop one CLOSE grace before ``deadline``'s grant ends (at once if passed; never untimed)."""
 
     if deadline.stop_after_sec is not None:
         arm_grant_stop(max(0.0, deadline.stop_after_sec))

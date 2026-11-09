@@ -277,33 +277,35 @@ runtime_env_dotenv_credentials_elsewhere() {
 
 # Remove from the checkout's .env $1 every assignment of RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS,
 # RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS and the keys $2..., with the continuation lines of a quoted value, and
-# keep every other byte. The lines are told apart as load_dotenv_no_clobber reads them. What is kept is written beside
-# the file (mktemp in its directory), given its mode and renamed over it, so a reader sees the old file or the new one,
-# never part of one. A link is always replaced, never written through: by a regular file of what it kept, or, for a
-# link to anything but a regular file, removed, so no later write of .env lands in what it points to. Nothing is
-# written when there is nothing to remove from a regular file (runtime_env_keep_lent_dotenv_lines always writes).
-# Status 1 and why on stderr when it cannot be done, a .env this account cannot read or one that is not a regular file
-# included.
+# keep every other byte. The lines are told apart as load_dotenv_no_clobber reads them. What is kept is written to a
+# new file beside .env with the file's mode and renamed over it (_runtime_env_replace_dotenv), so a reader sees the old
+# file or the new one, never part of one. A link is always replaced, never written through: by a regular file of what
+# it kept, or, for a link to anything but a regular file, removed, so no later write of .env lands in what it points
+# to. Nothing is written when there is nothing to remove from a regular file (runtime_env_keep_lent_dotenv_lines always
+# writes). Status 1 and why on stderr when it cannot be done, a .env this account cannot read or one that is not a
+# regular file included.
 runtime_env_remove_dotenv_credentials() {
   _runtime_env_rewrite_dotenv 0 "$@"
 }
 
-# runtime_env_remove_dotenv_credentials for a .env another account can write (runtime_env_dotenv_not_private), which
-# also removes every assignment load_dotenv_no_clobber would not lend from it (runtime_env_dotenv_lent), with the
-# continuation lines of a quoted value, and every other line but a blank one or a comment. The install's own writes
+# runtime_env_remove_dotenv_credentials for a .env another account can write (runtime_env_dotenv_not_private): the
+# file is rebuilt from the assignments load_dotenv_no_clobber would lend from it (runtime_env_dotenv_lent), each written
+# afresh as NAME=VALUE in the order it has there, and nothing else of it is kept -- no comment, blank line or other
+# byte, since a reader that splits lines another way could find an assignment in one (preflight reads .env as this
+# file does, _shell_lines in cli/preflight_env.py, but the bytes are another account's). The install's own writes
 # replace such a .env with a file of this account's, which a later reader may find private: what another account
 # planted there (NODE_OPTIONS, OPENAI_BASE_URL, LD_PRELOAD) must be gone before, or the rewrite lends it from then on.
-# The file is always replaced, even when nothing is removed, by one of mode 0600 that no other account can append to
-# before the install's next write copies it; as root, it keeps the owner of a .env that the checkout's owner owns, so
-# the user's own .env stays the user's. Call it before the first write of such a .env.
+# The file is always replaced, even when nothing is removed, by one of mode 0600 that belongs to the account that runs
+# the install (root included) and that no other account can append to before the install's next write copies it.
+# Call it before the first write of such a .env.
 runtime_env_keep_lent_dotenv_lines() {
   _runtime_env_rewrite_dotenv 1 "$@"
 }
 
 # The two above: $1 is 1 to keep only what a .env another account can write lends, 0 to remove the credentials alone.
 _runtime_env_rewrite_dotenv() {
-  local lent_only="$1" dotenv="$2" keys mode=600 tmp line text key value nl quote="" drop=0 removed=0 failed=0 REPLY
-  local owner dir_owner
+  local lent_only="$1" dotenv="$2" keys mode=600 line text key value nl quote="" drop=0 removed=0 failed=0 REPLY
+  local kept=""
   shift 2
   keys=" $RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS $RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS $* "
   if [ -L "$dotenv" ] && [ ! -f "$dotenv" ]; then
@@ -318,11 +320,7 @@ _runtime_env_rewrite_dotenv() {
   fi
   [ -L "$dotenv" ] || mode="$(stat -c '%a' -- "$dotenv")" || return 1
   [ "$lent_only" -eq 0 ] || mode=600
-  tmp="$(mktemp "$(dirname -- "$dotenv")/.env.XXXXXX")" || return 1
-  if [ "$lent_only" -eq 1 ] && [ "$(id -u)" = 0 ] && [ ! -L "$dotenv" ]; then
-    owner="$(stat -c '%u:%g' -- "$dotenv")" && dir_owner="$(stat -c '%u' -- "$(dirname -- "$dotenv")")" || failed=1
-    if [ "$failed" -eq 0 ] && [ "${owner%%:*}" = "$dir_owner" ]; then chown -- "$owner" "$tmp" || failed=1; fi
-  fi
+  # Read as load_dotenv_no_clobber reads: lines end at a newline alone, and one carriage return before it is dropped.
   while :; do
     nl=$'\n'
     if ! IFS= read -r line; then
@@ -335,8 +333,10 @@ _runtime_env_rewrite_dotenv() {
       drop=0
       text="${line#"${line%%[![:space:]]*}"}"
       text="${text%$'\r'}"
-      text="${text#export }"
-      if [[ "$text" == *=* && "$text" != \#* ]]; then
+      if [[ "$text" == \#* ]]; then
+        [ "$lent_only" -eq 0 ] || drop=1
+      elif [[ "${text#export }" == *=* ]]; then
+        text="${text#export }"
         key="${text%%=*}"
         key="${key%"${key##*[![:space:]]}"}"
         [[ "$keys" != *" $key "* ]] || drop=1
@@ -353,30 +353,66 @@ _runtime_env_rewrite_dotenv() {
               quote="${text:0:1}"
             fi ;;
         esac
-        if [ "$lent_only" -eq 1 ] && { [ -n "$quote" ] || ! runtime_env_dotenv_lent "$key" "$value"; }; then
+        if [ "$lent_only" -eq 1 ]; then
+          if [ "$drop" -eq 0 ] && [ -z "$quote" ] && runtime_env_dotenv_lent "$key" "$value"; then
+            # Written afresh: the name and a listed value, nothing of the line around them.
+            kept+="${key}=${value}"$'\n'
+            continue
+          fi
           drop=1
         fi
-      elif [ "$lent_only" -eq 1 ] && [ -n "$text" ] && [[ "$text" != \#* ]]; then
+      elif [ "$lent_only" -eq 1 ]; then
         drop=1
       fi
     fi
-    if [ "$drop" -eq 1 ]; then
+    if [ "$drop" -eq 1 ] || { [ "$lent_only" -eq 1 ] && [ -n "$quote" ]; }; then
       removed=$((removed + 1))
-    else
-      printf '%s%s' "$line" "$nl" || failed=1
+    elif [ "$lent_only" -eq 0 ]; then
+      kept+="${line}${nl}"
     fi
-  done < "$dotenv" > "$tmp" || failed=1
+  done < "$dotenv" 2>/dev/null || failed=1
   if [ "$failed" -eq 1 ]; then
     printf '[runtime-env ERROR] cannot remove the credentials from %s: it could not be read, or what it keeps written\n' \
       "$dotenv" >&2
-  elif [ -n "$quote" ]; then
-    printf '[runtime-env ERROR] cannot remove the credentials from %s: a quoted value in it never ends\n' "$dotenv" >&2
-  elif { [ "$removed" -eq 0 ] && [ ! -L "$dotenv" ] && [ "$lent_only" -eq 0 ]; } || { chmod -- "$mode" "$tmp" && mv -fT -- "$tmp" "$dotenv"; }; then
-    rm -f -- "$tmp"
-    return 0
+    return 1
   fi
-  rm -f -- "$tmp"
+  if [ -n "$quote" ]; then
+    printf '[runtime-env ERROR] cannot remove the credentials from %s: a quoted value in it never ends\n' "$dotenv" >&2
+    return 1
+  fi
+  [ "$removed" -ne 0 ] || [ -L "$dotenv" ] || [ "$lent_only" -eq 1 ] || return 0
+  _runtime_env_replace_dotenv "$dotenv" "$mode" "$kept" && return 0
+  printf '[runtime-env ERROR] cannot remove the credentials from %s: it could not be read, or what it keeps written\n' \
+    "$dotenv" >&2
   return 1
+}
+
+# Replace the file $1 with a new one of this account's holding $3, of mode $2. Its directory may be one another
+# account can write (a shared checkout), so nothing is done there by a path another account could turn elsewhere: the
+# directory is opened once and the new file made, written, given its mode and renamed through that descriptor
+# (/proc/self/fd), as shared_storage makes one; the new file is made under an unguessable name of its own, never
+# through a link (noclobber's O_EXCL), and then held to being the regular file this account just made. A new file
+# another account swaps in before the rename is found after it, and the replacement fails. Nothing is chowned: as
+# root, .env becomes root's, as every write of .env leaves it. Status 1 when it cannot be done.
+_runtime_env_replace_dotenv() {
+  (
+    umask 077
+    set -C
+    dir_fd="" new_fd="" name=""
+    exec {dir_fd}< "$(dirname -- "$1")/" || exit 1
+    dir="/proc/self/fd/$dir_fd"
+    [ -d "$dir" ] || exit 1
+    name="$(mktemp -u .env.XXXXXXXXXXXX)" && [ -n "$name" ] || exit 1
+    exec {new_fd}> "$dir/$name" || exit 1
+    if [ "$(stat -L -c '%F %u %h %s' -- "/proc/self/fd/$new_fd")" != "regular empty file $(id -u) 1 0" ] ||
+       ! printf '%s' "$3" >&"$new_fd" || ! chmod -- "$2" "/proc/self/fd/$new_fd" ||
+       ! mv -fT -- "$dir/$name" "$dir/$(basename -- "$1")"; then
+      rm -f -- "$dir/$name"
+      exit 1
+    fi
+    # Another account that swapped its own entry in for the new file before the rename put that entry at .env.
+    [ "/proc/self/fd/$new_fd" -ef "$dir/$(basename -- "$1")" ] && [ ! -L "$dir/$(basename -- "$1")" ]
+  )
 }
 
 # Status 0 when $2, the rest of a line, ends a value quoted with $1 as _runtime_env_read_quoted_value ends one: its last
@@ -488,10 +524,14 @@ HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env \
 HYPERLOOM_FRAMEWORK_ENV=isolated,shared HYPERLOOM_LLM_MODE=anthropic,deepseek,openai HYPERLOOM_RUN_MODE=baremetal,docker"
 
 # Status 0 when a .env another account can write lends the variable named $1 (any case, as preflight compares it) with
-# the value $2, compared whole.
+# the value $2, compared whole. The name is held to ASCII before it is folded: under a UTF-8 locale ${1^^} turns a long
+# s into S, and the name, written back as given, would then be one load_dotenv_no_clobber refuses whole. The letters are
+# spelled out because a range or class can take in other letters in some locales.
+RUNTIME_ENV_ASCII_NAME_RE='^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*$'
 runtime_env_dotenv_lent() {
-  local upper="${1^^}" entry
-  [[ "$upper" =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
+  local upper entry
+  [[ "$1" =~ $RUNTIME_ENV_ASCII_NAME_RE ]] || return 1
+  upper="${1^^}"
   for entry in $RUNTIME_ENV_DOTENV_NOT_PRIVATE_LENT; do
     [ "${entry%%=*}" = "$upper" ] || continue
     [[ ",${entry#*=}," == *",$2,"* && "$2" != *,* ]]

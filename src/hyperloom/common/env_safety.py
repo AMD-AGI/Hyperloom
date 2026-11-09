@@ -511,8 +511,11 @@ def valid_env_key(key: object) -> bool:
 
 def is_allowed_dotenv_key(key: object) -> bool:
     name = str(key or "").strip()
+    # Held to ASCII before folding: str.upper() turns a long s into S, and the name is written back as given.
+    if not valid_env_key(name):
+        return False
     upper = name.upper()
-    if not valid_env_key(upper) or upper in BLOCKED_UNTRUSTED_ENV_NAMES:
+    if upper in BLOCKED_UNTRUSTED_ENV_NAMES:
         return False
     return upper in DOTENV_EXACT_ALLOWLIST or any(upper.startswith(prefix) for prefix in DOTENV_PREFIX_ALLOWLIST)
 
@@ -520,14 +523,14 @@ def is_allowed_dotenv_key(key: object) -> bool:
 def is_allowed_not_private_dotenv_key(key: object) -> bool:
     """True when a ``.env`` another account can write may lend ``key``, with one of the values
     DOTENV_NOT_PRIVATE_LENT_VALUES gives it (is_lent_not_private_dotenv_assignment)."""
-    upper = str(key or "").strip().upper()
-    return is_allowed_dotenv_key(upper) and upper in DOTENV_NOT_PRIVATE_LENT_VALUES
+    name = str(key or "").strip()
+    return is_allowed_dotenv_key(name) and name.upper() in DOTENV_NOT_PRIVATE_LENT_VALUES
 
 
 def is_lent_not_private_dotenv_assignment(key: object, value: object) -> bool:
     """True when a ``.env`` another account can write lends ``key=value``: the name and that value are both listed."""
-    upper = str(key or "").strip().upper()
-    return is_allowed_not_private_dotenv_key(upper) and str(value) in DOTENV_NOT_PRIVATE_LENT_VALUES[upper]
+    name = str(key or "").strip()
+    return is_allowed_not_private_dotenv_key(name) and str(value) in DOTENV_NOT_PRIVATE_LENT_VALUES[name.upper()]
 
 
 def is_allowed_kernel_agent_env_key(key: object) -> bool:

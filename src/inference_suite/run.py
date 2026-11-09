@@ -5,8 +5,9 @@
 
 Before anything starts the round checks what it runs on: the staged tools, the source files, the frozen base, the
 installed framework's version (D6) and its parser (D7) unless the server is external, and the eval's served context.
-It then acquires the server, runs the load and the eval on it, and releases it. The GPU sampler follows the round's
-phase marks, so its readings cover the measured window alone; the KV sampler scrapes the ready server and tags each
+It then acquires the server, runs the load and the eval on it, and releases it. The power recorder samples the node for
+the whole round and bounds each phase by the instant its mark carries; once the round ends, ``power.json`` is written
+with the load's token counts and the report carries its summary. The KV sampler scrapes the ready server and tags each
 reading with its phase. An AgentX profile round opens the server's capture window on the replay's phase clock, a fixed
 profile round around its measured pass. A scriptable round runs its base's script in place of a server and a load, and
 a scriptable profile round captures the script's whole run. Every child is reaped and every artifact written before :func:`run_round`
@@ -29,19 +30,30 @@ from pathlib import Path
 
 import yaml
 
-from hyperloom_common.gpu_telemetry import GpuPhase, GpuPowerRecorder
+from hyperloom_common.gpu_telemetry import (
+    GpuPhase,
+    PowerRecorder,
+    RecorderScope,
+    RecorderTiming,
+    TokenCounts,
+    gpu_monitor,
+)
 from hyperloom_common.io import atomic_write_json
 from inference_suite import framework_version, parser_check, staging
 from inference_suite.compose import Refusal, RoundFacts, compose
 from inference_suite.contracts.base_launch import DIGEST_PREFIX, BaseLaunch, EnvValue
 from inference_suite.contracts.config import ConfigError, LifecycleMode, SuiteConfig, WorkloadKind
 from inference_suite.contracts.launch import ClientInvocation, Launch, VersionCheck
-from inference_suite.contracts.layout import RunLayout
+from inference_suite.contracts.layout import POWER, RunLayout
 from inference_suite.contracts.report import (
+    AgentxResult,
     EvalResult,
     ExitCodes,
     FailedStep,
+    FixedMetrics,
     GpuMonitorBlock,
+    MlperfResult,
+    PowerSummary,
     ProbeOutcome,
     ProfileResult,
     Report,
@@ -84,14 +96,21 @@ _LM_EVAL_RESULTS = "results_*.json"
 #: Recorded when the serving interpreter's framework carries no version and the base names no recipe version to hold
 #: it to (D6 is not applicable).
 UNVERSIONED = "unversioned"
+#: The marks that move the power recorder's phase; the eval's end returns it to ``finished``, so the eval phase holds
+#: only the eval.
 _GPU_PHASES: Mapping[Phase, GpuPhase] = {
+    Phase.SPAWN: GpuPhase.BOOT,
+    Phase.READY: GpuPhase.READY,
     Phase.WARMUP: GpuPhase.WARMUP,
     Phase.MEASURED: GpuPhase.MEASURED,
     Phase.FINISHED: GpuPhase.FINISHED,
     Phase.EVAL: GpuPhase.EVAL,
+    Phase.EVAL_END: GpuPhase.FINISHED,
+    Phase.TEARDOWN: GpuPhase.TEARDOWN,
 }
 #: The ``config_envs`` key :class:`KvMetricsPoller` derives its ``/metrics`` URL from.
 _KV_BASE_URL_KEY = "BENCHMARK_BASE_URL"
+_COUNTED_LOADS = (WorkloadKind.FIXED.value, WorkloadKind.AGENTX.value, WorkloadKind.MLPERF.value)
 _UTF8 = "utf-8"
 
 
@@ -129,7 +148,7 @@ def _write_config(config: SuiteConfig, layout: RunLayout) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _gpu_listener(recorder: GpuPowerRecorder) -> PhaseListener:
+def _gpu_listener(recorder: PowerRecorder) -> PhaseListener:
     def hear(phase: Phase, mono: float) -> None:
         gpu_phase = _GPU_PHASES.get(phase)
         if gpu_phase is not None:
@@ -138,23 +157,52 @@ def _gpu_listener(recorder: GpuPowerRecorder) -> PhaseListener:
     return hear
 
 
-def _recorder(config: SuiteConfig, layout: RunLayout) -> GpuPowerRecorder | None:
+def _recorder(config: SuiteConfig, layout: RunLayout) -> PowerRecorder | None:
     telemetry = config.telemetry.gpu
     if not telemetry.enabled:
         return None
-    return GpuPowerRecorder(
-        output_path=str(layout.gpu_power),
-        samples_path=str(layout.gpu_samples),
-        gpus=set(config.server.gpus),
-        interval_sec=telemetry.interval_sec,
+    scope = RecorderScope(
+        gpus=tuple(config.server.gpus), external_server=config.lifecycle.mode is LifecycleMode.EXTERNAL
     )
+    timing = RecorderTiming(fast_sec=telemetry.interval_sec)
+    return PowerRecorder(output_path=str(layout.power), scope=scope, timing=timing)
 
 
-def _gpu_monitor(recorder: GpuPowerRecorder | None, aborted: bool) -> tuple[GpuMonitorBlock, ...]:
+def _token_counts(sections: Mapping[str, object]) -> TokenCounts | None:
+    """What the measured window served, from the load's report section; ``None`` for a load that counts no tokens."""
+    load = next((section for name in _COUNTED_LOADS if (section := sections.get(name)) is not None), None)
+    if isinstance(load, FixedMetrics):
+        values = load.values
+        return TokenCounts(
+            *(_count(values[key]) for key in ("completed_requests", "total_input_tokens", "total_output_tokens"))
+        )
+    if isinstance(load, AgentxResult):
+        return TokenCounts(load.counts["successful"], load.counts["input_tokens"], load.counts["output_tokens"])
+    if isinstance(load, MlperfResult):
+        result = load.result
+        return TokenCounts(_count(result.get("completed")), None, _count(result.get("total_output_tokens")))
+    return None
+
+
+def _count(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+@dataclass(frozen=True)
+class _PowerSections:
+    """The report's view of the round's ``power.json``."""
+
+    gpu_monitor: tuple[GpuMonitorBlock, ...] = ()
+    power: PowerSummary | None = None
+
+
+def _finish_power(recorder: PowerRecorder | None, round_: _Round) -> _PowerSections:
+    """Write ``power.json`` with the round's token counts, and return what the report carries of it."""
     if recorder is None:
-        return ()
-    recorder.close(aborted=aborted)
-    return tuple(GpuMonitorBlock.from_document(block.as_dict()) for block in recorder.gpu_monitor())
+        return _PowerSections()
+    recording, document = recorder.finish(_token_counts(round_.sections), aborted=round_.stop is not None)
+    blocks = tuple(GpuMonitorBlock.from_document(block.as_dict()) for block in gpu_monitor(recording))
+    return _PowerSections(blocks, PowerSummary.of(POWER, document))
 
 
 def _load_base(config: SuiteConfig) -> BaseLaunch | Stop:
@@ -269,7 +317,7 @@ def _lm_eval_version() -> str | Stop:
 class _Round:
     """One round's progress: the first step it failed at, and the report sections it has filled so far."""
 
-    def __init__(self, config: SuiteConfig, layout: RunLayout, gpu: GpuPowerRecorder | None, cancel: Cancel) -> None:
+    def __init__(self, config: SuiteConfig, layout: RunLayout, gpu: PowerRecorder | None, cancel: Cancel) -> None:
         self.config = config
         self.layout = layout
         self.kv = _KvSampler(server_url(config.server), layout)
@@ -535,7 +583,7 @@ class _Round:
             )
         return _eval_result(layout, plan, self.config.eval.task.value)
 
-    def report(self, gpu_monitor: tuple[GpuMonitorBlock, ...]) -> Report:
+    def report(self, power: _PowerSections) -> Report:
         config = self.config
         workload = getattr(config, config.workload.value, None)
         stop = self.stop
@@ -552,7 +600,8 @@ class _Round:
             workload_digest=None if workload is None else _digest(workload.to_document()),
             concurrency=getattr(workload, "concurrency", None),
             server=self.server,
-            gpu_monitor=gpu_monitor,
+            gpu_monitor=power.gpu_monitor,
+            power=power.power,
             **self.sections,  # type: ignore[arg-type]
         )
 
@@ -637,12 +686,14 @@ def run_round(config: SuiteConfig, *, cancel: Cancel = _not_cancelled) -> RoundR
     config_sha256 = _write_config(config, layout)
     recorder = _recorder(config, layout)
     round_ = _Round(config, layout, recorder, cancel)
+    if recorder is not None:
+        recorder.start()
     try:
         round_.run(config_sha256)
     finally:
-        gpu_monitor = _gpu_monitor(recorder, aborted=round_.stop is not None)
+        power = _finish_power(recorder, round_)
         round_.clock.write(layout)
-    report = round_.report(gpu_monitor)
+    report = round_.report(power)
     atomic_write_json(layout.report, report.to_document())
     return RoundResult(report, layout)
 
