@@ -236,7 +236,9 @@ directory, never into the run directory.
 
 A round with GPU telemetry on writes `power.json` (`schema_version` 2): one file
 holding every power reading the node gives, from the start of the round to its
-end.
+end. The config's `telemetry.gpu.interval_sec` sets the sysfs interval: below
+0.5 s it is raised to 0.5 s, and above 1.5 s the config is refused, since samples
+more than 3 s apart invalidate the window's energy.
 
 | Source | Read | Recorded |
 |---|---|---|
