@@ -25,8 +25,7 @@ log = logging.getLogger(__name__)
 # Manifest key on the specialist's done payload / the integrate_patch params.
 MANIFEST_KEY = "framework_switches"
 
-# Default value assigned to a switch whose manifest entry omits one. The
-# rewrites are boolean fast paths, so "on" is the only value that matters.
+# Value of a switch whose manifest entry omits one: "on" for a flag; a size, count or threshold declares its own.
 DEFAULT_SWITCH_VALUE = "1"
 
 # Recognised rewrite categories, mirroring ``_framework_rewrite_evidence`` plus the two that are not host-observable
@@ -69,6 +68,16 @@ class _AcceptedSwitches(NamedTuple):
     problems: list[str]
 
 
+# A value no credential can be: a flag or a count. A token-cache switch reads credential-shaped by name alone.
+_LITERAL_VALUE = re.compile(r"(?i)true|false|on|off|yes|no|-?\d{1,9}")
+
+
+def _declared_value(entry: dict[str, Any]) -> str:
+    """The entry's value as an env string, defaulting only when it gives none."""
+    value = entry.get("value")
+    return str(value).strip() if value not in (None, "") else DEFAULT_SWITCH_VALUE
+
+
 def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _AcceptedSwitches:
     """Keep the entries that name a usable rewrite switch, reporting why the rest were dropped."""
     problems: list[str] = []
@@ -87,7 +96,8 @@ def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _Acce
         if upper in BLOCKED_EXTERNAL_ENV_NAMES:
             problems.append(f"dropped {name!r}: reserved benchmark variable, not a rewrite switch")
             continue
-        if is_secret_shaped_env_name(upper):
+        value = _declared_value(entry)
+        if is_secret_shaped_env_name(upper) and not _LITERAL_VALUE.fullmatch(value):
             problems.append(f"dropped {name!r}: credential-shaped name, not a rewrite switch")
             continue
         if upper in reserved:
@@ -104,7 +114,7 @@ def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _Acce
             problems.append(f"{name}: unrecognised category {category!r}; recorded as-is")
         accepted[upper] = {
             "switch": upper,
-            "value": str(entry.get("value") or DEFAULT_SWITCH_VALUE),
+            "value": value,
             "category": category,
             "target": str(entry.get("target") or "").strip(),
             "evidence": str(entry.get("evidence") or "").strip(),
@@ -414,6 +424,15 @@ def leave_one_out_variants(
     return variants
 
 
+def unattributed_arms(variants: list[dict[str, Any]], pending: set[str]) -> list[dict[str, Any]]:
+    """Keep the lever arms whose lever is in ``pending``, and the combination arm while any of its levers is."""
+    return [
+        v
+        for v in variants
+        if pending.intersection([v["framework_lever"]] if v["framework_lever"] else v["framework_lever_bundle"])
+    ]
+
+
 def summarize(switches: list[dict[str, Any]], problems: list[str]) -> str:
     """Render a one-block summary of a parsed manifest for a log or a result."""
     if not switches and not problems:
@@ -449,4 +468,5 @@ __all__ = [
     "switch_env",
     "transitive_closure",
     "unarmed_env_reads",
+    "unattributed_arms",
 ]

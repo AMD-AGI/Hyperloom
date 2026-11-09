@@ -1,10 +1,10 @@
 """The end of an optimization round: a same-node A/B, then the next round.
 
 The target is not a STOP: it triggers an A/B and the next round of optimization,
-and the "all plan items verdicted" trigger is unified with it. A campaign once
-stopped at its early-exit target while its last KEEP still gained, and the number
-that stopped it was the chained first-node scale (arbor/rebaseline.py), each
-KEEP's single replay carried forward: an upper bound.
+and the "all plan items verdicted" trigger is unified with it. An early-exit target
+would stop a campaign while its last KEEP still gains, on a number that is the
+chained first-node scale (arbor/rebaseline.py), each KEEP's single replay carried
+forward: an upper bound.
 
 A round ends on either trigger:
 
@@ -15,7 +15,7 @@ Then, before the next iteration:
 
 1. **A/B.** The launcher's hook (``ARBOR_ROUND_AB``, or the config's
    ``round_ab.command``) serves the campaign's base tree and the current tree on this
-   node in alternating rounds (scripts/model-m-campaign/round_ab.py) and writes a
+   node in alternating rounds (the round-end A/B script) and writes a
    verdict to ``<out>/summary.json``.
 2. **Confirmed:** the current tree's A/B mean becomes the bar on this node, the base
    tree's the baseline, and the chained scale starts again from them (a ``ROUND_AB``
@@ -57,13 +57,13 @@ from pathlib import Path
 
 FILE = "round_end.json"
 STOP_FILE = "ROUND_STOP.md"
-STOP_PREFIX = "round-stop:"   # never "chunk-timer": scripts/cluster/chunk_lib.sh deletes those
+STOP_PREFIX = "round-stop:"   # never "chunk-timer": a cluster launcher's chunk library deletes those
 ENV_HOOK = "ARBOR_ROUND_AB"
 TRIGGERS = ("target", "map")
 VERDICTS = ("confirmed", "not_confirmed", "incomplete")
 
 KNOBS = {
-    "round_target_ratio": 1.40,   # the next target, over the A/B bar (calibrate_baseline.py's ratio)
+    "round_target_ratio": 1.40,   # the next target, over the A/B bar
     "round_ab_minutes": 150,      # time an A/B needs; less left before a chunk's switch hands off
     "round_ab_attempts": 3,       # incomplete A/Bs before the round end stops for the operator
 }

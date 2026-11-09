@@ -6,7 +6,7 @@ Layout under the share root (default /path/to/arbor-share, on the share's pod)::
     projects/<project>/<user>/<campaign>/knowledge/<type>/  summary, outcomes, findings,
                                                             profiles, dossier, artifacts
 
-The pod is reached through the platform's ssh gateway, which takes ssh
+The pod is reached through an ssh gateway, which takes ssh
 commands, scp and sftp but not rsync and not piped stdin.
 So an upload is one sftp batch: make the directories, put each file under a
 temporary name, rename it into place. sftp's rename replaces the target in one
@@ -104,8 +104,8 @@ class Share:
         if not step("ssh", reached,
                     f"reached {self.host}" if reached else (se.strip() or so.strip() or f"exit {rc}")[-300:],
                     f"ssh to {self.host} failed. Add the pod to ~/.ssh/config as {self.host} "
-                    f"(the collector skills show the entry) with the key you registered "
-                    f"on the platform, and check `ssh {self.host} true`."):
+                    f"(the collector skills show the entry) with the key the gateway "
+                    f"accepts, and check `ssh {self.host} true`."):
             return out
         if not step("share root", "WRITABLE" in so,
                     f"{self.projects} {'is writable' if 'WRITABLE' in so else 'is missing or not writable'}",

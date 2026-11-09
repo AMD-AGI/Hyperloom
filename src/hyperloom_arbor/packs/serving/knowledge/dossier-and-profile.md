@@ -38,7 +38,7 @@ need no GPU first; one iteration can write several.
    trace (labelled eager) when op attribution is needed. Stop any traced server before DONE.
 4. **Part 8** (kernel usage) from part 7's kernels, AITER's source in the container, and the CUDA
    path if the model has one.
-5. **Parts 9 and 10** need people: a reference on another GPU, and earlier AMD optimizations
+5. **Part 10** needs people: earlier AMD optimizations
    (an InferenceX recipe for this model, if one exists). Record what is missing as an open ask,
    not a blocker.
 6. **Part 11** (directions), last, from parts 1–10 only. Each direction gets a map ID and becomes

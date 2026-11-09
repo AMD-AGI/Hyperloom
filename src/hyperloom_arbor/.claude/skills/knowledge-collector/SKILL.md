@@ -72,7 +72,7 @@ Before a campaign, or when asked what is known about a model:
 1. **Find the campaigns**: the dashboard's global mode, filtered by project
    (the `dashboard` skill); or
    `ssh arbor-share 'ls /path/to/arbor-share/projects/<project>/*/*/knowledge/summary/SUMMARY.md'`;
-   on a Cluster B node, the same path directly.
+   on a node that mounts the share, the same path directly.
 2. **Read** `SUMMARY.md`, then `OUTCOMES.md` (what was tried and why it was
    kept or reverted) and `FINDINGS.md` (dead ends, with when to revisit each).
 3. **Use it as leads, with their labels.** A result holds for its pins, node,

@@ -71,7 +71,9 @@ The mask is resolved variable-major, over the full ROCm precedence chain in
 its legacy spelling `HSA_VISIBLE_DEVICES`) before the HIP-level ones
 (`HIP_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES`, `GPU_DEVICE_ORDINAL`). Within
 each variable the process environment comes before the materialized baseline
-recipe's `benchmark.envs`.
+recipe's `benchmark.envs`, except a recipe ROCR mask that is the point's own pin
+inside the process mask: the materializer launches the server on it, so the
+resolver reports it first too.
 
 That module is also the single definition of the tuple and the mask parser that
 `orchestrator/bus/gpu_pool.py`, `orchestrator/policy/gate.py`,
@@ -81,12 +83,14 @@ many GPUs does this process have", and widening that would change GPU accounting
 repo-wide — while this resolver answers "where is this run pinned", and a run
 pinned with a legacy spelling is really pinned.
 
-The process env comes first because the recipe's ROCR key is not evidence of a
-pin: `materialize_config_with_envs` autofills `ROCR_VISIBLE_DEVICES=0..tp-1`
-into every materialized recipe when the mask is absent or narrower than `TP`.
-A recipe ROCR value byte-identical to that default is therefore ignored, so a
-`HIP`-pinned or genuinely unpinned run is not silently re-pinned to cards
-`0..tp-1`. A recipe mask that differs from the default *is* honoured, and its ids are
+A recipe's ROCR key alone is not evidence of a pin: `materialize_config_with_envs`
+writes a mask into every materialized recipe, filling it from the process mask,
+or `0..tp-1` with none, when the point names none or fewer cards than `TP`, and
+records each fill under `HYPERLOOM_ROCR_AUTOFILL`. A recipe ROCR value equal to
+that record, or to `0..tp-1` in a recipe without one, is therefore ignored, so a
+`HIP`-pinned or genuinely unpinned run is not silently re-pinned to the fill, and
+a recipe re-materialized under another process mask is refilled from that mask.
+Any other recipe mask *is* honoured, and its ids are
 forwarded **logical**, exactly like a process-env one: GEAK starts its servers
 from `launch_recipe`, which carries that mask, so the servers see a renumbered
 set even though the GEAK process itself never does.

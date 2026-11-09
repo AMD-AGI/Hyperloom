@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -133,3 +134,94 @@ def test_an_unfetchable_node_stops_the_install_only_when_geak_agent_is_selected(
 
     assert "downloading" in proc.stderr
     assert refused or _node_bin(proc) == ""
+
+
+def _served_node_archive(tmp_path: Path) -> Path:
+    """A fake curl serving a Node archive whose members belong to uid/gid 1000, as nodejs.org's do."""
+    import hashlib
+    import io
+    import tarfile
+
+    served = tmp_path / "served"
+    served.mkdir()
+    archive = served / f"{_NODE_DIR}.tar.xz"
+    with tarfile.open(archive, "w:xz") as tar:
+        for name, data, mode in (
+            (_NODE_DIR, None, 0o755),
+            (f"{_NODE_DIR}/bin", None, 0o755),
+            (f"{_NODE_DIR}/bin/node", b"#!/bin/sh\necho v22.23.3\n", 0o755),
+        ):
+            info = tarfile.TarInfo(name)
+            info.uid = info.gid = 1000
+            info.uname = info.gname = "builder"
+            info.mode = mode
+            if data is None:
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            else:
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    (served / "SHASUMS256.txt").write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+    curl = tmp_path / "bin" / "curl"
+    curl.parent.mkdir(parents=True, exist_ok=True)
+    curl.write_text(
+        '#!/bin/sh\nout=""\nwhile [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) url="$1"; shift;; esac; done\n'
+        f'cp "{served}/$(basename "$url")" "$out"\n',
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    return archive
+
+
+@pytest.mark.skipif(shutil.which("xz") is None, reason="the installer unpacks Node with xz")
+def test_the_fetched_node_belongs_to_the_installing_account(tmp_path):
+    _served_node_archive(tmp_path)
+
+    proc = _install(tmp_path, 'ensure_geak_node\necho "NODE=${_geak_node_bin}"', node_on_path="18.19.0")
+
+    node = Path(_node_bin(proc))
+    assert node == tmp_path / "cache" / _NODE_DIR / "bin" / "node"
+    for path in (node, node.parent, node.parent.parent):
+        assert path.stat().st_uid == os.geteuid(), f"{path} kept the archive's owner"
+
+
+def _one_id_user_namespace() -> bool:
+    try:
+        probe = subprocess.run(["unshare", "--user", "--map-root-user", "true"], capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
+
+
+@pytest.mark.skipif(shutil.which("xz") is None, reason="the installer unpacks Node with xz")
+@pytest.mark.skipif(not _one_id_user_namespace(), reason="this host cannot make a user namespace")
+def test_node_is_fetched_inside_a_one_id_user_namespace(tmp_path):
+    """Root of a namespace that maps one id cannot chown to the archive's uid 1000; the unpack must not try."""
+    _served_node_archive(tmp_path)
+    body = 'ensure_geak_node\necho "NODE=${_geak_node_bin}"'
+    script = (
+        f"set -euo pipefail\nsource {sourceable_kernel_tools(tmp_path)!s}\n"
+        f'export PATH="{tmp_path / "bin"}:$PATH"\n{body}\n'
+    )
+    _fake_node(tmp_path / "bin" / "node", "18.19.0")
+    (tmp_path / "repo").mkdir(exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("GEAK_", "HYPERLOOM_GEAK_"))}
+    env.update(
+        REPO_ROOT=str(tmp_path / "repo"),
+        HYPERLOOM_CACHE_DIR=str(tmp_path / "cache"),
+        GEAK_ROOT=str(tmp_path / "geak"),
+        PYTHON=sys.executable,
+        PYTHONPATH=str(_SRC),
+    )
+
+    proc = subprocess.run(
+        ["unshare", "--user", "--map-root-user", "bash", "-c", script],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert _node_bin(proc) == str(tmp_path / "cache" / _NODE_DIR / "bin" / "node")

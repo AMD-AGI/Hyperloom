@@ -126,10 +126,10 @@ The following inference frameworks are supported:
      - 10.0 (docker) / 7.2.4 (bare-metal wheel)
      - Default framework. Validated ``docker`` images use ROCm 10.0 (``rocm10`` tags below). On a ROCm 7.2.x bare-metal host the installer still derives ``SGLANG_ROCM_EXTRA=rocm724`` from ``torch.version.hip`` (see below).
    * - vLLM
-     - 10.0 (docker, bare-metal source) / 7.2.3 (bare-metal wheel)
+     - 10.0 (docker, bare-metal source) / 7.2 (bare-metal wheel)
      - Validated ``docker`` image is the ROCm 10.0 build below. On bare metal the
        installer routes by the detected stack: a ROCm 7.2.x host installs the
-       ``rocm723`` wheel, a ROCm 10 host (``torch.version.hip`` 7.15) builds vLLM
+       ``rocm72`` wheel, a ROCm 10 host (``torch.version.hip`` 7.15) builds vLLM
        from source, and any other combination is rejected (see below). Do not mix
        frameworks within one session
    * - ATOM
@@ -144,7 +144,7 @@ Container images
 
 Pick the image that matches your environment. Public Docker Hub refs are used
 on your own GPU machine: the official upstream ``lmsysorg/sglang-rocm:<tag>``
-for SGLang, ``rocm/vllm:<tag>`` for vLLM and
+for SGLang, ``vllm/vllm-openai-rocm:<tag>`` for vLLM and
 ``rocm/atom-dev:<tag>`` for Atom. If your deployment uses a private registry
 mirror, set the registry prefix accordingly.
 
@@ -158,7 +158,7 @@ mirror, set the registry prefix accordingly.
      - MI300X / MI325X
    * - ``lmsysorg/sglang-rocm:v0.5.23-rocm10-mi35x-20261102``
      - MI355X
-   * - ``rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0``
+   * - ``vllm/vllm-openai-rocm:v0.33.0-rocm100``
      - MI300X / MI325X / MI355X
    * - ``rocm/atom-dev:v0.1.7-rc0``
      - MI355X (verified); MI300X / MI325X untested
@@ -187,7 +187,7 @@ nightly build and moves. Pin the versioned tag so a session stays reproducible.
 
 Browse all available tags at
 `hub.docker.com/r/lmsysorg/sglang-rocm/tags <https://hub.docker.com/r/lmsysorg/sglang-rocm/tags>`_,
-`hub.docker.com/r/rocm/vllm/tags <https://hub.docker.com/r/rocm/vllm/tags>`_
+`hub.docker.com/r/vllm/vllm-openai-rocm/tags <https://hub.docker.com/r/vllm/vllm-openai-rocm/tags>`_
 and
 `hub.docker.com/r/rocm/atom-dev/tags <https://hub.docker.com/r/rocm/atom-dev/tags>`_.
 
@@ -230,10 +230,10 @@ end-to-end validation of every stack.
      - Notes
    * - Operating System
      - Ubuntu 24.04
-     - Recommended bare-metal baseline. vLLM 0.28.0+ ROCm wheels require glibc >= 2.39, so Ubuntu 22.04 hosts must downgrade vLLM (for example ``VLLM_VERSION=0.27.1``) or use ``docker`` mode instead.
+     - Recommended bare-metal baseline. vLLM 0.28.0+ ROCm wheels require glibc >= 2.39, so Ubuntu 22.04 hosts must downgrade vLLM (for example ``VLLM_VERSION=0.27.1 VLLM_ROCM_VARIANT=rocm723``) or use ``docker`` mode instead.
    * - ROCm
      - 7.2.x or 10.0 (bare metal) / 10.0 (docker)
-     - Patch levels differ by framework and setup mode. On ROCm 7.2.x, vLLM installs the ROCm 7.2.3 wheel (``rocm723``); on ROCm 10.0, vLLM is built from source. On a ROCm 7.2.x bare-metal host, SGLang resolves ``SGLANG_ROCM_EXTRA=rocm724`` (ROCm 7.2.4 layer). The validated ``docker`` stacks use ROCm 10.0 user space (``rocm10`` images above), not the 7.2.x bare-metal wheel paths.
+     - Patch levels differ by framework and setup mode. On ROCm 7.2.x, vLLM installs the ROCm 7.2 wheel (``rocm72``); on ROCm 10.0, vLLM is built from source. On a ROCm 7.2.x bare-metal host, SGLang resolves ``SGLANG_ROCM_EXTRA=rocm724`` (ROCm 7.2.4 layer). The validated ``docker`` stacks use ROCm 10.0 user space (``rocm10`` images above), not the 7.2.x bare-metal wheel paths.
    * - Python
      - 3.12
      - Required by the vLLM ROCm wheel. The vLLM source build accepts Python >= 3.10, < 3.15.
@@ -244,12 +244,12 @@ end-to-end validation of every stack.
      - 0.5.23 (rocm10), pinned to commit ``297e54fd105e``
      - Recommended ``docker`` stack uses the ``lmsysorg/sglang-rocm:v0.5.23-rocm10-*`` images above (ROCm 10.0 user space). ``SGLANG_REF`` is the ``v0.5.23`` release commit (peeled from the tag object). Through 0.5.18 the HIP extra pinned ``compressed-tensors==0.15.0``, which caps torch below 2.11 and therefore cannot resolve at all against a ROCm 10 stack; 0.5.19 moved that dependency into ``runtime_common`` unpinned, leaving the installer's ROCm torch constraint as the version pip solves for. Bare-metal installs on ROCm 10 take the source-install path; on ROCm 7.2.x hosts, ``SGLANG_ROCM_EXTRA=rocm724`` still selects the AMD wheel index. Kernel-shape profiling for SGLang >= 0.5.18 uses TraceLens ``kernel_shape_tool`` rather than git-applying SGLang roofline patches.
    * - vLLM
-     - v0.29.0 (rocm723) wheel on ROCm 7.2.x; v0.29.0 source build, pinned to commit ``98dff2a81d74``, on ROCm 10; isolated venv
-     - On ROCm 7.2.x, installs ``vllm==0.29.0+rocm723`` from the wheels.vllm.ai pip index on Ubuntu 24.04+. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch. On ROCm 10 (``torch.version.hip`` 7.15) no wheel is published, so the installer checks out ``VLLM_SOURCE_REF`` (the ``v0.29.0`` release commit) into ``VLLM_ROOT`` (default ``/opt/hyperloom/vllm``) and builds it into ``VLLM_VENV_ROOT`` as a system-site-packages venv over the host ROCm torch. The source route requires ``--framework-env isolated``, ``git``, ``gcc``/``g++`` >= 11.3, ``cmake`` >= 3.26.1, ``ninja``, ``hipcc`` and the ROCm devel headers, installs AITER into the same venv when it is not already importable, and writes ``VLLM_ROCM_USE_AITER=1`` to ``.env`` when ``aiter`` imports. ``VLLM_INSTALL_METHOD`` (``auto``, ``wheel``, ``source``) can only confirm the detected route; a ROCm stack other than 7.2.x or 10 is rejected.
+     - v0.33.0 (rocm72) wheel on ROCm 7.2.x; v0.33.0 source build, pinned to commit ``4ba787ec9959``, on ROCm 10; isolated venv
+     - On ROCm 7.2.x, installs ``vllm==0.33.0+rocm72`` from the wheels.vllm.ai pip index on Ubuntu 24.04+. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch. On ROCm 10 (``torch.version.hip`` 7.15) the installer checks out ``VLLM_SOURCE_REF`` (the ``v0.33.0`` release commit) into ``VLLM_ROOT`` (default ``/opt/hyperloom/vllm``) and builds it into ``VLLM_VENV_ROOT`` as a system-site-packages venv over the host ROCm torch. The source route requires ``--framework-env isolated``, ``git``, ``gcc``/``g++`` >= 11.3, ``cmake`` >= 3.26.1, ``ninja``, ``hipcc`` and the ROCm devel headers, installs AITER into the same venv when it is not already importable, and writes ``VLLM_ROCM_USE_AITER=1`` to ``.env`` when ``aiter`` imports. ``VLLM_INSTALL_METHOD`` (``auto``, ``wheel``, ``source``) can only confirm the detected route; a ROCm stack other than 7.2.x or 10 is rejected.
 
 Bare-metal ROCm patch levels differ per framework. On ROCm 7.2.x the vLLM stack
-installs the ``rocm723`` variant (ROCm 7.2.3); on ROCm 10 it builds from source
-against the host ROCm, matching the ROCm 10 user space of the ``rocm/vllm`` image
+installs the ``rocm72`` variant (ROCm 7.2); on ROCm 10 it builds from source
+against the host ROCm, matching the ROCm 10 user space of the ``vllm/vllm-openai-rocm`` image
 the ``docker`` route uses; the SGLang stack
 installs from the ROCm 7.2.4 AMD wheel index when a host stays on ROCm 7.2.x;
 the recommended SGLang ``docker`` stack uses the two
