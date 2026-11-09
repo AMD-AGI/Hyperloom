@@ -76,6 +76,14 @@ def test_an_agent_branch_waits_for_cards_while_it_would_still_run_the_session_s_
     assert session._setup.least_run_seconds == 3780.0
 
 
+def test_a_session_that_runs_no_agent_has_no_sandboxes_and_refuses_an_agent_branch_by_name(tmp_path):
+    agents = replace(_agent_sessions(), sandboxes=None)
+    place = BranchPlace(SimpleNamespace(path=tmp_path / "worktree"), object(), tmp_path / "session")
+
+    with pytest.raises(ValueError, match="a1 runs an agent, and the session has no sandboxes"):
+        agents.session(SessionStart("a1", "c0", 1, BranchTask(agent="arbor")), place)
+
+
 def test_a_branch_whose_task_names_an_agent_runs_it_on_ports_of_its_own_in_the_sandbox_it_leases(tmp_path, monkeypatch):
     package = tmp_path / "site-packages" / "vllm"
     package.mkdir(parents=True)

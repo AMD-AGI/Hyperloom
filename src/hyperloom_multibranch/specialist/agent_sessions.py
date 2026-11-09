@@ -125,7 +125,8 @@ class AgentSessions:
     """What a session's agents run on: ``spec``, the workload every agent is asked to optimize (the cards, the port, the
     start commit's arguments and the workspace are each branch's own); the onboarding ``command`` and its ``env``; the
     ``toolbox`` the sandboxes are leased from and imports go to, and the ``repo`` they are read against; the
-    ``sandboxes`` the agents run in; and ``client``, the gate's benchmark client, ``None`` when the session has none to
+    ``sandboxes`` the agents run in, ``None`` when the session runs no agent; and ``client``, the gate's benchmark
+    client, ``None`` when the session has none to
     give. ``dossier`` is the dossier every agent branch is given: the one the run was given with its reviewed map, or
     the one the session's dossier pass wrote, once it has. ``maps`` is the scheduler's side of a mapping branch,
     ``None`` in a session that opens none. ``least_run_seconds`` is the least an agent must have left to run for its
@@ -136,7 +137,7 @@ class AgentSessions:
     env: Mapping[str, str]
     toolbox: RealToolbox
     repo: ExperimentRepo
-    sandboxes: AgentSandboxes
+    sandboxes: AgentSandboxes | None
     client: GateClient | None = None
     dossier: str | None = None
     maps: MapCalls | None = None
@@ -155,13 +156,14 @@ class AgentSessions:
             return MapSession(start, self.maps, partial(self._mapped, branch, place))
         spec = replace(self._placed(branch, place), plan=start.task.plan or None, dossier=self.dossier)
         onboard = cli_onboard(self.command, self.env, branch, place.blackboard)
+        sandboxes = self._agent_sandboxes(branch)
         sandbox = self._sandbox(branch, place)
 
         def onboarding(agent_sandbox: AgentSandbox) -> OnboardingSetup:
             return OnboardingSetup(agent_sandbox, onboard)
 
         def spend(roots: tuple[Path, ...], ledger: Path) -> AgentSpend:
-            config = self.sandboxes.claude_config(place)
+            config = sandboxes.claude_config(place)
             return AgentSpend(config, roots, ledger, branch, self.command.model, place.blackboard)
 
         setup = AutonomousSetup(
@@ -218,13 +220,19 @@ class AgentSessions:
     def _sandbox(self, holder: str, place: BranchPlace) -> Callable[[BranchLease], AgentSandbox]:
         """The sandbox of a lease for ``holder`` in ``place``, the framework's source in its worktree imported first."""
 
+        sandboxes = self._agent_sandboxes(holder)
         layout = COMPONENT_LAYOUTS[self.spec.framework]
         source = place.worktree.path / PurePosixPath(layout.upstream_prefix).parent
 
         def sandbox(lease: BranchLease) -> AgentSandbox:
-            return self.sandboxes.sandbox(holder, place, source, lease)
+            return sandboxes.sandbox(holder, place, source, lease)
 
         return sandbox
+
+    def _agent_sandboxes(self, holder: str) -> AgentSandboxes:
+        if self.sandboxes is None:
+            raise ValueError(f"{holder} runs an agent, and the session has no sandboxes to run one in")
+        return self.sandboxes
 
 
 def with_agents(
