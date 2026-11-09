@@ -920,6 +920,9 @@ class TestResult:
     the root's reading it is judged after (``LongContextResult.root``).
     ``builds`` has one charge for each native build the test's stack needed (none for a stack that needs none, and none in
     a document written before builds existed); ``gpu_seconds`` and ``queued_at`` never include build time.
+    ``agentx_checkpoint`` is the ruling the AgentX checkpoint made on the test's measured round (``None`` for a test it
+    did not judge, or whose window never closed); a test it stopped (``stopped``) is the candidate's failure, and its
+    ``gain_pct`` covers the first ``at_sec`` of the round only.
     A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
     mean nothing now and ``from_document`` leaves them out, so such a document still loads.
     """
@@ -955,6 +958,7 @@ class TestResult:
     short_prompt_consistency: ShortPromptConsistency | None = None
     long_context: LongContextResult | None = None
     builds: tuple[BuildCharge, ...] = ()
+    agentx_checkpoint: AgentxCheckpointRuling | None = None
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -986,13 +990,20 @@ class TestResult:
         ):
             raise MeasurementError(f"request_classes must be a tuple of RequestClasses, got {self.request_classes!r}")
         _check_phases(self.phases, self.unaccounted_seconds)
-        consistency = self.short_prompt_consistency
-        if consistency is not None and not isinstance(consistency, ShortPromptConsistency):
-            raise MeasurementError(f"short_prompt_consistency must be a ShortPromptConsistency, got {consistency!r}")
-        if self.long_context is not None and not isinstance(self.long_context, LongContextResult):
-            raise MeasurementError(f"long_context must be a LongContextResult, got {self.long_context!r}")
+        self._check_findings()
         if not isinstance(self.builds, tuple) or not all(isinstance(b, BuildCharge) for b in self.builds):
             raise MeasurementError(f"builds must be a tuple of BuildCharge, got {self.builds!r}")
+
+    def _check_findings(self) -> None:
+        """The checks the test ran beside its rounds, and the checkpoint's ruling on them."""
+        for name, kind in (
+            ("short_prompt_consistency", ShortPromptConsistency),
+            ("long_context", LongContextResult),
+            ("agentx_checkpoint", AgentxCheckpointRuling),
+        ):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, kind):
+                raise MeasurementError(f"{name} must be a {kind.__name__}, got {value!r}")
 
     def _check_repro_verdict(self) -> None:
         if self.repro_verdict not in ("", *REPRO_VERDICTS):
@@ -1053,13 +1064,15 @@ class TestResult:
             document["long_context"] = self.long_context.to_document()
         if self.builds:
             document["builds"] = [value.to_document() for value in self.builds]
+        if self.agentx_checkpoint is not None:
+            document["agentx_checkpoint"] = self.agentx_checkpoint.to_document()
         return document
 
     @classmethod
     def from_document(cls, document: object) -> TestResult:
         f = _mapping(document, "a test result")
         sandbox, failure, consistency = f.get("sandbox"), f.get("failure_class"), f.get("short_prompt_consistency")
-        long_context = f.get("long_context")
+        long_context, checkpoint = f.get("long_context"), f.get("agentx_checkpoint")
         return cls(
             request_id=f.get("request_id"),
             validity=_enum(Validity, f.get("validity"), "validity"),
@@ -1092,6 +1105,7 @@ class TestResult:
             short_prompt_consistency=None if consistency is None else ShortPromptConsistency.from_document(consistency),
             long_context=None if long_context is None else LongContextResult.from_document(long_context),
             builds=tuple(map(BuildCharge.from_document, _items(f.get("builds", ()), "builds"))),
+            agentx_checkpoint=None if checkpoint is None else AgentxCheckpointRuling.from_document(checkpoint),
         )
 
 

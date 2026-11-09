@@ -75,6 +75,7 @@ def report_document(
             "knowledge": exports.knowledge_document(),
             "breakdown": str(exports.breakdown),
             "dashboard": {"json": str(exports.dashboard.json), "html": str(exports.dashboard.html)},
+            "agentx_checkpoint": None if exports.checkpoint is None else exports.checkpoint.to_document(),
         },
         "stop": {
             "clean": report.stop.clean,
@@ -159,6 +160,7 @@ def report_markdown(report: CloseReport, session_id: str, agent_isolation: Launc
         "",
         *_export_lines(report.exports),
         *_stop_lines(report.stop),
+        *_checkpoint_lines(report.exports),
     ]
     return "\n".join(lines) + "\n"
 
@@ -180,6 +182,12 @@ def _export_lines(exports: CloseExports | None) -> list[str]:
         f"Breakdown: {exports.breakdown}",
         f"Dashboard: {exports.dashboard.html}",
     ]
+
+
+def _checkpoint_lines(exports: CloseExports | None) -> list[str]:
+    if exports is None or exports.checkpoint is None:
+        return []
+    return ["", "## AgentX checkpoint", "", *exports.checkpoint.lines()]
 
 
 def _stop_lines(stop: StopReport) -> list[str]:

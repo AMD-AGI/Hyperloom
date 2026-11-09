@@ -31,9 +31,14 @@ from hyperloom.common.perf_metric import (
     holds_within_band,
     incomparability_reason,
 )
+from hyperloom.contracts.measurement import AgentxCheckpointRuling
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok
 from hyperloom_multibranch.rulegate.readings import GRADED_SHORT_REQUESTS
+
+#: The refusal of a candidate the AgentX checkpoint stopped: its ``gain_pct`` is the checkpoint's, over the first
+#: half hour only, and it records no value, so nothing that averages full measurements reads it as one.
+CHECKPOINT_TRAILED = "checkpoint_trailed"
 
 # Failing more requests than the parent is a defect of the candidate a repair can look at; the other reasons
 # ``incomparability_reason`` gives mean the pair did not measure the same work. Only unserved requests count: a short
@@ -148,6 +153,24 @@ def compare(
     )
 
 
+def trailed(ruling: AgentxCheckpointRuling, request_id: str, objective: AgentXObjective) -> Judgement:
+    """The judgement of a candidate the checkpoint stopped for trailing its parent: regressed, never retested."""
+    return Judgement(
+        Verdict.REGRESSED,
+        ruling.gain_pct,
+        objective.bar_pct,
+        (request_id,),
+        {},
+        AccuracyVerdict.NOT_MEASURED,
+        (CHECKPOINT_TRAILED,),
+    )
+
+
+def partial_window(judgement: Judgement) -> bool:
+    """Whether ``judgement``'s gain covers the checkpoint's window only, not a full measurement."""
+    return CHECKPOINT_TRAILED in judgement.refused_by
+
+
 def confirm(
     first: Judgement,
     retest: Mapping[str, float],
@@ -178,6 +201,7 @@ def confirm(
 
 __all__ = [
     "BELOW_THRESHOLD",
+    "CHECKPOINT_TRAILED",
     "P50_BELOW_THRESHOLD",
     "SPEED_GATES",
     "TOTAL_BELOW_THRESHOLD",
@@ -185,4 +209,6 @@ __all__ = [
     "Guard",
     "compare",
     "confirm",
+    "partial_window",
+    "trailed",
 ]

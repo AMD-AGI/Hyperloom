@@ -56,7 +56,7 @@ from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import BranchLogStore, CommitQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
-from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
+from hyperloom_multibranch.contracts.toolbox import SpecialistTokens, WorkloadKind
 from hyperloom_multibranch.blackboard import BriefTriggers, LocalBlackboard
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
@@ -425,6 +425,7 @@ def _toolbox(
 
     from hyperloom.measure.compile import EnvironmentCompiler
     from hyperloom.measure.hosted_spec import SpecContext
+    from hyperloom_multibranch.toolbox.agentx_checkpoint import CheckpointReferences
     from hyperloom_multibranch.toolbox.planner import HostedPlanner
     from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
@@ -438,12 +439,14 @@ def _toolbox(
         blob_root=str(setup.blobs.root),
     )
     planner = HostedPlanner(compiler, canonical, layout.toolbox / POINTS_DIR)
-    return host.backend.toolbox(
-        setup,
-        LocalBlackboard(layout.blackboard, Writer(Role.TOOLBOX, TOOLBOX_WRITER)),
-        AcceptanceSetup(repo, planner, image.digest, workload_kind=workload.kind, explore_accuracy=False),
-        spec,
+    blackboard = LocalBlackboard(layout.blackboard, Writer(Role.TOOLBOX, TOOLBOX_WRITER))
+    checkpoint = None
+    if workload.kind is WorkloadKind.AGENTX:
+        checkpoint = CheckpointReferences(setup.agentx_early_stop, workload.agentx_objective, blackboard)
+    acceptance = AcceptanceSetup(
+        repo, planner, image.digest, workload_kind=workload.kind, explore_accuracy=False, checkpoint=checkpoint
     )
+    return host.backend.toolbox(setup, blackboard, acceptance, spec)
 
 
 def _specialist_briefs(setup: PeerSetup, repo: GitExperimentRepo) -> SessionBriefs:

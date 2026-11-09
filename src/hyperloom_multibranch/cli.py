@@ -124,6 +124,7 @@ from functools import partial
 from pathlib import Path
 
 from hyperloom_common.shared_storage import open_shared_append
+from hyperloom.common.agentx_early_stop import EarlyStopMode, early_stop_mode
 from hyperloom.common.outside_facts.image_check import ImageCheckFailed
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
@@ -832,6 +833,7 @@ def settings_from(
         agent_dossier=_agent_dossier(args.agent_dossier, args.agent_directions),
         review_gate=args.review_gate,
         inferencex_commit=parse_inferencex_commit(args.inferencex_commit) if args.inferencex_commit else "",
+        agentx_early_stop=early_stop_mode(os.environ, EarlyStopMode.SHADOW),
     )
 
 
