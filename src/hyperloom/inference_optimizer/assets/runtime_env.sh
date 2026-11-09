@@ -488,10 +488,14 @@ HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env \
 HYPERLOOM_FRAMEWORK_ENV=isolated,shared HYPERLOOM_LLM_MODE=anthropic,deepseek,openai HYPERLOOM_RUN_MODE=baremetal,docker"
 
 # Status 0 when a .env another account can write lends the variable named $1 (any case, as preflight compares it) with
-# the value $2, compared whole.
+# the value $2, compared whole. The name is held to ASCII before it is folded: under a UTF-8 locale ${1^^} turns a long
+# s into S, and the name, written back as given, would then be one load_dotenv_no_clobber refuses whole. The letters are
+# spelled out because a range or class can take in other letters in some locales.
+RUNTIME_ENV_ASCII_NAME_RE='^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*$'
 runtime_env_dotenv_lent() {
-  local upper="${1^^}" entry
-  [[ "$upper" =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
+  local upper entry
+  [[ "$1" =~ $RUNTIME_ENV_ASCII_NAME_RE ]] || return 1
+  upper="${1^^}"
   for entry in $RUNTIME_ENV_DOTENV_NOT_PRIVATE_LENT; do
     [ "${entry%%=*}" = "$upper" ] || continue
     [[ ",${entry#*=}," == *",$2,"* && "$2" != *,* ]]
