@@ -833,7 +833,7 @@ def test_a_symlink_the_agent_flips_on_the_way_to_the_admin_directory_after_the_c
         point(own)
         return admin
 
-    monkeypatch.setattr(git_safety, "trusted_admin_dir", check_then_flip)
+    monkeypatch.setattr(worktree_module, "trusted_admin_dir", check_then_flip)
 
     patch = worktree.diff("vllm")
     assert not ran.exists(), ran.read_text()

@@ -266,9 +266,8 @@ def _worktree_git(worktree: Path, common: Path, args: Sequence[str], pinned: Map
     remote's lazy fetch starts nothing either."""
     env = {**pinned, "LC_ALL": "C"}
     try:
-        done = app_git(
-            worktree, *NO_EXCLUDES_FILE, *_FIXED_CONFIG, *args, timeout=GIT_TIMEOUT_S, env=env, common=common
-        )
+        admin = trusted_admin_dir(worktree, common)
+        done = app_git(worktree, *NO_EXCLUDES_FILE, *_FIXED_CONFIG, *args, timeout=GIT_TIMEOUT_S, env=env, admin=admin)
     except (OSError, subprocess.SubprocessError) as error:
         raise WorktreeError(f"git {args[0]} in {worktree} was refused: {error}") from error
     if done.returncode != 0:

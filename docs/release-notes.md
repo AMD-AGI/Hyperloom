@@ -20,6 +20,18 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **An explore variant that moves a lever its base launch pins is dropped
+  before the round spends a slot on it.** When the base launch simulates
+  speculative-decoding acceptance (`rejection_sample_method: synthetic`,
+  `synthetic_acceptance_length`, `SGLANG_SIMULATE_ACC_LEN`), its draft and its
+  simulated acceptance are pinned: a proposal that changes, removes or unsets
+  one of them, or that declares an acceptance length on a base that verifies a
+  real draft, is now refused by the round's pre-flight filter with reason
+  `speculative_decoding_pinned` and listed in the round's skipped variants,
+  where before it was admitted and then failed as the launch was materialized,
+  having already taken a variant slot. The refusal at materialization stays as
+  the backstop for launches the filter does not compose.
+
 - **Bump validated vLLM stack to 0.33.0 (ROCm 10 docker) and accept the relocated graph-capture marker.**
   Switches the recommended vLLM image to `docker.io/vllm/vllm-openai-rocm:v0.33.0-rocm100`
   (docs, examples, `models.tsv`, installer hint), bumps the bare-metal defaults

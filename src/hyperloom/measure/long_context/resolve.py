@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.long_context.plan import MIN_LENGTH, LongContextPlan
 from hyperloom.measure.long_context.prompts import PromptSetError
-from hyperloom.measure.long_context.staging import load_prompt_set, manifest_length
+from hyperloom.measure.long_context.staging import load_prompt_set, manifest_bound, manifest_length
 from hyperloom.measure.short_prompts.staging import EVALSETS_DIR, cache_root, recorded_sha256
 
 __all__ = ["StagedSet", "staged_set"]
@@ -25,11 +25,13 @@ __all__ = ["StagedSet", "staged_set"]
 
 @dataclass(frozen=True)
 class StagedSet:
-    """A set in the cache: its key, the SHA-256 of its prompts file and the token length its prompts were built for."""
+    """A set in the cache: its key, the SHA-256 of its prompts file, the token length its prompts were built for and the
+    context bound it was built under (``None`` when it records none)."""
 
     prompt_set: str
     prompts_sha256: str
     length: int
+    bound: int | None = None
 
 
 def staged_set(key: str, environ: Mapping[str, str]) -> StagedSet:
@@ -43,8 +45,8 @@ def staged_set(key: str, environ: Mapping[str, str]) -> StagedSet:
     entry = cache_root(environ) / EVALSETS_DIR / key
     try:
         LongContextPlan(key, "0" * 64, MIN_LENGTH)  # the key as a name, before it is used as a path
-        sha256, length = recorded_sha256(entry), manifest_length(entry)
-        load_prompt_set(LongContextPlan(key, sha256, length), environ)
+        sha256, length, bound = recorded_sha256(entry), manifest_length(entry), manifest_bound(entry)
+        load_prompt_set(LongContextPlan(key, sha256, length, bound=bound), environ)
     except DocumentError as exc:
         raise PromptSetError(str(exc)) from exc
-    return StagedSet(key, sha256, length)
+    return StagedSet(key, sha256, length, bound)
