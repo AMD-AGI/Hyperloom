@@ -150,7 +150,7 @@ def test_a_hosted_run_that_names_no_layer_bubblewrap_refuses_without_probing_pat
     for later in (choose_agent_isolation, choose_sandbox_isolation):
         with pytest.raises(IsolationRefused):
             later()
-    assert bwrap_isolation() is None
+    assert bwrap_isolation() == NoIsolation((NO_LAYER_BWRAP,))
 
 
 @pytest.mark.parametrize("named", ["bwrap", "bin/bwrap"])
@@ -274,9 +274,17 @@ def test_a_sandbox_runs_under_bubblewrap_where_it_works(account, probe):
     assert choose_sandbox_isolation() == BwrapIsolation(ON_PATH, (f"running them as an account: {SANDBOX_ACCOUNT}",))
 
 
-def test_bubblewrap_alone_is_none_where_its_probe_finds_a_problem(probe):
+def test_bubblewrap_alone_names_its_probe_s_reasons_where_it_finds_a_problem(probe):
     probe.answer = DENIED
-    assert bwrap_isolation() is None
+    assert bwrap_isolation() == NoIsolation(
+        ("bubblewrap (/usr/bin/bwrap, 0.11.1): bwrap: setting up uid map: Permission denied",)
+    )
+    probe.answer = MISSING
+    assert bwrap_isolation() == NoIsolation(("bubblewrap: not found on PATH",))
+    probe.answer = NO_ANSWER
+    assert bwrap_isolation() == NoIsolation((f"bubblewrap at {LAYER}: no answer in 10 s",), transient=True), (
+        "a probe that gave no answer in time is not a final answer"
+    )
     probe.answer = ON_PATH
     assert bwrap_isolation() == BwrapIsolation(ON_PATH)
     probe.answer = IN_LAYER
