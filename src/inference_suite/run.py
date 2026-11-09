@@ -379,9 +379,11 @@ class _Round:
         every flag (D7).
 
         An external round holds nothing: it never starts ``launch``, and the server it reaches may run on another host.
+        A base whose image settles the check by itself (no recipe version, or an assumed one) keeps that verdict.
         """
         if self.config.lifecycle.mode is LifecycleMode.EXTERNAL:
-            return replace(launch, framework=replace(launch.framework, version_check=VersionCheck.NOT_HELD))
+            check = framework_version.unheld(launch.base.image) or VersionCheck.NOT_HELD
+            return replace(launch, framework=replace(launch.framework, version_check=check))
         python = self.config.server.framework_python
         try:
             install = probe_install(python, launch.framework.name, env, cwd=self.layout.framework_cwd)
