@@ -303,7 +303,8 @@ class SandboxPool:
         waits for a slot, for room in the quota and for the sandbox to run share one deadline, ``timeout_sec`` (or
         ``remaining_sec`` when less) from the call, and each logs when it begins and while it lasts. A sandbox a
         finished test handed over (:meth:`hand_over`) is closed once this one runs, or once this create fails or stops;
-        when the grant has no room for both it is closed before the create.
+        when the grant has no room for both it is closed before the create, and when the service refuses the create for
+        its quota it is closed before the create is repeated.
 
         Raises:
             NoRunnerTemplate: No template serves ``gpu_count`` (checked before any slot is taken).
@@ -546,8 +547,9 @@ class SandboxPool:
         time, so a replay still finds a sandbox that is running. A sandbox the platform made and that failed before it
         ran (``SandboxCreateFailed``) ends the attempt: its key is not replayed and no next key is tried, because each
         would only make another sandbox that fails the same way. A full quota (``SandboxQuotaExceeded``) says nothing
-        about a node and is no failure of the test: the create waits for a sandbox to end and is repeated, until ``wait``
-        runs out (:class:`AcquireTimedOut`). The create's own wait for the sandbox to run is the lesser of the pool's
+        about a node and is no failure of the test: the sandbox kept for the next test, if any, is closed (the service
+        charges a sandbox the pool cannot count, so the grant can be full beside it), then the create waits for a sandbox
+        to end and is repeated, until ``wait`` runs out (:class:`AcquireTimedOut`). The create's own wait for the sandbox to run is the lesser of the pool's
         ``request_timeout_sec`` and what is left of ``wait``.
         """
         base = metadata[IDEMPOTENCY_KEY]
@@ -593,6 +595,7 @@ class SandboxPool:
                     refused = wait.begin("room in the grant's quota", f"the service refused the create: {said}")
                 else:
                     refused.tick(f"the service refused the create: {said}")
+                self._yield_parked(f"the service refused the create of {wait.label} for its quota: {said}")
                 self._await_room(stop, ended, wait)
 
     def _await_room(self, stop: threading.Event | None, ended: int, wait: _Wait) -> None:
@@ -808,6 +811,19 @@ class SandboxPool:
                 self._end_parked(kept, reason)
             except Exception:  # the new sandbox stays its test's whatever the old one's close raised
                 log.exception("sandbox %s, kept for the next test, could not be closed", kept.runner.sandbox_id)
+
+    def _yield_parked(self, why: str) -> None:
+        """Close the kept sandbox, whichever create it was kept for: the service refused a create for the grant's quota,
+        and an idle kept sandbox is the one thing in the grant the pool can free. What its close raises is logged, and
+        the create goes on waiting for room."""
+        with self._cond:
+            parked = self._parked
+        if parked is None:
+            return
+        try:
+            self._end_parked(parked, why)
+        except Exception:  # the create waits for room either way; a sandbox that did not close is counted by the service
+            log.exception("sandbox %s, kept for the next test, could not be closed", parked.runner.sandbox_id)
 
     def _end_parked(self, parked: _Parked, why: str) -> None:
         """Close the handed-over sandbox, unless it is closed already; ``why`` is logged."""

@@ -17,6 +17,7 @@ from collections.abc import Callable
 
 import pytest
 
+from hyperloom.measure import sandboxes
 from hyperloom.measure.sandboxes import (
     HANDOVER_TIMER_NAME,
     AttemptTag,
@@ -59,6 +60,7 @@ class _Service:
         self.hold: threading.Event | None = None
         self.creating = threading.Event()
         self.quota: int | None = None
+        self.unseen = 0  # sandboxes the service charges to the grant that the pool cannot see (another role's)
         self.refusals = 0
         self.fail: Exception | None = None
         self.kill_error: Exception | None = None
@@ -70,10 +72,11 @@ class _Service:
         if self.hold is not None:
             self.creating.set()  # a create that waits for the test: not one that went through before
             assert self.hold.wait(10), "the test never let the create through"
-        if self.fail is not None:
-            raise self.fail
+        fail = self.fail
+        if fail is not None:
+            raise fail
         with self._lock:
-            if self.quota is not None and len(self.live) >= self.quota:
+            if self.quota is not None and len(self.live) + self.unseen >= self.quota:
                 self.refusals += 1
                 raise SandboxQuotaExceeded("grant_quota_exceeded")
             self._count += 1
@@ -297,7 +300,7 @@ def test_a_test_stopped_while_its_create_waits_for_quota_closes_the_old_one() ->
     first = _acquire(pool, "req-1")
     pool.note_upcoming({"req-2"})
     pool.hand_over(first)
-    service.quota = 1  # the kept sandbox fills it
+    service.quota = 0  # sandboxes the pool cannot see fill the grant: closing the kept one frees no room
     stop = threading.Event()
     worker, landed = _in_thread(lambda: _acquire(pool, "req-2", stop=stop))
     _until(lambda: service.refusals >= 1, "a refused create")
@@ -307,25 +310,50 @@ def test_a_test_stopped_while_its_create_waits_for_quota_closes_the_old_one() ->
     assert service.live == {} and pool.parked is None
 
 
-def test_a_create_refused_for_quota_keeps_the_old_one_until_the_timeout() -> None:
+def test_a_create_refused_for_quota_closes_the_kept_sandbox_at_once() -> None:
+    """The service charges a sandbox the pool cannot count (a branch's ``dev`` sandbox whose close failed), so the grant
+    is full beside the kept sandbox: the refused create closes it and runs, rather than waiting out the timeout."""
     service = _Service()
-    pool = _pool(service, timeout=0.5)
+    pool = _pool(service, grant=(3, 2), timeout=3)
     first = _acquire(pool, "req-1")
     pool.note_upcoming({"req-2"})
     pool.hand_over(first)
-    service.quota = 1  # the kept sandbox fills the grant's quota
+    assert pool.parked == first.sandbox_id
+    service.quota, service.unseen = 2, 1  # the grant's two GPUs: the kept sandbox and the unseen one
     began = time.monotonic()
     second = _acquire(pool, "req-2")
-    assert service.refusals >= 1, "the create was refused while the old sandbox was kept"
-    assert time.monotonic() - began >= 0.45, "the old sandbox was kept until the timeout"
+    assert service.refusals == 1, "one refusal, then the create ran in the room the kept sandbox left"
+    assert time.monotonic() - began < 2, "the refused create closed the kept sandbox, not the 3 s timeout"
     assert service.events == [
         ("running", first.sandbox_id),
         ("close", first.sandbox_id),
         ("running", second.sandbox_id),
     ]
-    assert time.monotonic() - began < 5, "the closed sandbox woke the create at once, not after the quota retry"
+    assert pool.parked is None and pool.active == 1
     pool.release(second)
-    assert service.live == {}
+    assert service.live == {} and pool.active == 0
+
+
+def test_a_kept_sandbox_whose_close_raises_on_a_quota_refusal_leaves_the_create_waiting(monkeypatch) -> None:
+    monkeypatch.setattr(sandboxes, "_QUOTA_RETRY_SEC", 0.05)
+    service = _Service()
+    pool = _pool(service, grant=(3, 2), timeout=60)
+    first = _acquire(pool, "req-1")
+    pool.note_upcoming({"req-2"})
+    pool.hand_over(first)
+    service.quota, service.unseen = 2, 1
+    service.kill_error = RuntimeError("the close failed")
+    worker, landed = _in_thread(lambda: _acquire(pool, "req-2", timeout_sec=60))
+    _until(lambda: service.refusals >= 1, "a refused create")
+    _until(lambda: pool.parked is None, "the kept sandbox to be given up")
+    service.kill_error = None
+    service.closed(first.sandbox_id)  # the service ends it in the end (its lifetime)
+    _joined(worker)
+    second = landed[0]
+    assert isinstance(second, RunnerSandbox), second
+    assert pool.active == 1
+    pool.release(second)
+    assert service.live == {} and pool.active == 0
 
 
 def test_a_create_in_flight_leaves_no_room_to_keep_a_sandbox(caplog) -> None:
@@ -572,6 +600,7 @@ def test_a_branch_lease_takes_the_room_of_the_kept_sandbox(claimed: bool) -> Non
     pool.note_upcoming({"req-2"})
     pool.hand_over(first)
     worker = None
+    landed: list[object] = []
     if claimed:
         service.hold = threading.Event()
         worker, landed = _in_thread(lambda: _acquire(pool, "req-2"))
