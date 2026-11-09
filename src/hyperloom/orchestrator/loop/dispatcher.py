@@ -43,13 +43,8 @@ from ..policy.gate import (
 )
 from ..policy.projection import serving_tp_for_policy
 from ..policy.specialist_in_flight import specialist_in_flight_denial
-from ..bus.gpu_pool import (
-    GPU_LEASE_TTL_GRACE,
-)
-from ..bus.resource_lock import (
-    KNOWN_LANES,
-    _expand_lanes,
-)
+from ..bus.gpu_pool import GPU_LEASE_TTL_GRACE
+from ..bus.resource_lock import KNOWN_LANES, _expand_lanes
 from ._explore_grid import explore_grid_denial
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension

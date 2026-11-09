@@ -51,11 +51,7 @@ from ..policy.custom_specialist import skips_reactor_turn
 from ..policy.gate import PolicyGate
 from ..policy.projection import serving_tp_for_policy
 from ..state.round_store import RoundStore
-from ..bus.gpu_pool import (
-    SpecialistGpuPool,
-    resolve_gpu_specialist_devices,
-    resolve_whole_machine_devices,
-)
+from ..bus.gpu_pool import SpecialistGpuPool, resolve_gpu_specialist_devices, resolve_whole_machine_devices
 from ..bus.resource_lock import SqliteLeaseBackend
 from ..state.shared_state import SharedState, effective_closing_grace_sec
 from .signals import SignalDrain
@@ -714,13 +710,7 @@ class Coordinator:
             self._last_maintenance_ts = now
         return in_closing
 
-    def record_exception(
-        self,
-        *,
-        stage: str,
-        exc: BaseException,
-        agent: str = "",
-    ) -> None:
+    def record_exception(self, *, stage: str, exc: BaseException, agent: str = "") -> None:
         """Record a Coordinator-side exception without killing the session."""
         self._fault_open_phase_event(stage=stage, exc=exc)
         try:
