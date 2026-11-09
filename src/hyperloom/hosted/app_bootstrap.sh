@@ -138,7 +138,8 @@ trust_local_source() {
   fi
   [[ "$path" == /* ]] || return 0
   # A source that is not a directory here is left to the fetch, which fails as it did before.
-  resolved="$(cd -- "$path" 2>/dev/null && pwd -P)" || return 0
+  # Physically (-P): a ".." after a symlink goes up from where the link leads, as git itself would resolve the path.
+  resolved="$(cd -P -- "$path" 2>/dev/null && pwd -P)" || return 0
   trusted="$(mktemp "${TMPDIR:-/tmp}/hyperloom-source-trust.XXXXXX")"
   # Written through the new clone's git dir, so git looks for no repository in the working directory.
   git --git-dir="$git_dir" config --file "$trusted" --add safe.directory "$resolved"
