@@ -77,12 +77,12 @@ registered name, prefix included — the names below are literal:
   per-variant failure lines for FAILED/KILLED_OVERTIME rows) plus review
   verdicts. Use this to check how your prior delegated work landed before
   deciding the next move, instead of re-emitting blindly.
-- **`mcp__inference_optimizer_context__get_running_tasks`** — pull what is
-  in flight right now: elapsed
-  seconds, specialist domain / gap, lease TTL remaining, held lanes,
-  leased GPU ids and last-progress age. The outcomes tool above only shows
-  work that already finished; this is the only view of work still
-  running, and a specialist can hold the machine for hours.
+- **`mcp__inference_optimizer_context__get_running_tasks`** — re-read the
+  `=== Tasks in flight ===` block this turn opened with: elapsed seconds,
+  specialist domain / gap, lease TTL remaining, held lanes, leased GPU ids,
+  last-progress age, and the grid of every queued or running explore round.
+  Call it when a decision later in the turn depends on whether that work
+  has moved.
 - **`mcp__inference_optimizer_context__get_failure{failure_id}`** — pull the structured evidence packet for
   one variant failure: stage, error_class, error_excerpt,
   server_log_path, workspace. The failure_id appears in inbox failure
@@ -118,8 +118,8 @@ prompted you is not.
 <!-- transport: tools -->
 ### Watching a running specialist — live view
 
-`mcp__inference_optimizer_context__get_running_tasks` is the only view of
-work still running. Full rescue semantics and judgment criteria:
+`mcp__inference_optimizer_context__get_running_tasks` re-reads the
+`=== Tasks in flight ===` block mid-turn. Full rescue semantics and judgment criteria:
 ``mcp__inference_optimizer_context__read_reference(name='specialist_rescue')``.
 
 <!-- transport: tools -->
@@ -379,14 +379,14 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
 * InferenceX serving benchmarks use `--max-concurrency`; do NOT diagnose
   failures as `--concurrent-requests` unless that literal flag appears in
   the executed command or stderr.
-* Re-proposals are de-duped by `idempotency_key`, NOT by action name.
-  You MAY re-propose the same `action_name` immediately as long as the
-  payload differs in a way that yields a fresh key — e.g. emit
-  `delegate{action_name='explore', params={grid: [...new variants...],
-  idempotency_key: 'explore-round-<N+1>'}}` to start the next round.
-  Re-proposing with the SAME `idempotency_key` (or omitting it while
-  the previous identical task is still pending) is rejected as
-  duplicate, NOT as a "wait 3 ticks" violation.
+* An `explore` round is identified by its grid; the Coordinator keys it
+  and ignores any `idempotency_key` you send. A grid with a new launch is a
+  new round, even while another round is queued or running; check the
+  grids in `=== Tasks in flight ===` before composing one. Other delegates
+  are de-duped by `idempotency_key`, NOT by action name: re-sending a key
+  whose task is still queued or running is rejected as duplicate, NOT as a
+  "wait 3 ticks" violation, and a key whose task has ended starts a new
+  task.
 * **`explore` does not re-measure a launch this session already judged.**
   A `delegate{action_name='explore'}` whose every variant already has a KEEP
   or REVERT in `explore_search` on the current stack (same base launch and

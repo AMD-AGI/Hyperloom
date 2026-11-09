@@ -8,7 +8,10 @@ There is no switch. :func:`choose_agent_isolation` takes the account tier (:clas
 (:class:`BwrapIsolation`) when its probe passes. When neither works, a launch that must be isolated refuses with
 :class:`IsolationRefused`, naming the reasons of both; any other launch runs unconfined as before
 (:class:`NoIsolation`, carrying both reasons), which :func:`announce_agent_isolation` says once at start-up with a
-WARNING and :func:`agent_isolation_report` records for the session report.
+WARNING and :func:`agent_isolation_report` records for the session report. A launch that runs unconfined says so
+itself (:func:`unconfined_launch`): with the process's one WARNING when start-up did not say it already (a probe that
+passed then and gave no answer in time at the launch), and in the session report's lines
+(:func:`session_isolation_lines`).
 
 Isolation is required in a hosted run (its entry calls :func:`require_agent_isolation` once at start-up, which marks
 the process) and, for a specialist, wherever ``HYPERLOOM_SPECIALIST_USER`` is set. An agent sandbox's commands
@@ -63,6 +66,8 @@ __all__ = [
     "choose_sandbox_isolation",
     "isolation_required",
     "require_agent_isolation",
+    "session_isolation_lines",
+    "unconfined_launch",
 ]
 
 log = logging.getLogger(__name__)
@@ -73,6 +78,9 @@ RAY_ACTOR_PATH = "the Ray GPU actor path cannot run the specialist as another us
 SANDBOX_ACCOUNT = "an agent sandbox runs its commands as the app's own account"
 #: The bubblewrap tier's reason in a hosted run whose entry named no hosting layer bubblewrap.
 NO_LAYER_BWRAP = "bubblewrap: a hosted run launches agents only with its hosting layer's bubblewrap, and none was named"
+
+#: What a WARNING says of agents that run unconfined.
+UNCONFINED = "run unconfined on this host, as before: they can read this account's files and credentials"
 
 #: How a launch is isolated, as the report names it.
 ACCOUNT = "account"
@@ -101,10 +109,13 @@ class AccountIsolation:
 
 @dataclass(frozen=True)
 class BwrapIsolation:
-    """The agent runs in a bubblewrap sandbox with the probed bubblewrap; ``notes`` say why not as an account."""
+    """The agent runs in a bubblewrap sandbox with the probed bubblewrap; ``notes`` say why not as an account.
+    ``started_elsewhere``: another process (a Ray actor) starts bubblewrap, so no thread here decides what
+    ``--die-with-parent`` follows (:meth:`launch`)."""
 
     probe: BwrapProbe
     notes: tuple[str, ...] = ()
+    started_elsewhere: bool = False
 
     @property
     def shown(self) -> str:
@@ -126,7 +137,8 @@ class BwrapIsolation:
         The variables ``marks`` names leave ``env`` and are set inside with ``--setenv``, so bubblewrap's own
         processes carry no mark and a reaper's TERM reaches only the sandbox (their values show in bubblewrap's
         command line: never a secret). ``--die-with-parent`` is kept only on the main thread: it follows the thread
-        that starts bubblewrap, and one that ends first would SIGKILL the sandbox with no grace.
+        that starts bubblewrap, and one that ends first would SIGKILL the sandbox with no grace. Where another process
+        starts it (:attr:`started_elsewhere`), this thread decides nothing, and the policy's stands.
 
         Raises:
             IsolationRefused: ``policy`` names a problem for this bubblewrap's version (nothing was started).
@@ -139,7 +151,9 @@ class BwrapIsolation:
         moved = tuple((name, child_env.pop(name)) for name in marks if name in child_env)
         on_main = threading.current_thread() is threading.main_thread()
         policy = dataclasses.replace(
-            policy, marks=(*policy.marks, *moved), die_with_parent=policy.die_with_parent and on_main
+            policy,
+            marks=(*policy.marks, *moved),
+            die_with_parent=policy.die_with_parent and (on_main or self.started_elsewhere),
         )
         try:
             return policy.argv(self.probe, argv, status_fd=status_fd), child_env
@@ -190,11 +204,15 @@ class IsolationReport:
 
 @dataclass
 class _Process:
-    """What this process was told at start-up, and what it has logged."""
+    """What this process was told at start-up, what it has logged (``warned_unconfined``: the WARNING that agents run
+    unconfined), the report start-up announced, and the agent launches that ran unconfined since, by their reasons."""
 
     hosted: bool = False
     layer_bwrap: str | None = None
     logged: set[str] = field(default_factory=set)
+    warned_unconfined: bool = False
+    announced: IsolationReport | None = None
+    unconfined: dict[str, int] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -207,6 +225,13 @@ def _log_once(level: int, message: str) -> None:
             return
         _STATE.logged.add(message)
     log.log(level, "%s", message)
+
+
+def _warn_unconfined(message: str) -> None:
+    """Log ``message`` as this process's one WARNING that agents run unconfined, or at INFO once one was."""
+    with _STATE.lock:
+        first, _STATE.warned_unconfined = not _STATE.warned_unconfined, True
+    _log_once(logging.WARNING if first else logging.INFO, message)
 
 
 def _configured(user: str | None) -> str:
@@ -366,13 +391,37 @@ def announce_agent_isolation() -> IsolationReport:
     said = []
     if unconfined:
         what = "agents" if len(unconfined) == len(decisions) else unconfined[0]
-        said.append(
-            f"{what} run unconfined on this host, as before: they can read this account's files and credentials"
-        )
+        said.append(f"{what} {UNCONFINED}")
     if refused:
         said.append(f"{' and '.join(refused)} will be refused: they must be isolated here, and no tier can")
-    if said:
-        _log_once(logging.WARNING, f"{'; '.join(said)} ({'; '.join(report.reasons)})")
+    message = f"{'; '.join(said)} ({'; '.join(report.reasons)})"
+    if unconfined:
+        _warn_unconfined(message)
+    elif refused:
+        _log_once(logging.WARNING, message)
     else:
         _log_once(logging.INFO, report.line())
+    with _STATE.lock:
+        _STATE.announced = report
     return report
+
+
+def unconfined_launch(isolation: NoIsolation) -> None:
+    """Record that an agent was just launched unconfined, as ``isolation`` says why, for the session report, and say
+    so: this process's one WARNING that agents run unconfined when nothing said it yet, else one INFO line for each
+    reason."""
+    with _STATE.lock:
+        _STATE.unconfined[isolation.why] = _STATE.unconfined.get(isolation.why, 0) + 1
+    _warn_unconfined(f"agents {UNCONFINED} ({isolation.why})")
+
+
+def session_isolation_lines() -> tuple[str, ...]:
+    """What a session report says of how its agents were isolated: the report start-up announced
+    (:func:`announce_agent_isolation`), and how many agent launches ran unconfined since, for each reason; none when
+    neither happened in this process."""
+    with _STATE.lock:
+        announced, unconfined = _STATE.announced, dict(_STATE.unconfined)
+    lines = [announced.line()] if announced is not None else []
+    for why, count in unconfined.items():
+        lines.append(f"agent isolation: {count} agent launch{'' if count == 1 else 'es'} ran unconfined: {why}")
+    return tuple(lines)
