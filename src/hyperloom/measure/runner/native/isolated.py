@@ -22,10 +22,12 @@ runner.native.service.ensure_build`).
    starts from an empty root: only the work directory is writable, the toolchain, the image's packages and the tree the
    child imports from are read-only, the signing key and this user's credential locations do not exist inside (a
    directory a bound tree holds is masked, a file left out of it), and it has a network of its own (loopback only).
+   This tier is offered where bubblewrap's probe passes and it also starts a sandbox with a network of its own
+   (:func:`compile_bwrap`).
 
 Which one a build got is the ``isolation`` entry of its record's toolchain, written by this process, never by the
 child. A host where neither works builds nothing: the build fails as the machine's (``BuildInfraError``), naming both
-reasons (:func:`isolation_problem`). A remote build pool is another
+reasons (:class:`Unisolated`). A remote build pool is another
 :class:`~hyperloom.measure.runner.native.service.Build` behind the same ``runner(inputs)`` seam.
 
 The child imports the builder from the tree this process runs from (``source``), not from whatever ``hyperloom`` the
@@ -49,7 +51,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.bwrap import BwrapPolicy, BwrapPolicyError
+from hyperloom_common.bwrap import SYSTEM_ROOTS, BwrapPolicy, BwrapPolicyError
 
 import hyperloom
 from hyperloom.common.agent_isolation import BwrapIsolation, NoIsolation, bwrap_isolation
@@ -78,9 +80,10 @@ __all__ = [
     "STAGED_FILE",
     "IsolatedBuilds",
     "Isolation",
+    "Unisolated",
     "account_problem",
+    "compile_bwrap",
     "compile_policy",
-    "isolation_problem",
     "job_document",
     "local_isolation",
     "staged_record",
@@ -136,6 +139,13 @@ class Isolation:
     bwrap: BwrapIsolation | None = None
 
 
+@dataclass(frozen=True)
+class Unisolated:
+    """No tier can isolate a compile on this host: ``why`` names both tiers' reasons, as the choice found them."""
+
+    why: str
+
+
 def private_network(unshare: str) -> bool:
     """Whether this process can start a process in a network namespace of its own: ``unshare --net true`` is run once."""
     try:
@@ -170,27 +180,53 @@ def unisolated(account: str, bwrap: NoIsolation) -> str:
     return f"it can compile neither as user {NOBODY} ({account}) nor under bubblewrap ({bwrap.why})"
 
 
-def isolation_problem() -> str | None:
-    """Why this host can isolate a compile in neither tier (see the module), naming both reasons; ``None`` when one
-    works."""
-    account = account_problem()
-    if account is None:
+def own_network_problem(found: BwrapIsolation) -> NoIsolation | None:
+    """Why ``found`` cannot start a sandbox with a network of its own, which every compile has (its probe's canary
+    keeps the host's network, so a host that allows no new network namespace passes it); ``None`` when it can.
+    ``transient`` where it gave no answer in time."""
+    policy = BwrapPolicy(read_only=SYSTEM_ROOTS, own_network=True, die_with_parent=True)
+    said = f"bubblewrap ({found.shown}) with a network of its own"
+    try:
+        done = subprocess.run(
+            policy.argv(found.probe, ["true"]),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ.get("PATH", os.defpath)},
+            timeout=_PROBE_TIMEOUT_SEC,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return NoIsolation((f"{said}: no answer in {_PROBE_TIMEOUT_SEC} s",), transient=True)
+    except (OSError, BwrapPolicyError) as exc:
+        return NoIsolation((f"{said}: {exc}",))
+    if done.returncode == 0:
         return None
+    lines = [line.strip() for line in done.stderr.splitlines() if line.strip()]
+    return NoIsolation((f"{said}: {lines[-1] if lines else f'bubblewrap exited {done.returncode}'}",))
+
+
+def compile_bwrap() -> BwrapIsolation | NoIsolation:
+    """The compile's bubblewrap: :func:`~hyperloom.common.agent_isolation.bwrap_isolation`, where it also starts a
+    sandbox with a network of its own (:func:`own_network_problem`); else :class:`NoIsolation` naming why,
+    ``transient`` where a probe gave no answer in time."""
     found = bwrap_isolation()
-    return None if isinstance(found, BwrapIsolation) else unisolated(account, found)
+    if isinstance(found, NoIsolation):
+        return found
+    return own_network_problem(found) or found
 
 
-def local_isolation(network_probe: Callable[[str], bool] = private_network) -> Isolation | None:
+def local_isolation(network_probe: Callable[[str], bool] = private_network) -> Isolation | Unisolated:
     """User 65534 (``setpriv``), in a network namespace of its own (``unshare --net``) where ``network_probe`` finds the
     host lets this process make one; else, where this host cannot change the user (:func:`account_problem`), a
-    bubblewrap sandbox with a network of its own where bubblewrap's probe passes (its ``notes`` say why not as 65534);
-    ``None`` when neither works (:func:`isolation_problem` says why)."""
+    bubblewrap sandbox with a network of its own where :func:`compile_bwrap` finds one (its ``notes`` say why not as
+    65534); :class:`Unisolated` naming both reasons when neither works."""
     setpriv = shutil.which("setpriv")
     account = account_problem()
     if setpriv is None or account is not None:
-        found = bwrap_isolation()
+        found = compile_bwrap()
         if isinstance(found, NoIsolation):
-            return None
+            return Unisolated(unisolated(account or "setpriv (util-linux) is not on PATH", found))
         noted = replace(found, notes=(f"compiling as user {NOBODY}: {account}",))
         return Isolation((), None, ISOLATION_BWRAP_NETNS, noted)
     drop = (setpriv, f"--reuid={NOBODY}", f"--regid={NOBODY}", "--clear-groups", "--no-new-privs", "--")
@@ -280,14 +316,14 @@ class IsolatedBuilds:
     """``runner(inputs) -> Build`` for :class:`~hyperloom_multibranch.toolbox.store_builds.StoreBuildDriver` (see the
     module). ``isolation`` is how every compile is isolated, or what chooses it at each build (such as
     :func:`local_isolation` for a session that found none at its start: a bubblewrap whose probe gave no answer in time
-    may answer later); ``factories`` name each component's recipe factory as ``module:function``; ``child`` says what
+    may answer later); :class:`Unisolated` or ``None`` refuses every build; ``factories`` name each component's recipe factory as ``module:function``; ``child`` says what
     runs the child."""
 
     def __init__(
         self,
         planner: NativePlanner,
         blobs: BlobStore,
-        isolation: Isolation | Callable[[], Isolation | None] | None,
+        isolation: Isolation | Unisolated | Callable[[], Isolation | Unisolated] | None,
         factories: Mapping[str, str],
         child: ChildInterpreter = ChildInterpreter(),
     ) -> None:
@@ -299,8 +335,8 @@ class IsolatedBuilds:
 
     def _build(self, planned: PlannedBuild, scratch: Path) -> Staged:
         isolation = self._isolation() if callable(self._isolation) else self._isolation
-        if isolation is None:
-            why = isolation_problem() or "the build runner was given no isolation"
+        if not isinstance(isolation, Isolation):
+            why = isolation.why if isinstance(isolation, Unisolated) else "the build runner was given no isolation"
             raise BuildInfraError(f"this host cannot isolate a native build: {why}; nothing was compiled")
         work = Path(scratch) / _WORK
         work.mkdir()

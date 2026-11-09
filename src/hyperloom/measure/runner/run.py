@@ -589,7 +589,11 @@ def _own_directories(
     if raised is not None:
         ctx.notes.append(raised)
     return dataclasses.replace(
-        call, jit=session, tables_patch=patched_configs(farm), env_overrides={**call.env_overrides, **own}
+        call,
+        jit=session,
+        tables_patch=patched_configs(farm),
+        framework_changed=farm is not None,
+        env_overrides={**call.env_overrides, **own},
     )
 
 

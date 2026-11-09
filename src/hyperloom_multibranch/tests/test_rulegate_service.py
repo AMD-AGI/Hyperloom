@@ -6,7 +6,6 @@ import pytest
 
 from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.common.perf_metric import (
-    AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY_P50,
 )
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
@@ -20,6 +19,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH,
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import delta
 from hyperloom_multibranch.rulegate import regression
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.tests.fakes import RecordingVerifier, quick_polls  # noqa: F401
@@ -76,7 +76,7 @@ class _Session:
         self.gate = self.new_gate()
 
     def new_gate(self) -> GateService:
-        rule = AgentXRule() if self.agentx else InferenceXRule(self.blackboard, CONC)
+        rule = AgentXRule(AgentXObjective.P50_INTERACTIVITY) if self.agentx else InferenceXRule(self.blackboard, CONC)
         return GateService(self.blackboard, self.toolbox, rule, self.verifier)
 
     async def record_root(self) -> None:
@@ -201,7 +201,7 @@ async def test_an_agentx_baseline_is_one_root_test_and_names_it(tmp_path):
     measured = (await session.blackboard.record(request_id)).result
     assert record.request_ids == (request_id,) and (record.source, record.wall_seconds) == ("", None)
     assert record.values == dict(sorted(measured.rounds[-1].metrics.items()))
-    assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
+    assert record.threshold_pct == {GRADED_INTVTY_P50: 2.0}
     assert session.verifier.asked == [request_id]
     assert await session.blackboard.baseline() == record
     await session.toolbox.close()

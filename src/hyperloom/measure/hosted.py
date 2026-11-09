@@ -130,12 +130,12 @@ _ROUND_REPORTS = frozenset({REPORT_FILE, "benchmark_report.json"})
 #: The steps of a landing, marked on the attempt's timeline when each ends. The journal line of the attempt's end says how
 #: long each took (``landing_sec``): all of them are file system work below the session directory, and a slow landing
 #: is told apart only by its steps. What ``result_landing`` holds beyond them is that journal line and its event.
-_VERIFIED, _ARCHIVED, _MATERIALIZED, _JIT_PUBLISHED, _ROUNDS_READ = (
+_VERIFIED, _ROUNDS_READ, _ARCHIVED, _MATERIALIZED, _JIT_PUBLISHED = (
     "read_verified",
+    "rounds_read",
     "archived",
     "materialized",
     "jit_published",
-    "rounds_read",
 )
 _LANDING_SEC = "landing_sec"
 _LOG_SUFFIX = ".log"
@@ -675,14 +675,15 @@ class HostedMeasurementBackend:
         try:
             verified = self._read_and_verify(attempt, staging)
             step(_VERIFIED)
+            # Before anything is kept or shared: a bundle whose rounds are refused publishes nothing.
+            rounds = _rounds_of(verified, Path(call.output_dir))
+            step(_ROUNDS_READ)
             location = self._archive(attempt, verified, staging)
             step(_ARCHIVED)
             self._land(attempt, verified)
             step(_MATERIALIZED)
             self._publish_jit(attempt, verified, staging)
             step(_JIT_PUBLISHED)
-            rounds = _rounds_of(verified, Path(call.output_dir))
-            step(_ROUNDS_READ)
         except ResultRejected as exc:
             outcome = _refusal(call, HOSTED_RESULT_REJECTED_RC, "result_rejected", str(exc))
             self._finish_record(attempt, outcome, {"verdict": "result_rejected", "reject": exc.reason.value})
@@ -1082,7 +1083,7 @@ def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ..
     returncode = verified.result.outcome.returncode
     if ROUNDS_FILE in listed:
         document = json.loads(verified.read_file(ROUNDS_FILE).decode("utf-8"))
-        return tuple(
+        rounds = tuple(
             RoundOutcome(
                 int(r["point"]),
                 r["phase"],
@@ -1093,6 +1094,10 @@ def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ..
             )
             for r in document
         )
+        if returncode == 0 and any(r.returncode != 0 for r in rounds):
+            # The runner's outcome is its first failed round's code, so a success over a failed round is not its own.
+            raise ResultRejected(RejectReason.MANIFEST_INVALID, "a round failed under an outcome that says success")
+        return rounds
     reports = sorted(
         path for path in listed if Path(path).name in _ROUND_REPORTS and WARMUP_DIR not in Path(path).parts
     )

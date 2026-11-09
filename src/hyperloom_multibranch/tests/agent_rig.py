@@ -25,7 +25,7 @@ from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, Re
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.arbor_adapter import ARBOR_PYTHON, BRANCH_RUN
-from hyperloom_multibranch.specialist.gate_client import GateClient
+from hyperloom_multibranch.specialist.gate_client import FixedGateClient
 from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
 from inference_suite.contracts import FixedWorkload
 
@@ -429,7 +429,7 @@ MODEL = "/models/Qwen3-14B-FP8"
 
 
 #: The gate's client as MB builds it; it names the model by its hub name, which the server must answer to.
-CLIENT = GateClient(
+CLIENT = FixedGateClient(
     "/opt/InferenceX/inferencex-e2e",
     "Qwen/Qwen3-14B-FP8",
     FixedWorkload(
@@ -559,7 +559,7 @@ def _spec(tmp_path: Path, **changes: object) -> AgentSpec:
         cards=(4, 5),
         seconds=3600.0,
         port=PORT,
-        client=CLIENT.command(PORT, tmp_path / "agent" / "mb-bench"),
+        client=CLIENT.stage(PORT, tmp_path / "agent" / "mb-bench"),
         knowledge=str(tmp_path / "agent" / "mb-integration.md"),
         deadline=DEADLINE,
         root=_git(workspace, "rev-parse", "HEAD"),

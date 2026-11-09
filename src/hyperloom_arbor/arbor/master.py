@@ -34,6 +34,28 @@ from arbor.policy.claude_loop import KNOWLEDGE_SKILL, _run_claude
 from arbor.rebaseline import current as rebase_scale
 from arbor.state import CampaignState
 
+#: <session>/: the Arbor time a standalone session has spent, so a resume counts it against time_budget_minutes.
+CLOCK_FILE = "clock.json"
+
+
+def _spent(session_dir: Path) -> float:
+    """Seconds of Arbor time the session spent before this launch, from :data:`CLOCK_FILE`; 0 without one."""
+    try:
+        return max(0.0, float(json.loads((Path(session_dir) / CLOCK_FILE).read_text()).get("spent_s", 0.0)))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0
+
+
+def _record_spent(session_dir: Path, seconds: float) -> None:
+    """Write the session's spent Arbor time. Bookkeeping: a write that fails is said, never raised."""
+    try:
+        part = Path(session_dir) / f".{CLOCK_FILE}.tmp"
+        part.write_text(json.dumps({"spent_s": round(seconds, 1), "ts": time.time()}) + "\n")
+        os.replace(part, Path(session_dir) / CLOCK_FILE)
+    except OSError as exc:
+        print(f"[arbor] could not write {CLOCK_FILE}: {exc}", file=sys.stderr, flush=True)
+
+
 def _resolve_target(target, metric: str):
     """Resolve a campaign `target` to a number, or None if it carries none.
 
@@ -354,8 +376,28 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
             base_launch.write(campaign.config, session_dir)
         except OSError as exc:
             print(f"[arbor] could not write {base_launch.HOST_LAUNCH_FILE}: {exc}", file=sys.stderr, flush=True)
+    # A standalone container must see the session where the bench writes: <session_mount>/<name>.
+    # Checked at every start, a resume included, before any GPU time.
+    if not refused and not component.is_component(campaign) and session_dir:
+        from arbor.execute.workspace import session_mount_problem
+        session_dir.mkdir(parents=True, exist_ok=True)
+        problem = session_mount_problem(campaign.config.get("docker_container", ""), session_dir,
+                                        campaign.config.get("session_mount", "/workspace/sessions"))
+        if problem:
+            refused.append(problem)
     if refused:
         return component.refuse(refused, campaign.config, session_dir)
+    # The other editable trees (AITER) become git trees with a baseline, at every start, so each
+    # iteration commits and reverts them with the workspace (arbor/execute/trees.py).
+    if not component.is_component(campaign) and campaign.config.get("docker_container"):
+        from arbor.execute import trees as _trees
+        try:
+            for tree, base in _trees.ensure(campaign.config["docker_container"], campaign.config,
+                                            session_dir).items():
+                print(f"[arbor] Tracking {tree} from {base[:12]}", file=sys.stderr, flush=True)
+        except (RuntimeError, OSError) as exc:
+            print(f"[arbor] WARNING: the editable trees are not tracked ({exc}): a change there is not "
+                  f"committed or reverted with the iteration", file=sys.stderr, flush=True)
 
     # Rolling chunks (arbor/cluster/handoff.py): the
     # launcher opts in with ARBOR_ROLL=1. The lease is taken before anything
@@ -457,8 +499,13 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
         state.save(state_path)
 
     # A run split into commands (arbor run --split processes, a worker's order) keeps its first start, so a time
-    # budget bounds the whole run, not each command.
-    start_time = getattr(args, "started", None) or time.time()
+    # budget bounds the whole run, not each command. A resumed standalone session keeps what it already spent
+    # (<session>/clock.json, written at every iteration's start): the budget bounds the session, not each launch.
+    started = getattr(args, "started", None)
+    spent = 0.0 if started or component.is_component(campaign) else _spent(session_dir)
+    start_time = started or (time.time() - spent)
+    if spent:
+        print(f"[arbor] Resumed: {spent / 60:.0f} min of the time budget already spent ({CLOCK_FILE})")
     metric_name = campaign.pack.objective.get("metric", "")
     config_target = _resolve_target(campaign.config.get("target"), metric_name)
     _seed_baseline(state_path, campaign, campaign.pack.objective.get("direction", "max"))
@@ -601,6 +648,8 @@ def before_pass(s: Session) -> Step:
         return Step("exit")
 
     elapsed_min = (time.time() - s.start_time) / 60.0
+    if not s.comp:
+        _record_spent(s.session_dir, elapsed_min * 60.0)
     if s.time_budget and elapsed_min >= s.time_budget:
         print(f"[arbor] Time budget exhausted ({elapsed_min:.1f}/{s.time_budget} min) — exiting.")
         return Step("exit")

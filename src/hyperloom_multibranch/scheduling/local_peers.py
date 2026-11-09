@@ -69,6 +69,7 @@ from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet, ReproRunner
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule, Rule
 from hyperloom_multibranch.rulegate.service import GateService
+from hyperloom_multibranch.scheduling.launch_isolation import announce_launch_isolation, launch_isolation
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.session_base import freeze_session_base, served_launch
 from hyperloom_multibranch.scheduling.settings import AGENT_PORT, Workload
@@ -79,6 +80,7 @@ from hyperloom_multibranch.specialist.runtime import RuntimePacing, SpecialistRu
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
+    from hyperloom_multibranch.specialist.gate_client import GateClient
     from pathlib import Path
 
     from hyperloom.hosted.mcp_server import McpServer
@@ -107,6 +109,8 @@ POINTS_DIR = "points"
 BENCHMARK_FILE = "benchmark.yaml"
 #: A claim's lease on the specialist tools: the runtime renews it every 10 minutes.
 CLAIM_TTL_SECONDS = 1800.0
+#: Where a machine's render nodes are, one ``renderD*`` for every card a process there can open.
+RENDER_NODE_DIR = "/dev/dri"
 #: The switch the main flow and the measurement renderer read an AgentX workload from
 #: (``hyperloom.common.perf_metric.agentx_enabled``).
 AGENTX_ENV = "HYPERLOOM_AGENTX"
@@ -296,10 +300,10 @@ def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> N
 
 def workload_rule(workload: Workload, blackboard: CommitQuery) -> Rule:
     """The rule a session of ``workload`` is judged on: InferenceX throughput at the workload's conc against the
-    PRELUDE bar ``blackboard`` holds, or AgentX P50 interactivity with its guards."""
+    PRELUDE bar ``blackboard`` holds, or the AgentX objective with its guards."""
 
     if workload.inferencex is None:
-        return AgentXRule()
+        return AgentXRule(workload.agentx_objective)
     return InferenceXRule(blackboard, workload.conc)
 
 
@@ -335,11 +339,14 @@ def specialist_recall(reports: Path) -> LessonRecall:
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
     """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`) and
     freezes the base launch every test runs on in ``MB-toolbox`` unless the session froze one
-    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`). Raises :class:`PeersUnavailable`
+    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which its Arbor agents are served
+    when the operator gave it as a reference script. Raises :class:`PeersUnavailable`
     when no base launch can be frozen or the session's canonical measurement cannot be taken.
 
     Called on the event loop the session runs on. The toolbox is built, not started: the session starts it, and its
-    close releases the backend and the sandboxes. The MCP service is started; the session stop stops it.
+    close releases the backend and the sandboxes. The MCP service is started; the session stop stops it. How the
+    specialists, sandboxes and tests it launches are isolated is said once here, at WARNING when some are not
+    (:func:`~hyperloom_multibranch.scheduling.launch_isolation.announce_launch_isolation`).
     """
 
     from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
@@ -350,8 +357,9 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox, host.image.ref)
-    frozen = freeze_session_base(layout.toolbox, workload, setup.agent_launch)
-    base, setup = server_base(frozen.launch), replace(setup, agent_launch=served_launch(frozen, setup.agent_launch))
+    frozen = freeze_session_base(layout.toolbox, workload, setup.reference_script, setup.inferencex_commit)
+    served = served_launch(frozen, setup.reference_script, setup.agent_launch)
+    base, setup = server_base(frozen.launch), replace(setup, agent_launch=served)
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
@@ -371,6 +379,8 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     briefs = _specialist_briefs(setup, repo)
     _serve_specialist_tools(mcp, toolbox, runtime_blackboard, briefs)
     sandboxes = branch_sandboxes(host.backend, setup, lambda branch: built.worktrees(branch))
+    isolation = launch_isolation(local=host.backend.on_this_machine)
+    announce_launch_isolation(isolation)
     leases = _lend_dev_sandboxes(mcp, setup, toolbox, runtime_blackboard, sandboxes)
     tokens = McpSpecialistTokens(mcp)
     rendered = canonical_dir / RENDERED_CANONICAL
@@ -392,7 +402,17 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     gate_service = GateService(gate_blackboard, toolbox, rule, toolbox)
     regression = RegressionSet(gate_blackboard, runner, repo, pool=session_cases(host.image.digest, gate_blackboard))
     return Peers(
-        runtime, toolbox, repo, gate_service, mcp, briefs, host.image.digest, gate, regression, built.dossier_pass
+        runtime,
+        toolbox,
+        repo,
+        gate_service,
+        mcp,
+        briefs,
+        host.image.digest,
+        gate,
+        regression,
+        isolation,
+        built.dossier_pass,
     )
 
 
@@ -481,9 +501,24 @@ def _lend_dev_sandboxes(
     return leases
 
 
+def render_nodes() -> int:
+    """How many render nodes, ``renderD*`` in :data:`RENDER_NODE_DIR`, this machine holds: one for every card a
+    process here can open, so a container a device plugin gave some of a node's cards holds theirs alone."""
+
+    from pathlib import Path
+
+    try:
+        return sum(1 for node in Path(RENDER_NODE_DIR).iterdir() if node.name.startswith("renderD"))
+    except OSError:
+        return 0
+
+
 def machine_cards() -> tuple[int, ...]:
     """The cards of this machine the session may use: the absolute ids the first visible-device mask set names, or,
-    when none is set, as many as ``rocm-smi`` shows from card 0; none when neither shows any.
+    when none is set, as many as ``rocm-smi`` shows from card 0; none when neither shows any. Raises
+    :class:`PeersUnavailable` when ``rocm-smi`` shows more cards than this machine holds render nodes
+    (:func:`render_nodes`): in a container given some of a node's cards it shows them all, and a test leased one it
+    was not given could not open it.
 
     The ids are absolute because every sandbox's ``ROCR_VISIBLE_DEVICES`` is set to its leased cards in place of the
     mask this process runs under; a mask of device UUIDs names no id, so it leaves no card. The main flow resolves its
@@ -496,7 +531,13 @@ def machine_cards() -> tuple[int, ...]:
         mask = os.environ.get(name)
         if mask is not None:
             return tuple(parse_device_list(mask))
-    return tuple(range(detect_gpu_count()))
+    shown, nodes = detect_gpu_count(), render_nodes()
+    if shown > nodes:
+        raise PeersUnavailable(
+            f"rocm-smi shows {shown} cards, more than the {nodes} this machine can open (its render nodes,"
+            f" {RENDER_NODE_DIR}/renderD*): name the cards it was given in ROCR_VISIBLE_DEVICES"
+        )
+    return tuple(range(shown))
 
 
 def measurement_host(env: Mapping[str, str], backend: ToolboxBackend) -> MeasurementHost:
@@ -531,11 +572,15 @@ def staged_client() -> InferenceXCheckout:
 
 def machine_parallel_tests(tp: int) -> int:
     """How many tests of ``tp`` cards the local toolbox runs at once on this machine's cards; raises ``ValueError``
-    when a test of ``tp`` cards does not fit on them."""
+    when a test of ``tp`` cards does not fit on them, or its cards cannot be told (:func:`machine_cards`)."""
 
     from hyperloom_multibranch.toolbox.local_hosted import max_parallel_tests
 
-    return max_parallel_tests(len(machine_cards()), tp)
+    try:
+        cards = machine_cards()
+    except PeersUnavailable as exc:
+        raise ValueError(str(exc)) from exc
+    return max_parallel_tests(len(cards), tp)
 
 
 def specialist_model(env: Mapping[str, str]) -> str:
@@ -582,7 +627,11 @@ def _specialist_role(workload: Workload) -> str:
     """The workload as the specialists' role prompt names it."""
 
     shape = workload.inferencex
-    requests = "AgentX trace replay" if shape is None else f"ISL {shape.isl}, OSL {shape.osl}"
+    requests = (
+        f"AgentX trace replay graded on {workload.agentx_objective.title} ({workload.metric})"
+        if shape is None
+        else f"ISL {shape.isl}, OSL {shape.osl}"
+    )
     return (
         f"{workload.model_basename} on {workload.framework}, {workload.precision}, TP {workload.tp}, "
         f"{requests}, concurrency {workload.conc}, {workload.gpu_type}"
@@ -596,8 +645,8 @@ AITER = "aiter"
 def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     """Sessions that run ``command`` for every branch's specialist, in a worktree of the workload's framework, and
     each branch's third-party agent in a sandbox leased from the session's toolbox (``wiring.agent_sandboxes``), given
-    the gate's benchmark client when the session's canonical configuration names one; a session that runs no agent
-    reads no canonical.
+    the gate's benchmark client of the session's canonical configuration; a session that runs no agent reads no
+    canonical.
 
     The CLI runs on the main flow's allowlisted specialist environment, through a local AI work socket whose resource
     log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
@@ -608,16 +657,17 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         from hyperloom.orchestrator.specialists.agent_runner import Liveness, LocalAgentRunner, build_specialist_env
         from hyperloom_multibranch.specialist.agent_session import SPECIALIST_LOST_AFTER_S, AgentSetup
         from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
-        from hyperloom_multibranch.specialist.gate_client import GateClient
         from hyperloom_multibranch.specialist.model_sessions import model_sessions
-        from hyperloom_multibranch.specialist.prompts import role_prompt
+        from hyperloom_multibranch.specialist.prompts import RoleWorkload, role_prompt
         from hyperloom_multibranch.specialist.worktree import SourceBase
 
         layout, workload = wiring.setup.layout, wiring.setup.workload
         agent = AgentSetup(
             command=command,
             role=role_prompt(
-                _specialist_role(workload),
+                RoleWorkload(
+                    _specialist_role(workload), workload.agentx_objective if workload.inferencex is None else None
+                ),
                 references=wiring.setup.references,
                 base=wiring.base,
                 dev_leases=wiring.dev_leases.limits.cap if wiring.dev_leases else 0,
@@ -652,7 +702,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             wiring.toolbox,
             wiring.repo,
             wiring.agent_sandboxes,
-            client=GateClient.read(wiring.canonical) if wiring.setup.agents else None,
+            client=_gate_client(wiring) if wiring.setup.agents else None,
             dossier=wiring.setup.agent_dossier or None,
             maps=wiring.setup.agent_maps,
             least_run_seconds=wiring.setup.agent_share_minutes * 60.0,
@@ -660,6 +710,21 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         return with_agents(sessions, agents, branch_dir=layout.branch_dir, blackboard_for=wiring.blackboards)
 
     return build
+
+
+def _gate_client(wiring: SessionWiring) -> GateClient:
+    """The gate's client of the session's rendered canonical configuration, an AgentX replay bounded as one attempt of
+    a test is; raises :class:`PeersUnavailable` when the session's base or staged tools cannot run one."""
+
+    from hyperloom.orchestrator.actions.executors import SuiteRoundRefused
+    from hyperloom_multibranch.specialist.gate_client import read_gate_client
+
+    try:
+        return read_gate_client(
+            wiring.canonical, wiring.setup.layout.toolbox, attempt_timeout_sec(wiring.setup.workload)
+        )
+    except SuiteRoundRefused as exc:
+        raise PeersUnavailable(f"the gate's client cannot be given to the session's agents: {exc}") from exc
 
 
 def specialist_readable(references: Mapping[str, Path], workload: Workload) -> tuple[Path, ...]:
@@ -825,6 +890,7 @@ __all__ = [
     "InferenceXCheckout",
     "LocalCards",
     "MeasurementHost",
+    "RENDER_NODE_DIR",
     "SessionWiring",
     "SpecialistSessions",
     "ToolboxBackend",
@@ -836,6 +902,7 @@ __all__ = [
     "measurement_host",
     "model_backed_sessions",
     "peers_on",
+    "render_nodes",
     "require_framework_package",
     "specialist_command",
     "specialist_model",

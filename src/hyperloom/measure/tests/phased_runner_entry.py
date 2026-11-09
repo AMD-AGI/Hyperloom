@@ -18,6 +18,7 @@ from pathlib import Path
 
 from hyperloom.measure import local
 from hyperloom.measure.runner import run as runner_flow
+from hyperloom.measure.tests.bundle_factory import lm_eval_at_its_pin
 from hyperloom.measure.tests.phase_rounds import RealClock, Rounds, StagedGrid
 
 
@@ -33,6 +34,7 @@ def main() -> int:
         return []
 
     local.teardown_variant_server = stop_server  # type: ignore[assignment]
+    sys.path.insert(0, str(lm_eval_at_its_pin(root / "lm-eval-pin")))
     return runner_flow.run(root / "in", root / "out", scratch=root / "work" / "scratch", spec_wait_sec=60)
 
 

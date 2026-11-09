@@ -18,6 +18,7 @@ import grp
 import os
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -73,6 +74,13 @@ class Accounts:
         """Run ``code`` as root of a new user namespace that maps only ``0`` to ``uid`` (``setgroups`` denied, so the
         account keeps :attr:`group` without seeing it); its stdout. The maps are written from here, as a container
         runtime writes them."""
+        return self.run_in_namespace(uid, code, more=(), umask=umask)
+
+    def run_in_namespace(
+        self, uid: int, code: str, *, more: tuple[tuple[int, int, int], ...] = (), umask: int = 0o022
+    ) -> str:
+        """Run ``code`` as root of a new user namespace that maps ``0`` to ``uid`` and each ``(inside, outside,
+        count)`` range of ``more`` for users and groups alike (``setgroups`` denied); its stdout."""
         wait_then_run = ["sh", "-c", 'read _ && exec "$@"', "sh", *self._interpreter(code, umask)]
         prefix = self._setpriv(uid)
         child = subprocess.Popen(
@@ -83,7 +91,9 @@ class Accounts:
             text=True,
         )
         try:
-            _map_single_id(child.pid, uid)
+            _map_ids(
+                child.pid, "".join(f"{inside} {outside} {count}\n" for inside, outside, count in ((0, uid, 1), *more))
+            )
         except OSError as exc:
             child.kill()
             child.communicate()
@@ -120,14 +130,14 @@ def _finish(done: subprocess.CompletedProcess[str]) -> str:
     return done.stdout
 
 
-def _map_single_id(pid: int, uid: int) -> None:
+def _map_ids(pid: int, ranges: str) -> None:
     ours = os.stat("/proc/self/ns/user").st_ino
     deadline = time.monotonic() + _TIMEOUT_SEC
     while os.stat(f"/proc/{pid}/ns/user").st_ino == ours:
         if time.monotonic() > deadline:
             raise TimeoutError(f"process {pid} never entered a new user namespace")
         time.sleep(0.01)
-    for name, text in (("setgroups", "deny"), ("uid_map", f"0 {uid} 1"), ("gid_map", f"0 {uid} 1")):
+    for name, text in (("setgroups", "deny"), ("uid_map", ranges), ("gid_map", ranges)):
         Path(f"/proc/{pid}/{name}").write_text(text)
 
 
@@ -146,6 +156,31 @@ def _runnable_python(uid: int) -> str | None:
         if subprocess.run(probe, capture_output=True, timeout=_TIMEOUT_SEC, check=False).returncode == 0:
             return candidate
     return None
+
+
+#: An account no one on the host is: the owner of a link "another account" put there.
+_ANOTHER_ACCOUNT = 60999
+
+
+def theirs(link: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Make ``link`` another account's: chowned to one where this is root, else seen as one by ``fstat`` (only that
+    inode: the directories around it stay this account's)."""
+    if os.geteuid() == 0:
+        os.lchown(link, _ANOTHER_ACCOUNT, _ANOTHER_ACCOUNT)
+        return link
+    planted = os.lstat(link)
+    real_fstat = os.fstat
+
+    def as_another_accounts(descriptor: int) -> os.stat_result:
+        info = real_fstat(descriptor)
+        if (info.st_dev, info.st_ino) != (planted.st_dev, planted.st_ino):
+            return info
+        fields = list(info)
+        fields[stat.ST_UID] = _ANOTHER_ACCOUNT
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", as_another_accounts)
+    return link
 
 
 @contextmanager

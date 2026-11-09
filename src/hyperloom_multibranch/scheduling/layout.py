@@ -228,8 +228,9 @@ def session_dir_name(now: float) -> str:
 def create_session(workspace: Path, model_basename: str, clock: Clock) -> SessionLayout:
     """Create a fresh session directory with every subdirectory; an existing one is an error.
 
-    Each is ``2775`` (:func:`~hyperloom_common.shared_storage.make_shared_dirs`), whatever the umask: a later leg of a
-    hosted run, and the sandboxes it lends, may be other accounts of the group, and they write in it."""
+    Below shared storage each is ``2775`` (:func:`~hyperloom_common.shared_storage.make_shared_dirs`), whatever the
+    umask: a later leg of a hosted run, and the sandboxes it lends, may be other accounts of the group, and they write
+    in it. Elsewhere the umask decides."""
     root = workspace / fs_safe_id(model_basename) / session_dir_name(clock.now())
     make_shared_dirs(root.parent)
     root.mkdir(SHARED_DIR_MODE)

@@ -433,6 +433,10 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
     from arbor.execute import turns
     tag = turns.new_tag(label)
     tagged = "env" in getattr(ClaudeAgentOptions, "__dataclass_fields__", {})
+    # Standalone, what the turn starts inside the container through `docker exec` carries no tag: the container's
+    # processes are listed now, and what is new when the turn ends is stopped there.
+    box = turns.CONTAINER if label not in turns.KEPT else None
+    before = await asyncio.to_thread(turns.container_procs, box) if box else None
     options = ClaudeAgentOptions(
         cwd=cwd,
         allowed_tools=allowed_tools,
@@ -502,6 +506,12 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
             if stopped:
                 print(f"[arbor] {label}: stopped {len(stopped)} process(es) the turn left running: {stopped[:8]}"
                       + (f"; still running after SIGTERM: {running[:8]}" if running else ""),
+                      file=sys.stderr, flush=True)
+        if before is not None:
+            stopped, running = await asyncio.to_thread(turns.end_container_turn, before, box, label)
+            if stopped:
+                print(f"[arbor] {label}: stopped {len(stopped)} process(es) the turn left running in {box}: "
+                      f"{stopped[:8]}" + (f"; still running after SIGTERM: {running[:8]}" if running else ""),
                       file=sys.stderr, flush=True)
 
     if not text_parts and sdk_errors:
@@ -583,19 +593,27 @@ def _parse_critic_decision(output: str) -> tuple[str, str]:
     parseable is treated as UPHOLD: the gate already applied every mechanical
     rule, so a silent critic must not be able to discard a legitimate result.
     Older prompts emitted ``KEEP``; accept it as a synonym for UPHOLD.
+
+    Markdown around a line is not part of it: ``**DECISION: REVERT**``, ``**DECISION:** REVERT``,
+    `` `DECISION: REVERT` `` and ``> DECISION: REVERT`` are each a REVERT. Matching the bare line
+    alone once read a bold REVERT as no verdict at all, and the gate's KEEP stood against the
+    critic. The last verdict wins. A critic that gives none still upholds the gate, and its reason
+    says that no verdict was found rather than that there was no objection.
     """
-    decision = "UPHOLD"
-    reason = "critic produced no objection"
-    for line in output.strip().splitlines():
-        line = line.strip()
-        m = re.match(r'DECISION:\s*(UPHOLD|KEEP|REVERT|RECHECK)', line, re.IGNORECASE)
+    decision = None
+    reason = None
+    for raw_line in output.strip().splitlines():
+        line = raw_line.strip().strip(_MARKDOWN_DECORATION)
+        m = re.match(r'DECISION\s*[*_`]*\s*:\s*[*_`]*\s*(UPHOLD|KEEP|REVERT|RECHECK)\b', line, re.IGNORECASE)
         if m:
             raw = m.group(1).upper()
             decision = "UPHOLD" if raw in ("UPHOLD", "KEEP") else raw
-        m = re.match(r'REASON:\s*(.*)', line, re.IGNORECASE)
+        m = re.match(r'REASON\s*[*_`]*\s*:\s*[*_`]*\s*(.*)', line, re.IGNORECASE)
         if m:
-            reason = m.group(1).strip()
-    return decision, reason
+            reason = m.group(1).strip().rstrip(_MARKDOWN_DECORATION) or reason
+    if decision is None:
+        return "UPHOLD", reason or "critic gave no DECISION line — gate verdict stands"
+    return decision, reason or "critic gave no reason"
 
 
 _MARKDOWN_DECORATION = "*_`>#- \t"
@@ -695,10 +713,13 @@ def _check_switches(state, config: dict, container: str, workspace: str, session
     settings = pair[1] if pair else knobs.settings(config, None)
     launch_env = {k: str(v) for k, v in (config.get("server_env") or {}).items()}
 
-    def existed(name: str) -> bool:
-        r = run_in(container, ["git", "grep", "-q", "-F", "-e", name, "HEAD~1", "--"],
-                   workdir=workspace, capture_output=True, text=True)
-        return r.returncode != 1   # only "not found" proves it new
+    # The tree before the change, and the other editable packages (AITER reads its own variables).
+    existed = _switches.existed_in(run_in, container, workspace,
+                                   [p.get("path") for p in (config.get("editable_packages") or [])])
+    on_by_default = _switches.declared_default_on(agent_output) & _switches.env_reads(git_diff)
+    if on_by_default:
+        print(f"[arbor] S4: {', '.join(sorted(on_by_default))} declared DEFAULT_ON: unset runs the "
+              f"new path, which the arm served", file=sys.stderr, flush=True)
 
     def jit_files(cfg: dict) -> set[str]:
         roots = _switches.jit_roots({**_live_env(cfg), **found})
@@ -883,6 +904,12 @@ def _finalize_iteration(
         git_diff = git(container, workspace, "diff", "HEAD~1", "HEAD")
     except RuntimeError:
         git_diff = "(could not read diff)"
+    # The same iteration's commits in the other editable trees (AITER), each path under its tree's
+    # name: a change confined to one would otherwise look empty to the critic and to S4.
+    from arbor.execute import trees as _trees
+    trees_diff = _trees.diff(container, iter_dir)
+    if trees_diff:
+        git_diff = f"{git_diff}\n{trees_diff}" if git_diff.strip() else trees_diff
 
     # ── Out-of-tree artifacts (evaluators, knowledge notes) ─────────────────
     # Written to the pack dir on shared storage, so invisible to git_diff.
@@ -1234,7 +1261,7 @@ def _finalize_iteration(
         )
         state.save(session_dir_p / "session.json")
         if gate.revert_tree:
-            _safe_revert(container, workspace)
+            _safe_revert(container, workspace, campaign.config)
 
     state.save(session_dir_p / "session.json")
 
@@ -1901,8 +1928,15 @@ def _server_log_tail(config: dict, container: str, lines: int = 20) -> str:
     return r.stdout
 
 
-def _safe_revert(container: str, workspace: str) -> None:
+def _safe_revert(container: str, workspace: str, config: dict | None = None) -> None:
+    """Revert the iteration: the workspace's commit, and the same iteration's commits in the other editable trees
+    (arbor/execute/trees.py), found by the commit's subject."""
+    from arbor.execute import trees as _trees
     from arbor.execute.workspace import git, revert as _revert
+    try:
+        subject = git(container, workspace, "log", "-1", "--format=%s")
+    except RuntimeError:
+        subject = ""
     try:
         git(container, workspace, "checkout", "--", ".")
         git(container, workspace, "clean", "-fd")
@@ -1912,6 +1946,11 @@ def _safe_revert(container: str, workspace: str) -> None:
         _revert(container, workspace)
     except RuntimeError as e:
         print(f"[arbor] revert failed: {e}", file=sys.stderr, flush=True)
+    others = _trees.paths(config or {})
+    if others and subject.startswith("iter-"):
+        reverted = _trees.revert(container, others, subject)
+        if reverted:
+            print(f"[arbor] reverted in {', '.join(reverted)} too", file=sys.stderr, flush=True)
 
 
 def _mean_script(bench_output_path: str, metric_key: str, secondary_key: str | None = None) -> str:
@@ -2057,6 +2096,12 @@ def run_iteration(
 
     iter_dir = session_dir_p / f"iter_{iteration}"
     iter_dir.mkdir(parents=True, exist_ok=True)
+
+    # Standalone in a container: what a turn starts there is stopped when it ends (arbor/execute/turns.py).
+    from arbor.execute import turns as _turns
+    from arbor.execute.workspace import HOST as _HOST
+    _turns.CONTAINER = (container if container and container != _HOST and not component.is_component(config)
+                        else None)
 
     # Anchors the out-of-tree artifact scan: anything the agent writes into the
     # pack's eval/ or knowledge/ dirs from here on belongs to this iteration.
@@ -2263,7 +2308,11 @@ def run_iteration(
     print(f"[arbor] Claim class: {claim_class} — {change}", file=sys.stderr, flush=True)
 
     # ── Step 3: Harness commits ─────────────────────────────────────────────
-    if not has_changes(container, workspace):
+    # The other editable trees (AITER) count too: a change confined to one is a change
+    # (arbor/execute/trees.py), committed and reverted with the workspace's.
+    from arbor.execute import trees as _trees
+    trees_changed = _trees.changed(container, config)
+    if not has_changes(container, workspace) and not trees_changed:
         # A pure-scan PROBE legitimately changes no files — "I read the upstream
         # branches and there is nothing new" is a result the pack explicitly
         # asks for. It still has to produce a ledger record to count.
@@ -2289,6 +2338,11 @@ def run_iteration(
 
     sha = commit(container, workspace, f"iter-{iteration}: {change}")
     print(f"[arbor] Committed: {sha[:12]} — {change}", file=sys.stderr, flush=True)
+    if trees_changed:
+        iter_dir.mkdir(parents=True, exist_ok=True)
+        done = _trees.commit(container, trees_changed, f"iter-{iteration}: {change}", iter_dir)
+        print(f"[arbor] Committed in {', '.join(f'{t} {s[:12]}' for t, s in done.items())}",
+              file=sys.stderr, flush=True)
 
     # ── Step 3a: the weights' precision is the campaign's ───────────────────
     # A hard rule, before any GPU time: a change that sets another weight precision is another model's entry.
@@ -2317,7 +2371,7 @@ def run_iteration(
             reason=reason, claim_class=claim_class, findings=findings,
         )
         state.save(session_dir_p / "session.json")
-        _safe_revert(container, workspace)
+        _safe_revert(container, workspace, config)
         return {"iteration": iteration, "decision": "REVERT", "metric": 0.0, "change": change,
                 "claim_class": claim_class, "reason": reason}
 
@@ -2471,7 +2525,7 @@ def run_iteration(
             reason=f"server failed: {reason}",
         )
         state.save(session_dir_p / "session.json")
-        _safe_revert(container, workspace)
+        _safe_revert(container, workspace, config)
         return {"iteration": iteration, "decision": "REVERT", "metric": 0.0, "change": change}
 
     # Final health check
@@ -2491,7 +2545,7 @@ def run_iteration(
             reason=reason,
         )
         state.save(session_dir_p / "session.json")
-        _safe_revert(container, workspace)
+        _safe_revert(container, workspace, config)
         return {"iteration": iteration, "decision": "REVERT", "metric": 0.0, "change": change}
 
     print(f"[arbor] Server healthy.", file=sys.stderr, flush=True)
@@ -2638,7 +2692,10 @@ def run_iteration(
         + f"2. Watch progress — every 60s read bench logs:\n"
         f"   ```bash\n"
         f"   sleep 60 && {watch}\n"
-        f"   ```\n\n"
+        f"   ```\n"
+        f"   **One sleep+check per tool call, never a loop (`while`, `for`, `until`) in one bash call:**\n"
+        f"   this turn runs headless, and a shell loop asks for an approval no one can give, so it is\n"
+        f"   refused and the turn is lost.\n\n"
         f"3. If the server crashes during the bench (ServerDisconnectedError, SIGQUIT, OOM in log):\n"
         f"   - Fix the root cause (reduce a memory-heavy flag, adjust config)\n"
         + restart +
@@ -2693,8 +2750,21 @@ def run_iteration(
             bench_output = {"status": "failed", "error": "invalid JSON in bench_output.json"}
     elif _bench_failure(bench_agent_output) is not None:   # a verdict line, after any METRIC
         bench_output = {"status": "failed", "error": _bench_failure(bench_agent_output)}
-    elif reported_metric is not None:
+    elif reported_metric is not None and (host_bench or config.get("bench_metric_from_agent")):
+        # The host's bench command, whose record the agent writes anyway, or a pack whose bench
+        # writes no file (`bench_metric_from_agent`): the agent's number, marked as such.
         bench_output = {"status": "ok", metric_key: reported_metric, "source": "agent_reported"}
+    elif reported_metric is not None:
+        # The pack's bench script writes the file; without it, the agent's number would skip every
+        # check the file carries (the pack's own failure guard, duration_seconds, the secondary
+        # metric), so it is not booked. The usual cause is a session_mount that is not the
+        # container's path of the session's parent directory.
+        mount = "" if comp else (f" (session_mount {session_mount!r} must be the container's path of "
+                                 f"{Path(campaign.session_root).parent})")
+        bench_output = {"status": "failed", "error": (
+            f"no bench_output.json at {bench_output_file}; the bench was told to write "
+            f"{bench_output_path}{mount}. The agent reported METRIC {reported_metric}, which is not "
+            f"booked without the file")}
     else:
         bench_output = {"status": "failed", "error": "bench_output.json not found and no metric reported"}
 

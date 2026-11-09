@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from hyperloom_common.fs_utils import append_nofollow
 from hyperloom_common.proctree import TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 
@@ -279,6 +280,15 @@ def _pdeathsig_preexec() -> None:
         pass
 
 
+@dataclass(frozen=True)
+class CreatedLog:
+    """A log file the caller created at ``path``, which a process manager only appends to: what is there must be the
+    file ``identity`` (``(st_dev, st_ino)``) names."""
+
+    path: str
+    identity: tuple[int, int]
+
+
 @dataclass
 class ManagedServerProcess:
     """Supervise a single GPU/serving subprocess tied to this object's lifetime.
@@ -295,10 +305,11 @@ class ManagedServerProcess:
         *,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
-        log_path: str | None = None,
+        log_path: str | CreatedLog | None = None,
         stdin_path: str | None = None,
     ) -> int:
-        """Launch the subprocess and return its pid."""
+        """Launch the subprocess and return its pid. A :class:`CreatedLog` is appended to, never followed through a
+        link (:func:`~hyperloom_common.fs_utils.append_nofollow`); a path is created or truncated."""
         if self._proc is not None and self._proc.poll() is None:
             raise RuntimeError("ManagedServerProcess already running")
         stdin: Any = subprocess.DEVNULL
@@ -309,7 +320,13 @@ class ManagedServerProcess:
             if stdin_path:
                 stdin_fh = open(stdin_path, "rb")
                 stdin = stdin_fh
-            if log_path:
+            if isinstance(log_path, CreatedLog):
+                stdout_fh = append_nofollow(log_path.path, log_path.identity)
+                # Dated now, as the file this used to create was: the caller made it before Ray placed the actor,
+                # and a reaper reads its age as the CLI's silence.
+                os.utime(stdout_fh.fileno())
+                stdout = stdout_fh
+            elif log_path:
                 os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
                 stdout_fh = open(log_path, "w", encoding="utf-8")
                 stdout = stdout_fh
@@ -388,13 +405,16 @@ class ManagedServerProcess:
 
 @dataclass(frozen=True)
 class ActorLaunch:
-    """A subprocess a ServingActor launches; it runs in ``env`` alone, plus the visible-device keys Ray set."""
+    """A subprocess a ServingActor launches; it runs in ``env`` alone, plus the visible-device keys Ray set.
+    ``log_identity``: the log is the file the caller created at ``log_path``, which the actor only appends to
+    (:meth:`ManagedServerProcess.start`)."""
 
     cmd: list[str]
     env: dict[str, str] | None = None
     cwd: str | None = None
     log_path: str | None = None
     stdin_path: str | None = None
+    log_identity: tuple[int, int] | None = None
 
 
 def _child_env_for(launch: ActorLaunch) -> dict[str, str]:
@@ -429,6 +449,8 @@ def _serving_actor_body() -> Any:
                 "cwd": launch.cwd,
                 "log_path": launch.log_path,
             }
+            if launch.log_path is not None and launch.log_identity is not None:
+                start_kwargs["log_path"] = CreatedLog(launch.log_path, tuple(launch.log_identity))
             if launch.stdin_path is not None:
                 start_kwargs["stdin_path"] = launch.stdin_path
             return self._mgr.start(launch.cmd, **start_kwargs)
@@ -945,6 +967,7 @@ def maybe_gpu_specialist_lease(
 
 __all__ = [
     "ActorLaunch",
+    "CreatedLog",
     "GpuSpecialistLease",
     "ManagedServerProcess",
     "RAY_INFEASIBLE_MARKER",

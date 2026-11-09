@@ -39,7 +39,13 @@ from hyperloom.measure.compile import (
 from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
 from hyperloom_common.git_safety import app_git, trusted_admin_dir
-from hyperloom_common.shared_storage import SHARED_CHILD_UMASK, SHARED_DIR_MODE, make_shared_dirs, share_new_directory
+from hyperloom_common.shared_storage import (
+    SHARED_DIR_MODE,
+    child_umask,
+    directory_is_shared,
+    make_shared_dirs,
+    share_new_directory,
+)
 from hyperloom_multibranch.repo.isolated_git import (
     INIT,
     NO_EXCLUDES_FILE,
@@ -238,7 +244,8 @@ def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None =
     at. Otherwise ``cwd`` is the source base or an image's checkout: every driver program its config defines is blanked
     (:func:`~hyperloom_multibranch.repo.isolated_git.blank_driver_programs`) and the tree is trusted whoever owns it
     (``safe.directory``), as the leg that made it may be another account of the group. Either way no program the
-    config names runs, and git runs under umask ``002``: what it makes -- a worktree, its files, the repository's
+    config names runs, and below shared storage git runs under umask ``002``
+    (:func:`~hyperloom_common.shared_storage.child_umask`): what it makes -- a worktree, its files, the repository's
     objects and refs -- is the group's, as the dev sandboxes and the run's next leg write it."""
     pinned = _GIT_IDENTITY if index is None else {**_GIT_IDENTITY, "GIT_INDEX_FILE": str(index)}
     if common is not None:
@@ -253,7 +260,7 @@ def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None =
         git_argv(*trusted, *_FIXED_CONFIG, *blanked, *args),
         cwd=cwd,
         env=env,
-        umask=SHARED_CHILD_UMASK,
+        umask=child_umask(cwd),
         capture_output=True,
         timeout=GIT_TIMEOUT_S,
         check=False,
@@ -425,8 +432,9 @@ def _link(worktree: Path, prefix: PurePosixPath, target: str) -> None:
     """Link ``target`` at ``prefix`` in ``worktree`` unless something is there, making the directories on the way.
 
     The agent writes the worktree and may have made a directory on the way a symlink to somewhere else: each directory
-    is opened without following one, and the next made and opened relative to it, so nothing is made outside. A
-    directory made here is the group's (``2775``, set on its descriptor), as the dev sandboxes and the next leg write it.
+    is opened without following one, and the next made and opened relative to it, so nothing is made outside. Below
+    shared storage a directory made here is the group's (``2775``, set on its descriptor), as the dev sandboxes and the
+    next leg write it (:func:`~hyperloom_common.shared_storage.directory_is_shared`, judged at the first one made).
 
     Raises:
         WorktreeError: A directory on the way is a symlink or no directory.
@@ -438,9 +446,10 @@ def _link(worktree: Path, prefix: PurePosixPath, target: str) -> None:
         os.close(fd)
 
 
-def _link_below(dir_fd: int, link: Path, parts: tuple[str, ...], target: str) -> None:
+def _link_below(dir_fd: int, link: Path, parts: tuple[str, ...], target: str, widen: bool | None = None) -> None:
     """Link ``target`` at ``link``, whose directories still to make and open below ``dir_fd`` are ``parts``; a
-    directory made here is the group's (``2775``, set on its descriptor).
+    directory made here is the group's (``2775``, set on its descriptor) when ``widen``, decided at the first one made
+    (``None``: none made yet) by whether ``dir_fd`` is shared storage.
 
     Raises:
         WorktreeError: A directory on the way is a symlink or no directory.
@@ -454,14 +463,15 @@ def _link_below(dir_fd: int, link: Path, parts: tuple[str, ...], target: str) ->
     with contextlib.suppress(FileExistsError):
         os.mkdir(part, SHARED_DIR_MODE, dir_fd=dir_fd)
         made = True
+        widen = directory_is_shared(dir_fd) if widen is None else widen
     try:
         fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=dir_fd)
     except OSError as error:
         raise WorktreeError(f"{link} cannot be linked: {part} is no directory: {error}") from error
     try:
-        if made:
+        if made and widen:
             os.fchmod(fd, SHARED_DIR_MODE)
-        _link_below(fd, link, parts[1:], target)
+        _link_below(fd, link, parts[1:], target, widen)
     finally:
         os.close(fd)
 

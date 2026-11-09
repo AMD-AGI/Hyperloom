@@ -7,7 +7,8 @@
 configured, so a host that is set up wrong refuses at start, naming every item, instead of failing each build later:
 
 - the compile can be isolated: as user 65534 (the service runs as root, has ``setpriv``, and its user namespace maps
-  65534), else under bubblewrap (:func:`~hyperloom.measure.runner.native.isolated.local_isolation`); a host where
+  65534), else under bubblewrap with a network of its own (:func:`~hyperloom.measure.runner.native.isolated.
+  compile_bwrap`, as :func:`~hyperloom.measure.runner.native.isolated.local_isolation` chooses); a host where
   neither works is refused naming both reasons (a bubblewrap whose probe gave no answer in time is not refused: that is
   not a final answer, so it is logged and each build asks again);
 - what the compile runs is there: this process's interpreter, its environment and source tree (the build child imports
@@ -51,9 +52,9 @@ from pathlib import Path
 from shutil import which
 from urllib.parse import unquote, urlparse
 
-from hyperloom.common.agent_isolation import NoIsolation, bwrap_isolation
+from hyperloom.common.agent_isolation import NoIsolation
 from hyperloom.measure.jit.native.config import BuildStoreConfigError
-from hyperloom.measure.runner.native.isolated import NOBODY, SOURCE_ROOT, account_problem, unisolated
+from hyperloom.measure.runner.native.isolated import NOBODY, SOURCE_ROOT, account_problem, compile_bwrap, unisolated
 from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES
 from hyperloom.orchestrator.trace_analysis import TRACELENS_REF
 
@@ -436,7 +437,7 @@ def _isolation_problems(account: str | None) -> list[str]:
     each build asks again."""
     if account is None:
         return []
-    bwrap = bwrap_isolation()
+    bwrap = compile_bwrap()
     if not isinstance(bwrap, NoIsolation):
         return []
     if bwrap.transient:

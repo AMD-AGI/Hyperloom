@@ -376,7 +376,10 @@ def _render_switches() -> str:
         "one, with the switch's name, where the kernel dispatches.\n\n"
         "A new variable your change reads that the tree did not name, that the arm leaves unset "
         "and that you did not declare, refuses the KEEP: the harness cannot know how to turn it "
-        "on."
+        "on. Two are not switches: a variable another editable package already reads (AITER's "
+        "`AITER_CONFIG_*`), and one whose unset value runs your new path (an opt-out such as "
+        "`DISABLE_X`), which you declare on its own line as `DEFAULT_ON: DISABLE_X`: the arm's "
+        "own run served that path."
     )
 
 

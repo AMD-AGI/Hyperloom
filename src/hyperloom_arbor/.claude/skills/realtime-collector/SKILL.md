@@ -154,6 +154,6 @@ the share could not be reached or written (the local copy is still written),
 | Variable | Default | |
 | --- | --- | --- |
 | `ARBOR_SHARE_HOST` | `arbor-share` | ssh destination, an alias from `~/.ssh/config` |
-| `ARBOR_SHARE_ROOT` | `/path/to/arbor-share` | the share root on that host; a scratch root (under `/tmp`) for tests |
+| `ARBOR_SHARE_ROOT` | none: the site sets it, in the environment or `~/.arbor/settings.env` | the share root on that host; a scratch root (under `/tmp`) for tests |
 | `ARBOR_SHARE_SSH_OPTS` | none | extra options for both ssh and sftp; use `-F` and `-o` forms (`-o Port=<port>`), since ssh and sftp spell `-p` differently |
 | `ARBOR_PROJECT`, `ARBOR_USER` | none | the names above |

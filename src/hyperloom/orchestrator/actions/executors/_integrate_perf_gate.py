@@ -610,7 +610,7 @@ def _unrated_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) ->
     stopped = stopped_by_the_run_class(bench_class)
     if stopped is not None:
         fields: dict[str, Any] = {"error_class": stopped.error_class, "error": stopped.interrupted}
-    elif _environment_unmeasured(bench_result):
+    elif _environment_unmeasured(bench_result, framework_changed=attempt.changes_framework):
         fields = {
             "error_class": BENCH_UNMEASURED_CLASS,
             "bench_error_class": bench_class,
@@ -631,13 +631,15 @@ def _unrated_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) ->
     }
 
 
-def _environment_unmeasured(bench_result: dict[str, Any]) -> bool:
+def _environment_unmeasured(bench_result: dict[str, Any], *, framework_changed: bool) -> bool:
     """Whether the bench produced no throughput and its error is evidence of an environment fault."""
     tput = bench_result.get("output_throughput")
     if isinstance(tput, (int, float)) and tput > 0:
         return False
     attribution = classify_failure_attribution(
-        error_class=bench_result.get("error_class"), error_excerpt=bench_result.get("error")
+        error_class=bench_result.get("error_class"),
+        framework_changed=framework_changed,
+        error_excerpt=bench_result.get("error"),
     )
     return attribution == FAILURE_ATTRIBUTION_ENVIRONMENT
 

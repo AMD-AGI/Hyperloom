@@ -836,7 +836,7 @@ class LocalAgentSandbox:
             return _Confined(isolation, policy, env, home, scratch)
         scratch.remove()
         failed = dataclasses.replace(isolation.probe, problems=tuple(refused))
-        self.isolation = choose_sandbox_isolation(probe=lambda _path: failed)
+        self.isolation = choose_sandbox_isolation(known=failed)
         logger.warning("the agent sandbox at %s runs unconfined, as before: %s", self.root, self.isolation.why)
         self.frameworks = framework_protection()
         return None

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -16,6 +17,7 @@ from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord, InboxItem
 from hyperloom_multibranch.contracts.blackboard.vocab import InboxKind
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.specialist import prompts
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy
@@ -26,6 +28,7 @@ from hyperloom_multibranch.specialist.prompts import (
     SUMMARY_ENTRIES,
     SUMMARY_ENTRY_CHARS,
     VERSION_HEX,
+    RoleWorkload,
     launch_prompt,
     prompt_versions,
     role_prompt,
@@ -44,7 +47,8 @@ from hyperloom_multibranch.blackboard.tools import (
 )
 from hyperloom_multibranch.toolbox.mcp_tools import REPLY_INBOX_HEADER
 
-WORKLOAD = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
+NAMED = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
+WORKLOAD = RoleWorkload(NAMED)
 TOOLS = (
     "blackboard_branch_log",
     "blackboard_claim",
@@ -75,9 +79,9 @@ def _launch(*, brief: str = "", direction: str = "", **overrides) -> str:
 
 
 def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
-    prompt = role_prompt(WORKLOAD.replace(", ", ",\n  "))
+    prompt = role_prompt(RoleWorkload(NAMED.replace(", ", ",\n  ")))
 
-    assert f"The session optimizes one workload: {WORKLOAD}." in prompt
+    assert f"The session optimizes one workload: {NAMED}." in prompt
     assert all(tool in prompt for tool in TOOLS)
     assert 'Never submit purpose "confirm"' in prompt
     assert "target_share_pct" in prompt and "w/(1-w)" in prompt
@@ -85,7 +89,7 @@ def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
     assert "A fixable defect" in prompt and "An inherent trade-off" in prompt
     assert prompt.index("blackboard_learn, citing the candidate") < prompt.index("then call decline_repair")
     with pytest.raises(ValueError, match="names the workload"):
-        role_prompt(" \n")
+        role_prompt(RoleWorkload(" \n"))
 
 
 def test_the_role_reads_the_briefs_two_direction_lists_before_claiming_and_chooses_as_before_without_them():
@@ -354,11 +358,37 @@ def test_the_role_holds_the_specialist_to_arbor_s_map_when_its_brief_has_one():
     assert "a direction a running Arbor branch holds" in role and "answers its reason" in role
 
 
-def test_the_role_names_each_workload_s_bar_as_its_gate_sets_it():
-    role = role_prompt(WORKLOAD)
+def test_an_inferencex_role_names_its_bar_and_defects_and_no_agentx_objective():
+    role = " ".join(role_prompt(WORKLOAD).split())
 
-    assert "on InferenceX from the spread of the baseline measurements" in role
-    assert "on AgentX a fixed threshold on the P50" in role
+    assert "clear the session's bar, set from the spread of the baseline measurements" in role
+    assert "the accuracy gate, requests it did not complete (dropped_requests)" in role
+    assert "(long_context_dropped). It waits for your diagnosis" in role
+    assert "accuracy whatever the scales. Write the lesson" in role
+    assert not any(word in role for word in ("P50", "P90", "interactivity", "output throughput"))
+
+
+@pytest.mark.parametrize("objective", list(AgentXObjective))
+def test_an_agentx_role_tells_its_objective_bar_and_guards(monkeypatch, objective):
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "4")
+    role = " ".join(role_prompt(RoleWorkload(NAMED, objective)).split())
+    guards = objective.guards
+
+    assert f"graded on {objective.title} ({objective.metric}): {objective.description}" in role
+    assert f"bar of +{objective.bar_pct:g}% on it" in role and "+2%" in role
+    assert " and ".join(f"{guard.name} ({guard.metric})" for guard in guards) + " each hold within 4%" in role
+    assert all(f"{guard.name} as {guard.refusal}" in role for guard in guards)
+    assert f"a {objective.title} gain bought with {guards[0].name} or {guards[1].name}" in role
+    assert "output throughput" not in role and "dropped_requests" not in role
+    assert "spread of the baseline measurements" not in role
+
+
+def test_the_two_agentx_objectives_tell_what_moves_them():
+    p50, total = AgentXObjective.P50_INTERACTIVITY, AgentXObjective.TOTAL_TOKEN_THROUGHPUT
+
+    assert "median request's per-output-token speed" in p50.description and "TTFT" in p50.description
+    assert "only at high concurrency" in total.description and "prefix-cache" in total.description
+    assert [guard.name for guard in total.guards] == ["P90 interactivity", p50.title]
 
 
 def test_a_resumed_cli_hears_why_it_stopped_its_worktree_and_what_arrived_meanwhile():
@@ -646,6 +676,7 @@ def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):
         ("_REFERENCES", lambda text: text + " One more rule.", "specialist_role"),
         ("_BASE", lambda text: text + " One more rule.", "specialist_role"),
         ("_HOLDS", lambda holds: {**holds, "geak": holds["geak"] + " more"}, "specialist_role"),
+        ("_INFERENCEX_GRADING", lambda grading: replace(grading, trade_off=", more"), "specialist_role"),
         ("_LEASE_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
         ("_WAIT_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
     ],
