@@ -19,8 +19,7 @@ from typing import Any
 from inference_suite.contracts import FailedStep
 
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom.common.outside_facts import PY_IMPORT_ERROR, PY_MODULE_NOT_FOUND_ERROR
-from hyperloom.common.failure_signature import SERVE_FLAG
+from hyperloom.common.failure_signature import IMPORT_ERROR, SERVE_FLAG
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID, HOST_GPUS_UNAVAILABLE
 
 FAILURE_STAGE_WARMUP: str = "warmup"
@@ -105,17 +104,10 @@ _ENVIRONMENT_ERROR_CLASSES = frozenset(
         FailedStep.TEARDOWN_INCOMPLETE.value,
     }
 )
-# What the suite's framework probe says (``FailedStep.FRAMEWORK_VERSION_UNKNOWN``) when the serving interpreter finds no
-# package of the framework, or importing it raised: the candidate's, as a server that died on the same import is, and
-# as ``hyperloom.measure.failures`` settles a test that stopped there (``import_error``). A probe that ran too long or
-# could not start, or a version it could not read, says nothing of the candidate and stays the environment's. The probe
-# says ``<python> cannot import <package>`` as the whole detail, so that is taken only at the end of the evidence, never
-# from a line inside it, as ``hyperloom.measure.failures`` takes it.
-_FRAMEWORK_UNIMPORTABLE_RE = re.compile(
-    r"\scannot import [A-Za-z_][\w.]*\s*\Z"
-    r"|(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:" + PY_IMPORT_ERROR + "|" + PY_MODULE_NOT_FOUND_ERROR + r"):\s*\S",
-    re.MULTILINE,
-)
+# How ``hyperloom.measure.failures`` settles a test the suite stopped at ``FailedStep.FRAMEWORK_VERSION_UNKNOWN``: the
+# candidate's ``import_error: <line>`` only when the test rebuilt the framework, ``framework_unimportable: <line>`` on
+# the image's own install. The ledger follows that verdict from the reason's prefix instead of reading the probe again.
+_CANDIDATE_FRAMEWORK_REASON_PREFIX = f"{IMPORT_ERROR}: "
 _HARNESS_ERROR_CLASSES = frozenset(
     {
         "benchmark_cap_error",
@@ -244,8 +236,8 @@ def classify_failure_attribution(
     kind = str(error_class or "").strip().lower()
     evidence = f"{reason or ''}\n{error_excerpt or ''}"
     if kind == FailedStep.FRAMEWORK_VERSION_UNKNOWN.value:
-        unimportable = _FRAMEWORK_UNIMPORTABLE_RE.search(evidence)
-        return FAILURE_ATTRIBUTION_CANDIDATE if unimportable else FAILURE_ATTRIBUTION_ENVIRONMENT
+        candidate = str(reason or "").strip().startswith(_CANDIDATE_FRAMEWORK_REASON_PREFIX)
+        return FAILURE_ATTRIBUTION_CANDIDATE if candidate else FAILURE_ATTRIBUTION_ENVIRONMENT
     if kind in _ENVIRONMENT_ERROR_CLASSES or _ENVIRONMENT_EVIDENCE_RE.search(evidence):
         return FAILURE_ATTRIBUTION_ENVIRONMENT
     if kind in _CANDIDATE_ERROR_CLASSES or _CANDIDATE_EVIDENCE_RE.search(evidence):
