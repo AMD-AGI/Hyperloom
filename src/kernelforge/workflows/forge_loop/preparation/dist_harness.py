@@ -24,6 +24,11 @@ parity calls, because this module reseeds between them rather than trusting
 ``build_inputs`` to vary. And no barrier can land inside the timed region,
 because the driver never sees the timed region at all.
 
+The verdict is the worst rank's SNR unless every case brings a ``judge``: an
+operator whose outputs carry different contracts -- an exact cache record next
+to a toleranced activation -- cannot state them as one SNR, so the driver judges
+each rank's answer and the harness reports ``allclose`` from the worst rank.
+
 Copied next to the driver during task preparation, imported as ``dist_harness``.
 """
 
@@ -32,11 +37,12 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import re
 import statistics
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -56,6 +62,10 @@ _REPLAY_WARMUP = 3
 #: what the probe checks instead of re-deriving the properties from the run.
 MEASURED = [0]
 
+#: A judge metric's name and text value: no whitespace or colon, so a metric
+#: line can never read as the ``SNR:`` or ``allclose:`` line the loop parses.
+_METRIC_TOKEN = re.compile(r"[A-Za-z0-9_.+-]+")
+
 
 @dataclass(frozen=True)
 class RankContext:
@@ -69,6 +79,14 @@ class RankContext:
 
 
 @dataclass(frozen=True)
+class Judgement:
+    """One rank's verdict on one candidate answer, and the numbers it rests on."""
+
+    passed: bool
+    metrics: Mapping[str, float | int | str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Case:
     """One measurable shape, and the three operator-specific callables for it.
 
@@ -76,12 +94,19 @@ class Case:
     collective. It is the one requirement here that this module cannot enforce:
     a single-GPU reference is still a function that returns a tensor, and a
     candidate that quietly drops a rank's contribution matches it.
+
+    ``judge`` compares one rank's candidate answer with its reference and returns
+    that rank's ``Judgement``; every case of a suite has one or none does.
+    ``verify_replay`` also judges the output of the last timed graph replay, for a
+    candidate whose answer depends only on its inputs.
     """
 
     case_id: str
     build_inputs: Callable[[RankContext], Any]
     call_candidate: Callable[[RankContext, Any], Any]
     reference: Callable[[RankContext, Any], Any]
+    judge: Callable[[RankContext, Any, Any], Judgement] | None = None
+    verify_replay: bool = False
 
 
 class HarnessError(RuntimeError):
@@ -217,8 +242,21 @@ def _slowest_across_ranks(value: float, context: RankContext) -> float:
     return float(tensor.item())
 
 
-def _check_case(case: Case, context: RankContext, seed: int) -> float:
-    """Validate the candidate over two back-to-back calls, and return worst SNR.
+def _every_rank_passes(passed: bool, context: RankContext) -> bool:
+    """Whether the verdict holds on every rank, because one wrong rank is a wrong collective."""
+    return _worst_across_ranks(1.0 if passed else 0.0, context) == 1.0
+
+
+@dataclass(frozen=True)
+class _Answer:
+    """One candidate call's answer and the reference it is held to."""
+
+    got: Any
+    want: Any
+
+
+def _parity_answers(case: Case, context: RankContext, seed: int) -> list[_Answer]:
+    """The candidate's answers over two back-to-back calls, each with its reference.
 
     Both candidate calls are issued before either is compared. A compiled
     collective usually writes into a registered scratch buffer, so a second call
@@ -239,8 +277,53 @@ def _check_case(case: Case, context: RankContext, seed: int) -> float:
     first_want = case.reference(context, _seeded_inputs(case, context, seed))
     second_want = case.reference(context, _seeded_inputs(case, context, seed + _PARITY_SEED_STRIDE))
     torch.cuda.synchronize()
-    local = min(_snr_db(first_got, first_want), _snr_db(second_got, second_want))
+    return [_Answer(first_got, first_want), _Answer(second_got, second_want)]
+
+
+def _check_case(case: Case, context: RankContext, seed: int) -> float:
+    """Validate the candidate over two back-to-back calls, and return worst SNR."""
+    local = min(_snr_db(answer.got, answer.want) for answer in _parity_answers(case, context, seed))
     return _worst_across_ranks(local, context)
+
+
+def _format_metrics(metrics: Mapping[str, float | int | str]) -> str:
+    """The metrics as ``name=value`` fields, refusing a name or value that is not a plain token."""
+    fields = []
+    for name, value in metrics.items():
+        text = f"{value:.6g}" if isinstance(value, float) else str(value)
+        if not (_METRIC_TOKEN.fullmatch(name) and _METRIC_TOKEN.fullmatch(text)):
+            raise HarnessError(f"judge metric {name}={value!r} is not a plain token (letters, digits, '_.+-')")
+        fields.append(f"{name}={text}")
+    return " ".join(fields)
+
+
+def _report_judgement(case_id: str, answer: str, verdict: Judgement, context: RankContext) -> None:
+    """Print one rank's verdict: rank 0's on stdout, any other failing rank's on stderr."""
+    line = f"judge: {case_id} {answer} rank={context.rank} passed={verdict.passed} {_format_metrics(verdict.metrics)}"
+    if context.rank == 0:
+        print(line.rstrip())
+    elif not verdict.passed:
+        print(line.rstrip(), file=sys.stderr)
+
+
+def _judge_case(case: Case, context: RankContext, seed: int) -> bool:
+    """Judge the candidate over two back-to-back calls; True when every rank passes both."""
+    passed = True
+    for index, answer in enumerate(_parity_answers(case, context, seed), start=1):
+        verdict = case.judge(context, answer.got, answer.want)
+        _report_judgement(case.case_id, f"call{index}", verdict, context)
+        passed = passed and verdict.passed
+    return _every_rank_passes(passed, context)
+
+
+def _verify_replay(case: Case, context: RankContext, seed: int, replayed: Any) -> None:
+    """Refuse to report a case whose last timed replay no longer produces the answer."""
+    torch.cuda.synchronize()
+    verdict = case.judge(context, replayed, case.reference(context, _seeded_inputs(case, context, seed)))
+    if not verdict.passed:
+        _report_judgement(case.case_id, "replay", verdict, context)
+    if not _every_rank_passes(verdict.passed, context):
+        raise HarnessError(f"case {case.case_id}: the output of its last timed graph replay fails its judge")
 
 
 def _bench_case(case: Case, context: RankContext, seed: int, warmup: int, iters: int) -> list[float]:
@@ -254,8 +337,8 @@ def _bench_case(case: Case, context: RankContext, seed: int, warmup: int, iters:
     """
     inputs = _seeded_inputs(case, context, seed)
 
-    def step() -> None:
-        case.call_candidate(context, inputs)
+    def step() -> Any:
+        return case.call_candidate(context, inputs)
 
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
@@ -266,24 +349,31 @@ def _bench_case(case: Case, context: RankContext, seed: int, warmup: int, iters:
     torch.cuda.synchronize()
 
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        step()
-    for _ in range(_REPLAY_WARMUP):
-        graph.replay()
-    torch.cuda.synchronize()
-
-    dist.barrier()
-
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    samples: list[float] = []
-    for _ in range(iters):
-        start.record()
-        graph.replay()
-        end.record()
+    try:
+        with torch.cuda.graph(graph):
+            replayed = step()
+        for _ in range(_REPLAY_WARMUP):
+            graph.replay()
         torch.cuda.synchronize()
-        samples.append(_slowest_across_ranks(start.elapsed_time(end), context))
-    return samples
+
+        dist.barrier()
+
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        samples: list[float] = []
+        for _ in range(iters):
+            start.record()
+            graph.replay()
+            end.record()
+            torch.cuda.synchronize()
+            samples.append(_slowest_across_ranks(start.elapsed_time(end), context))
+        if case.verify_replay:
+            _verify_replay(case, context, seed, replayed)
+        return samples
+    finally:
+        # Released before any error reaches run()'s teardown: destroying the
+        # process group while a graph holding a captured collective is alive hangs.
+        graph.reset()
 
 
 def _select(cases: Sequence[Case], case_id: str) -> list[Case]:
@@ -327,6 +417,12 @@ def _run_worker(cases: Sequence[Case], context: RankContext, seed: int, args: ar
                 print(f"case_ms: {case.case_id} {statistics.median(samples):.6f}")
         return 0
 
+    if cases[0].judge is not None:
+        verdicts = [_judge_case(case, _context_for(context, case), seed) for case in cases]
+        if speak:
+            print(f"allclose: {all(verdicts)}")
+        return 0
+
     worst = math.inf
     for case in _select(cases, ""):
         scoped = _context_for(context, case)
@@ -339,6 +435,16 @@ def _run_worker(cases: Sequence[Case], context: RankContext, seed: int, args: ar
     return 0
 
 
+def _refuse_an_inconsistent_suite(cases: Sequence[Case]) -> None:
+    """A suite reports one kind of verdict, and a replay is verified with the case's own judge."""
+    judged = {case.judge is not None for case in cases}
+    if len(judged) > 1:
+        raise HarnessError("every case has a judge or none does: a suite reports allclose or SNR, not both")
+    for case in cases:
+        if case.verify_replay and case.judge is None:
+            raise HarnessError(f"case {case.case_id} sets verify_replay but has no judge to verify the replay with")
+
+
 def run(cases: Sequence[Case], *, world_size: int, seed: int = 1234, argv: Sequence[str] | None = None) -> int:
     """Run ``cases`` on ``world_size`` ranks and print the forge-loop contract.
 
@@ -349,6 +455,7 @@ def run(cases: Sequence[Case], *, world_size: int, seed: int = 1234, argv: Seque
         raise HarnessError(f"dist_harness measures collectives; world_size {world_size} needs no harness")
     if not cases:
         raise HarnessError("no cases to measure")
+    _refuse_an_inconsistent_suite(cases)
     passthrough = list(argv) if argv is not None else sys.argv[1:]
     if os.environ.get("LOCAL_RANK") is None:
         return _relaunch_under_torchrun(world_size, passthrough)
@@ -367,6 +474,7 @@ def run(cases: Sequence[Case], *, world_size: int, seed: int = 1234, argv: Seque
 __all__ = [
     "Case",
     "HarnessError",
+    "Judgement",
     "RankContext",
     "run",
 ]
