@@ -154,10 +154,8 @@ def _private_directory(storage: int, shown: Path) -> int:
     """The owner-only directory below ``storage`` (a descriptor of it), made with its mode when it is not there, reached
     without following a link. One that is there already must be this account's with no access for anyone else: another
     account's, or a wider one, is refused."""
-    try:
+    with contextlib.suppress(FileExistsError):
         os.mkdir(shown.name, _OWNER_DIRECTORY, dir_fd=storage)
-    except FileExistsError:
-        pass
     try:
         descriptor = os.open(shown.name, _DIRECTORY, dir_fd=storage)
     except OSError as exc:
@@ -226,10 +224,8 @@ def _open_in_private(private: int, each: str, *, create: bool, shown: Path) -> i
     flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     try:
         if create:
-            try:
+            with contextlib.suppress(FileExistsError):
                 return os.open(each, flags | os.O_CREAT | os.O_EXCL, _OWNER_FILE, dir_fd=private)
-            except FileExistsError:
-                pass
         return os.open(each, flags, dir_fd=private)
     except OSError as exc:
         if isinstance(exc, FileNotFoundError) and not create:

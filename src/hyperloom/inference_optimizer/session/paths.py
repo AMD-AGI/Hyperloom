@@ -259,7 +259,7 @@ def db_path_for(session_dir: Path) -> Path:
     except FileNotFoundError:
         return shared
     except OSError:
-        pass  # a directory this account cannot enter holds it: the caller is refused when it opens it
+        return private  # a directory this account cannot enter holds it: the caller is refused when it opens it
     return private
 
 
