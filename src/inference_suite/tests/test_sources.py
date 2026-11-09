@@ -587,3 +587,67 @@ def test_resolve_exits_2_naming_why_a_pinned_commit_is_refused(tmp_path: Path, m
     assert cli.main(_resolve_argv(tmp_path, "--inferencex-commit", "8a76a78e41")) == cli.EXIT_REFUSED
     assert "InferenceX 8a76a78e41 lacks infx.srt_slurm.x.verifier" in capsys.readouterr().err
     assert not (tmp_path / "base_launch.json").exists()
+
+
+def _clone_fails(into: Path, commit: str):
+    raise SourceFetchError("git clone exited 128: fatal: unable to access: Could not resolve host: github.com")
+
+
+def test_a_pinned_inferencex_that_cannot_be_read_refuses_a_fixed_workload_rather_than_take_the_default_table(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(sources, "_inferencex", _clone_fails)
+    monkeypatch.setattr(sources, "_recipe_reads", _never)
+
+    assert cli.main(_resolve_argv(tmp_path, "--inferencex-commit", "8a76a78e41")) == cli.EXIT_REFUSED
+    error = capsys.readouterr().err
+    assert "InferenceX cannot be read at the pinned commit 8a76a78e41" in error
+    assert "Could not resolve host: github.com" in error
+    assert not (tmp_path / "base_launch.json").exists()
+
+    assert cli.main(_resolve_argv(tmp_path)) == cli.EXIT_OK
+    assert json.loads((tmp_path / "base_launch.json").read_text(encoding="utf-8"))["source"]["kind"] == "default_table"
+
+
+def test_a_pinned_inferencex_that_cannot_be_read_refuses_an_agentx_shell_user_file(monkeypatch) -> None:
+    monkeypatch.setattr(sources, "_inferencex", _clone_fails)
+    user_file = parse_user_file("launch.sh", b"python3 -m sglang.launch_server --tp-size 8\n", framework="sglang")
+
+    with pytest.raises(InferencexCommitRefused, match="cannot be read at the pinned commit 8a76a78e41.*: git clone"):
+        fetch_sources(_AGENTX_QUERY, user_file=user_file, inferencex_commit="8a76a78e41")
+
+
+def test_pinned_inferencex_code_that_fails_refuses_rather_than_names_an_unread_source(
+    read_inferencex, monkeypatch
+) -> None:
+    def code_fails(*args):
+        raise SourceFetchError("pip exited 1: no matching distribution")
+
+    monkeypatch.setattr(sources, "_require_resolver_api", lambda checkout: None)
+    monkeypatch.setattr(sources, "_latest_releases", lambda framework: {})
+    monkeypatch.setattr(sources, "_with_cookbook", lambda snapshot, query, scratch: snapshot)
+    monkeypatch.setattr(sources, "_with_inferencex_answers", code_fails)
+
+    with pytest.raises(InferencexCommitRefused, match="pinned commit 8a76a78e41.*: pip exited 1"):
+        fetch_sources(_QUERY, inferencex_commit="8a76a78e41")
+    assert fetch_sources(_QUERY).unread == UnreadSource(
+        "InferenceX's own code", "pip exited 1: no matching distribution"
+    )
+
+
+def test_a_pinned_fetch_the_network_fails_is_not_called_a_missing_commit(
+    origin: Path, tmp_path: Path, monkeypatch
+) -> None:
+    real_git = sources._git
+
+    def git(*args: str, cwd: Path | None = None) -> str:
+        if args[0] == "fetch":
+            raise SourceFetchError("git fetch exited 128: fatal: unable to access: Could not resolve host: github.com")
+        return real_git(*args, cwd=cwd)
+
+    monkeypatch.setattr(sources, "_git", git)
+    first = _git(origin, "rev-list", "--max-parents=0", "trunk")
+
+    with pytest.raises(SourceFetchError, match="Could not resolve host") as failed:
+        checkout_commit(f"file://{origin}", first, ("docs",), tmp_path / "clone")
+    assert not isinstance(failed.value, InferencexCommitRefused)

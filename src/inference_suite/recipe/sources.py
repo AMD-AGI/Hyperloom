@@ -13,7 +13,8 @@ InferenceX's ``recipes`` dependencies, and their answers are recorded as data th
 built on the pinned CPython build (:func:`inference_suite.client_env.pinned_python`), never on the interpreter running
 this module, and only once that build satisfies the checkout's ``requires-python``.
 
-A source that cannot be read, InferenceX included, stops the reading there, and the snapshot names it. The
+A source that cannot be read, InferenceX included, stops the reading there, and the snapshot names it; InferenceX
+pinned to a commit that cannot be read there refuses instead, since a pinned base may come from nowhere else. The
 operator's own launch file needs no source read: the load client is pinned in :mod:`inference_suite.pins`.
 """
 
@@ -71,6 +72,9 @@ SRT_SLURM = f"{PROJECT}/utils/srt-slurm"
 
 _FRAMEWORK_REPOS = {"sglang": SGLANG_REPO, "vllm": VLLM_REPO, "atom": ATOM_REPO}
 _INFERENCEX_SOURCE = "InferenceX"
+_INFERENCEX_CODE_SOURCE = "InferenceX's own code"
+# What git says when the remote holds no object for the sha asked for, as opposed to failing to reach it.
+_NO_SUCH_OBJECT = re.compile(r"not our ref|unadvertised object")
 _RECIPES_EXTRA = "recipes"
 _QUIET = "--quiet"
 _REV_PARSE = "rev-parse"
@@ -261,7 +265,8 @@ def checkout_commit(repo: str, commit: str, directories: Sequence[str], into: Pa
 
     Raises:
         InferencexCommitRefused: ``repo`` has no commit ``commit`` names, or more than one.
-        SourceFetchError: ``repo`` cannot be read.
+        SourceFetchError: ``repo`` cannot be read, the commit's fetch included when git does not say the commit is
+            missing.
     """
     _git(*("clone", _QUIET, "--no-tags", "--filter=tree:0", "--no-checkout", repo, str(into)))
     full = _full_commit(repo, commit, into)
@@ -269,7 +274,9 @@ def checkout_commit(repo: str, commit: str, directories: Sequence[str], into: Pa
     try:
         _git("fetch", _QUIET, "--filter=blob:none", "origin", full, cwd=into)
     except SourceFetchError as error:
-        raise InferencexCommitRefused(f"{repo} has no commit {full}: {error}") from error
+        if _NO_SUCH_OBJECT.search(str(error)):
+            raise InferencexCommitRefused(f"{repo} has no commit {full}: {error}") from error
+        raise
     _git("checkout", _QUIET, full, cwd=into)
     return Checkout(repo, full, into)
 
@@ -578,11 +585,17 @@ def _recipe_reads(
         ),
         (f"the {query.framework} cookbook", lambda snapshot: _with_cookbook(snapshot, query, scratch)),
         (
-            "InferenceX's own code",
+            _INFERENCEX_CODE_SOURCE,
             lambda snapshot: _with_inferencex_answers(snapshot, query, checkout, inferencex, scratch),
         ),
     ]
     return tuple(reads)
+
+
+def _pinned_unreadable(commit: str, error: SourceFetchError) -> InferencexCommitRefused:
+    return InferencexCommitRefused(
+        f"InferenceX cannot be read at the pinned commit {commit}, and a pinned base comes from no other source: {error}"
+    )
 
 
 def _with_corpus_source(fetched_unix: int, user_file: UserFile, commit: str) -> SourceSnapshot:
@@ -590,6 +603,8 @@ def _with_corpus_source(fetched_unix: int, user_file: UserFile, commit: str) -> 
         try:
             _, inferencex = _inferencex(Path(scratch_dir) / "inferencex", commit)
         except SourceFetchError as error:
+            if commit:
+                raise _pinned_unreadable(commit, error) from error
             unread = UnreadSource(_INFERENCEX_SOURCE, str(error))
             return SourceSnapshot(None, fetched_unix, user_file=user_file, unread=unread)
     return SourceSnapshot(inferencex, fetched_unix, user_file=user_file)
@@ -606,8 +621,8 @@ def fetch_sources(
     the snapshot's ``unread``, and nothing after it is read.
 
     Raises:
-        InferencexCommitRefused: ``inferencex_commit`` is no commit InferenceX has, or, when the recipes are read, its
-            InferenceX lacks code the resolver runs; nothing after InferenceX is read.
+        InferencexCommitRefused: ``inferencex_commit`` is no commit InferenceX has, InferenceX or its own code cannot be
+            read at it, or, when the recipes are read, its InferenceX lacks code the resolver runs.
     """
     commit = parse_inferencex_commit(inferencex_commit) if inferencex_commit else ""
     fetched_unix = int(time.time())
@@ -620,6 +635,8 @@ def fetch_sources(
         try:
             checkout, inferencex = _inferencex(scratch / "inferencex", commit)
         except SourceFetchError as error:
+            if commit:
+                raise _pinned_unreadable(commit, error) from error
             return SourceSnapshot(None, fetched_unix, unread=UnreadSource(_INFERENCEX_SOURCE, str(error)))
         if commit:
             _require_resolver_api(checkout)
@@ -628,6 +645,8 @@ def fetch_sources(
             try:
                 snapshot = read(snapshot)
             except SourceFetchError as error:
+                if commit and source == _INFERENCEX_CODE_SOURCE:
+                    raise _pinned_unreadable(commit, error) from error
                 return dataclasses.replace(snapshot, unread=UnreadSource(source, str(error)))
         return snapshot
 

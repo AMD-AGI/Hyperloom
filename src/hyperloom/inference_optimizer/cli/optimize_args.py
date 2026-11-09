@@ -306,8 +306,9 @@ def add_base_launch_arguments(opt: argparse.ArgumentParser) -> None:
             "a prefix of 7 or more hex digits) instead of the head of its "
             "main, e.g. to match a CI run; the full sha is recorded in "
             "base_launch.json. The cookbooks, vLLM recipes and ATOM catalog "
-            "are still read at main. Exits 2 when InferenceX has no such "
-            "commit or the commit lacks code the resolver runs; resolve such "
+            "are still read at main. Exits 2 when InferenceX cannot be read "
+            "at that commit, has no such commit, or the commit lacks code the "
+            "resolver runs; resolve such "
             "a base elsewhere and pass it as --reference-script. A resume "
             "keeps its frozen base."
         ),
