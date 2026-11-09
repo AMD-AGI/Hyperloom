@@ -92,8 +92,12 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 def _open_below(base: Path, parts: Sequence[str], *, create: bool) -> int:
-    """Open ``base`` then each of ``parts`` as a directory, never through a symlink; return the last fd."""
-    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    """Open ``base`` then each of ``parts`` as a directory, never through a symlink; return the last fd.
+
+    ``base`` itself is refused when it is a link (a link above it is followed): a less-privileged process that writes
+    the directory holding it can swap it for a link to anywhere.
+    """
+    fd = os.open(base, _DIR_FLAGS)
     try:
         for name in parts:
             if create:
@@ -146,6 +150,39 @@ def create_nofollow(base: Path, rel: Sequence[str], *, mode: int = _PRIVATE_MODE
     finally:
         os.close(dir_fd)
     return os.fdopen(fd, "w", encoding="utf-8")
+
+
+def file_identity(handle: IO[str]) -> tuple[int, int]:
+    """``(st_dev, st_ino)`` of the open file ``handle``: what :func:`append_nofollow` checks it reopens."""
+    found = os.fstat(handle.fileno())
+    return found.st_dev, found.st_ino
+
+
+def append_nofollow(path: Path | str, identity: tuple[int, int]) -> IO[str]:
+    """Open the file at ``path`` for appending text, only when it is the file ``identity`` names (:func:`file_identity`
+    of the one :func:`create_nofollow` made there).
+
+    Neither ``path`` nor its directory is opened through a link, and whatever else is now at the name (a link, a FIFO,
+    a file with another name elsewhere) is refused: nothing is written through it. A file a less-privileged process
+    made there in its place may reuse the inode number; appending to that one writes only to a file of its own.
+
+    Raises:
+        OSError: ``path`` cannot be opened so, or is not that file.
+    """
+    target = Path(path)
+    dir_fd = os.open(target.parent, _DIR_FLAGS)
+    try:
+        fd = os.open(
+            target.name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd
+        )
+    finally:
+        os.close(dir_fd)
+    found = os.fstat(fd)
+    if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1 or (found.st_dev, found.st_ino) != tuple(identity):
+        os.close(fd)
+        raise OSError(errno.EINVAL, "not the file created there", str(target))
+    os.set_blocking(fd, True)
+    return os.fdopen(fd, "a", encoding="utf-8")
 
 
 def write_text_nofollow(base: Path, rel: Sequence[str], text: str, *, mode: int = _PRIVATE_MODE) -> Path:
