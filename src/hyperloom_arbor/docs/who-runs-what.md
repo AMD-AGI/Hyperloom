@@ -5,9 +5,7 @@ In component mode, Hyperloom's multi-branch mode (MB) runs Arbor as an autonomou
 - **Arbor owns** the optimization loop, inside the cards and the time MB gives it.
 
 This page says which side runs each step of an MB session, and what passes between the two.
-- **When this page was written:**
-  - Arbor `main` `85f01cc`;
-  - Hyperloom `multibranch-dev` at `8f59f12db` or later.
+- **The Hyperloom it describes:** `multibranch-dev` at `8f59f12db` or later.
 - **Hyperloom's copy of this page:** `docs/conceptual/multibranch-arbor.md`.
 - **The contract key by key, from Arbor's side:** [hosts.md](hosts.md).
 - **The design and its decisions:** [component-mode.md](component-mode.md).
@@ -148,8 +146,8 @@ docs: `docs/how-to/multibranch-review-gate.md`.
 
 - **The review pauses unattended runs:** it is on by default. A batch run passes `--no-review-gate`, or a person
   approves from a login node.
-- **An older MB under a newer Arbor:** an MB before `cc5fc7dca` doesn't write `component.review`. Its Arbors at
-  `1fa2069` or later wait at Arbor's own gate, holding their leases.
+- **An older MB under a newer Arbor:** an MB before `cc5fc7dca` doesn't write `component.review`. Its Arbors, which
+  have the review gate, wait at Arbor's own gate, holding their leases.
 - **No merge across operating points:** each point's session ends with its own recipe. A rule that combines them
   (for example, keep a change only if no point regresses) is not built.
 - **A dropped flag of the resolved launch:** a KEEP that runs without a flag the `--agent-launch` file sets now

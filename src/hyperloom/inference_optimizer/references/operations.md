@@ -224,7 +224,7 @@ resume the optimizer.
 chooses a session for you. Take `$SESSION_DIR` from the launch-info JSON or
 the `HYPERLOOM_LAUNCH` line, never from the newest timestamp dir under
 `$USER_DATA_PATH/<model>/`. Keep `$USER_DATA_PATH` at the workspace root
-so `runtime/kernel-agent.env.sh` resolves. The named session must contain
+so the `kernel-agent.env.sh` install.sh wrote in this container resolves. The named session must contain
 `manifest.json` and `state.json`.
 
 Reuse the launch template with these diffs: drop `--model`, add

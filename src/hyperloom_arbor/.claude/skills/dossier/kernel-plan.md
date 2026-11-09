@@ -61,7 +61,7 @@ source and label, as everywhere in the dossier.
   - the kernels shipped and unused, and why;
   - AITER's tuned tables and fallbacks;
   - KernelForge's pages;
-  - what the reference platform runs (part 9) and the gfx950 gap.
+  - the gfx950 gaps that may block a port.
 - **What can be reused:** device functions in the tree, AITER, FlyDSL or CK
   primitives, an existing kernel to extend.
 - **What has been tried:** 10.uK's kills in this region, each with what it
@@ -82,8 +82,8 @@ source and label, as everywhere in the dossier.
 - **Graphs and compilation:**
   - It must capture under the served graph mode.
   - Counts that vary per step are runtime arguments, not compile-time
-    constants. A `tl.constexpr` route count compiled thousands of variants and
-    stalled the engine mid-bench.
+    constants. A `tl.constexpr` count compiles a variant per value, which can
+    mean thousands of variants and an engine stalled mid-bench.
   - Target zero JIT compiles during inference.
 - **gfx950:**
   - wave64;
@@ -91,9 +91,6 @@ source and label, as everywhere in the dossier.
     FP8, BF16);
   - LDS per CU (check `rocminfo` on the node);
   - CU count, and the XGMI bandwidth when a collective borders the region.
-
-  Port a reference-platform idea only after naming the gap that could block
-  it.
 - **The language:** Triton, FlyDSL, CK or HIP, and why. A kernel that belongs
   in AITER (a tuned row, an operator AITER already owns) is written to land
   there, and the plan says so. The `kernels` skill says which tool fits which
@@ -116,17 +113,17 @@ with its iteration, its numbers and its evidence, lands in the session's
 | S4 In tree | Behind a `VLLM_*` switch that defaults off, declared `SWITCH: NAME=1` beside `DONE:`. The harness checks it at the KEEP, serving the switch on: dispatch logged on every rank, 0 JIT compiles in serving, accuracy gate passed (`arbor/measure/switches.py`) | Dispatch fails at a served shape and the fix breaks S2 or S3 |
 | S5 A/B | The campaign's own gate, at every operating point the target names | The gate: KEEP, REVERT or a Pareto point, as part 4 classes it |
 
-Lessons the stages carry, from earlier rewrites:
-- **Time graph-captured, not eager:** eager timing is host-bound and misread
-  the size of a saving.
-- **Gate correctness before timing,** with a negative control. Checks that
-  passed vacuously were caught that way.
-- **A fixture can rank right and price wrong.** One served
-  saving was well off its projection, so only S5 books a gain.
+Lessons the stages carry:
+- **Time graph-captured, not eager:** eager timing is host-bound and can
+  misread a saving's size.
+- **Gate correctness before timing,** with a negative control: it catches
+  checks that pass vacuously.
+- **A fixture can rank right and price wrong.** A served saving can come out
+  far from the fixture's projection, so only S5 books a gain.
 - **Prove the arm by an artifact the run owns,** such as a cache file or a
   marker the kernel writes, not by a log line that may be swallowed.
-- **Probe before building:** pricing the design's parts first changed the
-  design (a split grid lost to the interleaved one).
+- **Probe before building:** pricing the design's parts first can change the
+  design (a split grid can turn out costlier than an interleaved one).
 
 ### The `## Items` block
 
@@ -138,7 +135,7 @@ losing design does not hold up the others:
 ## Items
 
 ITEMS: [
- {"id": "s1", "stage": "S1", "title": "Reference: the chain in situ",
+ {"id": "s1", "stage": "S1", "title": "Reference: the region in situ",
   "gate": {"measure": "region_us", "reference": 1000.0, "tolerance_pct": 10},
   "stop": {"measure": "gap_x_gate", "below": 3, "status": "below_floor"}, "stops_plan": true},
  {"id": "c.s2", "stage": "S2", "after": ["s1"], "gate": {"require": ["correct", "negative_control_fired"], "measure": "snr_db", "min": 30.0}},
@@ -148,7 +145,7 @@ ITEMS: [
 ```
 
 - **`id`:** lower case, `s1` or `<design>.<stage>`. In a campaign the item's
-  ID is the map ID, a dot, and this: `m-finalize-chain.c.s2`.
+  ID is the map ID, a dot, and this: `m-<region>.c.s2`.
 - **`stage`:** S1–S5 here. An architectural plan uses ARM (one layout at
   every point of a table) and FRONTIER (the dominating layout lands); a port
   of upstream work uses CORRECT, PORT (the commit named) and AB.
@@ -167,7 +164,7 @@ Check it with `python3 -m arbor.stages check <plan.md>`.
 **In the campaign, the agent declares each stage's result on one line:**
 
 ```
-STAGE: {"item": "m-finalize-chain.c.s2", "result": "pass", "measured": {"snr_db": <dB>, "correct": true, "negative_control_fired": true}, "evidence": {"artifacts": ["iter_<n>/<file>.json"], "ledger": ["<ledger id>"]}}
+STAGE: {"item": "m-<region>.c.s2", "result": "pass", "measured": {"snr_db": <dB>, "correct": true, "negative_control_fired": true}, "evidence": {"artifacts": ["iter_<n>/<file>.json"], "ledger": ["<ledger id>"]}}
 ```
 
 `result` is pass, fail or stop. The harness judges the line at the next
@@ -238,115 +235,70 @@ it.
 
 ## Worked example
 
-Two plans from a Model M dossier, written and run by campaigns' agents. One
-built a slice of its rewrite and kept it; the other stopped at S1, as it
-should have. The numbers in the `## Items` blocks below are illustrative.
+An illustrative example, made up to show the format. Its region, designs and
+numbers come from no campaign.
 
-### (a) Rewrite A: the MoE finalize chain
+### (a) A rewrite with two designs
 
-The plan's region is a reduce-scatter, a finalize, a copy and an all-gather
-per layer and microbatch on the mixed step, which the compute stream waits
-on. It carried three designs as one ladder, S1 to S6: S-A (a staged bf16 peer
-reduce-scatter), S-B (S-A without its staging copy) and S-C (S-A with an
-MXFP8 transport, an accuracy trade).
-
-What each design's stages showed, mapped onto §5:
-
-| The plan's stage | §5 stage | What it showed | Verdict |
-|---|---|---|---|
-| S1 | S1 Reference | the chain's time per call and the compute stall it causes, several times the gate | done |
-| S-A: S2 | S2 Correct | SNR against fp32 above RCCL's ring; both negative controls fire | pass |
-| S-A: (an earlier fixture) | S3 Fast | faster than RCCL's reduce-scatter, closing most of the gap, on a fixture | pass, on a fixture |
-| S-A: S3 Dispatched | S4 In tree | graph capture survives; every rank installed and dispatching | pass |
-| S-A: S4 A/B | S5 A/B | REVERT: below the bar | killed |
-| (S-A explained) | — | read first as the wrong stream, then (corrected: already on a side stream) as a DBO pairing loss; in situ: the kernel beats the ring, but two rendezvous barriers and the staging copy cost more than it saves | — |
-| S-B: S5 | S4, S5 | not built: without the copy, the chain is still slower than RCCL's | killed unbuilt |
-| S-C: S6 | S2 Correct | the transport's error sits well below the MXFP4 partial's own; negative controls firing | pass |
-| S-C: S6 | S3 Fast | at the shipped grid MXFP8 is no faster, at a smaller grid it is; the whole link beats RCCL's | pass |
-| S-C: S6 | S4 In tree | four switches (`VLLM_<REGION>_PEER_RS`, `_STAGED`, `_FMT=mxfp8`, `_LOCAL_BF16`), off by default; vLLM only; declines under capture, so decode is untouched | pass |
-| S-C: S6 | S5 A/B | KEEP above the bar, interactivity unchanged | done |
-| (after it) | a new direction | the fused form (MoE stage 2 writes MXFP8): priced; its first step, stage 2's tile 128 → 256, REVERT | — |
-
-S-A's S4 and S5 ran in one WIN iteration, and so did S-C's. In this format
-they are two: a FIX that lands the code behind its switches, off, and must
-KEEP (S4), then the WIN that turns them on (S5).
-
-The `## Items` block the plan would carry (the format of §5). Each design is
-its own chain after `s1`; S-B builds on S-A, so it waits for `a.s5`:
+The region is a decode layer's tail: the output projection, the residual add,
+the RMSNorm and the FP8 quantization of the next layer's input, four launches
+per layer. S1 prices it in situ. The plan carries two designs, each its own
+chain after `s1`: A puts the add, the norm and the quantization in the
+projection GEMM's epilogue; B leaves the GEMM alone and fuses the other three
+into one kernel, a smaller change with a smaller ceiling.
 
 ```
 ## Items
 
 ITEMS: [
- {"id": "s1", "stage": "S1", "title": "Reference: the finalize chain and the stall it releases, in situ",
-  "gate": {"measure": "region_us", "reference": 1000.0, "tolerance_pct": 10},
+ {"id": "s1", "stage": "S1", "title": "Reference: projection, add, norm and quantization in situ",
+  "gate": {"measure": "region_us", "reference": 400.0, "tolerance_pct": 10},
   "stop": {"measure": "gap_x_gate", "below": 3, "status": "below_floor"}, "stops_plan": true},
- {"id": "a.s2", "stage": "S2", "title": "S-A: the staged bf16 peer reduce-scatter against fp32", "after": ["s1"],
-  "gate": {"require": ["correct", "negative_control_fired"], "measure": "snr_db", "min": 50.0}},
- {"id": "a.s3", "stage": "S3", "title": "S-A: the peer kernel at the served payload", "after": ["a.s2"],
-  "gate": {"measure": "gap_share", "min": 0.5}},
- {"id": "a.s4", "stage": "S4", "title": "S-A: in the tree, off by default", "after": ["a.s3"],
-  "gate": {"require": ["switch_default_off", "capture_survives", "dispatch_all_ranks", "zero_jit"]}},
- {"id": "a.s5", "stage": "S5", "title": "S-A: the campaign's A/B", "after": ["a.s4"], "attempts": 1},
- {"id": "b.s4", "stage": "S4", "title": "S-B: the restricted hook, no staging copy", "after": ["a.s5"],
-  "gate": {"require": ["switch_default_off", "capture_survives", "dispatch_all_ranks", "zero_jit"]}},
- {"id": "b.s5", "stage": "S5", "title": "S-B: the A/B", "after": ["b.s4"], "attempts": 1},
- {"id": "c.s2", "stage": "S2", "title": "S-C: the MXFP8 transport against fp32", "after": ["s1"],
+ {"id": "a.s2", "stage": "S2", "title": "A: the GEMM with add, norm and quantization in its epilogue", "after": ["s1"],
   "gate": {"require": ["correct", "negative_control_fired"], "measure": "snr_db", "min": 30.0}},
- {"id": "c.s3", "stage": "S3", "title": "S-C: the whole link at the served shape", "after": ["c.s2"],
+ {"id": "a.s3", "stage": "S3", "title": "A: graph-captured at the served shapes", "after": ["a.s2"],
   "gate": {"measure": "gap_share", "min": 0.5}},
- {"id": "c.s4", "stage": "S4", "title": "S-C: four switches, off by default", "after": ["c.s3"],
+ {"id": "a.s4", "stage": "S4", "title": "A: in the tree, off by default", "after": ["a.s3"],
   "gate": {"require": ["switch_default_off", "dispatch_all_ranks", "zero_jit", "accuracy_pass"]}},
- {"id": "c.s5", "stage": "S5", "title": "S-C: the A/B", "after": ["c.s4"], "attempts": 2}]
+ {"id": "a.s5", "stage": "S5", "title": "A: the A/B", "after": ["a.s4"], "attempts": 2},
+ {"id": "b.s2", "stage": "S2", "title": "B: one kernel for the add, norm and quantization", "after": ["s1"],
+  "gate": {"require": ["correct", "negative_control_fired"], "measure": "snr_db", "min": 30.0}},
+ {"id": "b.s3", "stage": "S3", "title": "B: graph-captured at the served shapes", "after": ["b.s2"],
+  "gate": {"measure": "gap_share", "min": 0.3}},
+ {"id": "b.s4", "stage": "S4", "title": "B: in the tree, off by default", "after": ["b.s3"],
+  "gate": {"require": ["switch_default_off", "dispatch_all_ranks", "zero_jit", "accuracy_pass"]}},
+ {"id": "b.s5", "stage": "S5", "title": "B: the A/B", "after": ["b.s4"], "attempts": 2}]
 ```
 
-What it teaches:
-- **Designs are separate item chains.** The plan ranked S-C last, behind S-A
-  and S-B, so it was not priced until both had died. As its own chain after
-  `s1`, it could have started right after S1.
-- **Explain a losing A/B in situ before killing its sibling.** S-A's REVERT
-  was read one way after another, an iteration each, before an in-situ trace
-  in the server found the cause: the barriers and the copy, not the kernel.
-  That killed S-B on evidence rather than by association, and it made S-C's
-  case: under MXFP8 the copy becomes the format conversion the transport needs
-  anyway.
-- **The records were scattered.** The campaign wrote many addenda, most on
-  this plan, and the plan's own stage table was never updated past S1. Here
-  the harness writes the stage records (§5): `stages.json`, each attempt with
-  its iteration, numbers and evidence.
-- **A lane ends at its last verdict.** Every item had one once S-C's A/B was
-  booked. The fused form came after it; it is a proposal for the next round's
-  map, not more of this plan.
+What it shows:
+- **Designs are separate item chains.** B does not wait for A. Ranked in one
+  ladder, a later design is priced only after the ones ahead of it have died;
+  as its own chain after `s1`, it starts at once.
+- **S4 and S5 are separate iterations:** a FIX that lands the code behind its
+  switch, off, and must KEEP (S4), then the WIN that turns it on (S5).
+- **Explain a losing A/B in situ before killing a sibling.** A REVERT can come
+  from what surrounds the kernel (a barrier, a copy) rather than from the
+  kernel itself. Traced in the server, it kills a sibling that shares the
+  cause on evidence rather than by association, or clears one that does not.
+- **A lane ends at its last verdict.** A direction that turns up on the way is
+  a proposal for the next round's map, not more of this plan.
 
-### (b) Rewrite B: the decode layer's collective count
+### (b) A plan that stops at S1
 
-Its prize was measured first: the share of run each decode collective
-removed would save, and the share for all four. It had no mechanism, so S1
-was a dependency census from the source, with a hard stop: no removal priced
-at 3× the gate, no rewrite.
-
-| The plan's stage | §5 stage | What it showed | Verdict |
-|---|---|---|---|
-| S1 census | S1 Reference | the four collectives are totally ordered by data dependence, and the model has no shared expert to hide one behind; the diamond fee, re-measured, was well below the figure carried from an earlier campaign; the best single collective nets under 3× the gate | stop: below_floor |
-| S2 overlap, S3 riders | — | not run | killed by the stop |
-
-The items, with the stop on `s1`:
+A plan with a prize but no mechanism yet makes S1 a census with a hard stop:
+no candidate priced at 3× the gate, no rewrite. The items, with the stop on
+`s1`:
 
 ```
 ## Items
 
 ITEMS: [
- {"id": "s1", "stage": "S1", "title": "The dependency census of the four decode collectives",
+ {"id": "s1", "stage": "S1", "title": "Census: what removing each candidate launch would free",
   "gate": {"require": ["census"]},
   "stop": {"measure": "gain_x_gate", "below": 3, "status": "below_floor"}, "stops_plan": true},
- {"id": "o.s3", "stage": "S3", "title": "Overlap: a pair of independent collectives in one diamond, priced", "after": ["s1"],
-  "gate": {"measure": "gain_x_gate", "min": 3}},
- {"id": "o.s4", "stage": "S4", "title": "Overlap: in the tree, off by default", "after": ["o.s3"],
-  "gate": {"require": ["switch_default_off", "dispatch_all_ranks", "zero_jit"]}},
- {"id": "o.s5", "stage": "S5", "title": "Overlap: the A/B", "after": ["o.s4"]},
- {"id": "r.s2", "stage": "S2", "title": "Rider: AITER's fused all-reduce and RMSNorm express Model M's norm", "after": ["s1"],
+ {"id": "f.s2", "stage": "S2", "title": "Fusion: the best candidate pair, correct", "after": ["s1"],
   "gate": {"require": ["correct", "negative_control_fired"]}},
- {"id": "r.s5", "stage": "S5", "title": "Rider: the A/B", "after": ["r.s2"]}]
+ {"id": "f.s5", "stage": "S5", "title": "Fusion: the A/B", "after": ["f.s2"]}]
 ```
 
 At its census iteration, `STAGE: {"item": "<map ID>.s1", "result": "stop", "measured":
@@ -354,6 +306,6 @@ At its census iteration, `STAGE: {"item": "<map ID>.s1", "result": "stop", "meas
 every later item as killed, and the lane closes.
 
 **A plan stopped at S1 is a success.** One iteration, no build, and the
-verdict the plan asked for: the decode tier is at its floor in this region.
-The plan also says what would reopen it: a new independent branch at decode,
-or a sharding regime that changes the order of dependence.
+verdict the plan asked for: the region is at its floor. The plan also says
+what would reopen it, such as a change of deployment that moves the region's
+share.

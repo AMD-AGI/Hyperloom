@@ -21,6 +21,7 @@ import yaml
 from hyperloom_common.coerce import to_float, to_int
 from hyperloom_common.env import is_truthy
 from hyperloom.common.env_safety import build_benchmark_env
+from hyperloom.common.outside_facts import ENV_EVAL_ONLY
 
 from . import bypass_engine
 from . import bypass_report
@@ -34,6 +35,11 @@ def _run_eval_enabled(bench_envs: dict[str, Any]) -> bool:
     if raw is None:
         raw = os.environ.get("RUN_EVAL", "false")
     return is_truthy(raw, default=True)
+
+
+def _eval_only(bench_envs: dict[str, Any]) -> bool:
+    """Whether the round only evaluates, with no bench before it, as InferenceX's scripts read ``EVAL_ONLY``."""
+    return is_truthy(bench_envs.get(ENV_EVAL_ONLY) or os.environ.get(ENV_EVAL_ONLY), default=False)
 
 
 def _tokenize_extra_args(bench_envs: dict[str, Any], framework: str) -> list[str]:
@@ -261,7 +267,8 @@ class _Round:
         )
 
     def run_client(self) -> int:
-        """Run the InferenceX client, then optional eval; return client rc."""
+        """Run the InferenceX client, then optional eval; return client rc. A round that only evaluates (``EVAL_ONLY``)
+        runs no client, as InferenceX's ``run_benchmark_serving`` returns before its bench then."""
         bench_envs = self.bench_envs
         # Honor materializer-computed request sizing (env then YAML envs) so the benchmark scale matches Magpie; fall
         # back to build_client_command defaults (conc*10 / 2*conc) when unset.
@@ -286,7 +293,7 @@ class _Round:
                 seed=to_int(os.environ.get(BENCH_SEED_ENV)),
             )
         )
-        rc = _run_subprocess(client_cmd, self.timeout_s, self.workspace, "client")
+        rc = 0 if _eval_only(bench_envs) else _run_subprocess(client_cmd, self.timeout_s, self.workspace, "client")
         if rc == 0 and _run_eval_enabled(bench_envs):
             _ensure_eval_deps(sys.executable)
             eval_cmd = bypass_engine.build_eval_command(
@@ -321,10 +328,13 @@ class _Round:
         _write_report(self.workspace, self.subject, bypass_report.RunOutcome(False, [reason]), start)
 
     def finalize(self, start: float, rc: int) -> int:
-        """Parse raw result, write report; return exit code."""
+        """Parse raw result, write report; return exit code. A round that only evaluates leaves no raw result: it
+        succeeds when its evaluation ran and passed."""
         raw = _load_raw_result(self.workspace)
         eval_rc = _read_eval_returncode(self.workspace)
-        success = rc == 0 and eval_rc == 0 and raw is not None
+        eval_only = _eval_only(self.bench_envs)
+        produced = _run_eval_enabled(self.bench_envs) if eval_only else raw is not None
+        success = rc == 0 and eval_rc == 0 and produced
         errors: list[str] = []
         if eval_rc != 0:
             # Mirror InferenceX's benchmark_lib.sh message so baseline's _is_eval_rooted_failure recognizes a bypass
@@ -332,8 +342,10 @@ class _Round:
             errors.append(f"run_eval failed with exit code {eval_rc}")
         elif rc != 0:
             errors.append(f"benchmark client exited {rc}")
-        if raw is None:
-            errors.append("inferencex_result.json not produced")
+        if not produced:
+            errors.append(
+                "EVAL_ONLY with RUN_EVAL off ran nothing" if eval_only else "inferencex_result.json not produced"
+            )
         _write_report(
             self.workspace,
             self.subject,
