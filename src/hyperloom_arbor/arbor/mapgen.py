@@ -1,10 +1,10 @@
-"""A directions map generated from a host's root profile, with the v2 pack's roadmap as the template.
+"""A directions map generated from a host's root profile, with a serving pack's roadmap as the template.
 
 A host that runs several Arbors from one map needs that map before its branches open. A
 dossier pass measures one (``component.stop_at: "map"``); this writes one at once, with no GPU
 time, from what the host already has after its baseline: the op shares of the root's profile,
 the file it gives Arbor as ``component.profile``: minimal directions from the host's profile,
-with the v2 pack as a template.
+with a serving pack's roadmap as a template.
 
 - **The minimal directions** are the profile's op families, as Hyperloom's MB reads them for its
   open areas: each op is put in the first family whose pattern its name matches
@@ -63,21 +63,21 @@ def _boundaries(pat: str) -> str:
 
 _FAMILY_RES = tuple((name, re.compile(_boundaries(pat), re.IGNORECASE)) for name, pat in FAMILIES)
 
-# Each family's direction, framed as the v2 pack's roadmap frames that gap: (id, title).
+# Each family's direction, framed as a serving pack's roadmap frames that gap: (id, title).
 TEMPLATE: dict[str, tuple[str, str]] = {
     "attention": ("m-attn", "Attention: the kernel each served shape dispatches, prefill and decode, "
-                            "and the metadata it builds per step (v2 roadmap B: selection by shape)"),
+                            "and the metadata it builds per step (selection by shape)"),
     "linear attention": ("m-linattn", "Linear attention: the recurrent and conv kernels on the decode "
                                       "path, and their state layout"),
     "moe": ("m-moe", "MoE: expert GEMMs in the checkpoint's own datatype, routing and top-k, and TP "
-                     "against EP for the served batches (v2 roadmap A2, D2)"),
+                     "against EP for the served batches"),
     "gemm": ("m-gemm", "Dense GEMMs: tuned kernels for the served shapes, the scale layout, and no "
-                       "silent fallback (v2 roadmap A1)"),
+                       "silent fallback"),
     "small": ("m-fuse", "Small kernels: norm, RoPE, activation and elementwise folded into their "
-                        "producers, fewer launches at small batch (v2 roadmap A3, X3)"),
+                        "producers, fewer launches at small batch"),
     "sampling": ("m-sampling", "Sampling and logits: the path after the forward pass"),
     "collectives": ("m-comm", "Collectives: all-reduce, all-gather and reduce-scatter on the custom "
-                              "paths, overlapped or fused with their neighbours (v2 roadmap D)"),
+                              "paths, overlapped or fused with their neighbours"),
 }
 SMALL = ("norm", "rope", "activation", "elementwise")
 
@@ -158,7 +158,7 @@ def main(argv: list[str]) -> int:
     from arbor import component
     from arbor.directions import _entry
     ap = argparse.ArgumentParser(prog="python3 -m arbor.directions generate",
-                                 description="A directions map from a host's root profile, with the v2 "
+                                 description="A directions map from a host's root profile, with a serving "
                                              "pack's roadmap as the template.")
     ap.add_argument("--profile", required=True, help="the root profile: {unit, shares: {op: share}}")
     ap.add_argument("--out", required=True, help="the map to write: {\"directions\": [...]}")

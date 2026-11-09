@@ -20,7 +20,7 @@ from hyperloom.common import rocm_smi
 from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.ports import pick_server_port
-from hyperloom.common.proctree import TERM_GRACE_SEC, group_members, running, signal_group
+from hyperloom.common.proctree import TERM_GRACE_SEC, group_members, leader_exited, running, signal_group
 from hyperloom.inference_optimizer.gpu_types import magpie_reuse_scripts
 
 from .bypass_engine import lifecycle_meta_file, lifecycle_pid_file
@@ -211,12 +211,13 @@ def _terminate_group(pgid: int) -> bool:
 
 
 def _group_has_live_member(pgid: int) -> bool:
-    """Whether ``pgid`` still has a member that is not a zombie.
+    """Whether ``pgid`` still has a member that :func:`running` counts.
 
-    A server re-parented to an init that never waits stays a zombie once it exits. A zombie holds no memory and takes
-    no signal, so it is not a survivor.
+    A server re-parented to an init that never waits stays a zombie once it exits. A zombie whose every thread has
+    exited holds no memory and takes no signal, so it is not a survivor; one whose leader exited while another thread of
+    it runs is.
     """
-    return any(state != "Z" for _pid, _start, state in group_members(pgid))
+    return any(running(pid) for pid, _start, _state in group_members(pgid))
 
 
 def _group_gone_within(pgid: int, window_sec: float) -> bool:
@@ -230,12 +231,24 @@ def _group_gone_within(pgid: int, window_sec: float) -> bool:
 
 
 def _pid_cmdline(pid: int) -> str:
-    """Return ``/proc/<pid>/cmdline`` as a space-joined string, or ``\"\"``."""
-    try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return ""
-    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+    """Return ``pid``'s command line as a space-joined string, or ``\"\"``.
+
+    An exited leader's ``/proc/<pid>/cmdline`` reads empty while another thread of its process may still run. Every
+    thread of a process shares its memory, so such a thread's ``task/<tid>/cmdline`` reads the same command line.
+    """
+    proc = Path(f"/proc/{pid}")
+    sources = [proc / "cmdline"]
+    if leader_exited(pid):
+        with suppress(OSError):
+            sources = [task / "cmdline" for task in (proc / "task").iterdir()]
+    for source in sources:
+        try:
+            raw = source.read_bytes()
+        except OSError:
+            continue
+        if raw:
+            return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+    return ""
 
 
 def _looks_like_server_process(pid: int) -> bool:
@@ -281,9 +294,10 @@ def stop_agentx_servers(root: Path | str) -> list[int]:
 def reap_recorded_servers(root: Path | str, pidfile_glob: str = "*.pid") -> ServerReap:
     """Reap every serving process still up that a pidfile matching ``pidfile_glob`` under ``root`` names.
 
-    Nothing is signalled on the recorded pid alone: a live pid must still look like a serving process, and a gone
-    leader's group is signalled only while a live member of it does, so a recycled pid or pgid is left untouched. A
-    pidfile is removed once nothing it names is left; a survivor's stays for the next reap.
+    Nothing is signalled on the recorded pid alone: a pid whose leader runs must still look like a serving process,
+    and the group of a leader that is gone or has exited is signalled only while a live member of it does, so a recycled
+    pid or pgid is left untouched. A pidfile is removed once nothing it names is left; a survivor's stays for the next
+    reap.
     """
     reap = ServerReap(reaped=[], survivors=[])
     root = Path(root)
@@ -297,31 +311,33 @@ def reap_recorded_servers(root: Path | str, pidfile_glob: str = "*.pid") -> Serv
             continue
         server_pid, recorded_pgid = recorded
 
-        # A leader that exited but was never waited on is a zombie: gone for this purpose, while its ranks may not be.
-        pid_alive = running(server_pid)
+        # Only a running leader is told by its own cmdline. A leader that has exited, as a zombie nobody waited on or
+        # while ``running`` still counts its process by another thread, is judged like a gone one: by the live members
+        # of its recorded group. Those are its ranks, and its own process while a thread of it runs (``_pid_cmdline``).
+        leader_alive = running(server_pid) and not leader_exited(server_pid)
         server_pgid = recorded_pgid
-        if pid_alive:
+        if leader_alive:
             with suppress(OSError):
                 server_pgid = os.getpgid(server_pid)
 
-        if pid_alive and not _looks_like_server_process(server_pid):
-            # Live pid but not one of our servers (pid reuse): do not touch the process; leave the pidfile for a later
-            # re-evaluation.
+        if leader_alive and not _looks_like_server_process(server_pid):
+            # A running leader but not one of our servers (pid reuse): do not touch the process; leave the pidfile for a
+            # later re-evaluation.
             log.info(
                 "orphan-reaper: pid=%d from %s no longer looks like a server (cmdline mismatch); leaving it untouched",
                 server_pid,
                 pid_file,
             )
             continue
-        if not pid_alive and not _group_has_live_member(server_pgid):
+        if not leader_alive and not _group_has_live_member(server_pgid):
             # Stale pidfile from a fully-exited server tree; just clean it up.
             _remove_pidfile(pid_file)
             continue
-        if not pid_alive and not _process_group_looks_like_server(server_pgid):
-            # The original leader is gone, and the remaining/reused pgid has no server-looking member; do not risk
-            # signalling an unrelated group.
+        if not leader_alive and not _process_group_looks_like_server(server_pgid):
+            # The original leader is gone or has exited, and the remaining/reused pgid has no server-looking member; do
+            # not risk signalling an unrelated group.
             log.info(
-                "orphan-reaper: pid=%d from %s is gone and pgid=%d has no server-looking member; leaving it untouched",
+                "orphan-reaper: pid=%d from %s exited and pgid=%d has no server-looking member; leaving it untouched",
                 server_pid,
                 pid_file,
                 server_pgid,

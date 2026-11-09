@@ -51,17 +51,15 @@ def stop_server(container: str, gpu_ids: list[int] | None = None,
     """Stop the serving server gracefully (SIGTERM, wait, verify VRAM released).
 
     NEVER use pkill -9 / SIGKILL — SGLang holds KFD GPU memory until the
-    Python process exits cleanly. SIGKILL skips cleanup, leaving most of each
-    GPU's memory held as zombie VRAM that blocks the next launch with a
-    memory-imbalance error.
+    Python process exits cleanly. SIGKILL skips cleanup, which can leave GPU
+    memory held that blocks the next launch with a memory-imbalance error.
 
     Waits until GPU VRAM drops below 10GB before returning so the next
     launch doesn't fail with 'memory capacity unbalanced'.
 
-    vLLM too: this signalled only `sglang.launch_server`, so on a vLLM
-    campaign nothing stopped. One campaign kept a server and
-    its EngineCore holding most of each GPU's memory through every "stop"; the next
-    launch failed or the harness reused the stale server. `vllm serve` is the
+    vLLM too: a vLLM server and its EngineCore left running hold most of each
+    GPU's memory through a "stop"; the next launch fails or the harness
+    reuses the stale server. `vllm serve` is the
     API server, which takes its engine down on SIGTERM; an EngineCore or
     worker it leaves behind renames itself `VLLM::...`, so those get SIGTERM
     too once the grace period has passed.

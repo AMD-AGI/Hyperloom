@@ -1674,6 +1674,7 @@ class TestForgeGemmHelperCoverage:
         "'torch.bfloat16', 'torch.float8_e4m3fn', 'torch.float4_e2m1fn_x2', "
         "'QuantType.per_1x32', True, False)"
     )
+    _REAL_MOE_MISS = _REAL_MOE_DISPATCH.replace("using 2stage default for", "no tuned FlyDSL config for")
 
     @staticmethod
     def _moe_state(tmp_path):
@@ -1698,11 +1699,11 @@ class TestForgeGemmHelperCoverage:
         )
 
     async def _run_on_moe_log(self, tmp_path, monkeypatch, task_id: str) -> dict:
-        """Run the gemm lane on a serving log that dispatched one MoE GEMM and return its input JSON."""
+        """Run the gemm lane on a serving log whose one MoE GEMM missed its tuned row and return its input JSON."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
         log = tmp_path / "server.log"
-        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+        log.write_text(self._REAL_MOE_DISPATCH + "\n" + self._REAL_MOE_MISS + "\n", encoding="utf-8")
 
         async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
             return 0, self._sentinel(), ""
@@ -1731,25 +1732,18 @@ class TestForgeGemmHelperCoverage:
         assert values["q_dtype_w"] == "torch.float4_e2m1fn_x2"
         assert values["q_type"] == "QuantType.per_1x32"
 
-    def test_the_token_column_comes_from_the_workload(self, tmp_path):
-        """``tokens`` arrives as forge's comma-separated string, not a list."""
+    def test_the_token_column_is_the_tokens_the_key_missed(self, tmp_path):
+        """A token the lookup hit is already served; only the missed ones are worth a tuning row."""
         log = tmp_path / "server.log"
-        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+        hit = self._REAL_MOE_DISPATCH.replace(", 256, 256, ", ", 256, 32, ").replace(
+            "2stage default", "2stage (kernelName1='k1', kernelName2='k2')"
+        )
+        log.write_text("\n".join([hit, self._REAL_MOE_DISPATCH, self._REAL_MOE_MISS]) + "\n", encoding="utf-8")
 
-        for tokens, expected in (
-            ("1,32,64", ["1", "32", "64"]),
-            ("64", ["64"]),
-            ([1, 32, 64], ["1", "32", "64"]),
-            ("", ["1"]),
-            ("  16 , 16 ,bad,-8, 0 ", ["16"]),
-        ):
-            csv_path, _report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(
-                str(log), tokens, tmp_path / f"ws_{str(tokens)[:12].strip()}"
-            )
-            assert csv_path, f"no CSV for tokens={tokens!r}"
-            rows = Path(csv_path).read_text(encoding="utf-8").strip().splitlines()
-            got = [r.split(",")[0] for r in rows[1:]]
-            assert got == expected, f"tokens={tokens!r} -> {got}"
+        csv_path, _report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(str(log), tmp_path / "ws")
+
+        rows = Path(csv_path).read_text(encoding="utf-8").strip().splitlines()
+        assert [r.split(",")[0] for r in rows[1:]] == ["256"]
 
     @pytest.mark.asyncio
     async def test_the_moe_csv_reaches_the_forge_argv(self, tmp_path, monkeypatch):

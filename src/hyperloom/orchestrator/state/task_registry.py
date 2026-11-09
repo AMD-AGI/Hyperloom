@@ -494,15 +494,13 @@ class TaskRegistry:
             history.append({"ts": now_iso(), "evidence": evidence or {}})
             cur.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
 
-    async def exists_with_key_prefix(self, kind: str, key_prefix: str, *, states: tuple[str, ...]) -> bool:
-        """Return whether a task of ``kind`` in one of ``states`` has this key prefix."""
-        placeholders = ",".join("?" for _ in states)
-        row = await self.db.fetchone(
-            "SELECT 1 FROM tasks WHERE kind=? AND substr(idempotency_key, 1, ?)=? "
-            f"AND state IN ({placeholders}) LIMIT 1",  # nosec B608 - generated placeholders only.
-            (kind, len(key_prefix), key_prefix, *states),
+    async def with_key_prefix(self, kind: str, key_prefix: str) -> list[Task]:
+        """Return every task of ``kind`` whose idempotency key starts with ``key_prefix``, oldest first."""
+        rows = await self.db.fetchall(
+            "SELECT * FROM tasks WHERE kind=? AND substr(idempotency_key, 1, ?)=? ORDER BY created_at ASC",
+            (kind, len(key_prefix), key_prefix),
         )
-        return row is not None
+        return [Task.from_row(r) for r in rows]
 
     async def find_by_idempotency_key(self, idempotency_key: str) -> Task | None:
         """Return the task registered under ``idempotency_key``, or None."""
