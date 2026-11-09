@@ -23,7 +23,6 @@ _HOST_MASK = "0,1,2,3,4,5,6,7"
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "8")
 
 
 def _materialized_mask(tmp_path, **envs) -> str:
