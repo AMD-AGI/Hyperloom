@@ -9,7 +9,8 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 
 from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
-from hyperloom.common.perf_metric import AGENTX_KEEP_P50_THRESHOLD_PCT, is_agentx_mode
+from hyperloom.common.agentx_objective import AgentXObjective
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.inference_optimizer.grading import resolved_grading
 
 # Percentiles rendered per axis, in order.
@@ -81,13 +82,15 @@ def grading_lines(grading: Mapping[str, Any] | None = None, backend: str = "") -
             "**Graded on output token throughput** — this session was seeded on that axis,",
             "so a KEEP is an output-throughput gain; interactivity is measured, not graded.",
         ]
+    objective = AgentXObjective.P50_INTERACTIVITY
+    guards = " and ".join(f"{guard.name} (`{guard.metric}`)" for guard in objective.guards)
     return [
         "**Graded on E2E normalised interactivity P50** — the median of",
         "`OSL_i / E2EL_i` in tok/s/user. InferenceX ranks submissions on the P90 of the",
-        "same family; the median is what Hyperloom decides KEEP on, and P90 is held as a guard.",
-        f"KEEP needs >=+{AGENTX_KEEP_P50_THRESHOLD_PCT:.0f}% on it while the slow tail (P90) and output",
-        "throughput each hold inside the noise band. Anything short of all three is REVERT.",
-        "Total token throughput is still measured, and is not the objective.",
+        "same family; the median is what Hyperloom decides KEEP on.",
+        f"KEEP needs >=+{objective.bar_pct:g}% on it while {guards} each hold inside the noise band.",
+        "Anything short of all of them is REVERT. Output token throughput is still measured, and is",
+        "neither the objective nor a guard.",
     ]
 
 

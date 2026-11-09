@@ -29,8 +29,19 @@ it.
   given; it is still recorded. Arbor's directives state the session's bar and
   guards. A resumed session judges by the new rule. Before, a real 2-3% gain
   was refused, and a gain was held back when the replayed window's
-  output-length mix lowered output throughput. Single-lineage
-  `hyperloom optimize` keeps its 3% bar and guards.
+  output-length mix lowered output throughput.
+- **Single-lineage AgentX keeps on MB's rule.** `hyperloom optimize` on an
+  AgentX replay now keeps a change on a 2% P50 interactivity gain, not 3%, with
+  P90 interactivity and total token throughput inside the noise band
+  (`HYPERLOOM_PERF_NOISE_PCT`). An output-throughput drop alone no longer
+  refuses: `output_regressed` is no longer given, `total_regressed` is new, and
+  a correctness fix's guard refusal names `total_throughput` instead of
+  `output_throughput`. The GEAK handoff's `workload_spec.acceptance` carries
+  `min_gain_pct` 2 and the P90 guard only, since GEAK records no total-throughput
+  guard. The 1800 s checkpoint's 2% early stop is unchanged. A resumed session
+  judges by the new rule. Before, a real 2-3% median gain was reverted, and a
+  gain was reverted when the window's output-length mix lowered output
+  throughput.
 - **An MB AgentX session can be graded on total token throughput.**
   `hyperloom-multibranch run --workload agentx --agentx-objective
   total_token_throughput` keeps a change on the round's `total_token_throughput`

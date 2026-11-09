@@ -115,7 +115,7 @@ def test_agentx_reads_both_sides_on_the_intvty_axis(native_benchmark, monkeypatc
 
 
 def test_agentx_keep_verdict_when_intvty_clears_threshold(native_benchmark, monkeypatch):
-    """A candidate that improves the median >= 3% with both guards in band is KEEP."""
+    """A candidate that improves the median past the bar with both guards in band is KEEP."""
     _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     # +10% interactivity, same tput
@@ -134,7 +134,7 @@ def test_agentx_revert_when_both_axes_worse(native_benchmark, monkeypatch):
         state, _full_measurement(total=20000.0, output=130.0, intvty=15.0), keep_threshold_pct=2.0
     )
     assert graded.verdict == VERDICT_REVERT
-    assert graded.refused_by == "p50_gain_below_threshold,p90_regressed,output_regressed"
+    assert graded.refused_by == "p50_gain_below_threshold,p90_regressed,total_regressed"
 
 
 def test_agentx_revert_when_median_gain_is_below_threshold(native_benchmark, monkeypatch):
@@ -162,8 +162,21 @@ def test_agentx_revert_when_the_slow_tail_guard_fails(native_benchmark, monkeypa
     assert graded.refused_by == "p90_regressed"
 
 
-def test_agentx_revert_when_the_output_guard_fails(native_benchmark, monkeypatch):
-    """A median win bought by dropping output throughput past the band is not a win."""
+def test_agentx_keeps_a_median_gain_on_the_shared_two_percent_bar(native_benchmark, monkeypatch):
+    """+2.5% on the median clears the bar single-lineage and MB share."""
+    _agentx(monkeypatch, native_benchmark)
+    state = _State(current_best=_ANCHOR, baseline_tput=180.0)
+    graded = resolve_graded_comparison(
+        state,
+        _full_measurement(total=25984.0, output=183.0, intvty=22.56, intvty_p50=_ANCHOR["e2e_norm_intvty_p50"] * 1.025),
+        keep_threshold_pct=2.0,
+    )
+    assert graded.verdict == VERDICT_KEEP
+    assert graded.refused_by == ""
+
+
+def test_agentx_an_output_drop_alone_does_not_refuse(native_benchmark, monkeypatch):
+    """Output throughput follows the window's output-length mix, so it is recorded, not guarded."""
     _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(
@@ -171,8 +184,21 @@ def test_agentx_revert_when_the_output_guard_fails(native_benchmark, monkeypatch
         _full_measurement(total=25984.0, output=150.0, intvty=24.0),
         keep_threshold_pct=2.0,
     )
+    assert graded.verdict == VERDICT_KEEP
+    assert graded.refused_by == ""
+
+
+def test_agentx_revert_when_the_total_guard_fails(native_benchmark, monkeypatch):
+    """A median win bought by dropping total token throughput past the band is not a win."""
+    _agentx(monkeypatch, native_benchmark)
+    state = _State(current_best=_ANCHOR, baseline_tput=180.0)
+    graded = resolve_graded_comparison(
+        state,
+        _full_measurement(total=_ANCHOR["total_throughput"] * 0.94, output=183.0, intvty=24.0),
+        keep_threshold_pct=2.0,
+    )
     assert graded.verdict == VERDICT_REVERT
-    assert graded.refused_by == "output_regressed"
+    assert graded.refused_by == "total_regressed"
 
 
 def test_a_degraded_pair_never_reports_a_keep_verdict(native_benchmark, monkeypatch):
