@@ -1069,6 +1069,17 @@ def test_close_kills_every_sandbox_and_removes_the_base_dir() -> None:
     assert not base.exists()
 
 
+def test_no_launcher_outlives_the_close_of_its_provider() -> None:
+    provider = LocalSandboxProvider([LocalTemplate("dev", "dev")])
+    sb = _create(provider, "dev", "dev")
+    sb.run("sleep 300", background=True)
+    assert sb.run("true").exit_code == 0
+    launchers = [proc.pid for proc in sb._procs]
+    assert len(launchers) == 2
+    provider.close()
+    _assert_all_gone(launchers)
+
+
 def test_a_second_kill_waits_for_the_first_to_finish(make) -> None:
     provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0])
     sb = _create(provider, "dev", "dev")
