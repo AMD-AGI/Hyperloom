@@ -28,12 +28,14 @@ it.
   a CI run; `base_launch.json` records the full sha. Before, InferenceX was
   always read at `main`. The cookbooks, vLLM recipes and ATOM catalog are
   still read at `main`, and a resumed session keeps its frozen base. A commit
-  InferenceX does not have or that cannot be read (git's error is shown; the
-  default table is never taken in its place), or one that lacks the functions the resolver runs
+  InferenceX does not have, or one that lacks the functions the resolver runs
   (such as `acceptance_length`), is refused before the session starts,
   naming what it lacks; resolve that
   base elsewhere and pass the frozen `base_launch.json` as
-  `--reference-script`. See
+  `--reference-script`. While a commit is pinned, a source that cannot be
+  read (InferenceX, the model card, a release list, a cookbook) refuses the
+  session, naming the source and its error, instead of falling back to the
+  default table. See
   [Base launch](reference/inference-suite.md#base-launch).
 
 - **A `custom` workload's entrypoint is named after the board itself.**

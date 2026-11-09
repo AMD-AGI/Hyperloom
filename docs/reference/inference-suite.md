@@ -28,8 +28,8 @@ gives the base:
    `src/inference_suite/recipe/defaults/table.yaml`.
 
 An AgentX session that no recipe and no `--reference-script` serves is refused.
-When a source cannot be read, a fixed session runs the default table and an AgentX
-session is refused. Repositories are read at the head of their `main` and recorded
+When a source cannot be read, a fixed session runs the default table, unless
+InferenceX is pinned (below), and an AgentX session is refused. Repositories are read at the head of their `main` and recorded
 with that commit; the vLLM recipes site has no commit and is recorded as the
 response it was read from.
 
@@ -41,8 +41,9 @@ included. The base records the full sha it read. Only InferenceX is pinned; the
 cookbooks, the vLLM recipes site and ATOM's catalog are still read at `main`. A
 resume keeps its frozen base whatever the flag says. The commit is refused, with
 exit 2, when InferenceX has no such commit or the prefix names more than one, when
-InferenceX or its own code cannot be read at it (git's error is kept; a missing
-commit and an unreachable remote are told apart; no default table is taken), and
+any source cannot be read while it is pinned, InferenceX and its own code
+included (the message names the source and keeps git's error; a missing commit
+and an unreachable remote are told apart; no default table is taken), and
 when the commit lacks a function the resolver runs from InferenceX's own code
 (for example, a commit without `acceptance_length`, `generation_role` and
 `verifier` in `infx.srt_slurm.synthetic_acceptance`); the message names what it

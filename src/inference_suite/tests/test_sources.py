@@ -601,7 +601,7 @@ def test_a_pinned_inferencex_that_cannot_be_read_refuses_a_fixed_workload_rather
 
     assert cli.main(_resolve_argv(tmp_path, "--inferencex-commit", "8a76a78e41")) == cli.EXIT_REFUSED
     error = capsys.readouterr().err
-    assert "InferenceX cannot be read at the pinned commit 8a76a78e41" in error
+    assert "InferenceX cannot be read with InferenceX pinned at commit 8a76a78e41" in error
     assert "Could not resolve host: github.com" in error
     assert not (tmp_path / "base_launch.json").exists()
 
@@ -613,7 +613,9 @@ def test_a_pinned_inferencex_that_cannot_be_read_refuses_an_agentx_shell_user_fi
     monkeypatch.setattr(sources, "_inferencex", _clone_fails)
     user_file = parse_user_file("launch.sh", b"python3 -m sglang.launch_server --tp-size 8\n", framework="sglang")
 
-    with pytest.raises(InferencexCommitRefused, match="cannot be read at the pinned commit 8a76a78e41.*: git clone"):
+    with pytest.raises(
+        InferencexCommitRefused, match="InferenceX cannot be read .*pinned at commit 8a76a78e41.*: git clone"
+    ):
         fetch_sources(_AGENTX_QUERY, user_file=user_file, inferencex_commit="8a76a78e41")
 
 
@@ -628,7 +630,9 @@ def test_pinned_inferencex_code_that_fails_refuses_rather_than_names_an_unread_s
     monkeypatch.setattr(sources, "_with_cookbook", lambda snapshot, query, scratch: snapshot)
     monkeypatch.setattr(sources, "_with_inferencex_answers", code_fails)
 
-    with pytest.raises(InferencexCommitRefused, match="pinned commit 8a76a78e41.*: pip exited 1"):
+    with pytest.raises(
+        InferencexCommitRefused, match="InferenceX's own code cannot be read .*8a76a78e41.*: pip exited 1"
+    ):
         fetch_sources(_QUERY, inferencex_commit="8a76a78e41")
     assert fetch_sources(_QUERY).unread == UnreadSource(
         "InferenceX's own code", "pip exited 1: no matching distribution"
@@ -651,3 +655,18 @@ def test_a_pinned_fetch_the_network_fails_is_not_called_a_missing_commit(
     with pytest.raises(SourceFetchError, match="Could not resolve host") as failed:
         checkout_commit(f"file://{origin}", first, ("docs",), tmp_path / "clone")
     assert not isinstance(failed.value, InferencexCommitRefused)
+
+
+def test_a_source_that_cannot_be_read_under_a_pinned_commit_refuses_rather_than_take_the_default_table(
+    read_inferencex, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(sources, "_require_resolver_api", lambda checkout: None)
+    monkeypatch.setattr(sources, "_latest_releases", _unreachable)
+    monkeypatch.setattr(sources, "_with_cookbook", _never)
+
+    assert cli.main(_resolve_argv(tmp_path, "--inferencex-commit", "8a76a78e41")) == cli.EXIT_REFUSED
+    error = capsys.readouterr().err
+    assert "the sglang releases cannot be read" in error
+    assert "pinned at commit 8a76a78e41" in error
+    assert "git ls-remote exited 128: could not resolve host" in error
+    assert not (tmp_path / "base_launch.json").exists()
