@@ -23,6 +23,7 @@ from hyperloom.common.perf_metric import (
     axis_of,
     holds_within_band,
     incomparability_reason,
+    parse_intvty_noise_pct,
 )
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok
@@ -36,11 +37,17 @@ class Guard:
     refusal: str
     metric: str
 
+    @property
+    def name(self) -> str:
+        return _TITLES[self.metric]
+
 
 class AgentXObjective(str, Enum):
-    """The axis an AgentX session is graded on: the round metric its bar reads (:attr:`metric`), the gain that clears
-    it (:attr:`bar_pct`), the refusal that says a candidate did not (:attr:`below_threshold`), and the axes it may not
-    pay for that gain with (:attr:`guards`). The error-rate bar holds under either."""
+    """The axis an AgentX session is graded on: the round metric its bar reads (:attr:`metric`), named in words
+    (:attr:`title`) and told to the LLM roles with what moves it (:attr:`description`), the gain that clears it
+    (:attr:`bar_pct`), the refusal that says a candidate did not (:attr:`below_threshold`), and the axes it may not pay
+    for that gain with (:attr:`guards`), each held within :attr:`guard_band_pct` of the parent. The error-rate bar
+    holds under either."""
 
     P50_INTERACTIVITY = "p50_interactivity"
     TOTAL_TOKEN_THROUGHPUT = "total_token_throughput"
@@ -48,6 +55,14 @@ class AgentXObjective(str, Enum):
     @property
     def metric(self) -> str:
         return _METRICS[self]
+
+    @property
+    def title(self) -> str:
+        return _TITLES[self.metric]
+
+    @property
+    def description(self) -> str:
+        return _DESCRIPTIONS[self]
 
     @property
     def bar_pct(self) -> float:
@@ -61,6 +76,10 @@ class AgentXObjective(str, Enum):
     def guards(self) -> tuple[Guard, ...]:
         return _GUARDS[self]
 
+    @property
+    def guard_band_pct(self) -> float:
+        return parse_intvty_noise_pct()
+
 
 P50_BELOW_THRESHOLD = "p50_gain_below_threshold"
 TOTAL_BELOW_THRESHOLD = "total_throughput_gain_below_threshold"
@@ -71,6 +90,23 @@ _METRICS = {
 _BELOW_THRESHOLD = {
     AgentXObjective.P50_INTERACTIVITY: P50_BELOW_THRESHOLD,
     AgentXObjective.TOTAL_TOKEN_THROUGHPUT: TOTAL_BELOW_THRESHOLD,
+}
+_TITLES = {
+    GRADED_INTVTY_P50: "P50 interactivity",
+    GRADED_INTVTY: "P90 interactivity",
+    TOTAL_TOKEN_THROUGHPUT: "total token throughput",
+}
+_DESCRIPTIONS = {
+    AgentXObjective.P50_INTERACTIVITY: (
+        "the median request's per-output-token speed end to end, decode and time to first token together. Faster "
+        "decode, attention and MoE kernels, a lower TTFT and a higher speculative-decoding acceptance move it."
+    ),
+    AgentXObjective.TOTAL_TOKEN_THROUGHPUT: (
+        "the tokens, input and output, the server completes per second at the session's concurrency. Capacity moves "
+        "it: batching and scheduling, prefill efficiency, KV-cache capacity and prefix-cache hits, fewer stalls. It "
+        "moves only at high concurrency: at low concurrency the trace's tool and think time paces the requests, and a "
+        "faster server barely moves it."
+    ),
 }
 # MB's own bar, apart from the single-lineage flow's AGENTX_KEEP_P50_THRESHOLD_PCT.
 _BAR_PCT = 2.0
@@ -133,7 +169,8 @@ def _read(candidate: Mapping[str, float], parent: Mapping[str, float], objective
     gain = gain_pct(value, parent_value)
     if gain is None:
         raise ValueError(f"cannot compare a {metric} of {value!r} against a parent {metric} of {parent_value!r}")
-    defects = [guard.refusal for guard in objective.guards if not _guard_holds(candidate, parent, guard.metric)]
+    band = objective.guard_band_pct
+    defects = [guard.refusal for guard in objective.guards if not _guard_holds(candidate, parent, guard.metric, band)]
     incomparable = incomparability_reason(candidate, parent)
     if incomparable == _EXTRA_FAILED_REQUESTS:
         incomparable = ""
@@ -142,9 +179,9 @@ def _read(candidate: Mapping[str, float], parent: Mapping[str, float], objective
     return _Reading(objective, gain, tuple(defects), incomparable, agentx_accuracy_ok(candidate.get(GRADED_ERROR_RATE)))
 
 
-def _guard_holds(candidate: Mapping[str, float], parent: Mapping[str, float], key: str) -> bool:
+def _guard_holds(candidate: Mapping[str, float], parent: Mapping[str, float], key: str, band_pct: float) -> bool:
     """A side that did not report the guard's axis breaks it: ``holds_within_band`` reads it as 0.0, which holds."""
-    return key in candidate and key in parent and holds_within_band(candidate, parent, key)
+    return key in candidate and key in parent and holds_within_band(candidate, parent, key, noise_pct=band_pct)
 
 
 def _more_unserved(candidate: Mapping[str, float], parent: Mapping[str, float]) -> bool:

@@ -29,7 +29,7 @@ from hyperloom_multibranch.specialist.autonomous_session import AutonomousSessio
 from hyperloom_multibranch.specialist.gate_client import read_gate_client
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, AgentSetup, BranchPlace
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions, model_sessions
-from hyperloom_multibranch.specialist.prompts import role_prompt
+from hyperloom_multibranch.specialist.prompts import RoleWorkload, role_prompt
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.specialist.runtime import SessionStart
 from hyperloom_multibranch.specialist import worktree as worktree_module
@@ -43,7 +43,7 @@ def test_a_branch_s_sessions_and_its_worktree_tools_share_one_worktree_on_one_so
     (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
     installed = PackageBase("vllm", package, None, None)
     monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
-    role = role_prompt("qwen3-8b on vllm, TP 1, concurrency 64")
+    role = role_prompt(RoleWorkload("qwen3-8b on vllm, TP 1, concurrency 64"))
     command = AgentCommand("claude", "claude", model="claude-opus-5-5")
     setup = AgentSetup(command, role, {}, object(), object(), object(), object())
 

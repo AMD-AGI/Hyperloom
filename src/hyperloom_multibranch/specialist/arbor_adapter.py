@@ -68,7 +68,6 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
     TOTAL_TOKEN_THROUGHPUT,
-    parse_intvty_noise_pct,
 )
 from hyperloom.inference_optimizer.framework_registry import expert_parallel_flag
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
@@ -733,7 +732,7 @@ def _agentx_kept(objective: AgentXObjective) -> str:
     guards = " and ".join(guard.metric for guard in objective.guards)
     return (
         f"of +{objective.bar_pct:g}% in one measurement, which is final unless a guard holds it for a retest: {guards}"
-        f" within {parse_intvty_noise_pct():g}% of the parent, and no more failed requests"
+        f" within {objective.guard_band_pct:g}% of the parent, and no more failed requests"
     )
 
 
