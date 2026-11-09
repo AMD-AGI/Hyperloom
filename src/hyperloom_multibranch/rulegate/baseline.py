@@ -15,10 +15,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from hyperloom.common.perf_metric import (
-    AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_DURATION,
     GRADED_ERROR_RATE,
-    GRADED_INTVTY,
     GRADED_OUTPUT,
 )
 from hyperloom.contracts.measurement import Purpose, TestResult
@@ -32,9 +30,9 @@ from hyperloom_multibranch.rulegate.readings import UnreadableResult, agentx_rea
 
 logger = logging.getLogger(__name__)
 
-# Without these and the objective's metric an AgentX comparison is graded on nothing, or found incomparable for every
-# candidate.
-_AGENTX_REQUIRED = (GRADED_INTVTY, GRADED_OUTPUT, GRADED_DURATION, GRADED_ERROR_RATE)
+# Without these and the objective's metric and guards an AgentX comparison is graded on nothing, or found incomparable
+# or guard-broken for every candidate.
+_AGENTX_COMPARABILITY = (GRADED_DURATION, GRADED_ERROR_RATE)
 
 
 async def write_inferencex_baseline(
@@ -75,20 +73,21 @@ async def write_agentx_baseline(
 ) -> BaselineRecord:
     """The baseline read from one root test, ``baseline``, its bar on ``objective``."""
     reading = agentx_reading(_root_result(baseline, root_commit), objective.metric)
-    record = replace(_agentx_record(root_commit, reading, objective.metric), request_ids=(baseline.request_id,))
+    record = replace(_agentx_record(root_commit, reading, objective), request_ids=(baseline.request_id,))
     await store.write_baseline(record)
     return record
 
 
-def _agentx_record(root_commit: str, reading: Mapping[str, float], graded: str) -> BaselineRecord:
-    missing = [key for key in (graded, *_AGENTX_REQUIRED) if key not in reading]
+def _agentx_record(root_commit: str, reading: Mapping[str, float], objective: AgentXObjective) -> BaselineRecord:
+    required = (objective.metric, *(guard.metric for guard in objective.guards), *_AGENTX_COMPARABILITY)
+    missing = [key for key in required if key not in reading]
     if missing:
         raise UnreadableResult(f"the AgentX baseline does not report {', '.join(missing)}")
     return BaselineRecord(
         root_commit,
         values=dict(sorted(reading.items())),
         dispersion_pct={},
-        threshold_pct={graded: AGENTX_KEEP_P50_THRESHOLD_PCT},
+        threshold_pct={objective.metric: objective.bar_pct},
         request_ids=(),
     )
 

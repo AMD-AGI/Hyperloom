@@ -20,12 +20,34 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **MB's AgentX bar drops to 2% and its guards follow the objective.**
+  A `hyperloom-multibranch` AgentX session keeps a change on a 2% gain on its
+  objective, not 3%. Under `p50_interactivity` the guards are P90 interactivity
+  and total token throughput (new refusal `total_regressed`); under
+  `total_token_throughput` they are P90 and P50 interactivity (`p50_regressed`).
+  Output throughput no longer guards either, so `output_regressed` is no longer
+  given; it is still recorded. Arbor's directives state the session's bar and
+  guards. A resumed session judges by the new rule. Before, a real 2-3% gain
+  was refused, and a gain was held back when the replayed window's
+  output-length mix lowered output throughput.
+- **Single-lineage AgentX keeps on MB's rule.** `hyperloom optimize` on an
+  AgentX replay now keeps a change on a 2% P50 interactivity gain, not 3%, with
+  P90 interactivity and total token throughput inside the noise band
+  (`HYPERLOOM_PERF_NOISE_PCT`). An output-throughput drop alone no longer
+  refuses: `output_regressed` is no longer given, `total_regressed` is new, and
+  a correctness fix's guard refusal names `total_throughput` instead of
+  `output_throughput`. The GEAK handoff's `workload_spec.acceptance` carries
+  `min_gain_pct` 2 and the P90 guard only, since GEAK records no total-throughput
+  guard. The 1800 s checkpoint's 2% early stop is unchanged. A resumed session
+  judges by the new rule. Before, a real 2-3% median gain was reverted, and a
+  gain was reverted when the window's output-length mix lowered output
+  throughput.
 - **An MB AgentX session can be graded on total token throughput.**
   `hyperloom-multibranch run --workload agentx --agentx-objective
   total_token_throughput` keeps a change on the round's `total_token_throughput`
   instead of `e2e_norm_intvty_p50`; the default, `p50_interactivity`, leaves
-  existing sessions as they were. The 3% bar, the P90 and output-throughput
-  guards, the retest and the error-rate threshold are unchanged. The objective is
+  existing sessions as they were. The retest and the error-rate threshold are
+  the same under either objective. The objective is
   recorded in the manifest and kept on resume; FINAL, the dashboard and
   `MB-report.md` name it, and the bar's refusal reads
   `total_throughput_gain_below_threshold`. Its Recipe KB record carries

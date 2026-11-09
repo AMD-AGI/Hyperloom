@@ -628,7 +628,9 @@ def _specialist_role(workload: Workload) -> str:
 
     shape = workload.inferencex
     requests = (
-        f"AgentX trace replay graded on {workload.metric}" if shape is None else f"ISL {shape.isl}, OSL {shape.osl}"
+        f"AgentX trace replay graded on {workload.agentx_objective.title} ({workload.metric})"
+        if shape is None
+        else f"ISL {shape.isl}, OSL {shape.osl}"
     )
     return (
         f"{workload.model_basename} on {workload.framework}, {workload.precision}, TP {workload.tp}, "
@@ -656,14 +658,16 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         from hyperloom_multibranch.specialist.agent_session import SPECIALIST_LOST_AFTER_S, AgentSetup
         from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
         from hyperloom_multibranch.specialist.model_sessions import model_sessions
-        from hyperloom_multibranch.specialist.prompts import role_prompt
+        from hyperloom_multibranch.specialist.prompts import RoleWorkload, role_prompt
         from hyperloom_multibranch.specialist.worktree import SourceBase
 
         layout, workload = wiring.setup.layout, wiring.setup.workload
         agent = AgentSetup(
             command=command,
             role=role_prompt(
-                _specialist_role(workload),
+                RoleWorkload(
+                    _specialist_role(workload), workload.agentx_objective if workload.inferencex is None else None
+                ),
                 references=wiring.setup.references,
                 base=wiring.base,
                 dev_leases=wiring.dev_leases.limits.cap if wiring.dev_leases else 0,
