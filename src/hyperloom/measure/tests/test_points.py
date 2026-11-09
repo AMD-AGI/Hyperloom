@@ -42,7 +42,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     materialize_config_with_envs,
 )
-from hyperloom.orchestrator.actions.executors._suite_config import suite_config
+from hyperloom.orchestrator.actions.executors._suite.config import suite_config
 from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
 from hyperloom.orchestrator.actions.executors.tests.test_suite_accuracy_round import _agentx_base
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _settings
@@ -78,7 +78,6 @@ def clean_process_env(monkeypatch, tmp_path):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "userdata"))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
 
 
 @pytest.fixture()

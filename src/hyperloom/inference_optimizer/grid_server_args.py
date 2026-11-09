@@ -15,6 +15,7 @@ from typing import Any
 
 from hyperloom_common.coerce import optional_positive_int
 from inference_suite import argv as _argv
+from inference_suite.contracts import RunnerOwned
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 
@@ -89,6 +90,20 @@ _BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = ("--no-enable-prefix-caching
 def strip_benchmark_harness_flags(server_args: str | None) -> str:
     """Drop every :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` entry from ``server_args``."""
     return _argv.remove_server_args(server_args, _BENCHMARK_HARNESS_FLAG_DENYLIST)
+
+
+def without_runner_owned(server_args: str | None, owned: RunnerOwned) -> str:
+    """``server_args`` without the flags ``owned`` names, in any spelling, and their values.
+
+    A round's launch spells what its runner sets, and a layer that sets it is refused; a layer replayed from a measured
+    launch leaves it to the runner, which sets it again.
+    """
+    names = owned.flags()
+    tokens = _argv.split_args_preserving_json(_argv.reserialize_json_blobs(str(server_args or "").strip())) or []
+    spellings = {token.partition("=")[0] for token in tokens if token.startswith("--")}
+    return _argv.remove_server_args(
+        server_args, sorted(flag for flag in spellings if _argv.canonical_flag_name(flag) in names)
+    )
 
 
 def normalize_server_args(server_args: str | None) -> str:

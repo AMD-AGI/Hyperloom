@@ -71,8 +71,18 @@ def test_a_durable_json_write_publishes_one_stable_layout(tmp_path):
     assert [p.name for p in target.parent.iterdir()] == ["state.json"]
 
 
-@pytest.mark.parametrize("options", [WriteOptions(fsync=True), WriteOptions(fsync_dir=True)], ids=["file", "directory"])
-def test_a_failed_fsync_fails_the_write_it_was_asked_to_make_durable(tmp_path, monkeypatch, options):
+@pytest.mark.parametrize(
+    ("options", "left"),
+    [
+        (WriteOptions(fsync=True), "old"),
+        (WriteOptions(fsync_dir=True), "new"),
+        (WriteOptions(fsync=True, shared=True), "old"),
+        (WriteOptions(fsync_dir=True, shared=True), "new"),
+    ],
+    ids=["file", "directory", "shared file", "shared directory"],
+)
+def test_a_failed_fsync_fails_the_write_it_was_asked_to_make_durable(tmp_path, monkeypatch, options, left):
+    """The file is flushed before the rename, which a failure there leaves undone; the directory after it."""
     target = tmp_path / "state.json"
     target.write_text("old")
 
@@ -83,6 +93,7 @@ def test_a_failed_fsync_fails_the_write_it_was_asked_to_make_durable(tmp_path, m
     with pytest.raises(OSError, match="fsync failed"):
         atomic_write_text(target, "new", options=options)
     assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
+    assert target.read_text() == left
 
 
 def test_fsync_tree_visits_every_file_and_directory(tmp_path):
@@ -208,6 +219,24 @@ def test_atomic_write_group_read_yields_to_mode_and_preserve(tmp_path):
     q.chmod(0o600)
     atomic_write_text(q, "new", options=WriteOptions(preserve_mode=True, group_read=True))
     assert stat.S_IMODE(q.stat().st_mode) == 0o600
+
+
+def test_a_shared_group_read_write_makes_the_missing_parent_before_asking_it_for_its_group(tmp_path):
+    """Outside shared storage a ``shared`` write keeps its private mode, and ``group_read`` asks the parent for it:
+    the parent ``make_parents`` makes, which is not there before the call."""
+    top = tmp_path / "top"
+    top.mkdir()
+    top.chmod(0o2750)
+    if not top.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    p = top / "missing" / "g.json"
+    previous = os.umask(0o027)
+    try:
+        atomic_write_text(p, "x", options=WriteOptions(shared=True, group_read=True, make_parents=True))
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(p.parent.stat().st_mode) == 0o2750, "made under the umask, keeping the setgid of its parent"
+    assert (p.read_text(), stat.S_IMODE(p.stat().st_mode)) == ("x", 0o640)
 
 
 class TestAppendJsonl:

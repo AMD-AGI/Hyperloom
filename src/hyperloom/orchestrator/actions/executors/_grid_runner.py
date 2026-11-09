@@ -3,7 +3,7 @@
 
 """Shared helper for the ``explore`` executor's grid runs.
 
-Every round runs on inference_suite with the base launch its session froze (:func:`._suite_config.suite_route`).
+Every round runs on inference_suite with the base launch its session froze (:func:`._suite.rounds.suite_route`).
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ from .benchmark_result import (
 )
 from ._gpu_metrics import write_gpu_metrics_from_report
 from ._round_folder import RoundFolder, is_round_folder, round_report_path
-from ._suite_config import SuiteRoundRefused, suite_route
+from ._suite.rounds import SuiteRoundRefused, suite_route
 from hyperloom.orchestrator.state.base_launch import session_cards
 from .benchmark_config import composed_benchmark_timeout_sec
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
@@ -736,6 +736,13 @@ async def _reported_round(run: _GridRun, at: _VariantSlot, label: str, bench_rou
                 run_grid_suite_round, route, bench_round, env_drop=unset, serving_lease=lease, on_poll=activity.note
             )
         except SuiteRoundRefused as exc:
+            log.warning(
+                "grid_runner: variant %s %s round refused before it ran: %s",
+                _variant_tag(run, at),
+                label,
+                exc,
+                exc_info=True,
+            )
             _abort_variant(at, _VariantFailure(exc.error_class, exc.detail))
     return _RoundProcess(ended.returncode, "", ended.detail)
 

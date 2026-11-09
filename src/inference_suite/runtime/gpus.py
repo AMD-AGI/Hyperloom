@@ -6,7 +6,9 @@
 A round's GPUs are the server's ``HIP_VISIBLE_DEVICES`` numbers, which ROCm assigns in KFD node order while
 ``amd-smi process`` indexes cards in PCI order, so each is translated to its amd-smi card before its row is read. A GPU
 another process holds would make the server fail, or worse, measure beside a foreign workload, so the round refuses
-before it spawns anything.
+before it spawns anything. amd-smi lists a process on every GPU it opened, and a ROCm process opens every GPU whatever
+its device mask, keeping its page tables and runtime context resident on each; so a process holds a GPU only when the
+VRAM amd-smi reports for it on that card (read per card from the process's DRM fdinfo) exceeds that footprint.
 """
 
 from __future__ import annotations
@@ -14,14 +16,23 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from hyperloom_common.amd_smi import AmdSmiError, gpu_rows, gpus_in_rocm_order, read_amd_smi_json
+from hyperloom_common.amd_smi import AmdSmiError, gpu_rows, gpus_in_rocm_order, metric_value, read_amd_smi_json
+
+#: Above the VRAM a process keeps on a card it opened but runs nothing on: 36-52 KiB of page tables, up to 1.7 MiB
+#: once ROCr has initialised the card (recorded on MI355X), while a server holds gigabytes.
+_OPENED_ONLY_VRAM_BYTES = 64 << 20
 
 
 def _holder(entry: object) -> str | None:
-    """The process one ``process_list`` entry names; amd-smi nests it under ``process_info`` on some releases, and an
-    idle GPU's lone entry carries a sentence there instead."""
+    """The process one ``process_list`` entry names when it holds the GPU; amd-smi nests it under ``process_info`` on
+    some releases, and an idle GPU's lone entry carries a sentence there instead. An entry that does not report its
+    resident memory holds the GPU."""
     info = entry.get("process_info", entry) if isinstance(entry, Mapping) else None
     if not isinstance(info, Mapping):
+        return None
+    memory = info.get("memory_usage")
+    vram = metric_value(memory.get("vram_mem")) if isinstance(memory, Mapping) else None
+    if vram is not None and vram <= _OPENED_ONLY_VRAM_BYTES:
         return None
     return f"pid {info.get('pid', '?')} ({info.get('name') or 'unnamed'})"
 

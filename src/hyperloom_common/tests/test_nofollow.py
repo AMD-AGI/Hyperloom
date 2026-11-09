@@ -11,6 +11,9 @@ from pathlib import Path
 import pytest
 
 from hyperloom_common.fs_utils import (
+    append_nofollow,
+    create_nofollow,
+    file_identity,
     is_private_dir,
     read_bytes_nofollow,
     read_text_nofollow,
@@ -212,3 +215,33 @@ def test_a_private_directory_is_this_accounts_own_not_a_link_and_only_it_can_wri
     uid = os.getuid()
     monkeypatch.setattr(os, "getuid", lambda: uid + 1)
     assert not is_private_dir(mine), "another account's"
+
+
+def test_appending_reaches_only_the_file_created_at_the_name(tmp_path: Path):
+    with create_nofollow(tmp_path, ("process.log",)) as created:
+        created.write("from the app\n")
+        identity = file_identity(created)
+    with append_nofollow(tmp_path / "process.log", identity) as log:
+        log.write("from the agent\n")
+    assert (tmp_path / "process.log").read_text(encoding="utf-8") == "from the app\nfrom the agent\n"
+
+
+@pytest.mark.parametrize("planted", ["link", "hard-link", "fifo"])
+def test_appending_refuses_whatever_else_is_put_at_the_name_and_writes_nothing_through_it(tmp_path: Path, planted):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("app's own\n", encoding="utf-8")
+    with create_nofollow(tmp_path, ("process.log",)) as created:
+        identity = file_identity(created)
+    log = tmp_path / "process.log"
+    log.unlink()
+    if planted == "link":
+        log.symlink_to(victim)
+    elif planted == "hard-link":
+        os.link(victim, log)
+    else:
+        os.mkfifo(log)
+
+    with pytest.raises(OSError):
+        append_nofollow(log, identity)
+
+    assert victim.read_text(encoding="utf-8") == "app's own\n"

@@ -377,6 +377,23 @@ def test_upstream_code_that_fails_rather_than_answers_is_refused(tmp_path: Path)
         inferencex_answers(Path(sys.executable), project, [point], [])
 
 
+# The test interpreter stands in for the pinned build, whose own tomllib reads the project's requires-python.
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib arrived in Python 3.11")
+def test_inferencex_needing_a_newer_python_than_the_pinned_build_is_refused_before_installing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text('[project]\nname = "infx"\nrequires-python = ">=3.99"\n')
+    monkeypatch.setattr(sources, "pinned_python", lambda into: Path(sys.executable))
+    version = ".".join(map(str, sys.version_info[:3]))
+
+    with pytest.raises(SourceFetchError, match=rf"requires Python >=3\.99.*is Python {version}"):
+        inferencex_python(project, tmp_path / "resolver")
+
+    assert not (tmp_path / "resolver" / "venv").exists()
+
+
 def _checkout_commit(repo: str, commit: str, into: Path) -> None:
     into.mkdir()
     _git(into, "init", "-q")
@@ -404,7 +421,7 @@ def test_the_main_inferencex_fixture_is_what_inferencex_answers_at_its_commit(tm
     spec = json.loads(selection.recipe["roles"]["agg"]["args"]["speculative-config"])
     asked = GoldenRequest(drafted.model_prefix, spec, "thinking_on", "block")
 
-    answers = inferencex_answers(inferencex_python(project, tmp_path / "venv"), project, points, [asked])
+    answers = inferencex_answers(inferencex_python(project, tmp_path / "resolver"), project, points, [asked])
 
     assert _git(tmp_path / "inferencex", "rev-parse", f"HEAD:{SRT_SLURM}") == recorded.srt_slurm_commit
     assert answers.rejections == recorded.rejections

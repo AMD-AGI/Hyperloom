@@ -32,13 +32,14 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     GeakProduct,
     IntegrateVerdict,
 )
+from ..state.base_launch import session_runner_owned
 from ..state.task_registry import Task
 from ..kernel.geak_config import (
     _geak_accepted_kernel_specs,
     _geak_has_accepted_kernel,
     geak_acceptance_specs,
     geak_spec_name,
-    _accepted_config_as_variant,
+    geak_candidate_launch,
     _accepted_config_controls,
 )
 
@@ -244,7 +245,9 @@ class _GeakPromotionMixin:
             return False
         result.setdefault("kernel_event_id", kernel_event_id(int(self.shared_state.macro_cycle or 0)))
         try:
-            accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
+            accepted_flags, parsed_envs = geak_candidate_launch(
+                result.get("accepted_config"), session_runner_owned(self.session_dir)
+            )
         except ValueError as exc:
             self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
             return False
@@ -502,7 +505,9 @@ class _GeakPromotionMixin:
         # Read before the lift overwrites ``current_best``; see :meth:`_record_geak_lift_attribution`.
         pre_geak_tput = to_float(self.shared_state.current_best.get("tput"), 0.0)
         try:
-            accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
+            accepted_flags, parsed_envs = geak_candidate_launch(
+                result.get("accepted_config"), session_runner_owned(self.session_dir)
+            )
         except ValueError as exc:
             self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
             return False

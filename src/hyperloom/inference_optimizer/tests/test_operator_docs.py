@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.cli.parser import _build_parser
-from hyperloom.orchestrator.actions.executors._suite_config import TOOL_CACHE_ENV
+from hyperloom.orchestrator.actions.executors._suite.rounds import TOOL_CACHE_ENV
 
 DOCS = Path(__file__).resolve().parents[4] / "docs"
 _FLAG = re.compile(r"`(--[a-z][a-z-]*)")

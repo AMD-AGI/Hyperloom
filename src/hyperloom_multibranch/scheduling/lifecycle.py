@@ -95,6 +95,7 @@ from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION, PLAYBOOK_JUDGE_PROMPT_VERSION
+from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.llm import recorded
@@ -299,6 +300,7 @@ class Session:
         self._signals = StopSignals()
         self._in_final = False
         self._image_check: ImageCheckReport | None = None
+        self._agent_isolation: LaunchIsolation | None = peers.isolation
         # The budget and hard stop the session's deadline is read from, which a person's review moves by its length
         # (_extend); while the review is pending the deadline does not pass.
         self._budget: SessionBudget | None = None
@@ -397,9 +399,9 @@ class Session:
         start and a recovery over it is refused while it is. The image check then compares the rule pack's outside
         facts with this environment, off the event loop; its summary goes into the manifest and CLOSE attaches the
         whole report. Under ``HYPERLOOM_IMAGE_CHECK=strict`` a failing fact raises :class:`ImageCheckFailed` here,
-        before the manifest is written and before any phase or CLOSE runs. The reference material the run was given
-        is copied in before the manifest, so the manifest the session writes describes a directory that already holds
-        it.
+        before the manifest is written and before any phase or CLOSE runs. How the peers isolate the agents and tests
+        they launch goes into the manifest and the report. The reference material the run was given is copied in before
+        the manifest, so the manifest the session writes describes a directory that already holds it.
         """
 
         budget = SessionBudget.from_hours(self._settings.max_hours, self._clock.now())
@@ -421,10 +423,12 @@ class Session:
 
         The candidates are read before anything else happens, so a session FINAL cannot run over is refused without a
         stop or a report being written. The budget is already spent, which is the state the normal path is in when
-        FINAL overruns the deadline: FINAL is unbounded and CLOSE gets one CLOSE grace from its end.
+        FINAL overruns the deadline: FINAL is unbounded and CLOSE gets one CLOSE grace from its end. The report says
+        how that session's agents were isolated, as its manifest recorded.
         """
 
         candidates = await self._final_candidates()
+        self._agent_isolation = read_manifest(self._layout.manifest).agent_isolation
         total = budget_seconds(self._settings.max_hours)
         budget = SessionBudget(self._clock.now() - total, total)
         self._in_final = True
@@ -887,7 +891,7 @@ class Session:
         )
         services = ExportServices(self._recipe_kb, self._author, self._curator)
         closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, services)
-        return Closer(self._layout, self._stopper, closing, self._clock)
+        return Closer(self._layout, self._stopper, closing, self._clock, self._agent_isolation)
 
     async def _root_session(self) -> PreludeResult:
         """PRELUDE: the root commit with its baseline, the commit EXPLORE opens on and the warm-start leads every
@@ -922,9 +926,8 @@ class Session:
         integration = integration_row(progress)
         if integration is None:
             raise RuntimeError("the blackboard has no integration branch after PRELUDE recorded its root")
-        return await choose_candidates(
-            progress, integration.head_commit, integration.head_value, self._settings.workload.metric, self._repo
-        )
+        root = (await self._blackboard.baseline()).root_commit
+        return await choose_candidates(progress, integration, self._settings.workload.metric, self._repo, root)
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
         if ending.stop_reason is SessionStopReason.ABORTED:
@@ -995,6 +998,7 @@ class Session:
             metric=self._settings.workload.metric,
             policy_versions=self._policy_versions(),
             image_check=ImageCheckSummary(image_check.summary()),
+            agent_isolation=self._agent_isolation,
         ).write(self._layout.manifest)
 
 

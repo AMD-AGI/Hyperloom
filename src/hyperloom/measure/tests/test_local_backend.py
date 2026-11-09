@@ -502,6 +502,18 @@ def test_a_round_whose_client_could_not_fetch_its_dependencies_is_an_infrastruct
     assert outcome.failure_reason.startswith("git_fetch_timeout: subprocess.TimeoutExpired")
 
 
+def test_a_round_refused_before_it_ran_names_its_class_and_detail_as_the_reason(grid, server, tmp_path):
+    """No run_dir, no server log: what the round runner recorded is the only account of the failure."""
+    detail = "inferencex is not staged in /tools"
+    grid.answers["warmup"] = grid.result(
+        "warmup", status="failed", returncode=None, workspace=None, error=detail, error_class="staging_missing"
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == ("unclear", f"staging_missing: {detail}")
+
+
 @pytest.mark.parametrize(
     ("step", "failure_class", "reason"),
     [
@@ -524,6 +536,20 @@ def test_the_step_a_rounds_report_failed_at_classifies_the_test_its_logs_cannot(
     outcome = _run(_graded_call(tmp_path))
 
     assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
+
+
+def test_a_flag_the_suite_refused_names_the_refusal_its_report_records(grid, server, tmp_path):
+    """The suite parses the argv before boot: the refusal is in ``report.json``'s ``failure_detail``, in no log."""
+    detail = "the user layer: argument --attention-backend: invalid choice: 'nonexistent'"
+    workspace = write_run_dir(
+        grid.tmp_path / "ws" / "warmup", failed_step=FailedStep.FLAG_UNKNOWN, failure_detail=detail
+    )
+    grid.answers["warmup"] = grid.result("warmup", status="failed", returncode=1, error="flag_unknown")
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == ("candidate", f"serve_flag: {detail}")
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup"]
 
 
 @pytest.mark.parametrize("round_name", ["warmup", "test", "eval"])

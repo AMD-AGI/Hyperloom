@@ -55,6 +55,7 @@ from hyperloom.common.env_safety import (
 )
 from hyperloom_common.fs_utils import (
     create_nofollow,
+    file_identity,
     read_text_nofollow,
     regular_files_nofollow,
     write_text_nofollow,
@@ -454,7 +455,8 @@ class SpecialistSubprocessDispatcher:
             try:
                 _raise_if_cancelled(scope)
                 if request.gpu_lease is not None:
-                    started = await self._start_ray_actor(request, launch, prepared, scope)
+                    log_fh = create_nofollow(request.workspace, (process_log.name,))
+                    started = await self._start_ray_actor(request, launch, scope, file_identity(log_fh))
                     if isinstance(started, SpecialistSubprocessResult):
                         return started
                     proc = prepared.started(started)
@@ -527,22 +529,19 @@ class SpecialistSubprocessDispatcher:
 
     @staticmethod
     async def _start_ray_actor(
-        request: SpecialistSpawn, launch: SpecialistLaunch, prepared: PreparedLaunch, scope: CancelScope | None
+        request: SpecialistSpawn, launch: SpecialistLaunch, scope: CancelScope | None, log_identity: tuple[int, int]
     ) -> _RayLeaseProcess | SpecialistSubprocessResult:
         """Submit the GPU actor launch and poll until it has a pid; a failure returns the task's result."""
-        # Non-blocking start: submit the actor launch, then poll for
-        # the pid with ``asyncio.sleep`` between polls. This keeps the
-        # Coordinator event loop responsive while Ray schedules the actor
-        # (no blocking ``ray.get``), and — combined with the timing split
-        # below — excludes Ray *pending* time from the specialist's running
-        # wall budget. A bounded pending deadline turns a permanently
-        # unschedulable request into a structured task failure instead of an
-        # unbounded stall. The actor opens process.log inside its worker
-        # (same host on single-node), so the reaper below reads it directly.
+        # Non-blocking start: submit the actor launch, then poll for the pid with ``asyncio.sleep`` between polls. This
+        # keeps the Coordinator event loop responsive while Ray schedules the actor (no blocking ``ray.get``), and —
+        # combined with the timing split below — excludes Ray *pending* time from the specialist's running wall budget.
+        # A bounded pending deadline turns a permanently unschedulable request into a structured task failure instead
+        # of an unbounded stall. The actor only appends to the process.log the caller created fresh (``log_identity``),
+        # never to what an earlier launch's agent left at the name; on one node the reaper below reads it directly.
         from hyperloom.orchestrator.actions.executors._ray_serving import ActorLaunch
 
         try:
-            spawn = prepared.actor(launch.cmd, launch.env)
+            spawn = launch.prepared.actor(launch.cmd, launch.env)
             request.gpu_lease.start_async(
                 ActorLaunch(
                     spawn.argv,
@@ -550,6 +549,7 @@ class SpecialistSubprocessDispatcher:
                     cwd=str(request.worktree or request.workspace),
                     log_path=str(launch.process_log),
                     stdin_path=str(launch.prompt_file),
+                    log_identity=log_identity,
                 )
             )
         except Exception as exc:  # isolation boundary: one specialist's GPU actor submit

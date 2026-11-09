@@ -135,8 +135,13 @@ PYTHON = "python3"
 SITE_ENV = "ARBOR_SITE"
 #: The Arbor commits that read :data:`SITE_ENV`: on main, and the tag on its v0.9.2 line.
 SITE_SINCE = "545a850 (v0.9.2.1)"
-#: :data:`PYTHON` run as Arbor: given :data:`SITE_ENV` where the sandbox's pip installs out of reach.
-ARBOR_PYTHON = f'env ${{PIP_TARGET:+"{SITE_ENV}=$PIP_TARGET"}} {PYTHON}'
+#: The file Arbor (v0.9.4 on) reads its ``ARBOR_*`` defaults from, ``~/.arbor/settings.env`` when unset or empty.
+#: Pointed at an empty file, so a local run never takes the running user's settings (an ``ARBOR_ROLL``, a review gate,
+#: an agent backend) past the preflight that refuses them in the environment.
+SETTINGS_ENV = "ARBOR_SETTINGS"
+#: :data:`PYTHON` run as Arbor: with no site settings file, and given :data:`SITE_ENV` where the sandbox's pip installs
+#: out of reach.
+ARBOR_PYTHON = f'env {SETTINGS_ENV}=/dev/null ${{PIP_TARGET:+"{SITE_ENV}=$PIP_TARGET"}} {PYTHON}'
 #: Run once Arbor's imports failed, says so when the cause is an Arbor that does not read :data:`SITE_ENV`: it names a
 #: directory, which is not on the import path Arbor's import left.
 _SITE_UNREAD = (
@@ -622,11 +627,17 @@ def host_rules(spec: AgentSpec) -> list[str]:
     point = ", ".join(f"{key} {value}" for key, value in _operating_point(spec.workload).items())
     owned = ", ".join(sorted({*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}))
     kind = str(spec.workload.get("kind") or "the session's workload")
+    kept = (
+        "in one measurement, which is final unless a guard (p90 interactivity, output throughput, failed requests)"
+        " holds it for a retest"
+        if kind == AGENTX
+        else "that a second measurement confirms"
+    )
     rules = [
         f"{HOST_RULE}: the workload is fixed: {kind}{f' at {point}' if point else ''}, measured by MB's client, the"
         f" only bench of record. A change never sets {owned}: MB owns them and refuses a launch that does.",
         f"{HOST_RULE}: MB keeps a change only on its own measurement of {spec.metric} on its own cards, a gain above"
-        " its bar that a second measurement confirms; Arbor's numbers decide only Arbor's own KEEPs.",
+        f" its bar {kept}; Arbor's numbers decide only Arbor's own KEEPs.",
     ]
     if kind == AGENTX:
         rules.append(
@@ -897,12 +908,17 @@ async def generate_directions(checkout: Path, profile: Path, out: Path) -> Path:
 
 
 async def _directions(checkout: Path, written: tuple[Path, ...], *args: str) -> None:
-    """Run ``python3 -m arbor.directions`` with ``args`` in ``checkout``; raise :class:`SplitFailed` with what it
-    printed when it fails or leaves any of ``written`` unwritten."""
+    """Run ``python3 -m arbor.directions`` with ``args`` in ``checkout``, as Arbor's other commands with no site
+    settings file (:data:`SETTINGS_ENV`); raise :class:`SplitFailed` with what it printed when it fails or leaves any
+    of ``written`` unwritten."""
 
     argv = [PYTHON, "-m", "arbor.directions", *args]
     process = await asyncio.create_subprocess_exec(
-        *argv, cwd=checkout, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        *argv,
+        cwd=checkout,
+        env={**os.environ, SETTINGS_ENV: os.devnull},
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
     output, _ = await process.communicate()
     said = " | ".join(line.strip() for line in output.decode(errors="replace").strip().splitlines()[-_TAIL_LINES:])
@@ -937,6 +953,7 @@ __all__ = [
     "REVIEW_HOST",
     "REVIEW_KEY",
     "REVIEW_OFF",
+    "SETTINGS_ENV",
     "SITE_ENV",
     "SITE_SINCE",
     "ArborCheckout",

@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract of the pre-boot GPU check: a round's GPUs must be visible to ``amd-smi`` and hold no process, and a refusal
-names each GPU and why.
+"""Contract of the pre-boot GPU check: a round's GPUs must be visible to ``amd-smi`` and no process may have memory
+resident on them beyond the page tables and runtime context every process that merely opened the card keeps there (an
+entry that reports no memory is a holder), and a refusal names each GPU and why.
 
 A round's GPUs are ``HIP_VISIBLE_DEVICES`` numbers, which ROCm assigns in KFD node order while ``amd-smi`` indexes cards
 in PCI order, so the check must translate one into the other.
@@ -54,6 +55,48 @@ def test_visible_idle_gpus_pass(monkeypatch):
 def test_a_gpu_another_process_holds_is_named_with_its_holder(monkeypatch, entry):
     _answer(monkeypatch, {"gpu_data": _host({1: [entry]})})
     assert gpus.unavailable_gpus((0, 1)) == "GPU 1 (amd-smi card 1): held by pid 4242 (python3)"
+
+
+def _opened(pid: int, vram: int) -> dict:
+    """An ``amd-smi process --json`` entry of ``pid`` with ``vram`` bytes resident on the card."""
+    memory = {key: {"value": 0, "unit": "B"} for key in ("gtt_mem", "cpu_mem")}
+    memory["vram_mem"] = {"value": vram, "unit": "B"}
+    return {"process_info": {"name": "python3", "pid": pid, "memory_usage": memory}}
+
+
+def test_a_process_listed_on_every_card_holds_only_the_one_it_has_memory_on(monkeypatch):
+    # A HIP process with no device mask opens every card: amd-smi lists it on all of them, with memory on one.
+    held = 7  # amd-smi card 7 is HIP GPU 4 on an MI355X board
+    _answer(
+        monkeypatch,
+        _host({card: [_opened(4242, 4 << 30 if card == held else 0)] for card in range(8)}),
+        _MI355X_ROCM_ORDER,
+    )
+
+    assert gpus.unavailable_gpus((3, 5, 6, 7)) is None
+    assert gpus.unavailable_gpus((4,)) == "GPU 4 (amd-smi card 7): held by pid 4242 (python3)"
+
+
+def test_a_process_that_only_opened_a_card_does_not_hold_it(monkeypatch):
+    # Recorded per-card drm-memory-vram: an orchestrator masked to card 3 and a scheduler masked to cards 4-7 keep
+    # 36-52 KiB on every card, and a server masked to card 5 keeps 1.7 MiB on the cards it does not use.
+    kib = 1 << 10
+    _answer(
+        monkeypatch,
+        _host(
+            {
+                card: [
+                    _opened(1822180, 52 * kib if card >= 4 else 48 * kib),
+                    _opened(2608305, 52 * kib if card == 3 else 36 * kib),
+                    _opened(2768962, 247_247_288 * kib if card == 5 else 1724 * kib),
+                ]
+                for card in range(8)
+            }
+        ),
+    )
+
+    assert gpus.unavailable_gpus((4, 6, 7)) is None
+    assert gpus.unavailable_gpus((5,)) == "GPU 5 (amd-smi card 5): held by pid 2768962 (python3)"
 
 
 def test_a_gpu_the_host_does_not_have_is_not_visible(monkeypatch):

@@ -23,13 +23,19 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import RUN_
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 from inference_suite.contracts import FailedStep
 from inference_suite.server_log import death_excerpt
-from .._accuracy_gate import ACCURACY_DEFINITION_DIGEST_KEY, EVAL_DEFINITION_DIGEST_KEY, parse_eval_results
+from .._accuracy_gate import (
+    ACCURACY_DEFINITION_DIGEST_KEY,
+    EVAL_DEFINITION_DIGEST_KEY,
+    EVAL_KIND_QUALITY_GATE_MISSING,
+    parse_eval_results,
+)
 from .._failed_step import failed_step_error_class
 from .._grid_runner import lease_cards, session_grid_bounds
 from .._ray_serving import ServingLease, maybe_serving_lease
 from .._subprocess_kill import resolve_benchmark_timeouts
-from .._suite_config import AccuracyRound, SuiteRoundRefused, deadline_unix, run_accuracy_suite_round, session_route
+from .._suite.rounds import AccuracyRound, SuiteRoundRefused, deadline_unix, run_accuracy_suite_round, session_route
 from .records import (
+    ACCURACY_EVAL_KIND_KEY,
     _BENCHMARK_MODE_ATTR,
     _DOUBLE_RUN_ROUND_DIRS,
     _is_double_run_accuracy_handoff,
@@ -459,6 +465,16 @@ class _BaselineAccuracyMixin:
         if accuracy_meets_floor(acc, usable_floor):
             return
         framework = _requested_framework(params)
+        context = f"baseline:{framework or 'unknown'}"
+        # The operator's script broke the scriptable contract: no specialist can repair it, and a sibling attempt ran
+        # the same script.
+        if result.get(ACCURACY_EVAL_KIND_KEY) == EVAL_KIND_QUALITY_GATE_MISSING:
+            request_baseline_accuracy_stop(
+                shared_state,
+                context=f"{context}:{EVAL_KIND_QUALITY_GATE_MISSING}",
+                cause=self._quality_gate_missing_cause(result),
+            )
+            return
         # Session-level salvage (complements #942): the cold-start guard and the coordinator's retries each run in
         # their own ``runs/baseline/<attempt>`` dir. #942 keeps every attempt's eval output inside that attempt's
         # ``$RESULT_DIR``, but the accuracy-stop decision runs on the *deciding* attempt -- whose dir can be empty
@@ -497,7 +513,7 @@ class _BaselineAccuracyMixin:
         # Only a *missing* reference can be explained by a dead server. A measured zero -- including one salvaged
         # from a sibling attempt -- means the eval did run and did write its results, so blaming the death here would
         # state the opposite of what the artifacts show, however dead the server later became.
-        context, cause = f"baseline:{framework or 'unknown'}", ""
+        cause = ""
         if acc is None and (death := self._accuracy_stop_death_evidence(result)):
             log.error(
                 "baseline_executor: no accuracy reference, and this round's server.log "
@@ -512,6 +528,11 @@ class _BaselineAccuracyMixin:
                 "no accuracy result, and a fatal engine death on record for this round",
             )
         request_baseline_accuracy_stop(shared_state, context=context, cause=cause)
+
+    @staticmethod
+    def _quality_gate_missing_cause(result: dict[str, Any]) -> str:
+        report = result.get("accuracy_source") or "no round report found"
+        return f"the entrypoint's result JSON carries no quality_gate block (report: {report})"
 
     def _route_baseline_accuracy_to_enablement(
         self,

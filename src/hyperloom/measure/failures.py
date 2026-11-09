@@ -86,6 +86,11 @@ GIT_FETCH_TIMEOUT = "git_fetch_timeout"
 #: address the sandbox reaches it from, after the client's own retries; the reason is ``<this>: <the line>``. No candidate
 #: causes it and the node has no part in it (``hyperloom_multibranch.toolbox.attempts`` does not report it against one).
 HUB_RATE_LIMITED = "hub_rate_limited"
+#: A Hugging Face cache (the ``datasets`` lock of the evaluation's dataset, say) refused the test with ``[Errno 13]
+#: Permission denied``; the reason is ``<this>: <the path refused>``. The cache is a volume every sandbox of the platform
+#: mounts alike, so no candidate causes it and a fresh sandbox meets it again: ``hyperloom_multibranch.toolbox.attempts``
+#: ends the test with it at once and does not hold it against the node.
+HF_CACHE_PERMISSION = "hf_cache_permission"
 #: The test's own timeout passed while its attempt waited for a slot of the sandbox pool or for room in the grant's
 #: quota, before any sandbox was made (``hyperloom.measure.sandboxes.AcquireTimedOut``); the reason is ``<this>: <what it
 #: waited for and what held it>``. Nothing ran, so no node and no candidate is to blame, and a retry would wait on the same
@@ -132,6 +137,8 @@ SERVER_STALLED_REASON = "server_stalled"
 #: The steps inference_suite names a round failed at that are not about the candidate, or that name the cause better
 #: than any line of a log that holds only the symptom. Every other step leaves the verdict to the logs.
 _FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
+    # The suite parses the argv before the server starts, so no server log holds the refusal.
+    FailedStep.FLAG_UNKNOWN: (FailureClass.CANDIDATE, SERVE_FLAG),
     FailedStep.PORT_IN_USE: (FailureClass.INFRA, PORT_IN_USE_REASON),
     FailedStep.GPUS_UNAVAILABLE: (FailureClass.INFRA, HOST_GPUS_UNAVAILABLE_REASON),
     FailedStep.SERVER_SILENT_BEFORE_READY: (FailureClass.INFRA, HUNG_BEFORE_READY),
@@ -139,6 +146,14 @@ _FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
     FailedStep.TEARDOWN_INCOMPLETE: (FailureClass.INFRA, FailedStep.TEARDOWN_INCOMPLETE.value),
     FailedStep.SERVER_STALLED: (FailureClass.UNCLEAR, SERVER_STALLED_REASON),
 }
+#: The steps whose reason quotes the report's ``failure_detail``, as ``<reason>: <detail>``.
+_DETAILED_STEPS = frozenset({FailedStep.FLAG_UNKNOWN})
+#: What the suite's framework probe says, as ``FailedStep.FRAMEWORK_VERSION_UNKNOWN``, when the serving interpreter
+#: finds no package of the framework at all (``framework_probe.probe_install``). Like a probe whose import raised, it
+#: is the candidate's ``import_error``, the cause a server that died on the same import used to name in its log; a
+#: probe that ran too long or could not start, or a version it could not read, says nothing of the candidate. The probe
+#: says it as the whole detail, so it is taken only at the end of the detail, as the experience ledger takes it.
+_FRAMEWORK_NOT_FOUND = re.compile(r"\scannot import [A-Za-z_][\w.]*\s*\Z")
 #: The two causes an unclear failure names when its log carries them; the reason is ``<prefix>: <the log's line>``.
 #: A failure the log only calls a crashed evaluation names the refused request too, when the log carries one.
 LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
@@ -215,6 +230,14 @@ class FailureClassification:
 
 
 @dataclass(frozen=True)
+class StepFailure:
+    """The step a failed round's ``report.json`` names, and its ``failure_detail`` (``""`` when it gave none)."""
+
+    step: FailedStep
+    detail: str = ""
+
+
+@dataclass(frozen=True)
 class FailureEvidence:
     """What a failed test left to read, consulted only when neither its error class nor its return code decides it.
 
@@ -222,14 +245,16 @@ class FailureEvidence:
     ``server.log`` and of the benchmark's stderr); ``client_logs`` are the benchmark client's own output, read only for
     the infrastructure cause it states (a Hub download refused), never for a candidate's signature, since a client that
     failed on its own says nothing of the server; ``detail`` is what the caller observed of a boot timeout, which the
-    return code alone does not say; ``failed_step`` is the step the failed round's ``report.json`` names, which
-    inference_suite records in place of the return code it exits with.
+    return code alone does not say; ``step_failure`` is the step the failed round's ``report.json`` names, with its
+    detail, which inference_suite records in place of the return code it exits with; ``unrun`` is ``<error_class>:
+    <message>`` of a failed round refused before it ran, which left no log: the only account of it there is.
     """
 
     logs: tuple[str, ...] = ()
     client_logs: tuple[str, ...] = ()
     detail: str = ""
-    failed_step: FailedStep | None = None
+    step_failure: StepFailure | None = None
+    unrun: str = ""
 
 
 def classify_test_failure(
@@ -253,22 +278,24 @@ def classify_test_failure(
         return _unclear(TEST_TIMEOUT_REASON)
     if returncode == 0:
         return FailureClassification(Disposition.SUCCEEDED)
-    text = "\n".join(_bounded(part) for part in evidence.logs if part)
+    parts = [_bounded(part) for part in evidence.logs if part]
+    text = "\n".join(parts)
     refused = log_causes.hub_rate_limited("\n".join([text, *(_bounded(part) for part in evidence.client_logs if part)]))
     if refused:
         # Before the signatures: the client that was refused may then fail to load a tokenizer, which reads as one.
         return _infra(f"{HUB_RATE_LIMITED}: {refused}")
-    step = evidence.failed_step
-    if step in _FAILED_STEP_VERDICTS:
-        failure_class, reason = _FAILED_STEP_VERDICTS[step]
-        return FailureClassification(Disposition.FAILED, failure_class, reason)
-    named = _named_by_logs(text)
+    reported = evidence.step_failure
+    step = reported.step if reported else None
+    by_step = _from_step(reported) if reported else None
+    if by_step is not None:
+        return by_step
+    named = _named_by_logs(text, parts)
     if named is not None:
         return named
     if returncode == SERVER_BOOT_TIMEOUT_RC or step is FailedStep.SERVER_BOOT_TIMEOUT:
         detail = evidence.detail
         return _candidate(f"{SERVER_BOOT_TIMEOUT_REASON}: {detail}" if detail else SERVER_BOOT_TIMEOUT_REASON)
-    return _from_unnamed_logs(text)
+    return _from_unnamed_logs(text, evidence.unrun)
 
 
 def decides_test(verdict: FailureClassification) -> bool:
@@ -292,14 +319,39 @@ def _from_error_class(error_class: str) -> FailureClassification:
     return FailureClassification(Disposition.PROGRAM_ERROR, failure_reason=f"unknown_error_class:{error_class}")
 
 
-def _named_by_logs(text: str) -> FailureClassification | None:
-    """The verdict a log gives by itself: a port taken, a known signature, a refused command line; else ``None``."""
+def _from_step(reported: StepFailure) -> FailureClassification | None:
+    """The verdict the failed step decides by itself; ``None`` leaves it to the logs."""
+    if reported.step is FailedStep.FRAMEWORK_VERSION_UNKNOWN:
+        return _unimportable_framework(reported.detail.strip())
+    if reported.step not in _FAILED_STEP_VERDICTS:
+        return None
+    failure_class, reason = _FAILED_STEP_VERDICTS[reported.step]
+    if reported.step in _DETAILED_STEPS and reported.detail.strip():
+        reason = f"{reason}: {log_causes.one_line(reported.detail)}"
+    return FailureClassification(Disposition.FAILED, failure_class, reason)
+
+
+def _unimportable_framework(detail: str) -> FailureClassification | None:
+    """The candidate's ``import_error`` when the framework probe found no framework or its import raised, else ``None``."""
+    line = log_causes.one_line(detail) if _FRAMEWORK_NOT_FOUND.search(detail) else log_causes.import_error(detail)
+    return _candidate(f"{IMPORT_ERROR}: {line}") if line else None
+
+
+def _named_by_logs(text: str, parts: list[str]) -> FailureClassification | None:
+    """The verdict a log gives by itself: a port taken, a known signature, a refused command line; else ``None``.
+
+    ``text`` is the logs ``parts`` joined.
+    """
     if _PORT_IN_USE.search(text):
         return _infra(PORT_IN_USE_REASON)
     full = log_causes.disk_full(text)
     if full:
         # Before the signatures: a full disk breaks whatever was writing, and the traceback it leaves can match one.
         return _infra(f"{DISK_FULL}: {full}")
+    refused_cache = _hf_cache_refusal(parts)
+    if refused_cache:
+        # Before the signatures: the evaluation that could not take the lock dies on it with a Python exception.
+        return _infra(f"{HF_CACHE_PERMISSION}: {refused_cache}")
     stalled_fetch = log_causes.git_fetch_timeout(text)
     if stalled_fetch:
         return _infra(f"{GIT_FETCH_TIMEOUT}: {stalled_fetch}")
@@ -322,8 +374,25 @@ def _named_by_logs(text: str) -> FailureClassification | None:
     return None
 
 
-def _from_unnamed_logs(text: str) -> FailureClassification:
-    """An unclear failure, with the line of the log that says what happened when there is one."""
+def _hf_cache_refusal(parts: list[str]) -> str | None:
+    """The Hugging Face cache path whose refusal ended the test, else ``None``.
+
+    The refusal must be the error a log ended on (:func:`log_causes.terminal_error`): ``huggingface_hub`` logs a refusal
+    of a read-only cache and carries on, and a refusal survived is no cause. When another log ended on a failure a
+    candidate is known to cause (a failed import, say), that failure is the cause and the refusal is not.
+    """
+    endings = [ending for ending in map(log_causes.terminal_error, parts) if ending]
+    refused = [path for path in (log_causes.hf_cache_permission(e) for e in endings) if path]
+    if not refused or any(classify_failure(e).is_actionable for e in endings):
+        return None
+    return refused[-1]
+
+
+def _from_unnamed_logs(text: str, unrun: str) -> FailureClassification:
+    """An unclear failure, named by what the runner recorded of a round that never ran, else by the line of the log that
+    says what happened when there is one."""
+    if unrun:
+        return _unclear(" ".join(unrun.split())[:LOG_LINE_CHARS])
     for reason, cause in (
         (LM_EVAL_BAD_REQUEST_REASON, log_causes.bad_request(text)),
         (PYTHON_EXCEPTION_REASON, log_causes.python_exception(text)),

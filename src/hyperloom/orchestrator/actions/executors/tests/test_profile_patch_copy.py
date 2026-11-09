@@ -136,7 +136,6 @@ class _Install:
 def profile_environment(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "tmp").mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
     monkeypatch.delenv("HYPERLOOM_SGLANG_VERSION_PIN", raising=False)
     monkeypatch.delenv("PYTHONPATH", raising=False)

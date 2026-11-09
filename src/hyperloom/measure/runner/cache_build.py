@@ -39,7 +39,10 @@ distribution's own build requirements name is never fetched. The lock must there
   another account may have put there, writable by its builder alone (:func:`_publish`). What a builder killed while
   copying left behind (``.<sha>.tmp-*``) is removed by the next builder of its account, and only when it is a directory
   that builder made for itself: its own and ``0700`` (:func:`_sweep_leftovers`). Anything else of that name stays, a
-  builder of another account's included, and the entry is built beside it.
+  builder of another account's included, and the entry is built beside it. Every directory and file of an entry in
+  place is readable by the group, whatever the builder's umask, so the other accounts' builders can check and use it; a
+  directory in place without the group's read is no finished entry (a builder killed just after its rename, a leftover
+  another account renamed there) and is renamed to a leftover's name and built again (:func:`_set_aside`).
 - An entry that is already there is used when it is complete and still what a build would write; one that differs is
   never modified: the build refuses and names the difference (:class:`CacheConflict`). Its manifest file is read once,
   the entry is checked against those bytes and the pin returned is their SHA-256, as a build returns the SHA-256 of the
@@ -115,7 +118,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import fcntl
 import fnmatch
 import hashlib
 import importlib.metadata
@@ -129,18 +131,24 @@ import struct
 import subprocess
 import sys
 import tempfile
-import time
 import zipfile
 import zlib
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager, suppress
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import current_umask, make_shared_dirs, ownership
+from hyperloom_common.shared_storage import make_shared_dirs, ownership
 from hyperloom.measure.runner.bootstrap import BOOTSTRAP_SCRIPT
 from hyperloom.measure.runner.suite_publish import SuitePublishError, publish_inference_suite
+from hyperloom.measure.runner.cache_build_lock import (
+    DEFAULT_LOCK_TIMEOUT_SEC,
+    CacheBuildError,
+    build_lock,
+    exclusive,
+    shared_umask,
+)
 from hyperloom.measure.runner.cache_layout import (
     BOOTSTRAP_NAME,
     CACHE_ENV,
@@ -183,11 +191,7 @@ __all__ = [
     "runner_wheel_target",
 ]
 
-DEFAULT_LOCK_TIMEOUT_SEC = 1800.0
-_LOCK_POLL_SEC = 0.1
-#: How a lock is opened: for writing, which ``flock`` over NFS needs, and never through a link.
-_LOCK_FLAGS = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
-_ALL_DIR_BITS, _ALL_FILE_BITS = 0o2777, 0o666
+_ALL_DIR_BITS = 0o2777
 #: How the cache directory is opened to put an entry in it (:func:`_publish`).
 _CACHE_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
 #: How a directory the builder made there is opened to fill it: never through a link.
@@ -198,6 +202,13 @@ _NEW_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CL
 _OWN_DIR_MODE, _OWN_FILE_MODE = 0o700, 0o600
 #: The permission bits an entry in place keeps of those it was built with: all but the group's and others' write.
 _ENTRY_BITS = 0o755
+#: What every directory of an entry in place has, whatever the umask it was built under, and every file the group's
+#: read (and execute where its owner has it): the other builders of the cache, other accounts of the group, read and
+#: check all of it (:func:`_reuse`). So the entry's own directory is never ``0700``, the mode by which the sweep
+#: (:func:`_sweep_leftovers`) tells a builder's unfinished copy, and a finished entry that another account of the group
+#: renames to a ``.<sha>.tmp-*`` name is never taken for one; one in place without these bits is set aside
+#: (:func:`_set_aside`).
+_ENTRY_GROUP_BITS = stat.S_IRGRP | stat.S_IXGRP
 _COPY_CHUNK = 1 << 20
 _TAIL = 2000
 _UTF8 = "utf-8"
@@ -245,10 +256,6 @@ _END_RECORD = struct.Struct("<4s4H2LH")
 _END_SIGNATURE, _ZIP64_LOCATOR_SIGNATURE, _ZIP64_LOCATOR_SIZE = b"PK\x05\x06", b"PK\x06\x07", 20
 #: Below the scratch directory of a build environment: the wheels of the build tools, and the virtual environment.
 _TOOLS_DIR, _ENV_DIR = "tools", "env"
-
-
-class CacheBuildError(CacheError):
-    """The cache cannot be built; the message says why. A campaign that gets it does not start."""
 
 
 class CacheConflict(CacheBuildError):
@@ -572,15 +579,8 @@ def _builder_problems(raw: bytes, manifest: Manifest) -> list[str]:
     return []
 
 
-def _shared_umask() -> int:
-    """The umask of what this builder makes for the other builders of the cache, the cache directory and the locks:
-    its own, with every group bit let through, so the group may read, enter and write whatever the umask keeps from
-    others."""
-    return current_umask() & ~stat.S_IRWXG
-
-
 def _shared_dirs(path: Path) -> Path:
-    return make_shared_dirs(path, mode=_ALL_DIR_BITS & ~_shared_umask())
+    return make_shared_dirs(path, mode=_ALL_DIR_BITS & ~shared_umask())
 
 
 def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) -> CacheEntry:
@@ -626,9 +626,14 @@ def _publish(made: Path, final: Path) -> None:
     descriptor of the directory it goes in, never through a link and never over a name that is there already
     (:data:`_NEW_FILE_FLAGS`). Whatever another account plants, the builder writes the entry and nothing else, into
     what it opened; what is in place is vouched for by the pin, as ever. The new directory is the builder's alone
-    (``0700``) until it is whole, each copy has the mode of what it copies without the group's and others' write
-    (:data:`_ENTRY_BITS`), and the manifest is copied last. A copy that fails removes the directory it opened, through
-    that descriptor, and nothing another account put in its place (:func:`_remove_directory`)."""
+    (``0700``) until it is whole and renamed into place, so a builder killed at any point before the rename leaves a
+    directory the sweep removes (:func:`_sweep_leftovers`); each copy has the mode of what it copies without the group's
+    and others' write (:data:`_ENTRY_BITS`) and with the group's read (:func:`_group_readable`), the entry's own
+    directory given its mode through the descriptor after the rename, and the manifest is copied last. A builder killed
+    between the rename and that ``fchmod`` leaves an entry in place that is still ``0700``, which the next builder of
+    any account sets aside for the sweep (:func:`_set_aside`). A copy that fails
+    removes the directory it opened, through that descriptor, and nothing another account put in its place
+    (:func:`_remove_directory`)."""
     root = os.open(final.parent, _CACHE_FLAGS)
     pending = f".{final.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
     try:
@@ -636,11 +641,13 @@ def _publish(made: Path, final: Path) -> None:
         directory = _open_new_directory(root, pending)
         opened = os.fstat(directory)
         try:
-            _copy_tree(made, directory, last=MANIFEST_NAME)
+            _copy_tree(made, directory, last=MANIFEST_NAME, keep_private=True)
             os.rename(pending, final.name, src_dir_fd=root, dst_dir_fd=root)
         except BaseException:
             _remove_directory(root, pending, lambda found: os.path.samestat(found, opened))
             raise
+        else:
+            os.fchmod(directory, _entry_mode(made))
         finally:
             os.close(directory)
     finally:
@@ -687,9 +694,23 @@ def _open_new_directory(parent: int, name: str) -> int:
     return descriptor
 
 
-def _copy_tree(source: Path, directory: int, last: str = "") -> None:
+def _entry_mode(source: Path) -> int:
+    """The mode of an entry's own directory in place: :func:`_group_readable` of that of ``source``."""
+    return _group_readable(os.stat(source).st_mode)
+
+
+def _group_readable(mode: int) -> int:
+    """``mode`` without the group's and others' write (:data:`_ENTRY_BITS`), with the group's read, and its execute
+    where the owner has execute (every directory, an executable file): what each copy in an entry has
+    (:data:`_ENTRY_GROUP_BITS`)."""
+    kept = stat.S_IMODE(mode) & _ENTRY_BITS | stat.S_IRGRP
+    return kept | stat.S_IXGRP if kept & stat.S_IXUSR else kept
+
+
+def _copy_tree(source: Path, directory: int, last: str = "", *, keep_private: bool = False) -> None:
     """Fill the new directory open as ``directory`` (:func:`_open_new_directory`) with a copy of what is in ``source``
-    (``last`` after the rest), then give it ``source``'s mode without the group's and others' write (:func:`_publish`).
+    (``last`` after the rest), then give it ``source``'s mode as :func:`_group_readable` makes it (:func:`_publish`),
+    unless ``keep_private``: the entry's own directory stays ``0700`` until it is in place.
 
     Raises:
         CacheBuildError: For something in ``source`` that is not a directory, a regular file or a link.
@@ -709,7 +730,8 @@ def _copy_tree(source: Path, directory: int, last: str = "") -> None:
             _copy_file(Path(entry.path), directory, entry.name, info.st_mode)
         else:
             raise CacheBuildError(f"{entry.path} is not a directory, a regular file or a link")
-    os.fchmod(directory, stat.S_IMODE(os.stat(source).st_mode) & _ENTRY_BITS)
+    if not keep_private:
+        os.fchmod(directory, _group_readable(os.stat(source).st_mode))
 
 
 def _remove_directory(parent: int, name: str, ours: Callable[[os.stat_result], bool]) -> None:
@@ -766,8 +788,8 @@ def _sweep_leftovers(cache_root: Path, sha: str) -> None:
 
 
 def _copy_file(source: Path, directory: int, name: str, mode: int) -> None:
-    """Copy the file ``source`` as the new file ``name`` of ``directory``, with ``mode`` but for the group's and others'
-    write."""
+    """Copy the file ``source`` as the new file ``name`` of ``directory``, with ``mode`` as :func:`_group_readable`
+    makes it."""
     sink = os.open(name, _NEW_FILE_FLAGS, _OWN_FILE_MODE, dir_fd=directory)
     try:
         with source.open("rb") as content:
@@ -775,7 +797,7 @@ def _copy_file(source: Path, directory: int, name: str, mode: int) -> None:
                 written = memoryview(chunk)
                 while written:
                     written = written[os.write(sink, written) :]
-        os.fchmod(sink, stat.S_IMODE(mode) & _ENTRY_BITS)
+        os.fchmod(sink, _group_readable(mode))
     finally:
         os.close(sink)
 
@@ -987,8 +1009,12 @@ def _links(entry: Path) -> list[str]:
 def _reuse(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) -> CacheEntry | None:
     """The entry at ``final`` if it is what a build would write, ``None`` when there is none.
 
-    An entry that is a link, or holds one where a builder makes a file or a directory (:func:`_links`), differs and is
-    not read; so does one with no manifest, which no builder leaves in place. An entry is never written to or removed.
+    A directory in place that the group cannot read and enter (:data:`_ENTRY_GROUP_BITS`) is one no builder finished:
+    the copy of a builder killed between the rename and its ``fchmod``, a builder's unfinished copy that an account of
+    the group renamed there, or an entry of a builder from before entries were the group's to read. It is set aside
+    (:func:`_set_aside`) and the entry built again. An entry that is a link, or holds one where a builder makes a file
+    or a directory (:func:`_links`), differs and is not read; so does one with no manifest, which no builder leaves in
+    place. An entry is never written to or removed.
     Its manifest file is read once: the entry is checked against those bytes (:func:`check_entry` pinned to their hash,
     so a manifest written over meanwhile is refused), those bytes against the commit, its wheels built from a source
     distribution included (:func:`_differences`), and the pin returned is their SHA-256.
@@ -997,6 +1023,10 @@ def _reuse(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) 
         CacheConflict: When there is an entry and it differs.
     """
     if not os.path.lexists(final):
+        return None
+    info = os.lstat(final)
+    if stat.S_ISDIR(info.st_mode) and info.st_mode & _ENTRY_GROUP_BITS != _ENTRY_GROUP_BITS:
+        _set_aside(final, sha)
         return None
     links = _links(final)
     if links:
@@ -1016,51 +1046,29 @@ def _reuse(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) 
     return CacheEntry(final, pin, reused=True)
 
 
-def _open_lock(path: Path) -> int:
-    """``path`` opened for writing, made ``0664`` (:func:`_shared_umask`) when this call creates it, so that every
-    account of the cache directory's group can take the lock after this one.
+def _set_aside(final: Path, sha: str) -> None:
+    """Rename the directory ``final`` to a leftover's name (``.<sha>.tmp-*``), which the sweep of its owner's builders
+    removes (:func:`_sweep_leftovers`), and sweep at once: this builder's own is removed now.
 
     Raises:
-        CacheBuildError: When it cannot be opened so, naming it: a lock another account made without group write.
+        CacheConflict: When it cannot be renamed (a sticky cache directory and another account's entry).
     """
-    mode = _ALL_FILE_BITS & ~_shared_umask()
+    root = os.open(final.parent, _CACHE_FLAGS)
+    aside = f".{sha}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
     try:
-        try:
-            descriptor = os.open(path, _LOCK_FLAGS | os.O_CREAT | os.O_EXCL, mode)
-        except FileExistsError:
-            return os.open(path, _LOCK_FLAGS)
+        os.rename(final.name, aside, src_dir_fd=root, dst_dir_fd=root)
     except OSError as exc:
-        raise CacheBuildError(
-            f"cannot open the build lock {path} for writing: {exc.strerror}{ownership(path)}; every account that builds "
-            "into this cache must be able to"
+        raise CacheConflict(
+            f"{final} is not what a build of {sha} writes (the group cannot read it{ownership(final)}), and it cannot "
+            f"be set aside: {exc.strerror}"
         ) from None
-    os.fchmod(descriptor, mode)
-    return descriptor
-
-
-def build_lock(cache_root: Path, sha: str) -> Path:
-    """The lock the builders of commit ``sha`` into ``cache_root`` take. Named apart from the ``.<sha>.lock`` of builders
-    whose locks were ``0644``, which another account cannot open for writing."""
-    return cache_root / f".{sha}.flock"
-
-
-@contextmanager
-def _exclusive(path: Path, timeout_sec: float) -> Iterator[None]:
-    """Hold an exclusive ``flock`` on ``path`` for the block; wait for it for at most ``timeout_sec``."""
-    descriptor = _open_lock(path)
-    try:
-        deadline = time.monotonic() + timeout_sec
-        while True:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise CacheBuildError(f"another build still holds {path} after {timeout_sec:.0f} s") from None
-                time.sleep(_LOCK_POLL_SEC)
-        yield
     finally:
-        os.close(descriptor)
+        os.close(root)
+    print(
+        f"runner cache: set aside {final} as {aside}: the group cannot read it, so no builder finished it",
+        file=sys.stderr,
+    )
+    _sweep_leftovers(final.parent, sha)
 
 
 def ensure_runner_cache(repo: Path, sha: str, cache_root: Path, options: BuildOptions = BuildOptions()) -> CacheEntry:
@@ -1077,7 +1085,7 @@ def ensure_runner_cache(repo: Path, sha: str, cache_root: Path, options: BuildOp
     tree = _commit_tree(repo, sha)
     _shared_dirs(cache_root)
     final = cache_root / sha
-    with _exclusive(build_lock(cache_root, sha), options.lock_timeout_sec):
+    with exclusive(build_lock(cache_root, sha), options.lock_timeout_sec):
         _sweep_leftovers(cache_root, sha)
         return _reuse(repo, sha, tree, final, options) or _build(repo, sha, tree, final, options)
 
@@ -1151,10 +1159,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     document = {"path": str(entry.path), "manifest_sha256": entry.manifest_sha256, "reused": entry.reused}
     print(json.dumps({**document, "inference_suite": str(runnable.inference_suite)}))
     return 0
-
-
-#: Public name of the per-key ``flock`` the native build service (``hyperloom.measure.runner.native``) coalesces with.
-exclusive = _exclusive
 
 
 if __name__ == "__main__":

@@ -139,6 +139,7 @@ _PROBE = textwrap.dedent(
             setattr(o, name, tuple(f"{name}_{i}" for i in range(len(value))))
 
     from hyperloom.common import aiter_layout, env_safety, failure_signature, visible_devices
+    from hyperloom.common.benchmark_config import BenchmarkPoint
     from hyperloom.measure import compile as compiled
     from hyperloom.measure import agentx_requests, eval_context, farm, hosted_spec, local, log_causes, points, surface
     from hyperloom.measure.framework import base as framework_base
@@ -162,7 +163,7 @@ _PROBE = textwrap.dedent(
         "blocked": sorted(env_safety.BLOCKED_EXTERNAL_ENV_NAMES),
         "reserved": sorted(templates.RESERVED_ENV_NAMES),
         "rocr": visible_devices.ROCR_LEVEL_VARS[0],
-        "gpus": hosted_spec.gpu_count_of({"benchmark": {"envs": {"ENV_TP": "4"}}}),
+        "gpus": hosted_spec.gpu_count_of(BenchmarkPoint.from_document({"benchmark": {"envs": {"ENV_TP": "4"}}})),
         "concurrency": hosted_executor._concurrency_in("benchmark: {envs: {ENV_CONC: 7}}"),
         "visible": run._visible({"ROCR_VISIBLE_DEVICES_ENV": "0,2"}),
         "export": list(agentx_requests._EXPORT_PATTERNS),

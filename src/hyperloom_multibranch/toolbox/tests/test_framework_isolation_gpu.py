@@ -11,8 +11,9 @@ same file (row count and sha256) after both, and each test's signed ``framework_
 session's base. What the write-back did is printed (``PROBE``): whether the server read the variable at all (a server
 that does not has nothing to rewrite) and which files in the test's private copies were rewritten.
 
-Needs what ``test_toolbox_kinds_gpu`` needs (``HL_GPU_MODEL``, ``HL_GPU_INFERENCEX``, ``HL_GPU_OUT``, ``HL_GPU_CARDS``)
-and the image's aiter tables at ``/sgl-workspace``; anywhere else the module is skipped.
+Needs what ``test_toolbox_kinds_gpu`` needs (``HL_GPU_MODEL``, ``HL_GPU_INFERENCEX`` holding
+``inference_suite.pins.INFERENCEX_CLIENT_COMMIT``, ``HL_GPU_OUT``, ``HL_GPU_CARDS``) and the image's aiter tables at
+``/sgl-workspace``; anywhere else the module is skipped.
 """
 
 from __future__ import annotations

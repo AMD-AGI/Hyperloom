@@ -108,8 +108,9 @@ def add_framework_arguments(opt: argparse.ArgumentParser) -> None:
         "HYPERLOOM_BYPASS_SCRIPTS_DIR. The entrypoint is taken as "
         "custom_<gpu-type>.sh, or the single .sh in the directory. It must "
         "emit a quality_gate block in its report: for a server-less workload "
-        "that gate is the only correctness signal, and a missing one scores "
-        "zero, so every candidate is rejected.",
+        "that gate is the only correctness signal. A baseline without it "
+        "stops the run (baseline_accuracy_failed); a candidate without it "
+        "is rejected.",
     )
     opt.add_argument(
         "--xdit-model-name",

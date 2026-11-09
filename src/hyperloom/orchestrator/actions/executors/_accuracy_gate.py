@@ -83,6 +83,9 @@ EVAL_KIND_ACCURACY_UNAVAILABLE = "accuracy_unavailable"
 EVAL_KIND_ACCURACY_BELOW_FLOOR = "accuracy_below_floor"
 # The model never emitted EOS, so the eval was cut short and scored ~0.
 EVAL_KIND_GENERATION_PATHOLOGY = "eval_generation_pathology"
+# A scriptable round report without a readable ``quality_gate``: the operator's script broke its contract, which no
+# framework change can repair.
+EVAL_KIND_QUALITY_GATE_MISSING = "quality_gate_missing"
 
 # Sidecar the probe writes into ``$RESULT_DIR`` when it trips; inference_suite writes its ProbeOutcome there on every
 # eval, tripped or not.
@@ -259,9 +262,9 @@ def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
     try:
         qg = _round_quality_gate(latest)
     except json.JSONDecodeError as exc:
-        return {"quality_gate": None, "error": f"parse error: {exc}"}
+        return {"quality_gate": None, "error": f"parse error: {exc}", "source_file": str(latest)}
     if not isinstance(qg, dict):
-        return {"quality_gate": None, "error": f"no quality_gate in {latest}"}
+        return {"quality_gate": None, "error": f"no quality_gate in {latest}", "source_file": str(latest)}
     return {"quality_gate": qg, "source_file": str(latest)}
 
 
@@ -419,6 +422,8 @@ def parse_eval_results(
             "metric": "quality_gate_passed",
             "quality_gate": None,
             "error": qg_out.get("error", "no quality_gate"),
+            "source_file": qg_out.get("source_file", ""),
+            "kind": EVAL_KIND_QUALITY_GATE_MISSING,
         }
 
     return _lm_eval_accuracy_result(workspace)
@@ -711,6 +716,7 @@ __all__ = [
     "EVAL_KIND_ACCURACY_BELOW_FLOOR",
     "EVAL_KIND_ACCURACY_UNAVAILABLE",
     "EVAL_KIND_GENERATION_PATHOLOGY",
+    "EVAL_KIND_QUALITY_GATE_MISSING",
     "EVAL_KIND_CONTEXT_TOO_SMALL",
     "EVAL_DEFINITION_DIGEST_KEY",
     "EVAL_KIND_RUNTIME_FAILURE",

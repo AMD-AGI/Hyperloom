@@ -13,7 +13,7 @@ import yaml
 from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.inference_optimizer.framework_registry import is_scriptable, shipped_config_name
 from hyperloom.inference_optimizer.session.paths import asset_root
-from hyperloom.orchestrator.actions.executors._suite_config import scriptable_workload
+from hyperloom.orchestrator.actions.executors._suite.config import scriptable_workload
 
 _FRAMEWORKS = ("atom", "sglang", "vllm", "xdit")
 _SERVING = tuple(framework for framework in _FRAMEWORKS if not is_scriptable(framework))

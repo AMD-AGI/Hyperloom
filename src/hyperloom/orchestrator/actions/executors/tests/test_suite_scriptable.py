@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._suite_config import suite_config
+from hyperloom.orchestrator.actions.executors._suite.config import suite_config
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import (
     _MODEL,
     _MODEL_ID,

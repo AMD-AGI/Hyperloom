@@ -133,6 +133,7 @@ from hyperloom_multibranch.scheduling import judge
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.integrator import ADOPTING_LEAD
+from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.lifecycle import (
@@ -242,6 +243,15 @@ IMAGE_CHECK = ImageCheckReport(
     "2023-11-14T22:13:20Z",
     {"python": "/usr/bin/python3"},
     (FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone"),),
+)
+#: How the session's peers launch its agents and tests: all unconfined, as no account is configured and no bubblewrap
+#: is found.
+ISOLATION = LaunchIsolation(
+    "none",
+    "none",
+    "none",
+    False,
+    ("running them as an account: HYPERLOOM_SPECIALIST_USER is not set", "bubblewrap: not found"),
 )
 #: The review gate pauses a session with Arbor agents for a person; these sessions open their branches without one,
 #: as ``run --no-review-gate`` does, and the review's own tests turn it on.
@@ -422,6 +432,7 @@ class Stage:
     author: ScriptedCompletion = field(default_factory=ScriptedCompletion)
     learnings: LearningRecall | None = None
     image_check: Callable[[], ImageCheckReport] = lambda: IMAGE_CHECK
+    isolation: LaunchIsolation = ISOLATION
     dossier_pass: DossierPass | None = None
     toolbox: RecordingToolbox = field(init=False)
     sessions: RecordedSessions = field(init=False)
@@ -493,6 +504,7 @@ class Stage:
             digest,
             self.gate,
             self.regression,
+            self.isolation,
             self.dossier_pass,
         )
 
@@ -737,6 +749,9 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert manifest["rule_pack"] == rule_pack_identity()
     assert manifest["image_check"] == IMAGE_CHECK.summary()
     assert json.loads((stage.layout.reports / IMAGE_CHECK_FILE).read_text()) == IMAGE_CHECK.to_json()
+    assert manifest["agent_isolation"] == json.loads(stage.layout.report.read_text())["agent_isolation"]
+    assert read_manifest(stage.layout.manifest).agent_isolation == ISOLATION
+    assert "A" + ISOLATION.line()[1:] in stage.layout.report_markdown.read_text().splitlines()
     judge_calls = len(stage.layout.judge.read_text().splitlines())
     spends = [_judge_state(prompt)["spend"] for prompt in _judge_prompts(stage)]
     assert [spend["scheduler_llm_usd"] for spend in spends[:2]] == [0.0, JUDGE_USD]
@@ -921,6 +936,17 @@ async def test_a_manifest_written_with_the_removed_reuse_prelude_setting_still_r
     stage.layout.manifest.write_text(json.dumps(manifest))
 
     assert read_manifest(stage.layout.manifest).settings == stage.settings
+
+
+async def test_a_manifest_an_earlier_build_wrote_reads_with_the_agents_isolation_not_recorded(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    _script(stage)
+    await stage.run()
+    manifest = json.loads(stage.layout.manifest.read_text())
+    del manifest["agent_isolation"]
+    stage.layout.manifest.write_text(json.dumps(manifest))
+
+    assert read_manifest(stage.layout.manifest).agent_isolation is None
 
 
 async def test_a_session_copies_the_reference_material_it_was_given_and_its_manifest_pins_it(tmp_path: Path) -> None:
@@ -1707,6 +1733,7 @@ async def test_final_only_validates_the_branches_a_session_that_never_reached_fi
     report = json.loads(stage.layout.report.read_text())
     assert report["final"]["chosen"]["commit"] == head
     assert report["stop_reason"] == SessionStopReason.TIME_EXHAUSTED.value
+    assert report["agent_isolation"] == ISOLATION.to_dict(), "the recovery reports how the session's agents ran"
     [final] = [row for row in _decisions(stage) if row["kind"] == "final"]
     assert float(str(final["at"])) > SessionBudget.from_hours(SETTINGS.max_hours, START).deadline
     # The session that opened the integration branch recorded its STOP; a second one is a conflicting write.

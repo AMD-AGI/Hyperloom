@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import errno
 import importlib
+import shlex
+import sys
 import time
+from pathlib import Path
 
 import pytest
-from inference_suite.contracts import FailedStep
 
 from hyperloom.common import failure_signature
 from hyperloom.measure import failures, returncodes
@@ -18,9 +20,14 @@ from hyperloom.measure.failures import (
     FailureClass,
     FailureClassification,
     FailureEvidence,
+    StepFailure,
     classify_test_failure,
     decides_test,
 )
+from inference_suite import framework_version
+from inference_suite.contracts import FailedStep
+from inference_suite.framework_probe import FrameworkProbeError, probe_install, run_probe
+from inference_suite.frameworks import Framework
 
 IMPORT_ERROR_LOG = (
     "Traceback (most recent call last):\n  File \"x.py\", line 1\nModuleNotFoundError: No module named 'sglang_patch'\n"
@@ -357,14 +364,92 @@ TRACEBACK_LOG = 'Traceback (most recent call last):\n  File "x.py", line 1\nRunt
 def test_the_step_a_round_failed_at_names_a_cause_its_log_does_not(step, failure_class, reason) -> None:
     """``port_in_use`` is the suite's own refusal, which leaves no bind error in the log; a traceback is no cause."""
     for logs in ([], [TRACEBACK_LOG]):
-        verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=tuple(logs), failed_step=step))
+        verdict = classify_test_failure(
+            returncode=1, evidence=FailureEvidence(logs=tuple(logs), step_failure=StepFailure(step))
+        )
         assert (verdict.failure_class, verdict.failure_reason) == (failure_class, reason)
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "the user layer: unrecognized arguments: --foo-bar 1",
+        "the user layer: argument --attention-backend: invalid choice: 'nonexistent' (choose from 'fa3', 'triton')",
+    ],
+    ids=["bad_flag", "bad_choice"],
+)
+@pytest.mark.parametrize("logs", [[], [TRACEBACK_LOG]])
+def test_a_flag_the_suite_refused_before_boot_is_a_candidate_serve_flag_quoting_the_refusal(detail, logs) -> None:
+    """The suite parses the argv before the server starts, so no server log states the refusal; its report does."""
+    verdict = classify_test_failure(
+        returncode=1,
+        evidence=FailureEvidence(logs=tuple(logs), step_failure=StepFailure(FailedStep.FLAG_UNKNOWN, detail)),
+    )
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, f"serve_flag: {detail}")
+    assert decides_test(verdict)
+
+
+def test_a_flag_refusal_without_a_detail_is_still_a_candidate_serve_flag() -> None:
+    verdict = classify_test_failure(
+        returncode=1, evidence=FailureEvidence(step_failure=StepFailure(FailedStep.FLAG_UNKNOWN))
+    )
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, "serve_flag")
+
+
+def _unknown_framework(detail: str) -> FailureClassification:
+    return classify_test_failure(
+        returncode=1,
+        evidence=FailureEvidence(step_failure=StepFailure(FailedStep.FRAMEWORK_VERSION_UNKNOWN, detail)),
+    )
+
+
+def _bare_interpreter(tmp_path: Path) -> str:
+    """An interpreter that sees the standard library only, so no framework package is importable from it."""
+    script = tmp_path / "bare-python"
+    script.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -S "$@"\n')
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_a_serving_interpreter_without_the_framework_is_the_candidates_import_error(tmp_path: Path) -> None:
+    """The suite probes the install before boot, so no server log says it; the probe's detail is quoted, and the
+    test is settled as a server that died on the import would have settled it."""
+    with pytest.raises(FrameworkProbeError) as refused:
+        probe_install(_bare_interpreter(tmp_path), Framework.SGLANG, {})
+    detail = str(refused.value)
+    verdict = _unknown_framework(detail)
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, f"import_error: {detail}")
+    assert detail.endswith("cannot import sglang") and decides_test(verdict)
+
+
+def test_a_framework_whose_import_raised_in_the_probe_is_the_candidates_import_error_quoting_the_line(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(FrameworkProbeError) as refused:
+        run_probe(_bare_interpreter(tmp_path), "import sglang_patch", (), {})
+    verdict = _unknown_framework(str(refused.value))
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, IMPORT_ERROR_REASON)
+    assert decides_test(verdict)
+
+
+def test_a_probe_that_says_nothing_of_the_framework_leaves_the_verdict_to_the_log(tmp_path: Path) -> None:
+    """A probe that could not start or that failed for another reason, or a version that cannot be read, is not the
+    candidate's import: it is left to the logs as if no step were named, so the test is run again."""
+    details = [framework_version.check(None, "0.5.0").detail]  # type: ignore[union-attr]
+    for python, program in ((str(tmp_path / "no-such-python"), "pass"), (_bare_interpreter(tmp_path), "1/0")):
+        with pytest.raises(FrameworkProbeError) as refused:
+            run_probe(python, program, (), {})
+        details.append(str(refused.value))
+    for detail in details:
+        assert _unknown_framework(detail) == classify_test_failure(returncode=1, evidence=FailureEvidence()), detail
 
 
 def test_a_stalled_server_is_unclear_and_does_not_settle_the_test_whatever_its_log_says() -> None:
     verdict = classify_test_failure(
         returncode=1,
-        evidence=FailureEvidence(logs=(TRACEBACK_LOG, IMPORT_ERROR_LOG), failed_step=FailedStep.SERVER_STALLED),
+        evidence=FailureEvidence(
+            logs=(TRACEBACK_LOG, IMPORT_ERROR_LOG), step_failure=StepFailure(FailedStep.SERVER_STALLED)
+        ),
     )
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, "server_stalled")
     assert not decides_test(verdict)
@@ -372,7 +457,8 @@ def test_a_stalled_server_is_unclear_and_does_not_settle_the_test_whatever_its_l
 
 def test_a_boot_timeout_step_yields_to_a_cause_its_log_names_as_its_return_code_does() -> None:
     verdict = classify_test_failure(
-        returncode=1, evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG,), failed_step=FailedStep.SERVER_BOOT_TIMEOUT)
+        returncode=1,
+        evidence=FailureEvidence(logs=(IMPORT_ERROR_LOG,), step_failure=StepFailure(FailedStep.SERVER_BOOT_TIMEOUT)),
     )
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, IMPORT_ERROR_REASON)
 
@@ -380,7 +466,9 @@ def test_a_boot_timeout_step_yields_to_a_cause_its_log_names_as_its_return_code_
 def test_a_hub_refusal_still_beats_the_step() -> None:
     verdict = classify_test_failure(
         returncode=1,
-        evidence=FailureEvidence(client_logs=(HUB_REFUSED_CLIENT_LOG,), failed_step=FailedStep.SERVER_STALLED),
+        evidence=FailureEvidence(
+            client_logs=(HUB_REFUSED_CLIENT_LOG,), step_failure=StepFailure(FailedStep.SERVER_STALLED)
+        ),
     )
     assert verdict.failure_reason == f"{failures.HUB_RATE_LIMITED}: {HUB_REFUSAL}"
 
@@ -391,7 +479,7 @@ def test_a_hub_refusal_still_beats_the_step() -> None:
 @pytest.mark.parametrize("logs", [[], [TRACEBACK_LOG], [IMPORT_ERROR_LOG]])
 def test_a_step_about_the_candidate_leaves_the_verdict_to_the_log(step, logs) -> None:
     assert classify_test_failure(
-        returncode=1, evidence=FailureEvidence(logs=tuple(logs), failed_step=step)
+        returncode=1, evidence=FailureEvidence(logs=tuple(logs), step_failure=StepFailure(step))
     ) == classify_test_failure(returncode=1, evidence=FailureEvidence(logs=tuple(logs)))
 
 

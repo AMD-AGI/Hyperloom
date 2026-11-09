@@ -60,6 +60,7 @@ from hyperloom.measure.failures import (
     Disposition,
     FailureClassification,
     FailureEvidence,
+    StepFailure,
     classify_test_failure,
     decides_test,
 )
@@ -1229,20 +1230,29 @@ def _ended(run: _Run) -> _Ended:
         logs=(stderr, *_failure_logs(failing)),
         client_logs=tuple(_client_logs(failing)),
         detail=detail,
-        failed_step=_failed_step(failing),
+        step_failure=_step_failure(failing),
+        unrun=_unrun(failing),
     )
     verdict = classify_test_failure(returncode=returncode, evidence=evidence)
     return _Ended(rounds, returncode, stderr, verdict)
 
 
-def _failed_step(failing: list[VariantResult]) -> FailedStep | None:
-    """The step the report of the first failed round that names one failed at; a round with no run_dir names none."""
-    for result in failing:
-        if result.workspace and is_round_folder(Path(result.workspace)):
-            step = RoundFolder.read(Path(result.workspace)).report.failed_step
-            if step is not None:
-                return step
+def _step_failure(failing: list[VariantResult]) -> StepFailure | None:
+    """The failed step and detail of the first failed round whose report names one; a round with no run_dir names none."""
+    folders = (Path(result.workspace) for result in failing if result.workspace)
+    for report in (RoundFolder.read(folder).report for folder in folders if is_round_folder(folder)):
+        if report.failed_step is not None:
+            return StepFailure(report.failed_step, report.failure_detail or "")
     return None
+
+
+def _unrun(failing: list[VariantResult]) -> str:
+    """``<error_class>: <error>`` of the first failed round that left neither a workspace nor a server log (it was refused
+    before it ran), else ``""``."""
+    for result in failing:
+        if result.error_class and not result.workspace and not result.server_log_path:
+            return f"{result.error_class}: {result.error}" if result.error else result.error_class
+    return ""
 
 
 def _outcome(run: _Run) -> TestOutcome:
