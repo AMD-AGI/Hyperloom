@@ -28,7 +28,8 @@ it.
   a CI run; `base_launch.json` records the full sha. Before, InferenceX was
   always read at `main`. The cookbooks, vLLM recipes and ATOM catalog are
   still read at `main`, and a resumed session keeps its frozen base. A commit
-  InferenceX does not have, or one that lacks the functions the resolver runs
+  InferenceX does not have or that cannot be read (git's error is shown; the
+  default table is never taken in its place), or one that lacks the functions the resolver runs
   (such as `acceptance_length`), is refused before the session starts,
   naming what it lacks; resolve that
   base elsewhere and pass the frozen `base_launch.json` as

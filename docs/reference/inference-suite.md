@@ -40,7 +40,9 @@ InferenceX's branches or at the head of one of its refs, a pull request's
 included. The base records the full sha it read. Only InferenceX is pinned; the
 cookbooks, the vLLM recipes site and ATOM's catalog are still read at `main`. A
 resume keeps its frozen base whatever the flag says. The commit is refused, with
-exit 2, when InferenceX has no such commit or the prefix names more than one, and
+exit 2, when InferenceX has no such commit or the prefix names more than one, when
+InferenceX or its own code cannot be read at it (git's error is kept; a missing
+commit and an unreachable remote are told apart; no default table is taken), and
 when the commit lacks a function the resolver runs from InferenceX's own code
 (for example, a commit without `acceptance_length`, `generation_role` and
 `verifier` in `infx.srt_slurm.synthetic_acceptance`); the message names what it
