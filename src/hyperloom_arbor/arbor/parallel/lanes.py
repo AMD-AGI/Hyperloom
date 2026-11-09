@@ -47,7 +47,7 @@ from arbor.parallel.trees import (Conflict, FlagConflict, flags_from_workspace, 
 
 ACTIVE = ("SUBMITTING", "PENDING", "RUNNING")
 FINAL = ("CLOSED", "STOPPED")
-INTENT_RANK = {"LEARN": 0, "FIX-CORRECTNESS": 1, "FIX": 2, "WIN": 3}
+INTENT_RANK = {"LEARN": 0, "FIX-CORRECTNESS": 1, "FIX-STABILITY": 1, "FIX": 2, "WIN": 3}
 MAX_REFUSALS = 3
 
 

@@ -42,6 +42,7 @@ with:
 | `component.seconds` | or a duration in seconds from the first launch; a resume does not restart it. With both, the earlier wins; `0` means none, so `deadline` decides. |
 | `component.notes` | a file of what the host has already measured and merged. Read at every iteration; the agent never redoes what it lists (the first 20 KB go into its prompt). |
 | `component.bench_command` | the host's benchmark client, run unchanged for every measurement, with `{port}` (Arbor's server) and `{out}` (an empty directory per replay, for its results) filled in. Without it, the pack's bench. Warm the server first: the first reading after a start reads low. The agent reads the pack's metric from the client's results, and its second metric too when the pack names one (`p90_interactivity` as 1000 / p90 TPOT in ms if the client reports latencies): without it Arbor's gate is one-axis. |
+| `component.bench_read` | where the client puts each metric: `{"file": "report.json", "keys": {"e2e_norm_intvty_p50": "agentx.e2e_norm_intvty.p50", ...}}`. With it the harness reads every key by its dotted path after each replay (a fixed block the bench agent runs as given), and the agent reads nothing. A report that does not read, a path that is not a number, or no path for the objective's metric makes the iteration NOT_MEASURED; so does a missing value for a guard the map names. Needs `bench_command`. From interface `component` 4. |
 | `component.outbox` | where the KEEP snapshots go, relative to the session (default `keeps`). |
 | `component.root` | the commit the host gave the worktree (a sha): every patch and snapshot is measured against it. Without it, the repository's first commit. A `root` the workspace lacks is refused. |
 | `component.plan` | optional: this campaign's share of the host's directions, when the host runs several Arbors from one set ([below](#the-hosts-plan)). A list of directions, `{"directions": [...]}`, or the path of a JSON file holding either. |
@@ -200,6 +201,28 @@ flag or one environment variable made KEEPs fail at the gate, or measured them o
 - **The digest is the host's:** it groups flag values by the framework's own parser, which Arbor's host may not have, so
   Arbor compares the launch and leaves the digest to the host.
 - **Without the key,** nothing is checked and the launch is the framework's own, as before.
+
+## The host's objective
+
+A pack names one metric. A host that gates on another axis (an AgentX host judges KEEPs on P50 interactivity, while the
+agentx pack optimizes total throughput) would get changes it refuses and miss ones it would keep. So the host names its
+axis, and Arbor optimizes that in place of the pack's (`arbor/objective.py`):
+
+- **How the host names it:** `"opt_objective": "P50 interactivity"` in the config it writes, or `--opt-objective` on the
+  command. A name Arbor knows, a known key as written, or a key the bench writes with its direction (`"tpot_p50:min"`).
+  "P50 interactivity" is an AgentX host's axis, `e2e_norm_intvty_p50`: 1 / the median over requests of E2EL in s /
+  OSL, TTFT included, as InferenceX's harness publishes it. The decode-only one, 1000 / TPOT, is
+  `p50_interactivity`.
+- **What changes:** the program's objective, the metric the bench reads (the agentx pack's bench takes
+  `request_metrics.latency.e2e_norm_intvty` from the harness's aggregate as is; a host's client is read for the key, or
+  for the latencies it is made from), the gate and the bars. The pack's second metric, when it is the one asked, changes
+  places with the first.
+- **Before writing it:** `python3 -m arbor version --json` has `objective` (the config key, the flag, the keys and
+  names Arbor knows) from interface `cli` 4. A pin without it ignores the key, so a host refuses such a pin.
+- **After the start:** `<session>/objective.json`, written at every start: `metric`, `direction`, `source`
+  (`opt_objective` or `pack`), `asked`, `pack_metric`. A host that asked for an axis and finds another refuses the run.
+- **What Arbor refuses at the start:** a name it cannot read, and a resume under another objective than the session
+  started on (exit 2, in `component_refused.json`).
 
 ## Launch and resume
 

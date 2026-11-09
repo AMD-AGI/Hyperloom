@@ -435,10 +435,16 @@ def render_program(campaign, state, arbor_root: str | Path,
     obj = campaign.pack.objective
     unit = obj.get('unit', '')
     unit_s = f" {unit}" if unit else ""
+    # An objective asked in place of the pack's (arbor/objective.py): the pack's own text still names its metric.
+    over = obj.get("opt_objective") or {}
+    asked_s = (f"- Asked for this campaign (\"{over.get('asked')}\") in place of the pack's {over.get('pack_metric')}: "
+               f"where the pack's text names its own metric, read this one. A change is kept for what it does to "
+               f"{obj['metric']}.\n") if over and over.get("pack_metric") != obj["metric"] else ""
     sections.append(
         f"## Objective\n\n"
         f"- Kind: {obj['kind']}\n"
         f"- Metric: {obj['metric']} ({obj['direction']}){unit_s}\n"
+        + asked_s +
         f"- Baseline: {state.baseline}\n"
         f"- Best: {state.best_metric}\n"
         f"- Target: {campaign.config.get('target', 'not set')}\n"

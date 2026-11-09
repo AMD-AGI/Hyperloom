@@ -2,17 +2,20 @@
 
 WHAT AN ITERATION DECLARES and WHAT HAPPENS TO IT are two different things, and
 they live apart: ``arbor.measure.intents`` owns the first (WIN / FIX /
-FIX-CORRECTNESS / LEARN, one row each, chosen before the measurement) and this
-module owns the second. Every per-intent rule the gate applies is read off that
-row, so a fifth intent is a fifth row rather than a fifth branch here.
+FIX-CORRECTNESS / FIX-STABILITY / LEARN, one row each, chosen before the
+measurement) and this module owns the second. Every per-intent rule the gate
+applies is read off that row, so a new intent is a new row rather than a new
+branch here. The one input a row cannot carry is FIX-STABILITY's evidence, the
+failure on the kept tree and its absence from the candidate's run, which the
+harness reads from the logs (arbor/measure/stability.py) and passes in.
 
 Three verdicts, and only two of them touch the tree. ``NOT_MEASURED`` is the
 important one: a bench that never ran, a server that never came up, a 404 from
 the wrong wire name, a missing metric key — none of these say anything about
 the change. They used to be reported as REVERT, which discarded working code,
 incremented ``null_streak``, and drove tier escalation off manufactured
-evidence. NOT-MEASURED means the tree stands, the counters do not move, and the
-caller retries.
+evidence. NOT-MEASURED means the counters do not move; the driver puts the tree back
+to the last one kept and notes the change for a revisit (arbor/execute/kept.py).
 
 ``GateResult.decision`` keeps emitting the legacy
 ``KEEP``/``REVERT``/``PROBE``/``INVALID`` vocabulary, derived from the
@@ -98,7 +101,8 @@ class GateResult:
     # What the iteration declared it was buying. The row, not a string.
     intent: Intent = field(default_factory=lambda: resolve(None))
     # Whether the caller should `git revert` the tree. False for INVALID: the
-    # measurement failed, the change did not, so the code stays and is retried.
+    # measurement failed, not the change; the driver then restores the kept
+    # tree and notes the change for a revisit (arbor/execute/kept.py).
     revert_tree: bool = True
     # True only when the change cleared `threshold_rel` — i.e. it is a claimed
     # win, not merely worth keeping. Drives escalation, not retention.
@@ -229,6 +233,7 @@ def run_gate(
     arm: dict | None = None,
     bundle: dict | None = None,
     accuracy: dict | None = None,
+    stability: dict | None = None,
 ) -> GateResult:
     """Pure gate logic. Callers provide the raw results; this decides the outcome.
 
@@ -241,7 +246,9 @@ def run_gate(
     ``bundle`` is a declared bundle's check (arbor/measure/bundles.py), passed
     only when the pack allows bundles. ``accuracy`` is the full-set eval of a
     numerics change (arbor/measure/accuracy.py), passed only when the pack's
-    accuracy gate is on; absent, the gate is what it was.
+    accuracy gate is on; absent, the gate is what it was. ``stability`` is a
+    FIX-STABILITY candidate's evidence (arbor/measure/stability.py): without a
+    failure on record before it, the candidate is gated as a FIX.
     """
     metric_key = objective["metric"]
     direction = objective["direction"]
@@ -257,6 +264,14 @@ def run_gate(
     sec_threshold = measurement.get("secondary_threshold_rel", threshold)
 
     intent = resolve(intent if intent is not None else claim_class)
+    # A stability fix earns its cap only with the failure on record before it: without it, it is a FIX, and says so.
+    if intent.name == "FIX-STABILITY" and not (stability or {}).get("before"):
+        why = (stability or {}).get("why") or "the harness's check did not run"
+        res = run_gate(objective, best, bench_result, correctness_result, integrity_ok,
+                       secondary_best=secondary_best, intent=resolve("FIX"), arm=arm, bundle=bundle,
+                       accuracy=accuracy)
+        res.reason = f"{res.reason} [FIX-STABILITY with no failure on record ({why}): gated as a FIX]"
+        return res
     # How far THIS intent may regress. For a correctness fix that is the
     # catastrophe cap, for everything else the noise band — the one thing that
     # distinguishes FIX-CORRECTNESS from FIX.
@@ -474,18 +489,26 @@ def run_gate(
                 f"primary gain does not license an unbounded secondary loss. "
                 f"Check the draw fingerprint before re-running.")
 
-    # A correctness fix carries no performance claim on EITHER axis, so it is
-    # not judged on one and the Pareto shape never decides it. Only a
-    # catastrophe refuses it.
+    # A stability fix whose own run shows the failure it fixes has fixed nothing.
+    if intent.name == "FIX-STABILITY" and (stability or {}).get("own"):
+        return _result(REVERT, f"{delta_s} — the failure it fixes shows in its own run: "
+                               f"{stability['own'][0]}")
+
+    # A correctness or stability fix carries no performance claim on EITHER
+    # axis, so it is not judged on one and the Pareto shape never decides it.
+    # Only its cap refuses it.
     if intent.pareto_exempt:
+        what = "stability" if intent.name == "FIX-STABILITY" else "correctness"
+        cures = (f"; iter-{stability['before']['iteration']}'s failure is gone"
+                 if what == "stability" else "")
         if _within_noise(metric_value, best, direction, intent_tolerance):
             return _result(KEEP,
-                           f"correctness fix ships regardless of throughput "
-                           f"({delta_s}, cap {intent_tolerance:.1f}%)",
+                           f"{what} fix ships regardless of throughput "
+                           f"({delta_s}, cap {intent_tolerance:.1f}%{cures})",
                            booked=intent.books and pri.gain)
         return _result(REVERT,
                        f"{delta_s} — beyond the {intent_tolerance:.1f}% "
-                       f"catastrophe cap even for a correctness fix")
+                       f"cap even for a {what} fix")
 
     # A probe makes no metric claim. It only has to not leave the tree worse,
     # and a frontier trade is not "worse" — it is a different point.

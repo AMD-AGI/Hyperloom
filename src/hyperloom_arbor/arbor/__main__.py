@@ -1,4 +1,4 @@
-"""python3 -m arbor run|master|worker|review|conflicts|iterate|version"""
+"""python3 -m arbor run|master|worker|review|conflicts|iterate|version|schema|directions [--payload FILE]"""
 
 import sys
 
@@ -20,8 +20,20 @@ USAGE = """Usage:
   python3 -m arbor conflicts --session <dir> show|pick|merge    # decide two skills that write the same thing
   python3 -m arbor iterate init|begin|gate         # internal harness API
   python3 -m arbor version [--json]                # the version, and each interface's, for callers
+  python3 -m arbor directions generate|split ...  # the map step a host runs (python3 -m arbor.directions)
+  python3 -m arbor <command> --payload <file>      # the command's parameters as one JSON or YAML document
+  python3 -m arbor --payload <file>                # the same, the command named in the file (command: run)
+  python3 -m arbor schema [<command>] [--markdown]  # the payload's JSON Schema, from the commands' parsers
   python3 -m arbor --version
-Documentation: README.md and docs/ in this repository."""
+Documentation: README.md and docs/ in this repository (docs/cli.md: every command's parameters)."""
+
+# A payload (arbor/cli/payload.py) becomes the command's own flags before anything reads them.
+if any(a == "--payload" or a.startswith("--payload=") for a in sys.argv[1:]):
+    from arbor.cli.payload import run_expanded
+    _expanded = run_expanded(sys.argv[1:])
+    if isinstance(_expanded, int):
+        sys.exit(_expanded)
+    sys.argv[1:] = _expanded
 
 if len(sys.argv) < 2:
     print(USAGE, file=sys.stderr)
@@ -66,6 +78,14 @@ if cmd == "conflicts":
 
 if cmd == "iterate":
     from arbor.cli.iterate import main
+    sys.exit(main(sys.argv[2:]))
+
+if cmd == "schema":
+    from arbor.cli.payload import main
+    sys.exit(main(sys.argv[2:]))
+
+if cmd == "directions":
+    from arbor.directions import main
     sys.exit(main(sys.argv[2:]))
 
 print(f"Unknown command: {cmd}", file=sys.stderr)

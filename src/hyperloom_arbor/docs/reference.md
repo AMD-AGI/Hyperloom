@@ -6,9 +6,15 @@ code reads them. How the loop uses them: [how-it-works.md](how-it-works.md). The
 
 ## Command line
 
+Every command's parameters, with their types and defaults, are in [cli.md](cli.md), generated from the commands'
+own parsers. Each command also takes them as one JSON or YAML document, `--payload FILE`.
+
 | Command | What it does |
 |---|---|
+| `python3 -m arbor <command> --payload FILE`, `python3 -m arbor --payload FILE` | the command's parameters as a JSON or YAML document, its keys the flags' names (`max_iters`, `review_gate`); strict about keys and types; a flag on the same line wins. `command:` names the command when the line does not. Also `python3 -m arbor.directions --payload FILE` (`action: generate` or `split`). A campaign's start records it in `<session>/invocation.json` ([cli.md](cli.md)) |
+| `python3 -m arbor schema [<command>] [--markdown] [--write]` | the payload's JSON Schema, from the commands' parsers; `--write` regenerates `docs/schema/arbor-cli-payload.schema.json` and [cli.md](cli.md)'s tables |
 | `python3 -m arbor run --config C [--max-iters N] [--cooldown S]` | run a campaign; the same command resumes it (`--max-iters 0` = no limit; cooldown 30 s). A new campaign first waits at the review gate ([how-it-works.md](how-it-works.md#before-the-first-iteration-the-review-gate)); `--no-review-gate` starts it without one |
+| `python3 -m arbor run --config C --opt-objective TEXT` | optimize another metric than the pack's: a name, a known key as written, or a key the bench writes with its direction (`"tpot_p50:min"`). `"P50 interactivity"` and `"P90 interactivity"` are an AgentX host's end-to-end axis, `e2e_norm_intvty_p50` and `_p90` (1 / the p50 or p90 over requests of E2EL in s / OSL; TTFT counts); the decode-only ones are `"P50 TPOT interactivity"`, or the keys `p50_interactivity` and `p90_interactivity` (1000 / TPOT in ms). Also `"total throughput"`, `"output throughput"`. `version --json` lists the keys and names under `objective`. The pack's second metric, when it is the one asked, changes places with the first. Recorded in `<session>/objective.json`; a resume under another objective is refused. Also `master` and `worker`. The bench must report the metric: a host's client is read for it, but standalone the pack's bench must write its key, or every iteration is NOT_MEASURED (the agentx bench writes the throughputs, and `e2e_norm_intvty_p50` and `_p90` when InferenceX's aggregate has them) |
 | `python3 -m arbor run --config C --split processes [...]` | the same campaign, with the master and each worker as a command of its own, in turn ([master-worker.md](master-worker.md#the-commands)) |
 | `python3 -m arbor master --config C [--max-iters N] [--cooldown S] [--no-review-gate]` | the master's side: the setup, the map, a round end; stops once a work order is ready (`ordered`) or the campaign ends (`ended`), saying which in `role_exit.json` |
 | `python3 -m arbor worker --order W [--config C] [--max-iters N] [--cooldown S]` | one worker's stretch from the master's `work_order.json`, in the master's session, or in C's own; stops with its report (`reported`) |
@@ -43,6 +49,7 @@ people.
 | `identity` | | a label for the campaign |
 | `goal` | | one line, the title of the program the agent reads |
 | `target` | none | a number (the metric to reach), or a dict; reaching it ends a round |
+| `opt_objective` | none | the metric to optimize in place of the pack's, as `--opt-objective` takes it; a host writes it here. The flag and `ARBOR_OPT_OBJECTIVE` win over it |
 | `time_budget_minutes` | none | a wall clock for the session (ignored in component mode). A resume counts what the session already spent (`<session>/clock.json`, written at each iteration's start), so a session that dies and resumes still ends at its budget; to give it more, raise the budget |
 | `review_gate` | `true` | a new session waits for a human's approval before it runs anything; `ARBOR_REVIEW_GATE` and `run --[no-]review-gate` override it |
 | `baseline_record` | none | a JSON file `{mean, runs, mean_secondary}` with a measured baseline |
@@ -73,7 +80,7 @@ people.
 | `tp` | 1 | tensor parallelism |
 | `server_flags` | | the launch flags; the agent edits them in the workspace's `arbor/config.json` |
 | `server_env` | `{}` | the launch environment; the same. `GSM8K_LIMIT` and `GSM8K_MIN` here set the correctness check's size and floor |
-| `gpu_ids` | | the campaign's GPUs, physical numbers, `"0,1,2,3"` or a list. Before each server start a card that holds 10 GB or more with our server stopped is another process's, and the iteration is NOT_MEASURED, its change kept for later. Under a host, only these cards are read |
+| `gpu_ids` | | the campaign's GPUs, physical numbers, `"0,1,2,3"` or a list. Before each server start a card that holds 10 GB or more with our server stopped is another process's, and the iteration is NOT_MEASURED, its change noted for a revisit. Under a host, only these cards are read |
 | `server_host_memory_gb` | | the host memory a server pins (a CPU KV offload such as `SimpleCPUOffloadConnector`): with less `MemAvailable` before a start, the iteration is NOT_MEASURED |
 
 **Bench and correctness**
@@ -104,6 +111,7 @@ Parallel mode reads a separate run config ([operations.md](operations.md)).
 | `ARBOR_ROLL=1` | turn on rolling chunks; `ARBOR_ROLL_WALL_MIN`, `ARBOR_ROLL_SUCCESSOR_AT_MIN`, `ARBOR_ROLL_EXIT_MARGIN_MIN`, `ARBOR_ROLL_MAX_CHUNKS`, `ARBOR_ROLL_EST_DEFAULT_MIN`, `ARBOR_ROLL_EST_FLOOR_MIN` override `cluster.roll` |
 | `ARBOR_ROUND_AB` | the round-end A/B hook (over the config's `round_ab.command`) |
 | `ARBOR_SPLIT` | `processes` makes `arbor run` run the master and each worker as commands of their own, in turn (`--split processes`), so a host that launches `arbor run` needs no other change; `loop` (the default) runs both in one process |
+| `ARBOR_OPT_OBJECTIVE` | the metric to optimize in place of the pack's (`--opt-objective` sets it for the run's processes); over the config's `opt_objective` |
 | `ARBOR_REVIEW_GATE` | `0` starts new campaigns without the review gate, `1` with it; over the config's `review_gate`, under `run --[no-]review-gate` |
 | `ARBOR_SHARE_HOST`, `ARBOR_SHARE_ROOT`, `ARBOR_PROJECT`, `ARBOR_USER` | where the collectors push: the shared directory's host and path, the project and the user. The root has no default: a site sets it (here or in `~/.arbor/settings.env`), and without one the collectors write locally and push nothing |
 | `ARBOR_AGENT_BACKEND` | leave unset. Its non-Claude value imports a module that is not in the tree |
@@ -128,6 +136,11 @@ Parallel mode reads a separate run config ([operations.md](operations.md)).
 | `outside.json` | KEEP | links that leave the served tree |
 | `workspace_config.json` | KEEP | a copy of the workspace's `arbor/config.json` |
 | `directions.json` | when the map changes | the map (only the harness writes it) |
+| `objective.json` | every start | what the campaign optimizes: `metric`, `direction`, `unit`, `secondary_metric`, `source` (`pack` or `opt_objective`), `asked`, `pack_metric`. A host reads it to check the run optimizes its axis |
+| `invocation.json` | every start | how the start was asked for: `command`, its effective `params`, `from_payload` (the keys a `--payload` gave), `argv`, `payload` (`path`, `sha256`, `keys`, or null), `arbor` (the version), `ts` |
+| `kept.json` | the start, KEEP, PROBE, each iteration's start | the tree a REVERT or a NOT_MEASURED iteration goes back to: the workspace's commit and each editable tree's |
+| `invalids.json` | NOT_MEASURED | each NOT_MEASURED change's commits, intent and reason, and its revisit's outcome |
+| `revisit.json` | the revisit phase | the change the next iteration measures again |
 | `stages.json`, `lane_plan.md` | kernel-plan lanes | stage attempts and the pinned plan |
 | `round_end.json`, `rounds/` | round ends | the A/B and the next target |
 | `work_order.json`, `worker_report.json`, `WORKER_REPORT.md`, `roles/` | a worker's stretch | what it starts from and what it did, each stretch's pair kept in `roles/` ([master-worker.md](master-worker.md)) |
