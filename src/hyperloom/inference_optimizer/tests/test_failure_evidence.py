@@ -387,5 +387,28 @@ class TestAnUnknownFrameworkVersion:
         }
         assert {name: how == FAILURE_ATTRIBUTION_CANDIDATE for name, how in attributed.items()} == settled
 
+    @pytest.mark.parametrize(
+        ("detail", "candidate"),
+        [
+            pytest.param("the probe ran\n/opt/py/bin/python cannot import sglang", True, id="last-line"),
+            pytest.param("/opt/py/bin/python cannot import sglang\n", True, id="trailing-newline"),
+            pytest.param("/opt/py/bin/python cannot import sglang\nthen the probe ran past 60 s", False, id="mid-line"),
+        ],
+    )
+    def test_a_multi_line_detail_is_read_alike_by_the_ledger_and_the_toolbox(self, detail, candidate):
+        """The probe says ``<python> cannot import <package>`` as the whole detail, so both readers take it only at the
+        end of the whole detail: a line inside it that ends so is no answer of the probe, for either."""
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.contracts.measurement import FailureClass
+        from hyperloom.measure.failures import FailureEvidence, StepFailure, classify_test_failure
+        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+
+        error_class = failed_step_error_class(FailedStep.FRAMEWORK_VERSION_UNKNOWN)
+        attributed = classify_failure_attribution(error_class=error_class, error_excerpt=detail)
+        evidence = FailureEvidence(step_failure=StepFailure(FailedStep.FRAMEWORK_VERSION_UNKNOWN, detail))
+        settled = classify_test_failure(returncode=1, evidence=evidence).failure_class is FailureClass.CANDIDATE
+        assert (attributed == FAILURE_ATTRIBUTION_CANDIDATE, settled) == (candidate, candidate)
+
     def test_with_no_evidence_it_stays_the_environments(self):
         assert classify_failure_attribution(error_class="framework_version_unknown") == FAILURE_ATTRIBUTION_ENVIRONMENT

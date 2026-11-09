@@ -108,9 +108,11 @@ _ENVIRONMENT_ERROR_CLASSES = frozenset(
 # What the suite's framework probe says (``FailedStep.FRAMEWORK_VERSION_UNKNOWN``) when the serving interpreter finds no
 # package of the framework, or importing it raised: the candidate's, as a server that died on the same import is, and
 # as ``hyperloom.measure.failures`` settles a test that stopped there (``import_error``). A probe that ran too long or
-# could not start, or a version it could not read, says nothing of the candidate and stays the environment's.
+# could not start, or a version it could not read, says nothing of the candidate and stays the environment's. The probe
+# says ``<python> cannot import <package>`` as the whole detail, so that is taken only at the end of the evidence, never
+# from a line inside it, as ``hyperloom.measure.failures`` takes it.
 _FRAMEWORK_UNIMPORTABLE_RE = re.compile(
-    r"\scannot import [A-Za-z_][\w.]*\s*$"
+    r"\scannot import [A-Za-z_][\w.]*\s*\Z"
     r"|(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:" + PY_IMPORT_ERROR + "|" + PY_MODULE_NOT_FOUND_ERROR + r"):\s*\S",
     re.MULTILINE,
 )
