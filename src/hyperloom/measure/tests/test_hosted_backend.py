@@ -534,6 +534,35 @@ def test_a_restarted_application_reattaches_instead_of_measuring_twice(rig, tmp_
     assert json.loads(report.read_text())["fixed"]["output_throughput"] == 1234.0
 
 
+@pytest.mark.parametrize("when", ["before it runs", "while it measures"])
+def test_a_restarted_application_that_withdraws_the_test_a_dead_one_left_ends_its_sandbox(rig, tmp_path, when) -> None:
+    """A session taken up again after its process died withdraws the tests it left: the sandbox still measuring is
+    closed and gives its slot back, whether the withdrawal reaches the test before or after it re-attached."""
+    r = rig()
+    call = make_call(tmp_path, point=point_yaml(tmp_path, fake_mode="hang"))
+    _crash_mid_wait(r, call)
+    left = r.backend.journal.latest("req-1")
+    assert left.sandbox_id in {info.sandbox_id for info in r.provider.find({}, role="measurement")}
+    backend = r.another_backend()
+    result: list = []
+    if when == "before it runs":
+        backend.withdraw("req-1")
+    worker = threading.Thread(target=lambda: result.append(backend.run_test(call)))
+    worker.start()
+    try:
+        if when == "while it measures":
+            deadline = time.monotonic() + 20
+            while backend.pool.active == 0 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert backend.pool.active == 1, "the restarted application re-attached to the sandbox"
+            backend.withdraw("req-1")
+    finally:
+        worker.join(30)
+    assert not worker.is_alive() and result[0].returncode == STOPPED_RETURNCODE
+    assert left.sandbox_id not in {info.sandbox_id for info in r.provider.find({}, role="measurement")}
+    assert backend.pool.active == 0
+
+
 def test_a_restart_that_finds_no_slot_for_its_sandbox_ends_the_attempt_with_the_reason(rig, tmp_path) -> None:
     """The re-attach waits for a slot no longer than the test's timeout; the sandbox it could not hold is closed."""
     r = rig()

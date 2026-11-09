@@ -36,7 +36,8 @@ they run unconfined measures no spec ``local``.
 The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the run again: never once it holds
 ``final: true`` (:func:`write_final_exit`), and again when it is missing. ``session.json`` there names the session
 directory as soon as it exists (:func:`record_session`), so a start that finds it finishes that session instead of
-starting another. The two file names and their fields are the legacy entry's, ``hyperloom.hosted.entry``, which this
+starting another, once that session got through PRELUDE; one that ended before its baseline was recorded is closed,
+which ends the measurement sandboxes it left, and the spec's session starts again. The two file names and their fields are the legacy entry's, ``hyperloom.hosted.entry``, which this
 package does not import: importing it loads the legacy flow's state.
 """
 
@@ -67,6 +68,7 @@ from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.launch_isolation import launch_isolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, prelude_landed
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
@@ -395,6 +397,28 @@ def recorded_session(state_dir: Path) -> Path | None:
     return Path(json.loads(text)["session_dir"])
 
 
+@dataclass(frozen=True)
+class EarlierSession:
+    """The session an earlier start of the run began: ``finish``, which a restart finishes, when it got through
+    PRELUDE; ``left``, which a restart closes before it starts the spec's session again, when it committed its root
+    and ended before its baseline was recorded; neither when there was none or it committed no root, and so started
+    no test."""
+
+    finish: PersistedRun | None = None
+    left: PersistedRun | None = None
+
+
+def earlier_session(state_dir: Path) -> EarlierSession:
+    """The session ``session.json`` names, read back; raises what :func:`recorded_session` and
+    :func:`~hyperloom_multibranch.scheduling.lifecycle.persisted_run` raise. Blocks."""
+
+    previous = recorded_session(state_dir)
+    if previous is None or not SessionLayout(previous).root_recipe.is_file():
+        return EarlierSession()
+    persisted = persisted_run(previous)
+    return EarlierSession(finish=persisted) if prelude_landed(previous) else EarlierSession(left=persisted)
+
+
 def reported_stop_reason(root: Path) -> str | None:
     """The stop reason the CLOSE of the session in ``root`` reported, ``None`` when it wrote no report."""
 
@@ -411,11 +435,13 @@ __all__ = [
     "HOST_LAYER_ENV",
     "LAYER_BWRAP",
     "SESSION_FILE",
+    "EarlierSession",
     "GrantDeadline",
     "HostedExit",
     "HostedRefused",
     "arm_grant_stop",
     "campaign_spec",
+    "earlier_session",
     "grant_deadline",
     "grant_tests_that_fit",
     "hosted_storage",
