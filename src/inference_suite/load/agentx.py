@@ -80,6 +80,9 @@ _ACCOUNTING = {
     "dropped_total": "records_dropped_total",
 }
 
+#: The report's token counts, by the aiperf per-request metric each sums.
+_TOKEN_METRICS = {"input_tokens": "input_sequence_length", "output_tokens": "output_sequence_length"}
+
 #: Hears the replay at the monotonic instant of every poll, and once after the client exits.
 ReplayListener = Callable[[float], None]
 
@@ -226,16 +229,18 @@ def _export_lines(path: Path) -> Iterator[Mapping[str, Any]]:
             yield record
 
 
-def export_counts(path: Path) -> dict[str, int]:
-    """The request counts of the replay's per-request export, the way InferenceX's aggregator counts them.
+def export_counts(path: Path) -> dict[str, int | None]:
+    """The request counts of the replay's per-request export, the way InferenceX's aggregator counts them, and the
+    input and output tokens of its successful profiling requests.
 
     A warmup record that failed is both warmup- and error-dropped, so ``dropped_total`` is their union: every record
-    that is not a successful profiling one.
+    that is not a successful profiling one. A token count is ``None`` when a successful request carries no length.
 
     Raises:
         OSError, ValueError: The export cannot be read, or a line of it is not a request record.
     """
     counts = dict.fromkeys(("records_total", "successful", "error_dropped", "warmup_dropped", "error_osl_exported"), 0)
+    tokens: dict[str, float | None] = dict.fromkeys(_TOKEN_METRICS, 0.0)
     for record in _export_lines(path):
         metadata = record.get("metadata")
         phase = metadata.get("benchmark_phase") if isinstance(metadata, Mapping) else None
@@ -247,11 +252,22 @@ def export_counts(path: Path) -> dict[str, int]:
         counts["error_dropped"] += error
         counts["successful"] += not (warmup or error)
         counts["error_osl_exported"] += error and isinstance(metrics, Mapping) and ERROR_OSL_METRIC in metrics
+        if not (warmup or error):
+            _add_tokens(tokens, metrics)
     counts["dropped_total"] = counts["records_total"] - counts["successful"]
-    return counts
+    return {**counts, **{key: None if total is None else int(total) for key, total in tokens.items()}}
 
 
-def _disagreement(counts: Mapping[str, int], aggregate: Mapping[str, Any]) -> str | None:
+def _add_tokens(tokens: dict[str, float | None], metrics: object) -> None:
+    for key, name in _TOKEN_METRICS.items():
+        entry = metrics.get(name) if isinstance(metrics, Mapping) else None
+        value = entry.get("value") if isinstance(entry, Mapping) else entry
+        total = tokens[key]
+        valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+        tokens[key] = total + value if total is not None and valid else None
+
+
+def _disagreement(counts: Mapping[str, int | None], aggregate: Mapping[str, Any]) -> str | None:
     accounting = aggregate.get("request_accounting")
     if not isinstance(accounting, Mapping):
         return "the aggregate carries no request_accounting"
@@ -272,7 +288,7 @@ def _at(document: Mapping[str, Any], path: tuple[str, ...]) -> Any:
 class ReplayFacts:
     """What the round knows of the replay beyond its aggregate: the recounted export and how the replay ran."""
 
-    counts: Mapping[str, int]
+    counts: Mapping[str, int | None]
     stopped_by_threshold: bool
     fast_mode: bool
     request_export: str

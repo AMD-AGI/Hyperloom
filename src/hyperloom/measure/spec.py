@@ -29,6 +29,7 @@ from typing import Any
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError
 from hyperloom.common.launch_credentials import credentials_in_the_clear
 from hyperloom.contracts.measurement import Purpose
+from hyperloom.measure.checkpoint import CheckpointPlan
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS
@@ -64,6 +65,7 @@ _MANIFEST_SHA256 = "manifest_sha256"
 _ACCURACY = "accuracy"
 _SHORT_PROMPTS = "short_prompts"
 _LONG_CONTEXT = "long_context"
+_CHECKPOINT = "checkpoint"
 _RESULT_DIR = "result_dir"
 #: A key the sheet of a test that ran a greedy decode pass carried. The pass is gone and the key means nothing, but the
 #: journal keeps those sheets and a result is verified again from them, so the key is read and dropped.
@@ -463,6 +465,11 @@ def _long_context(value: Any, path: str) -> LongContextPlan | None:
     return None if value is None else LongContextPlan.parse(value, path)
 
 
+def _checkpoint(value: Any, path: str) -> CheckpointPlan | None:
+    """The sheet's AgentX checkpoint, absent from a sheet whose measured round is not judged."""
+    return None if value is None else CheckpointPlan.parse(value, path)
+
+
 def _base_launch(value: Any, path: str) -> BaseLaunch:
     """The frozen base a v2 sheet carries, its digest recomputed from its content and no credential in the clear."""
     if value is None:
@@ -498,6 +505,7 @@ class Procedure:
     benchmark_backend: str | None = None
     short_prompts: ShortPromptPlan | None = None
     long_context: LongContextPlan | None = None
+    checkpoint: CheckpointPlan | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Procedure":
@@ -531,6 +539,8 @@ class Procedure:
             document[_SHORT_PROMPTS] = self.short_prompts.to_document()
         if self.long_context is not None:
             document[_LONG_CONTEXT] = self.long_context.to_document()
+        if self.checkpoint is not None:
+            document[_CHECKPOINT] = self.checkpoint.to_document()
         return document
 
 
@@ -549,6 +559,7 @@ def _procedure_fields(r: Reader) -> dict[str, Any]:
         "deadline_unix": r.number("deadline_unix", minimum=0) or 0.0,
         "short_prompts": _short_prompts(r.optional(_SHORT_PROMPTS), r.at(_SHORT_PROMPTS)),
         "long_context": _long_context(r.optional(_LONG_CONTEXT), r.at(_LONG_CONTEXT)),
+        "checkpoint": _checkpoint(r.optional(_CHECKPOINT), r.at(_CHECKPOINT)),
     }
 
 

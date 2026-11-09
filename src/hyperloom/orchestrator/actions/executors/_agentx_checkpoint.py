@@ -10,6 +10,7 @@ finished, the candidate while its round is still running.
 from __future__ import annotations
 
 import logging
+import os
 import statistics
 import time
 from dataclasses import dataclass
@@ -17,9 +18,9 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from hyperloom_common.coerce import optional_positive_float
-from hyperloom_common.env import EnvValueError, env_str
 from hyperloom_common.io import atomic_write_json
 from hyperloom_common.jsonio import read_json
+from hyperloom.common.agentx_early_stop import EarlyStopMode, early_stop_mode
 from hyperloom.common.outside_facts import AIPERF_PROFILING_PHASE
 from hyperloom.common.perf_metric import (
     AGENTX_CHECKPOINT_MAX_DROP_PCT,
@@ -34,7 +35,6 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "CHECKPOINT_ARTIFACT_NAME",
-    "EARLY_STOP_ENV",
     "AgentxCheckpoint",
     "CheckpointJudge",
     "SuiteRoundCheckpoint",
@@ -44,11 +44,6 @@ __all__ = [
     "round_checkpoint",
     "workspace_checkpoint_p50",
 ]
-
-#: ``enforce`` (default) records the ruling and stops a trailing round, ``shadow`` only records it, ``off`` skips it.
-EARLY_STOP_ENV = "HYPERLOOM_AGENTX_EARLY_STOP"
-_ENFORCE, _SHADOW, _OFF = "enforce", "shadow", "off"
-_MODES = (_ENFORCE, _SHADOW, _OFF)
 
 #: Written into the round's slot when the checkpoint rules.
 CHECKPOINT_ARTIFACT_NAME = "agentx_checkpoint.json"
@@ -113,13 +108,11 @@ class SuiteRoundCheckpoint:
 
 def round_checkpoint(reference: Mapping[str, Any] | None) -> AgentxCheckpoint | None:
     """The checkpoint for a round graded against ``reference``; None when it is off or the reference has none."""
-    mode = env_str(EARLY_STOP_ENV).lower() or _ENFORCE
-    if mode not in _MODES:
-        raise EnvValueError(f"{EARLY_STOP_ENV}={mode!r} is not one of {', '.join(_MODES)}")
+    mode = early_stop_mode(os.environ, EarlyStopMode.ENFORCE)
     reference_p50 = optional_positive_float((reference or {}).get(GRADED_INTVTY_P50_CHECKPOINT))
-    if mode == _OFF or reference_p50 is None:
+    if mode is EarlyStopMode.OFF or reference_p50 is None:
         return None
-    return AgentxCheckpoint(reference_p50, enforce=mode == _ENFORCE)
+    return AgentxCheckpoint(reference_p50, enforce=mode is EarlyStopMode.ENFORCE)
 
 
 def checkpoint_summary(ruling: Mapping[str, Any]) -> str:

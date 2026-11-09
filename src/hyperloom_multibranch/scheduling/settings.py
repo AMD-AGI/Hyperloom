@@ -6,10 +6,12 @@ hard limits."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from hyperloom.common.agentx_early_stop import EarlyStopMode, early_stop_mode
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -159,7 +161,9 @@ class RunSettings:
     recipe sources; :mod:`~hyperloom_multibranch.scheduling.session_base`).
     ``dev_leases`` is how many dev sandboxes the session lends its specialists at once; 0 lends none. ``playbook`` says
     which scheduling playbook the session plays. ``inferencex_commit`` is the commit a fresh session's base launch reads
-    InferenceX at (``""`` for the head of its ``main``)."""
+    InferenceX at (``""`` for the head of its ``main``). ``agentx_early_stop`` is how the AgentX checkpoint treats an
+    explore that trails its parent (``toolbox.agentx_checkpoint``): recorded only by default; the manifest keeps it,
+    so a resumed session judges as it began."""
 
     workload: Workload
     max_hours: float
@@ -183,6 +187,13 @@ class RunSettings:
     agent_dossier: str = ""
     review_gate: bool = True
     inferencex_commit: str = ""
+    agentx_early_stop: EarlyStopMode = EarlyStopMode.SHADOW
+
+
+def session_early_stop(environ: Mapping[str, str]) -> EarlyStopMode:
+    """How a new session holds its explores to the AgentX checkpoint: the mode ``environ`` names, shadow when it names
+    none (single-lineage's default is enforce); a resumed session keeps the mode its manifest recorded."""
+    return early_stop_mode(environ, EarlyStopMode.SHADOW)
 
 
 __all__ = [
@@ -197,4 +208,5 @@ __all__ = [
     "RunSettings",
     "Workload",
     "sweep_concs",
+    "session_early_stop",
 ]

@@ -27,12 +27,7 @@ from hyperloom.orchestrator.kernel.geak_config import (
     _accepted_config_as_variant,
 )
 from ._accuracy_gate import parse_eval_results
-from ._gpu_power import (
-    ServerLogPhaseDriver,
-    build_gpu_power_recorder,
-    read_measured_gpu_power,
-    read_measured_gpu_power_by_gpu,
-)
+from ._gpu_power import ServerLogPhaseDriver, build_gpu_power_recorder, round_power_fields, round_power_summary
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
 from ._workload_envs import GEAK_METRIC_OUTPUT
 
@@ -82,8 +77,10 @@ def _run_with_power_sampling(
     """
     entry.update(gpu_power_avg_w=None, gpu_power_by_gpu_w=None)
     proc = _run_sampled(run, out_dir, env)
-    entry["gpu_power_avg_w"] = read_measured_gpu_power(out_dir)[1]
-    entry["gpu_power_by_gpu_w"] = read_measured_gpu_power_by_gpu(out_dir)[1]
+    summary = round_power_summary(None, out_dir)
+    if summary is not None:
+        fields = round_power_fields(summary)
+        entry.update(gpu_power_avg_w=fields["gpu_power_avg_w"], gpu_power_by_gpu_w=fields["gpu_power_by_gpu_w"])
     return proc
 
 
@@ -93,12 +90,13 @@ def _run_sampled(
     """Run one replay with the measured-phase power recorder a native round gets.
 
     The replay boots its own servers, so the watchdog's phase marks are not available; the driver reads the same
-    ready / warmup / measured / eval markers from the logs the replay writes. Writes ``gpu_power.json`` into
-    ``out_dir`` whenever sampling is on.
+    ready / warmup / measured / eval markers from the logs the replay writes. Writes ``power.json`` into ``out_dir``
+    whenever sampling is on; a replay counts no tokens, so its per-token figures are null.
     """
     recorder = build_gpu_power_recorder(str(out_dir / "server.log"), dict(env))
     if recorder is None:
         return run()
+    recorder.start()
     driver = ServerLogPhaseDriver(recorder, lambda: _replay_server_logs(out_dir), cursor=LogCursor())
     driver.start()
     try:
@@ -107,7 +105,7 @@ def _run_sampled(
         try:
             driver.stop()
         finally:
-            recorder.close()
+            recorder.finish(None)
 
 
 def _served_model(launch: Launch) -> str:

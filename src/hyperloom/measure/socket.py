@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef, FailureClass, PhaseTiming, SandboxFacts
+from hyperloom.measure.checkpoint import CheckpointPlan
 from hyperloom.measure.jit.session import JitCacheSession
 from hyperloom.measure.phases import PhaseRecorder
 from hyperloom.measure.long_context.plan import LongContextPlan
@@ -157,6 +158,9 @@ class TestCall:
     #: ``None`` for one the patch deletes (``measure.farm.patched_configs``). The test's private copies of the tables
     #: (``measure.framework.copies``) carry them, so the server reads, and builds its modules from, the patched tables.
     tables_patch: Mapping[str, Path | None] = field(default_factory=dict)
+    #: The AgentX checkpoint the test's measured round is held to; ``None`` judges no round. Whoever builds the call
+    #: decides it (``measure.checkpoint``); a warmup, an evaluation or a sweep round is never judged.
+    checkpoint: CheckpointPlan | None = None
     #: Whether the points put a rebuilt framework (a farm, ``measure.farm``) first on the server's import path. Whoever
     #: laid the farm sets it; a serving interpreter that cannot import its framework is the candidate's failure only then.
     framework_changed: bool = False

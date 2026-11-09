@@ -45,6 +45,7 @@ from hyperloom_multibranch.rulegate.rules import (
     repeats,
     retest_request,
     retracts,
+    stopped_at_checkpoint,
 )
 from hyperloom_multibranch.specialist.fix_check import FixCheck, FixChecking, check_fix, declares_fix
 
@@ -253,8 +254,10 @@ def left_unjudged(notice: str) -> bool:
 
 
 def _awaits_judgement(record: TestRecord) -> bool:
-    """A candidate's first test, measured and not judged yet; a failed measurement takes no judgement."""
-    return record.request.purpose is Purpose.EXPLORE and record.judgement is None and _succeeded(record)
+    """A candidate's first test, measured, or stopped by the AgentX checkpoint, and not judged yet; any other failed
+    measurement takes no judgement."""
+    measured = _succeeded(record) or stopped_at_checkpoint(record)
+    return record.request.purpose is Purpose.EXPLORE and record.judgement is None and measured
 
 
 def _succeeded(record: TestRecord) -> bool:

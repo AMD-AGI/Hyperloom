@@ -16,10 +16,10 @@ from hyperloom.common.perf_metric import (
     graded_axes_of,
     perf_snapshot_from_mapping,
 )
+from hyperloom.common.agentx_early_stop import EARLY_STOP_ENV
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors._agentx_checkpoint import (
     CHECKPOINT_ARTIFACT_NAME,
-    EARLY_STOP_ENV,
     AgentxCheckpoint,
     CheckpointJudge,
     round_checkpoint,

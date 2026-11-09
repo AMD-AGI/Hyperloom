@@ -137,6 +137,10 @@ class AgentXRule(Rule):
         return await write_agentx_baseline(store, root_commit, records[0], self.objective)
 
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
+        """A candidate the checkpoint stopped is judged on its ruling (:func:`stopped_at_checkpoint`)."""
+        ruling = _result(record).agentx_checkpoint
+        if ruling is not None and ruling.stopped:
+            return agentx.trailed(ruling, record.request_id, self.objective)
         return agentx.compare(self._reading(record), parent, record.request_id, self.objective)
 
     async def retest(self, first: Judgement, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
@@ -214,6 +218,13 @@ def retest_request(first: TestRecord, rule: Rule) -> TestRequest:
     )
 
 
+def stopped_at_checkpoint(record: TestRecord) -> bool:
+    """Whether the AgentX checkpoint stopped the test: a ruling on the candidate, judged though no full measurement
+    exists."""
+    ruling = None if record.result is None else record.result.agentx_checkpoint
+    return ruling is not None and ruling.stopped
+
+
 def _candidate(request: TestRequest) -> tuple[object, ...]:
     return request.parent_commit, request.delta, request.attachments
 
@@ -234,4 +245,5 @@ __all__ = [
     "repeats",
     "retest_request",
     "retracts",
+    "stopped_at_checkpoint",
 ]

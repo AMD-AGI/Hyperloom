@@ -510,9 +510,10 @@ class LocalProcess:
         return self._code if self._code is not None else self.popen.poll()
 
     def retire(self) -> None:
-        """End the launcher of a command that ended and left nothing running, which it would otherwise wait for until
-        the sandbox stops. In a confined sandbox :attr:`popen` is bubblewrap's process, and the launcher it runs is
-        the one process of its tree left: that launcher is ended, and bubblewrap's process ends with it."""
+        """Collect the launcher of a command that ended and left nothing running, ending it first when it has not
+        exited by itself yet, so it does not stay a zombie until the sandbox stops. In a confined sandbox :attr:`popen`
+        is bubblewrap's process, and the launcher it runs is the one process of its tree left: that launcher is ended,
+        and bubblewrap's process ends with it."""
 
         if self.returncode is None:
             return

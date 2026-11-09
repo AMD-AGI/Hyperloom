@@ -55,7 +55,8 @@ _FAKE_HARNESS = textwrap.dedent(
 
 
 def _record(phase: str | None, error: bool = False, error_osl: bool = False) -> dict[str, object]:
-    record: dict[str, object] = {"metadata": {} if phase is None else {"benchmark_phase": phase}, "metrics": {}}
+    lengths = {"input_sequence_length": {"value": 1000, "unit": "tokens"}, "output_sequence_length": {"value": 200}}
+    record: dict[str, object] = {"metadata": {} if phase is None else {"benchmark_phase": phase}, "metrics": lengths}
     if error:
         record["error"] = {"code": 500}
     if error_osl:
@@ -78,6 +79,8 @@ _COUNTS = {
     "warmup_dropped": 2,
     "error_osl_exported": 1,
     "dropped_total": 3,
+    "input_tokens": 3000,
+    "output_tokens": 600,
 }
 
 
@@ -186,6 +189,14 @@ def test_export_counts_count_a_failed_warmup_as_both_and_drop_their_union(tmp_pa
     assert counts == _COUNTS
     assert counts["successful"] + counts["dropped_total"] == counts["records_total"]
     assert counts["warmup_dropped"] <= counts["dropped_total"]
+
+
+def test_a_successful_request_without_a_length_leaves_its_token_count_unread(tmp_path: Path):
+    export = tmp_path / "export.jsonl"
+    unmeasured = {**_record("profiling"), "metrics": {"input_sequence_length": {"value": 7}}}
+    export.write_text("".join(json.dumps(record) + "\n" for record in (*_EXPORT, unmeasured)))
+    counts = export_counts(export)
+    assert counts["input_tokens"] == 3007 and counts["output_tokens"] is None
 
 
 def test_export_counts_refuse_a_line_that_is_not_a_record(tmp_path: Path):

@@ -199,6 +199,7 @@ from hyperloom_multibranch.scheduling.settings import (
     PlaybookMode,
     RunSettings,
     Workload,
+    session_early_stop,
 )
 from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_INDEX, ArborRefused, read_launch
 from inference_suite import UserFileError, parse_inferencex_commit, parse_user_file
@@ -832,6 +833,7 @@ def settings_from(
         agent_dossier=_agent_dossier(args.agent_dossier, args.agent_directions),
         review_gate=args.review_gate,
         inferencex_commit=parse_inferencex_commit(args.inferencex_commit) if args.inferencex_commit else "",
+        agentx_early_stop=session_early_stop(os.environ),
     )
 
 
