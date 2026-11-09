@@ -2,8 +2,8 @@
 
     {"run_id": "<run id>", "store": "<campaigns>/parallel",
      "arbor_ref": "main@<sha>", "arbor_root": "<campaigns>/Arbor-par",
-     "template_config": "configs/mi350x/model-m-c8.json",
-     "dossier_dir": "docs/dossier/model-m-mi350x/<round>",
+     "template_config": "configs/<config>.json",
+     "dossier_dir": "docs/dossier/<dossier>/<round>",
      "gates": "configs/parallel/gates-c8.json", "lane_sessions": "<campaigns>/sessions",
      "max_lanes": 4, "max_rounds": 0, "no_keep_rounds": 2,
      "seed": {"map": ".../11.uK-directions.md", "overlay": "configs/parallel/<run id>-r01-lanes.json",
@@ -13,9 +13,9 @@
      "base_aiter": "<a landed_aiter.py every lane and A/B arm applies>",
      "dossier_runner": "host", "dossier": {"pack": "parallel-dossier", "iterations": {"A": 8, "B": 8}},
      "cluster": {"partition": "<partition>", "time_limit": "04:00:00", "log_dir": "...",
-                 "lane_script": "scripts/model-m-campaign/campaign_model_m.sbatch",
+                 "lane_script": "scripts/parallel/lane.sbatch",
                  "profile_script": "scripts/parallel/profile_round.sbatch",
-                 "ab_script": "scripts/parallel/ab_model_m.sbatch"},
+                 "ab_script": "scripts/parallel/ab.sbatch"},
      "kinds": {"kernel-plan": {"policy": {...}, "space": {...}}}}
 
 Relative paths are the Arbor checkout's (`arbor_root`). `arbor_ref` names the
@@ -47,7 +47,7 @@ def sha256_text(text: str) -> str:
 
 
 def gates_sha(gates: dict) -> str:
-    """The gates' canonical sha256: what ab_model_m.sbatch recomputes on the node."""
+    """The gates' canonical sha256: what the A/B script recomputes on the node."""
     return sha256_text(json.dumps(gates, sort_keys=True))
 
 
@@ -79,9 +79,9 @@ class ClusterCfg:
     account: str = ""
     time_limit: str = "04:00:00"
     log_dir: str = ""
-    lane_script: str = "scripts/model-m-campaign/campaign_model_m.sbatch"
+    lane_script: str = "scripts/parallel/lane.sbatch"
     profile_script: str = "scripts/parallel/profile_round.sbatch"
-    ab_script: str = "scripts/parallel/ab_model_m.sbatch"
+    ab_script: str = "scripts/parallel/ab.sbatch"
     dossier_script: str = "scripts/parallel/dossier_round.sh"
     host: str = ""                       # ssh to a login node when the controller runs elsewhere
 

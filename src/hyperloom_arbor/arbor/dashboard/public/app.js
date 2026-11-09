@@ -233,8 +233,8 @@ function render(payload) {
   const rebased = rebases > 0 && !!stamped;
   // The collector's warm chain (realtime.py warm_chain): each rebased bar read on its
   // replays after the container's first, which reads low, as the candidates run. The
-  // driver's chain (the lessons' `scale`) counted that first replay, so a campaign's
-  // read well above its bar where its round-end A/B measured less.
+  // driver's chain (the lessons' `scale`) counts that first replay, and can read
+  // well above what a round-end A/B measures.
   const warm = rebased && typeof c.warm_scale === "number" && typeof c.warm_best === "number";
   const scale = rebased ? (warm ? c.warm_scale : stamped.scale) : 1;
   const scale2 = rebased && typeof stamped.secondary_scale === "number" ? stamped.secondary_scale : 1;
@@ -405,7 +405,7 @@ function render(payload) {
   // ---- node ----------------------------------------------------------------
   // The realtime collector never samples GPU nodes (a probe during a measured
   // replay perturbs it), so this panel only shows when a snapshot carries node
-  // data, as the Cluster A collector's did.
+  // data.
   const node = snap.node || {};
   const gpus = node.gpus || [];
   const containers = node.containers || [];
@@ -509,7 +509,7 @@ function renderAb(ab, abJob) {
   return parts.join("");
 }
 
-// A round end's A/B (scripts/model-m-campaign/round_ab.py), newest attempt first: per round,
+// A round end's A/B (the round-end A/B script), newest attempt first: per round,
 // the base and current arms at each point, the campaign's own (judged) point first. A row
 // is [round, arm, concurrency, metric, secondary]; the current arm's full GSM8K is a dict.
 function renderRoundAb(tries, c, jobs) {

@@ -27,7 +27,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -70,14 +70,16 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
 from hyperloom_multibranch.contracts.llm import CompletionReply
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
-from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
 from hyperloom_multibranch.specialist.judging import Judging
-from hyperloom_multibranch.specialist.map_session import MapCalls, MapSession
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SessionStart, SpecialistRuntime
 from hyperloom_multibranch.specialist.scripted import BranchHeads, ScriptedSession, ScriptedSetup
 from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
 from hyperloom_multibranch.toolbox.tests.fake_model import DEFAULT_BASELINE, FakeToolboxConfig, NoiseModel
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+
+if TYPE_CHECKING:
+    from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
+    from hyperloom_multibranch.specialist.map_session import MapCalls, MapSession
 
 BASELINE_VALUE = DEFAULT_BASELINE[GRADED_OUTPUT]
 #: The digest of the image the tests' recipes are based on.
@@ -216,6 +218,10 @@ class HeldGitRepo(GitExperimentRepo):
     async def read_recipe(self, commit: str) -> Recipe:
         async with self.time.held():
             return await super().read_recipe(commit)
+
+    async def root(self) -> str:
+        async with self.time.held():
+            return await super().root()
 
     async def create_branch(self, branch: str, at_commit: str) -> None:
         async with self.time.held():
@@ -398,6 +404,8 @@ class RecordedSessions:
             assert self._maps is not None, f"{branch} is a mapping branch in a session with no maps"
             self.started.setdefault(branch, start.start_commit)
             self.mapping.setdefault(branch, start.task.map_for)
+            from hyperloom_multibranch.specialist.map_session import MapSession
+
             return MapSession(start, self._maps, self._run_pass)
         if branch not in self.started:
             policies = self._toolbox.policies
@@ -419,6 +427,8 @@ class RecordedSessions:
 
 
 async def _no_pass(_start: DossierStart) -> DossierOutcome:
+    from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome
+
     return DossierOutcome(None, None, "no dossier pass in this test")
 
 

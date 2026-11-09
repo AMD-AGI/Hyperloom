@@ -54,7 +54,7 @@ def _read_output(path: Path, container: str, container_path: str) -> tuple[bool,
 def _live_flags(config: dict) -> str:
     """Return the effective server_flags: workspace arbor/config.json wins.
 
-    THE ASYMMETRY THIS FIXES, AND IT COST A CAMPAIGN A FICTITIOUS KEEP.
+    THE ASYMMETRY THIS FIXES.
     ``workspace.py`` seeds arbor/config.json with BOTH ``server_env`` and
     ``server_flags``, and the packs tell the agent that file is how you change
     the operating point. But only the env half was ever merged: ``_live_env``
@@ -64,16 +64,14 @@ def _live_flags(config: dict) -> str:
     server_flags changed nothing — silently, with the file on disk showing the
     edit it believed had landed.
 
-    Found by a campaign that booked a class-A KEEP for landing
-    ``--profiler-config`` and only discovered iterations later that
-    /proc/<pid>/cmdline contained no such flag and POST /start_profile returned
-    404, while the workspace config held the correct string and shell-quoting
-    had been ruled out by expanding it inside the container.
+    The symptom: a KEEP booked for landing a flag such as ``--profiler-config``
+    while /proc/<pid>/cmdline holds no such flag and the workspace config holds
+    the correct string.
 
     The consequence is larger than one KEEP: every flag-valued lever was
     unreachable. That includes ``--max-cudagraph-capture-size``, which is the
-    named fix for graph eviction at the capture ceiling, a measured gain on
-    p90_interactivity. A campaign cannot land a flag fix through a
+    named fix for graph eviction at the capture ceiling. A campaign cannot land
+    a flag fix through a
     path that discards flags.
     """
     from arbor.execute.workspace import read_workspace_config

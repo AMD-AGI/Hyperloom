@@ -30,8 +30,7 @@ WHY ``NOT_MEASURED`` IS. A bench that never ran, a server that never came up, a
 404 from the wrong wire name, a moved instrument — none of these say anything
 about the change. They are not a REVERT, they are the absence of a
 measurement: the tree stands, the counters do not move, and the caller retries.
-That rule was bought with lost iterations: a change that was correct the whole
-time was reverted again and again.
+Otherwise a change that is correct the whole time is reverted again and again.
 """
 
 from __future__ import annotations
@@ -100,7 +99,7 @@ class Intent:
 
 
 # How far below best a change may land and still count as neutral. Default 1% —
-# just above the run-to-run spread measured on the reference node. Packs with a
+# just above a typical run-to-run spread. Packs with a
 # noisier validator raise this in objective.measurement.
 DEFAULT_NOISE_BAND_PCT = 1.0
 
@@ -177,14 +176,13 @@ REGISTRY: tuple[Intent, ...] = (
         # (claude_loop.py) is the rule that actually decides -- eval/,
         # knowledge/, ledger.jsonl, arbor/ -- and those are harness-level
         # conventions (cf. ALLOWED_PACK_DIRS), not one pack's layout, so naming
-        # them here is general as well as true. The pre-split prompt named them
-        # and campaigns probed often; do not re-abstract this
+        # them here is general as well as true. Do not re-abstract this
         # without measuring what it costs.
         deliverable=(
             "buying knowledge rather than throughput. The deliverable is a "
             "resolved ledger entry, and an iteration that closes none is a "
             "REVERT. A LEARN touching only `eval/` and the ledger SKIPS THE "
-            "SERVER RUN ENTIRELY — minutes instead of ~45 — so reach for it "
+            "SERVER RUN ENTIRELY — minutes instead of a full server run — so reach for it "
             "often. The best one kills its own lead."
         ),
     ),
@@ -233,7 +231,7 @@ def tolerance(intent: Intent, measurement: dict) -> float:
 
 # ── Legacy vocabulary ───────────────────────────────────────────────────────
 # The old (claim_class, decision) pair is still written to session.json and
-# still read by everything downstream — `check_review_consistency.py` counts
+# still read by everything downstream — a review-consistency check counts
 # `l["decision"] == "KEEP"` straight out of the file, so promoting a probe to
 # KEEP would silently change the KEEP count of archived campaigns. These
 # functions are the whole compatibility surface, and they are exact.
@@ -244,7 +242,7 @@ def tolerance(intent: Intent, measurement: dict) -> float:
 #   ESCALATE  written by apply_escalation, a forced tier move
 #   NOTE      written BY HAND by the campaign owner, to correct the record —
 #             e.g. "iteration N's REVERT was a HARNESS failure, not a verdict".
-#   REBASELINE  written by scripts/model-m-campaign/rebase_bar.py, the bar on a new node
+#   REBASELINE  written by the campaign launcher's rebaseline step, the bar on a new node
 #   MAP_ROUND   written by apply_map_round (arbor/directions.py), a map round's event
 #   ROUND_END   written by arbor/rounds.py, a round end's request, incomplete A/B or stop
 #   ROUND_AB    written by arbor/rounds.py, a confirmed round-end A/B: the bar on its node

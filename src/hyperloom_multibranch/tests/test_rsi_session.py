@@ -39,14 +39,16 @@ from hyperloom_multibranch.blackboard.rsi.archive import (
     WRITE_ONLY_ENV,
     TreeArchive,
 )
+from hyperloom_multibranch.blackboard.rsi import frontier
 from hyperloom_multibranch.blackboard.rsi.frontier import (
     CANDIDATE_COMPONENT,
-    EVIDENCE_COMPONENTS,
-    NEAR_BAR_COMPONENT,
+    MERGED_COMPONENT,
+    MERGED_GAIN_COMPONENT,
     PROBATION_COMPONENT,
     SETTLED_TESTS,
     STALL_BAR_COMPONENT,
     STALLED_COMPONENT,
+    STRANDED_COMPONENT,
 )
 from hyperloom_multibranch.blackboard.rsi.ladder import trials
 from hyperloom_multibranch.blackboard.rsi.playbook import (
@@ -99,9 +101,6 @@ __all__ = ["framework"]
 
 #: Changes that measure the root's value, so a branch testing them commits nothing.
 FLAT = tuple(tagged(f"flat{n}") for n in range(9))
-#: A change that gains 0.45%: over half the 0.6% bar the noiseless baseline sets, under the bar, so a near miss.
-NEAR = tagged("near")
-NEAR_CURVES = {**EXPLORED, frozenset({"near"}): {MAIN_POINT: 1004.5, CONC: 1004.5}}
 #: :data:`~hyperloom_multibranch.tests.test_skeleton.WORKLOAD` as the command line spells it.
 WORKLOAD_ARGS = [
     "--model", WORKLOAD.model, "--framework", "sglang", "--tp", "1", "--isl", "1024", "--osl", "1024",
@@ -114,6 +113,17 @@ SESSION_ARGS = [
 ]  # fmt: skip
 STALLED = "stalled past the bar"
 INSISTED = "stop it whatever holds it"
+STALL_EVIDENCE = frozenset(
+    {
+        STALLED_COMPONENT,
+        STALL_BAR_COMPONENT,
+        MERGED_COMPONENT,
+        MERGED_GAIN_COMPONENT,
+        STRANDED_COMPONENT,
+        CANDIDATE_COMPONENT,
+        PROBATION_COMPONENT,
+    }
+)
 
 
 @pytest.fixture(autouse=True)
@@ -294,6 +304,8 @@ async def test_a_challenger_the_command_line_asks_for_plays_until_its_judge_brea
 ) -> None:
     archive = _archive(tmp_path, monkeypatch)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+    # A playbook on trial draws at most half the stalls for probation, by the session's random id; here all are drawn.
+    monkeypatch.setattr(frontier, "drawn_for_probation", lambda *_: True)
     pool = PlaybookPool.beside(archive)
     pool.register(Playbook("stall-4", replaced(H0, stall_tests=4).numbers, parent=H0.label, hypothesis="earlier stops"))
     settings = cli.settings_from(
@@ -301,14 +313,13 @@ async def test_a_challenger_the_command_line_asks_for_plays_until_its_judge_brea
     )
     stage = _stage(tmp_path)
     stage.settings = settings
-    stage.explored = NEAR_CURVES
     stage.judge = PlaybookJudge(insist=frozenset({"b02"}))
-    stage.scripts = {"b01": (tagged("c1"),), "b02": (*FLAT[:4], NEAR)}
+    stage.scripts = {"b01": (tagged("c1"),), "b02": FLAT[:6]}
 
     outcome = await stage.run()
 
     assert outcome.exit_code == 0 and settings.playbook is PlaybookMode.CHALLENGER
-    breach = f"stop of b02 refused for {HoldReason.NEAR_BAR.value}"
+    breach = f"stop of b02 refused for {HoldReason.PROBATION.value}"
     first, fell_back = await stage.handle(Role.OBSERVER).manifest_fingerprints()
     assert first.policy_versions[PLAYBOOK_KEY] == "stall-4" and FALLBACK_KEY not in first.policy_versions
     assert (fell_back.policy_versions[PLAYBOOK_KEY], fell_back.policy_versions[FALLBACK_KEY]) == ("stall-4", breach)
@@ -321,7 +332,7 @@ async def test_a_challenger_the_command_line_asks_for_plays_until_its_judge_brea
     assert "Scheduling playbook stall-4, on trial in this session:" in prompts[1]
     assert "Scheduling playbook h0:" in prompts[-1]
     held = [rows["b02"] for rows in _rounds(stage) if "components" in rows.get("b02", {})]
-    assert held and all(row["components"][NEAR_BAR_COMPONENT] == 1.0 and not _candidate(row) for row in held)
+    assert held and all(row["held"] == HoldReason.PROBATION.value and not _candidate(row) for row in held)
     assert (await _stops(stage))["b02"].startswith("session_end")
     [trial] = trials(pool)
     assert (trial.played, trial.champion, trial.fell_back) == ("stall-4", H0.label, True)
@@ -365,9 +376,8 @@ async def test_a_session_that_plays_no_playbook_runs_as_one_without_the_rsi(
         monkeypatch.setenv(WRITE_ONLY_ENV, "1")
         _crowned(archive, Playbook("stall-4", replaced(H0, stall_tests=4).numbers, parent=H0.label))
     stage = _stage(tmp_path)
-    stage.explored = NEAR_CURVES
     stage.judge = PlaybookJudge(insist=frozenset({"b02"}))
-    stage.scripts = {"b01": (tagged("c1"),), "b02": (*FLAT[:4], NEAR)}
+    stage.scripts = {"b01": (tagged("c1"),), "b02": FLAT[:5]}
 
     outcome = await stage.run()
 
@@ -381,8 +391,8 @@ async def test_a_session_that_plays_no_playbook_runs_as_one_without_the_rsi(
         assert "Scheduling playbook" not in prompt and "Open areas" not in prompt
         assert "How similar past sessions went" not in prompt
     rows = [row for rows in _rounds(stage) for row in rows.values()]
-    assert not any(EVIDENCE_COMPONENTS & set(row.get("components", {})) for row in rows)
-    assert not any(row.get("held") in (HoldReason.NEAR_BAR.value, HoldReason.PROBATION.value) for row in rows)
+    assert not any(STALL_EVIDENCE & set(row.get("components", {})) for row in rows)
+    assert not any(row.get("held") in (HoldReason.STRANDED.value, HoldReason.PROBATION.value) for row in rows)
     assert (await _stops(stage))["b02"] == f"judge: {INSISTED}"
     assert not any(node.probations for node in (await stage.handle(Role.OBSERVER).lineage()).branches)
     assert not [row for row in _decisions(stage) if row["reason"] == "scheduling playbook"]
