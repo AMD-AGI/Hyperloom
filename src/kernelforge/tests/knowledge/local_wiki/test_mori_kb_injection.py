@@ -33,10 +33,10 @@ def test_env_var_enables_mori_kb_injection(monkeypatch):
     assert "framework/mori" in _mori_prompt(config)
 
 
-def test_build_forge_knowledge_include_mori_flag():
+def test_build_forge_knowledge_serves_mori_only_when_named():
     root = resource_path("local_knowledge")
-    with_mori = build_forge_knowledge(root, include_mori=True)
-    without_mori = build_forge_knowledge(root, include_mori=False)
+    with_mori = build_forge_knowledge(root, frameworks=("mori",))
+    without_mori = build_forge_knowledge(root)
     assert "framework/mori" in with_mori
     assert "framework/mori" not in without_mori
 

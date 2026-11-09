@@ -793,6 +793,7 @@ def test_workspace_relative_inputs_resolve_like_absolute_ones(tmp_path, monkeypa
         ("gemm.py", "import hipblaslt\n@triton.jit\ndef k(): pass\n", "hipblaslt"),
         ("attn.py", "import aiter\n@triton.jit\ndef k(): pass\n", "aiter"),
         ("dsl.py", "from cutlass import cute\n@triton.jit\n", "flydsl"),
+        ("sgl_amd_mono/qwen3/ffn.py", "import flydsl.compiler as flyc\n", "mono"),
         ("ck_op.cpp", "#include <composable_kernel/foo.hpp>\n", "ck"),
         ("plain.cu", "__global__ void k() {}\n", "hip"),
     ],
@@ -807,6 +808,7 @@ def test_infer_kernel_backend_prefers_the_more_specific_backend(
     """Backend detection is ordered; a generic marker must not win over a library."""
     monkeypatch.delenv("FORGE_KERNEL_BACKEND", raising=False)
     path = tmp_path / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(source)
 
     assert infer_kernel_backend([path]) == expected
