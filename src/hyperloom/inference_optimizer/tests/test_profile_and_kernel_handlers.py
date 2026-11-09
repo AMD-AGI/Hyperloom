@@ -296,7 +296,7 @@ def test_materialize_config_rocr_visible_devices_stays_on_session_cards_when_und
     tmp_path,
     monkeypatch,
 ):
-    """A process mask narrower than an unclamped TP is not widened onto cards outside it."""
+    """A process mask narrower than TP is not widened onto cards outside it."""
     import yaml
 
     monkeypatch.setenv("TP", "8")

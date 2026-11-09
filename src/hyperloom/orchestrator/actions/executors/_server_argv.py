@@ -120,8 +120,7 @@ def _expert_parallel_arg(text: str, framework: str | None, envs: Mapping[str, An
     tp = int(envs.get("TP") or size)
     if tp % size:
         log.warning(
-            "EP=%d does not divide the launched TP=%d (after any clamp to the visible GPUs); "
-            "launching without expert parallelism.",
+            "EP=%d does not divide the launched TP=%d; launching without expert parallelism.",
             size,
             tp,
         )
