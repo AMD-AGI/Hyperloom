@@ -149,7 +149,8 @@ _PROBE = textwrap.dedent(
 
     out = {
         "signature": [pattern.pattern for rule in failure_signature._RULES for pattern in rule.patterns],
-        "causes": [value.pattern for name, value in vars(log_causes).items() if hasattr(value, "pattern")],
+        "causes": [value.pattern for name, value in vars(log_causes).items() if hasattr(value, "pattern")]
+        + [failure_signature._ARGPARSE_REFUSAL.pattern],
         "surface": [surface.SURFACE_ENV_KEYS, surface.POINT_ENV_KEYS, surface.REQUEST_ENV_KEYS],
         "points": [points._PROFILE_PINNED, points._PROFILE_SURFACE_EXEMPT],
         "local": [sorted(local._BOOT_CLIENT_ENVS), sorted(local._BENCH_ENVS), sorted(local._EVAL_ENVS)],
