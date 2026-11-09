@@ -284,8 +284,14 @@ def _validate_spec(spec: AgentLaunchSpec, now_unix: float) -> None:
         raise AgentConfigError("duplicate MCP server names")
 
 
+def _mcp_json_path(spec: AgentLaunchSpec) -> Path:
+    """Where :func:`_write_mcp_json` writes ``spec``'s MCP config."""
+    return spec.workspace / "runtime" / SPECIALIST_MCP_CONFIG_FILENAME
+
+
 def _write_mcp_json(spec: AgentLaunchSpec) -> Path:
-    """Write the ``{"mcpServers": ...}`` file; headers reference the token by variable name only."""
+    """Write the ``{"mcpServers": ...}`` file (at :func:`_mcp_json_path`); headers reference the token by variable
+    name only."""
     servers = {
         endpoint.name: {
             "type": "http",
@@ -551,8 +557,13 @@ class LocalAgentRunner:
             self._version_probe, spec.argv[0], {k: v for k, v in env.items() if v not in tokens}
         )
         private = (spec.workspace / PROMPT_FILE, spec.workspace / PROCESS_LOG_NAME)
-        # The child works in ``cwd``, so that is the tree it must be able to write.
-        place = LaunchPlace(spec.workspace, spec.cwd, private, spec.readable, spec.gpus > 0, git_admin=spec.git_admin)
+        # The child works in ``cwd``, so that is the tree it must be able to write. The MCP config written for it
+        # names the servers its network reaches, for either backend: codex takes them from its private config.toml,
+        # not from its argv.
+        mcp_config = str(_mcp_json_path(spec)) if spec.mcp_servers else None
+        place = LaunchPlace(
+            spec.workspace, spec.cwd, private, spec.readable, spec.gpus > 0, mcp_config, git_admin=spec.git_admin
+        )
         try:
             prepared = await asyncio.to_thread(prepare_launch, isolation, place, argv, env)
         except RunAsError as exc:
