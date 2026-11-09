@@ -42,6 +42,14 @@ it.
   error, and so does no recipe serving it, naming why each source missed. See
   [Base launch](reference/inference-suite.md#base-launch).
 
+- **A card that another process only opened no longer stops the session
+  with `host_gpus_unavailable`.** Every ROCm process opens all cards and
+  keeps up to a few MiB on each; the pre-boot GPU check now counts a
+  process as holding a card only above 1 GiB of VRAM there (or when
+  `amd-smi` reports none). It used to refuse any card with a nonzero
+  reading, so a scheduler or an idle server elsewhere on the host blocked
+  every card. See [inference-suite](reference/inference-suite.md).
+
 - **A `custom` workload's entrypoint is named after the board itself.**
   `--benchmark-scripts-dir` is searched for `custom_<gpu-type>.sh` with the
   board as given, so `mi308x`, `mi325x` and `mi350x` now look for

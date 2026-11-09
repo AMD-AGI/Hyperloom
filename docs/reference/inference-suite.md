@@ -136,7 +136,10 @@ Before `own` or `boot` starts a server, the round refuses a port something alrea
 listens on (`port_in_use`) and GPUs that `amd-smi` does not list or that another
 process holds (`gpus_unavailable`, naming each GPU, its amd-smi card and its holder; a
 round's GPU numbers are `HIP_VISIBLE_DEVICES` numbers, matched to amd-smi cards through
-their KFD node). Hyperloom stops
+their KFD node). A process holds a card when `amd-smi process` reports more than 1 GiB
+of VRAM for it there, or reports none at all: every ROCm process opens all cards and
+keeps up to a few MiB of page tables and runtime context on each, which does not count.
+Hyperloom stops
 the session on the first `gpus_unavailable` with `stop_reason=host_gpus_unavailable`.
 
 A server is ready when `/health` answers 200, its process is alive and its log

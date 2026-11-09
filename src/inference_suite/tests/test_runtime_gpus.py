@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 """Contract of the pre-boot GPU check: a round's GPUs must be visible to ``amd-smi`` and no process may have memory
-resident on them beyond the page tables and runtime context every process that merely opened the card keeps there (an
-entry that reports no memory is a holder), and a refusal names each GPU and why.
+resident on them beyond the 1 GiB a process that merely opened the card may keep there (an entry that reports no
+memory is a holder), and a refusal names each GPU and why.
 
 A round's GPUs are ``HIP_VISIBLE_DEVICES`` numbers, which ROCm assigns in KFD node order while ``amd-smi`` indexes cards
 in PCI order, so the check must translate one into the other.
@@ -97,6 +97,14 @@ def test_a_process_that_only_opened_a_card_does_not_hold_it(monkeypatch):
 
     assert gpus.unavailable_gpus((4, 6, 7)) is None
     assert gpus.unavailable_gpus((5,)) == "GPU 5 (amd-smi card 5): held by pid 2768962 (python3)"
+
+
+@pytest.mark.parametrize(("vram", "held"), [(1 << 30, False), ((1 << 30) + 1, True)])
+def test_a_card_is_held_only_above_one_gib_resident(monkeypatch, vram, held):
+    # Up to 1 GiB leaves room for a runtime that maps larger staging buffers on a card it does not serve on.
+    _answer(monkeypatch, _host({1: [_opened(4242, vram)]}))
+    expected = "GPU 1 (amd-smi card 1): held by pid 4242 (python3)" if held else None
+    assert gpus.unavailable_gpus((1,)) == expected
 
 
 def test_a_gpu_the_host_does_not_have_is_not_visible(monkeypatch):
