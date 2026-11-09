@@ -649,10 +649,12 @@ async def _run_tracelens_skill_codex(
         codex_error = f"{type(exc).__name__}: {exc}"
         if run.log:
             run.log(f"[codex-sdk] WARNING: {codex_error}")
-    return _skill_result(run, runner="codex", label="Codex", error=codex_error or result.error)
+    return _skill_result(run, runner="codex", label="Codex", raw_text=result.text, error=codex_error or result.error)
 
 
-def _skill_result(run: _SkillRun, *, runner: str, label: str, error: str) -> TraceLensSkillRunResult:
+def _skill_result(
+    run: _SkillRun, *, runner: str, label: str, error: str, raw_text: str = ""
+) -> TraceLensSkillRunResult:
     """The run's artifacts once ``analysis.md`` exists; an agent error after it landed is metadata.
 
     Raises:
@@ -764,7 +766,7 @@ async def run_tracelens_skill(
             timeout_sec=timeout_sec,
         )
         result = await drive_tracelens_skill(session, output_dir / "analysis.md")
-        return _skill_result(run, runner="deepseek", label="DeepSeek", error=result.error)
+        return _skill_result(run, runner="deepseek", label="DeepSeek", raw_text=result.text, error=result.error)
 
     if runner == llm_config.AGENT_BACKEND_CODEX and (sdk.codex_turn_runner is not None or no_injected_sdk):
         codex_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
