@@ -132,6 +132,26 @@ def test_changed_bytecode_under_a_protected_dir_is_deleted_and_a_changed_source_
     assert sourceless.read_bytes() == b"module"
 
 
+def test_bytecode_a_fresh_checkout_compiles_on_its_first_driver_run_keeps_the_turn(repo: Path) -> None:
+    """A copy of a new worktree has no interpreter cache, so running the driver creates one under a protected dir."""
+    harness = repo / "scripts"
+    harness.mkdir()
+    (harness / "task_measure.py").write_text("MEASURE = 1\n")
+    (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "harness")
+
+    guard = WorkspaceGuard(_writable(repo, FORGE_PROTECTED_PATHS))
+    guard.prepare()
+    (repo / "kernel.py").write_text("edited\n")
+    compiled = harness / "__pycache__" / "task_measure.cpython-312.pyc"
+    compiled.parent.mkdir()
+    compiled.write_bytes(b"compiled by the driver run")
+
+    assert guard.verify() == ["kernel.py"]
+    assert not compiled.exists()
+
+
 def test_bytecode_behind_a_linked_cache_dir_is_reported_not_deleted(
     repo: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
