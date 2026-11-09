@@ -54,7 +54,7 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.native_builds import native_builds, with_native_plan
-from hyperloom_multibranch.toolbox.long_context import environment_long_context
+from hyperloom_multibranch.toolbox.long_context import environment_long_context, sees_runner_cache
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, environment_short_prompts
 from hyperloom_multibranch.toolbox.tools import AsyncTool, tracelens_tool
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, ToolboxTuning
@@ -206,7 +206,9 @@ class HostedOptions:
     Without either the check is on with the session model's own set when this host finds it staged
     (``short_prompts.default_short_prompts``), and off, logged, when it does not. The long-context check is found the
     same way from ``acceptance.long_context``, ``HYPERLOOM_LONG_CONTEXT`` and ``long_context.ServedLongContext`` (the model's
-    own set at the context each test's launch serves). ``framework_configs`` is the directory of aiter's tuned tables
+    own set at the context each test's launch serves), except that this host stages the model's own set when a test first
+    needs it and it is not staged, as the local toolbox does, when it sees the runner cache (the directory
+    ``HYPERLOOM_RUNNER_CACHE`` names exists here); a host that does not see it runs no such check and logs why. ``framework_configs`` is the directory of aiter's tuned tables
     every test reads private copies of, snapshotted below ``session_dir/framework`` as the toolbox is built, where the
     runner sandboxes read it at the same path: the image's when omitted, ``""`` for none. The snapshot is named to every
     runner sandbox by ``HYPERLOOM_FRAMEWORK_SNAPSHOT`` and ``HYPERLOOM_FRAMEWORK_SESSION_SHA256``, which the runner
@@ -399,8 +401,8 @@ def _acceptance_with_prompts(
     acceptance: AcceptanceSetup, options: HostedOptions, environ: Mapping[str, str], model_dir: Path | None
 ) -> AcceptanceSetup:
     """``acceptance`` with the short-prompt set the options (else the acceptance setup, else ``HYPERLOOM_SHORT_PROMPTS``)
-    name, and the long-context set the acceptance setup (else ``HYPERLOOM_LONG_CONTEXT``, else the model's own set this
-    host finds staged) names.
+    name, and the long-context set the acceptance setup (else ``HYPERLOOM_LONG_CONTEXT``, else the model's own set, which
+    this host stages when it sees the runner cache, :func:`~.long_context.sees_runner_cache`) names.
 
     Raises:
         ShortPromptsNotStaged: The environment names a key that is not staged in this host's view of the runner cache.
@@ -411,7 +413,7 @@ def _acceptance_with_prompts(
     if named.short_prompts is None:
         named = with_short_prompts(named, environment_short_prompts(environ, model_dir))
     if named.long_context is None:
-        named = with_long_context(named, environment_long_context(environ, model_dir))
+        named = with_long_context(named, environment_long_context(environ, model_dir, stage=sees_runner_cache(environ)))
     return named
 
 
