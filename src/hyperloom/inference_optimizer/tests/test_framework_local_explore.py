@@ -81,6 +81,14 @@ class _Tasks:
         self._by_idem[key] = task
         return task, False
 
+    async def with_key_prefix(self, kind: str, key_prefix: str) -> list[Any]:
+        return [t for key, t in self._by_idem.items() if t.kind == kind and key.startswith(key_prefix)]
+
+    def settle_queued(self) -> None:
+        for task in self._queued:
+            task.state = "succeeded"
+        self._queued.clear()
+
     async def get(self, task_id: str) -> Any:
         for task in self._by_idem.values():
             if task.task_id == task_id:
@@ -373,7 +381,7 @@ def test_each_discovery_retry_takes_a_fresh_idempotency_key(tmp_path: Path):
         keys.append(stub.tasks.created[-1]["idempotency_key"])
         # The dispatched round settles: nothing is in flight, so the next tick asks again and the key is all that
         # stands between a real retry and a re-fetch of the finished one.
-        stub.tasks._queued.clear()
+        stub.tasks.settle_queued()
     assert len(set(keys)) == len(keys)
 
     # Budget spent: the lane declines so the rungs below it are reachable.
@@ -423,6 +431,21 @@ def test_a_discovery_proposal_naming_an_unregistered_framework_is_dropped(tmp_pa
     ]
 
 
+def test_the_discovery_contract_names_every_framework_the_phase_keeps():
+    """The phase drops any other spelling, so the agent has to be handed the closed vocabulary."""
+    import re
+
+    from hyperloom.inference_optimizer import framework_registry
+    from hyperloom.orchestrator.prompts.proposal_schemas import (
+        UPSTREAM_CANDIDATE_CONTRACT,
+        UPSTREAM_CANDIDATE_EXAMPLE,
+    )
+
+    told = " ".join(UPSTREAM_CANDIDATE_CONTRACT) + " " + UPSTREAM_CANDIDATE_EXAMPLE["framework"]
+    for name in framework_registry.names():
+        assert re.search(rf"\b{re.escape(name)}\b", told), name
+
+
 def test_a_registry_that_cannot_answer_is_not_an_idle_one(tmp_path: Path):
     """The pump must not read a failed task query as \"nothing in flight\"."""
     stub = _stub(tmp_path, local_explore=True)
@@ -447,7 +470,7 @@ def test_a_lane_that_cannot_run_retires_on_its_own_budget(tmp_path: Path):
             asyncio.run(stub.phase_framework._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is True
         )
         keys.append(stub.tasks.created[-1]["idempotency_key"])
-        stub.tasks._queued.clear()
+        stub.tasks.settle_queued()
         stub.phase_framework._ingest_candidate_discovery(task=task, done_payload={}, run_error="no runner")
 
     assert len(set(keys)) == len(keys)
@@ -466,6 +489,31 @@ def test_a_round_that_ran_clears_the_failure_streak(tmp_path: Path):
     stub.phase_framework._ingest_candidate_discovery(task=task, done_payload={"proposal_set": []})
     assert stub.shared_state.framework_agent_discover_failures == 0
     assert stub.shared_state.framework_agent_empty_discoveries == 1
+
+
+def test_the_round_after_a_harvest_is_a_new_round(tmp_path: Path):
+    """A harvest clears both streaks, and the next round must still queue rather than re-fetch the settled one."""
+    _state(local_explore=False).save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    phase = coord.phase_framework
+    harvest = {"proposal_set": [{"pr_url": "https://github.com/sgl-project/sglang/pull/1", "verdict": "worth_a_bench"}]}
+
+    async def _two_rounds() -> list[Any]:
+        assert await phase._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty") is True
+        (first,) = await coord.tasks.queued()
+        assert await phase._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty") is True
+        assert [t.task_id for t in await coord.tasks.queued()] == [first.task_id]
+        await coord.tasks.transition(first.task_id, "running")
+        await coord.tasks.transition(first.task_id, "succeeded")
+        phase._ingest_candidate_discovery(task=first, done_payload=harvest)
+        assert coord.shared_state.framework_agent_empty_discoveries == 0
+        assert coord.shared_state.framework_agent_discover_failures == 0
+        assert await phase._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty") is True
+        return [first, *await coord.tasks.queued()]
+
+    first, second = asyncio.run(_two_rounds())
+    assert second.task_id != first.task_id
+    assert second.params["candidate_discovery"] is True
 
 
 @pytest.mark.asyncio

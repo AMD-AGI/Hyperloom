@@ -1,10 +1,9 @@
 """Map kernel names onto named components, and say what you failed to map.
 
-This is the one idea worth taking from SIKL. SIKL's per-op bench hooks module
-objects, so its rows are named for the source (``attn.indexer``,
-``mlp.experts``) and its unmatched time lands in an explicit ``<rest>`` row you
-can read. On DSv4 that row was a sizable share of prefill — a number that was *visible*,
-and therefore a known coverage hole rather than a silent understatement.
+The idea: hook the model's module objects, so rows are named for the source
+(``attn.indexer``, ``mlp.experts``), and unmatched time lands in an explicit
+``<rest>`` row you can read. A large ``<rest>`` is then a *visible* coverage hole
+rather than a silent understatement.
 
 A torch trace gives mangled device symbols instead. Matching those with
 substrings is workable but fails in a specific, dangerous way: a pattern that
@@ -47,10 +46,9 @@ class Component:
 
 # Starting table for DSv4.x decode on ROCm/vLLM.
 #
-# Patterns are deliberately drawn from the same vocabulary the pack's
-# evaluators already use (eval_dsa_indexer.INDEXER_OPS, eval_moe_fp4.MOE_OPS,
-# eval_mla_absorb_rope.MLA_OPS), so a share computed here lines up with the
-# component those evaluators measure. Where a pattern in those lists is a
+# Patterns are deliberately drawn from the same vocabulary a DSv4.x pack's
+# evaluators use (their indexer, MoE and MLA op lists), so a share computed
+# here lines up with the component those evaluators measure. Where a pattern in those lists is a
 # *module* name that cannot appear in a device symbol ("absorb", "indexer"),
 # it is kept — it costs nothing and will match if a build annotates — but it is
 # not what the row relies on.
@@ -62,7 +60,7 @@ DEFAULT_COMPONENTS: tuple[Component, ...] = (
             "qk_rope_hadamard", "indexer", "catarraybatchedcopy",
             "index_select", "repeat_interleave",
         ),
-        source="DSA per-step metadata + top-k select (directive P1, vLLM #51315)",
+        source="DSA per-step metadata + top-k select (vLLM #51315)",
     ),
     Component(
         name="mla_attention",
@@ -70,7 +68,7 @@ DEFAULT_COMPONENTS: tuple[Component, ...] = (
             "mla", "fwd_kvcache", "reshape_and_cache", "cat_and_cache",
             "rope", "absorb",
         ),
-        source="MLA q-absorb BMM + RoPE + KV-cache write (directive P0)",
+        source="MLA q-absorb BMM + RoPE + KV-cache write",
     ),
     Component(
         name="moe",
@@ -98,7 +96,7 @@ DEFAULT_COMPONENTS: tuple[Component, ...] = (
     Component(
         name="spec_decode",
         patterns=("draft", "dspark", "rejection", "accept", "verify"),
-        source="DSpark draft + verification (directive P2)",
+        source="DSpark draft + verification",
     ),
     Component(
         name="collective",

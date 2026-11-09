@@ -27,7 +27,8 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NoReturn
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import pytest
 
@@ -215,12 +216,20 @@ from hyperloom_multibranch.scheduling.review import (
     REVIEW_SKIPPED,
 )
 from hyperloom_multibranch.scheduling.settings import DOSSIER_MINUTES
-from hyperloom_multibranch.specialist import autonomous_session
 from hyperloom_multibranch.specialist.arbor_adapter import MAPPED, SplitFailed
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
-from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
+
+if TYPE_CHECKING:
+    from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
+
+
+def _specialist_module(name: str) -> ModuleType:
+    """The specialist package's module ``name``, which a test that maps or runs an Arbor share needs; the test is
+    skipped while the package has no such module."""
+    return pytest.importorskip(f"hyperloom_multibranch.specialist.{name}")
+
 
 START = 1_700_000_000.0
 CONC = 16
@@ -549,8 +558,11 @@ class Stage:
         await then(branch, head)
 
     async def run(self) -> SessionOutcome:
-        """Run the session, its image check answered by ``image_check`` instead of this environment."""
+        """Run the session, its image check answered by ``image_check`` instead of this environment; a session with
+        autonomous agents maps and runs them on the specialist's map and autonomous sessions."""
 
+        for module in ("map_session", "autonomous_session") if self.settings.agents else ():
+            _specialist_module(module)
         with self._polls_on_virtual_time() as patch:
             patch.setattr(lifecycle, "run_image_check", self.image_check)
             return await self._session().run()
@@ -1907,6 +1919,7 @@ async def test_the_judge_sees_each_live_specialist_as_the_runtime_reports_it(tmp
         "gave_up": False,
         "judge_failed": False,
         "unready": "",
+        "exhausted": "",
     }
     assert "specialist" not in steering[INTEGRATION_BRANCH]
     assert later and all("specialist" not in rows.get("b02", {}) for rows in later)
@@ -2389,7 +2402,7 @@ async def test_a_review_decided_after_its_clock_ran_out_opens_no_share_and_says_
     stage, _map_file, _dossier = _two_arbors_reviewed(tmp_path, monkeypatch, read)
     stage.settings = replace(stage.settings, agent_share_minutes=2.0)
     # No margin before EXPLORE's end: a share opened at any time would run until it, so the clock is EXPLORE's alone.
-    monkeypatch.setattr(autonomous_session, "collection_margin", lambda _records, _floor: 0.0)
+    monkeypatch.setattr(_specialist_module("autonomous_session"), "collection_margin", lambda _records, _floor: 0.0)
 
     async def late() -> dict[str, Any]:
         open_by = await _open_by(stage)

@@ -64,17 +64,17 @@ def parse_args(argv=None):
                    help="iterations to skip before profiling; -1 estimates from isl/chunk")
     p.add_argument("--chunked-prefill-size", type=int, default=16384)
     p.add_argument("--max-model-len", type=int,
-                   default=int(os.environ.get("SIKL_MAX_MODEL_LEN", "1048576")))
+                   default=int(os.environ.get("ARBOR_PROFILE_MAX_MODEL_LEN", "1048576")))
     p.add_argument("--num-spec-tokens", type=int,
-                   default=int(os.environ.get("SIKL_NUM_SPEC_TOKENS", "5")),
+                   default=int(os.environ.get("ARBOR_PROFILE_NUM_SPEC_TOKENS", "5")),
                    help="0 disables speculative decoding")
     p.add_argument("--gpu-mem-util", type=float, default=0.9)
     p.add_argument("--cudagraph-capture-size", type=int, default=1024)
     p.add_argument("--tokenizer-mode", default="deepseek_v41")
     p.add_argument("--trace-dir", default=os.environ.get(
         "ARBOR_TRACE_DIR", "/workspace/sessions/torch_profile"))
-    p.add_argument("--json", default=os.environ.get("SIKL_OUTPUT",
-                                                    "/tmp/sikl_decode_result.json"))
+    p.add_argument("--json", default=os.environ.get("ARBOR_PROFILE_OUTPUT",
+                                                    "/tmp/decode_profile_result.json"))
     p.add_argument("--top", type=int, default=25, help="ops to print")
     p.add_argument("--probe-only", action="store_true",
                    help="report engine profiling capabilities and exit; no GPU needed")

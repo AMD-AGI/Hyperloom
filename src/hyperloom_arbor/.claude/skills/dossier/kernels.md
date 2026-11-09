@@ -2,8 +2,8 @@
 
 Which kernels serve each op at the served shapes, why those were chosen, and
 whether a better kernel exists. Inputs: the profile (part 7, from the
-`profiler` skill), the code reading (part 3) and, when the user provides it,
-the reference platform (part 9). Work op family by op family, largest first.
+`profiler` skill) and the code reading (part 3). Work op family by op family,
+largest first.
 
 ## 1. What ran
 
@@ -16,9 +16,9 @@ with at least 1% of GPU time in any regime:
   aten op's arguments with the CPU op tree);
 - the step kinds it runs in (decode, prefill, mixed; forward, backward).
 
-**One symbol can serve many call sites**: every MXFP8 linear in DSV4.1 ran as
-one kernel, `_mxfp8_linear_kernel`, whatever its projection. Split such a
-symbol by scope before ranking.
+**One symbol can serve many call sites**: every MXFP8 linear of a model can
+run as one kernel, whatever its projection. Split such a symbol by scope
+before ranking.
 
 ## 2. Who provides it
 
@@ -75,15 +75,7 @@ writing or tuning anything:
 Its pages cite AITER `b467ce342`: verify every claim against the installed
 source. This repository keeps a copy at `src/kernelforge`.
 
-## 6. What the reference platform runs
-
-From part 9 (the B200 trace's kernel census, or the recipe's backend flags):
-the kernel serving the same op, what it implies (a fused path, another tile
-shape, another number format, another backend), and the gfx950 gap that may
-block a port (formats, matrix instructions, wavefront 64, on-chip memory,
-asynchronous copies). A B200 choice is a lead, never evidence for gfx950.
-
-## 7. Check a candidate before proposing it
+## 6. Check a candidate before proposing it
 
 - Correctness against the exact path it replaces.
 - GPU time at the served row counts and contexts (part 5), graph-captured
@@ -96,19 +88,19 @@ and an A/B decides.
 
 ## The table
 
-| Op family | Kernels that ran (provider) | Share per regime | Shapes | Why this kernel | Unused alternatives (why; how to try) | KernelForge | Reference platform | gfx950 gap | Lead |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Op family | Kernels that ran (provider) | Share per regime | Shapes | Why this kernel | Unused alternatives (why; how to try) | KernelForge | gfx950 gap | Lead |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
 
-A worked row, DSV4.1 MoE experts on MI355X:
+An illustrative row, made up to show the form (not a measurement), for an
+FP8-activation, MXFP4-weight MoE's experts:
 
-- **Ran:** AITER's sort and quant-sort, then
-  `mfma_moe1_silu_mul_afp8_wfp4_bf16_*` (stage 1) and
-  `mfma_moe2_afp8_wfp4_bf16_*` (stage 2); FP8 activations, MXFP4 weights,
-  hidden 5120, intermediate 640 per rank, 384 experts, top-6.
-- **Why:** `tuned_fmoe.csv` (2,462 rows) had no row for the target's or the
-  drafter's key, so every token tier ran the untuned fallback (`block_m` 32).
-- **Unused:** AITER's opus A8W4 stage-2 kernel covers intermediate 512 and
-  768, not 640: shape family not covered.
+- **Ran:** AITER's sort and quant-sort, then its fused-MoE stage-1 and
+  stage-2 kernels; FP8 activations, MXFP4 weights, intermediate `<I>` per
+  rank.
+- **Why:** the tuned table has no row for the model's key, so every token
+  tier runs the untuned fallback.
+- **Unused:** another stage-2 kernel family, which covers other intermediate
+  sizes, not `<I>`: shape family not covered.
 - **Lead:** AITER's MoE tuner, deployed as an `AITER_CONFIG_FMOE` overlay
   (KernelForge's `fused_moe_grouped_gemm/tuning.md`); failing that, a new
-  opus family or a FlyDSL A8W4 kernel for 640.
+  kernel for `<I>`.
