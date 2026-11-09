@@ -13,13 +13,16 @@ on that loopback:
   to that port here and nowhere else;
 - one HTTP proxy, named inside by ``HTTPS_PROXY`` and ``HTTP_PROXY`` with loopback exempt (``NO_PROXY``), which this
   process serves (:class:`NetworkBridge`): it connects only to the other hosts and ports the launch names
-  (:func:`specialist_reach`), through the app's own proxy where the launch's environment names one, and answers 403
-  to anything else.
+  (:func:`specialist_reach`), and answers 403 to anything else. A ``CONNECT`` reaches a named host and port; a plain
+  ``http`` request only an endpoint the launch names as ``http``. Where the launch's environment names the app's own
+  proxy, the bridge itself opens a ``CONNECT`` to the checked target through it and carries the specialist's bytes only
+  inside that tunnel, so nothing it sends after its first request reaches the app's proxy as a request of its own.
 """
 
 from __future__ import annotations
 
 import base64
+import configparser
 import contextlib
 import ipaddress
 import json
@@ -42,10 +45,23 @@ log = logging.getLogger(__name__)
 SOCKET_DIR = ".hl-net"
 _PROXY_SOCKET = "proxy.sock"
 _MCP_FLAG = "--mcp-config"
-_URL = re.compile(r"https?://[^\s\"'<>,;]+")
 _BASE_URL_SUFFIX = "_BASE_URL"
-_BASE_URL_SETTING = "base_url="
+#: The one command-line setting that names an LLM endpoint: codex's ``-c model_providers.<name>.base_url=<value>``,
+#: whose value this repo writes as a TOML string (:mod:`hyperloom.common.codex_session`).
+_CONFIG_FLAGS = frozenset({"-c", "--config"})
+_CODEX_BASE_URL = re.compile(r"model_providers\.[A-Za-z0-9_-]+\.base_url=(.+)", re.DOTALL)
+_END_OF_OPTIONS = "--"
 _BEDROCK = "CLAUDE_CODE_USE_BEDROCK"
+#: The region variables a Bedrock-backed claude CLI reads; the first two name its region, the last its small model's.
+_AWS_REGION_VARIABLES = ("AWS_REGION", "AWS_DEFAULT_REGION", "ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION")
+_AWS_DEFAULT_REGION = "us-east-1"
+#: The keys of an AWS config file that name a region: a profile's own, and its SSO login's.
+_AWS_CONFIG_REGION_KEYS = ("region", "sso_region")
+_AWS_REGION = re.compile(r"[a-z]{2}(?:-[a-z]+)+-\d+")
+#: The AWS hosts a Bedrock login reaches in each of its regions: the runtime, STS (an assumed role, a web identity),
+#: and IAM Identity Center's portal and OIDC (an SSO profile); and the global STS endpoint.
+_AWS_REGIONAL_HOSTS = ("bedrock-runtime", "sts", "portal.sso", "oidc")
+_AWS_GLOBAL_STS = "https://sts.amazonaws.com"
 _TRUE = frozenset({"1", "true", "yes", "on"})
 #: Each provider's API host, reached when the launch names no base URL of its own for it.
 _DEFAULT_APIS = {"ANTHROPIC_BASE_URL": "https://api.anthropic.com", "OPENAI_BASE_URL": "https://api.openai.com"}
@@ -54,6 +70,9 @@ _HEAD_LIMIT = 64 * 1024
 _HEAD_TIMEOUT_SEC = 30.0
 _CONNECT_TIMEOUT_SEC = 30.0
 _CHUNK = 65536
+#: How the bridge reads and writes HTTP heads (byte for byte), and the text it reads from files and logins.
+_HEAD_CODEC = "latin-1"
+_TEXT_CODEC = "utf-8"
 _FIRST_UNPRIVILEGED_PORT = 1024
 _ESTABLISHED = b"HTTP/1.1 200 Connection established\r\n\r\n"
 #: The app's proxy settings the bridge goes through; nothing else of the launch's environment is kept.
@@ -154,10 +173,12 @@ except OSError as exc:
 @dataclass(frozen=True)
 class Reach:
     """What a sandboxed specialist reaches: ``loopback`` ports of this host (each with the host name its launch gave,
-    ``localhost`` say), served at the same port inside; ``remote`` hosts and ports, through the bridge's proxy."""
+    ``localhost`` say), served at the same port inside; ``remote`` hosts and ports, tunnelled to by the bridge's proxy;
+    and of those, the ``plain`` ones the launch names as ``http``, which the proxy also takes a plain request for."""
 
     loopback: Mapping[int, str] = field(default_factory=dict)
     remote: frozenset[tuple[str, int]] = frozenset()
+    plain: frozenset[tuple[str, int]] = frozenset()
 
 
 def _endpoint(url: str) -> tuple[str, int] | None:
@@ -197,14 +218,72 @@ def _mcp_urls(path: str | None) -> Iterator[str]:
             yield url
 
 
+def _options(cmd: Sequence[str]) -> Sequence[str]:
+    """``cmd`` up to its first ``--``: after it, its words are operands (a dsh task, say), never settings."""
+    return cmd[: cmd.index(_END_OF_OPTIONS)] if _END_OF_OPTIONS in cmd else cmd
+
+
+def _setting_url(value: str) -> str | None:
+    """The URL a codex ``-c`` value gives: a TOML basic string (as this repo writes it), a literal string, or bare."""
+    value = value.strip()
+    if value.startswith('"'):
+        try:
+            found = json.loads(value)
+        except ValueError:
+            return None
+        return found if isinstance(found, str) else None
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1]
+    return value
+
+
+def _codex_base_urls(cmd: Sequence[str]) -> Iterator[str]:
+    """The value of each codex ``-c model_providers.<name>.base_url=`` setting in ``cmd``'s options; no other word of
+    the command line (a prompt, a task text quoting ``base_url=``) names an endpoint."""
+    options = _options(cmd)
+    for flag, setting in zip(options, options[1:]):
+        found = _CODEX_BASE_URL.fullmatch(setting) if flag in _CONFIG_FLAGS else None
+        url = _setting_url(found.group(1)) if found else None
+        if url:
+            yield url
+
+
+def _aws_config_regions(env: Mapping[str, str]) -> Iterator[str]:
+    """The regions the AWS config file ``AWS_CONFIG_FILE`` names (read without following a link): each section's
+    ``region`` and ``sso_region``; none when it cannot be read."""
+    path = env.get("AWS_CONFIG_FILE") or ""
+    if not path:
+        return
+    parser = configparser.RawConfigParser(strict=False, interpolation=None)
+    try:
+        parser.read_string(read_bytes_nofollow(path, limit=1 << 20).decode(_TEXT_CODEC))
+    except (OSError, UnicodeDecodeError, configparser.Error):
+        return
+    for section in parser.sections():
+        for key in _AWS_CONFIG_REGION_KEYS:
+            if parser.has_option(section, key):
+                yield parser.get(section, key)
+
+
+def _bedrock_urls(env: Mapping[str, str]) -> Iterator[str]:
+    """What a Bedrock login in ``env`` reaches: in its region (``us-east-1`` where it names none), its small model's
+    and each its AWS config file names, the runtime, STS and the SSO portal and OIDC hosts; and the global STS."""
+    regions = {env.get(name, "").strip() for name in _AWS_REGION_VARIABLES} | set(_aws_config_regions(env))
+    if not (env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION")):
+        regions.add(_AWS_DEFAULT_REGION)
+    for region in sorted(region.strip().lower() for region in regions):
+        if _AWS_REGION.fullmatch(region):
+            for service in _AWS_REGIONAL_HOSTS:
+                yield f"https://{service}.{region}.amazonaws.com"
+    yield _AWS_GLOBAL_STS
+
+
 def _launch_urls(cmd: Sequence[str], env: Mapping[str, str], mcp_config: str | None) -> Iterator[str]:
     """Every LLM endpoint and MCP server the launch names: the base URLs its command line sets (codex's
-    ``model_providers.<name>.base_url=...``; never other text there, a prompt say), its ``*_BASE_URL`` variables
-    (each provider's API host where it names none, Bedrock's in its region when ``CLAUDE_CODE_USE_BEDROCK`` is on),
-    and the servers of the MCP configs it is given (``mcp_config``, and the one ``--mcp-config`` names)."""
-    for arg in cmd:
-        if _BASE_URL_SETTING in arg:
-            yield from _URL.findall(arg.split(_BASE_URL_SETTING, 1)[1])
+    ``-c model_providers.<name>.base_url=...``; never other text there, a prompt say), its ``*_BASE_URL`` variables
+    (each provider's API host where it names none, and what a Bedrock login reaches when ``CLAUDE_CODE_USE_BEDROCK``
+    is on), and the servers of the MCP configs it is given (``mcp_config``, and the one ``--mcp-config`` names)."""
+    yield from _codex_base_urls(cmd)
     for name, value in env.items():
         if name.endswith(_BASE_URL_SUFFIX) and value:
             yield value
@@ -212,11 +291,11 @@ def _launch_urls(cmd: Sequence[str], env: Mapping[str, str], mcp_config: str | N
         if not env.get(name):
             yield default
     if (env.get(_BEDROCK) or "").strip().lower() in _TRUE:
-        region = env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "us-east-1"
-        yield f"https://bedrock-runtime.{region}.amazonaws.com"
+        yield from _bedrock_urls(env)
     yield from _mcp_urls(mcp_config)
-    if _MCP_FLAG in cmd[:-1]:
-        yield from _mcp_urls(cmd[cmd.index(_MCP_FLAG) + 1])
+    options = _options(cmd)
+    if _MCP_FLAG in options[:-1]:
+        yield from _mcp_urls(options[options.index(_MCP_FLAG) + 1])
 
 
 def specialist_reach(cmd: Sequence[str], env: Mapping[str, str], mcp_config: str | None) -> Reach:
@@ -224,15 +303,18 @@ def specialist_reach(cmd: Sequence[str], env: Mapping[str, str], mcp_config: str
     network: the LLM endpoints and MCP servers its launch names (:func:`_launch_urls`), and nothing else."""
     loopback: dict[int, str] = {}
     remote: set[tuple[str, int]] = set()
+    plain: set[tuple[str, int]] = set()
     for url in _launch_urls(cmd, env, mcp_config):
         found = _endpoint(url)
         if found is None:
             continue
         if _is_loopback(found[0]):
             loopback.setdefault(found[1], found[0])
-        else:
-            remote.add(found)
-    return Reach(loopback, frozenset(remote))
+            continue
+        remote.add(found)
+        if url.strip().lower().startswith("http://"):
+            plain.add(found)
+    return Reach(loopback, frozenset(remote), frozenset(plain))
 
 
 def _target(line: str) -> tuple[str, int] | None:
@@ -246,8 +328,17 @@ def _target(line: str) -> tuple[str, int] | None:
     return _endpoint(where) if where.lower().startswith("http://") else None
 
 
+def _origin_form(data: bytes) -> bytes:
+    """A plain proxy request ``data`` with its absolute URL replaced by the path and query, as sent to the server."""
+    first, rest = data.split(b"\r\n", 1)
+    method, where, version = first.split()
+    parts = urlsplit(where.decode(_HEAD_CODEC))
+    path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    return b" ".join((method, path.encode(_HEAD_CODEC), version)) + b"\r\n" + rest
+
+
 def _read_head(conn: socket.socket) -> bytes:
-    """What the client sent up to the end of its request head (and any bytes after it); empty when it sent none."""
+    """What the peer sent up to the end of its head (and any bytes after it); empty when it sent none."""
     data = b""
     while b"\r\n\r\n" not in data and len(data) < _HEAD_LIMIT:
         chunk = conn.recv(_CHUNK)
@@ -257,11 +348,30 @@ def _read_head(conn: socket.socket) -> bytes:
     return data
 
 
+def _tunnel(remote: socket.socket, upstream: _Upstream, target: tuple[str, int]) -> bytes | None:
+    """Open a tunnel to ``target`` through the app's proxy at the other end of ``remote``, with the ``CONNECT`` this
+    process writes: the bytes that came after the proxy's ``200``, or ``None`` when it answered anything else."""
+    where = f"{target[0]}:{target[1]}".encode("ascii")
+    remote.sendall(b"CONNECT " + where + b" HTTP/1.1\r\nHost: " + where + b"\r\n" + upstream.authorization + b"\r\n")
+    remote.settimeout(_HEAD_TIMEOUT_SEC)
+    try:
+        answer = _read_head(remote)
+    except OSError:
+        return None
+    remote.settimeout(None)
+    if b"\r\n\r\n" not in answer:
+        return None
+    status = answer.split(b"\r\n", 1)[0].split(b" ")
+    if len(status) < 2 or not status[0].startswith(b"HTTP/") or status[1] != b"200":
+        return None
+    return answer[answer.index(b"\r\n\r\n") + 4 :]
+
+
 def _refuse(conn: socket.socket, status: str, why: str) -> None:
-    body = (why + "\n").encode("utf-8", "replace")
+    body = (why + "\n").encode(_TEXT_CODEC, "replace")
     head = f"HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n"
     with contextlib.suppress(OSError):
-        conn.sendall(head.encode("latin-1") + body)
+        conn.sendall(head.encode(_HEAD_CODEC) + body)
 
 
 def _pump(src: socket.socket, dst: socket.socket) -> None:
@@ -307,7 +417,7 @@ def _upstream(env: Mapping[str, str], target: tuple[str, int], connect: bool) ->
         login = f"{unquote(parts.username)}:{unquote(parts.password or '')}"
     authorization = b""
     if login:
-        authorization = b"Proxy-Authorization: Basic " + base64.b64encode(login.encode("utf-8")) + b"\r\n"
+        authorization = b"Proxy-Authorization: Basic " + base64.b64encode(login.encode(_TEXT_CODEC)) + b"\r\n"
     return _Upstream((parts.hostname, port), authorization)
 
 
@@ -433,34 +543,44 @@ class NetworkBridge:
             with self._lock:
                 self._open.discard(remote)
 
+    def _drop(self, remote: socket.socket) -> None:
+        with self._lock:
+            self._open.discard(remote)
+        remote.close()
+
     def _proxy(self, conn: socket.socket) -> None:
+        """Serve one proxy connection: a ``CONNECT`` to a host and port of the reach, or a plain request to one it
+        names as ``http``; 403 for anything else. Through the app's proxy, the bytes go only inside a tunnel this
+        process opened to the checked target (:func:`_tunnel`), never to that proxy as requests of their own."""
         conn.settimeout(_HEAD_TIMEOUT_SEC)
         data = _read_head(conn)
         conn.settimeout(None)
-        if not data:
+        if b"\r\n\r\n" not in data:
             return
-        line = data.split(b"\r\n", 1)[0].decode("latin-1")
+        line = data.split(b"\r\n", 1)[0].decode(_HEAD_CODEC)
         target = _target(line)
-        if target is None or target not in self.reach.remote:
+        connect = line.upper().startswith("CONNECT ")
+        if target is None or target not in (self.reach.remote if connect else self.reach.plain):
             shown = f"{target[0]}:{target[1]}" if target else line[:200]
             _refuse(conn, "403 Forbidden", f"not reachable from the specialist's sandbox: {shown}")
             return
-        connect = line.upper().startswith("CONNECT ")
         upstream = _upstream(self._env, target, connect)
         remote = self._connect(upstream.address if upstream else target)
-        if remote is None:
+        early = b"" if remote is None or upstream is None else _tunnel(remote, upstream, target)
+        if remote is None or early is None:
+            if remote is not None:
+                self._drop(remote)
             _refuse(conn, "502 Bad Gateway", f"cannot connect to {target[0]}:{target[1]}")
             return
-        if upstream is not None:
-            first, rest = data.split(b"\r\n", 1)
-            remote.sendall(first + b"\r\n" + upstream.authorization + rest)
-        elif connect:
-            end = data.index(b"\r\n\r\n") + 4
-            conn.sendall(_ESTABLISHED)
+        end = data.index(b"\r\n\r\n") + 4
+        if connect:
+            conn.sendall(_ESTABLISHED + early)
             if data[end:]:
                 remote.sendall(data[end:])
         else:
-            remote.sendall(data)
+            if early:
+                conn.sendall(early)
+            remote.sendall(_origin_form(data) if upstream is not None else data)
         self._relayed(conn, remote)
 
 
