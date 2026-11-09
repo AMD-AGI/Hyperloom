@@ -89,6 +89,15 @@ the installed framework:
 
 A round against a server it did not start (`external`) runs neither check.
 
+The server runs in the same interpreter the checks ask: `<framework_python> -m
+sglang.launch_server`, `-m vllm.entrypoints.cli.main serve` or `-m
+atom.entrypoints.openai_server`, never the base's entrypoint (`python3 -m ...`,
+`vllm serve`) through `PATH`. `launch.json` records that command as `entrypoint`
+and at the head of `argv`; the base and its digest keep the entrypoint the source
+spelled. A base whose entrypoint is not its framework's is refused
+(`config_invalid`); name another install with the server's `framework_python`
+instead.
+
 ## Launch layers
 
 A round's launch is composed in a fixed order, and `launch.json` records the layer

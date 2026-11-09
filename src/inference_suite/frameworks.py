@@ -79,6 +79,23 @@ class ServerFlags:
 
 
 @dataclass(frozen=True)
+class ServerCommand:
+    """How a framework's server starts.
+
+    ``entrypoint`` is the command the recipes spell, resolved through ``PATH``, which a base records as provenance.
+    ``module`` runs that same server under a named interpreter, so the server runs in the install the version probe
+    and the parser check read.
+    """
+
+    entrypoint: tuple[str, ...]
+    module: tuple[str, ...]
+
+    def argv(self, python: str) -> tuple[str, ...]:
+        """The server command under ``python``."""
+        return (python, *self.module)
+
+
+@dataclass(frozen=True)
 class FrameworkFacts:
     """What one framework fixes about a launch.
 
@@ -93,6 +110,7 @@ class FrameworkFacts:
     kind: FrameworkKind
     python_package: str | None
     server_flags: ServerFlags | None = None
+    server_command: ServerCommand | None = None
     expert_parallel: ExpertParallelFlag | None = None
     data_parallel: DataParallelFlag | None = None
     parser_source: str | None = None
@@ -155,6 +173,7 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         kind=FrameworkKind.SERVING,
         python_package="sglang",
         server_flags=ServerFlags("--model-path", _HOST_FLAG, "--port", "--served-model-name", "--context-length"),
+        server_command=ServerCommand(("python3", "-m", "sglang.launch_server"), ("-m", "sglang.launch_server")),
         expert_parallel=ExpertParallelFlag("--ep-size", ("--ep-size", "--expert-parallel-size", "--ep"), True),
         data_parallel=DataParallelFlag(("--data-parallel-size", "--dp-size"), shares_tp=("--enable-dp-attention",)),
         parser_source=_SGLANG_PARSER_SOURCE,
@@ -164,6 +183,8 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         kind=FrameworkKind.SERVING,
         python_package="vllm",
         server_flags=ServerFlags("--model", _HOST_FLAG, "--port", "--served-model-name", "--max-model-len"),
+        # The ``vllm`` console script is ``vllm.entrypoints.cli.main:main``.
+        server_command=ServerCommand(("vllm", "serve"), ("-m", "vllm.entrypoints.cli.main", "serve")),
         expert_parallel=ExpertParallelFlag(_VLLM_STYLE_EP_SWITCH, (_VLLM_STYLE_EP_SWITCH, "-ep"), False),
         data_parallel=DataParallelFlag(("--data-parallel-size", "-dp")),
         parser_source=_VLLM_PARSER_SOURCE,
@@ -172,6 +193,9 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         kind=FrameworkKind.SERVING,
         python_package="atom",
         server_flags=ServerFlags("--model", _HOST_FLAG, "--server-port", None, "--max-model-len"),
+        server_command=ServerCommand(
+            ("python3", "-m", "atom.entrypoints.openai_server"), ("-m", "atom.entrypoints.openai_server")
+        ),
         expert_parallel=ExpertParallelFlag(_VLLM_STYLE_EP_SWITCH, (_VLLM_STYLE_EP_SWITCH,), False),
         parser_source=_ATOM_PARSER_SOURCE,
     ),
@@ -191,6 +215,7 @@ __all__ = [
     "Framework",
     "FrameworkFacts",
     "FrameworkKind",
+    "ServerCommand",
     "ServerFlags",
     "framework_facts",
 ]

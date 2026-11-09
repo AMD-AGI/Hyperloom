@@ -9,10 +9,15 @@ framework's metrics flag when the round scrapes ``/metrics``), then the profiler
 flag beats every earlier group of the same flag; a later alias of it wins only because the engine applies the last
 one. Neither the user nor the candidate may set what the guard or the runner owns, nor, under a golden layer, what
 golden owns; such a layer is refused, not overridden, so the refusal names whose layer it was.
+
+The server runs as the framework's server module under ``server.framework_python``, the interpreter the version probe
+and the parser check run, never the base's entrypoint through ``PATH``. A base whose entrypoint is not its framework's
+server command names a program the round would not run, so it is refused.
 """
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
@@ -239,9 +244,15 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
     config.check_base(base)
     framework = Framework(base.framework)
     spec = framework_facts(framework)
-    server_flags = spec.server_flags
-    if server_flags is None:
+    server_flags, command = spec.server_flags, spec.server_command
+    if server_flags is None or command is None:
         raise LaunchError(f"{framework.value} runs no server, so it has no launch to compose")
+    if base.entrypoint != command.entrypoint:
+        detail = (
+            f"the base runs {shlex.join(base.entrypoint)}, not {framework.value}'s {shlex.join(command.entrypoint)}; "
+            f"the round runs {shlex.join(command.module)} under server.framework_python, so name the install there"
+        )
+        return Refusal(FailedStep.CONFIG_INVALID, LayerSource.BASE, detail)
     refusal = _first_refusal(server, base, _owned(base))
     if refusal is not None:
         return refusal
@@ -263,6 +274,7 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
         base=base,
         config_sha256=facts.config_sha256,
         golden_use=server.golden,
+        entrypoint=command.argv(server.framework_python),
         args=tuple(composer.args),
         env_sources=tuple(composer.env.values()),
         removed=tuple(composer.removed),

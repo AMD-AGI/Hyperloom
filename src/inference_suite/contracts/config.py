@@ -233,7 +233,8 @@ class ServerConfig:
 
     ``user`` and ``candidate`` stay separate layers so a refused flag can be told apart: a candidate's is the
     candidate's failure, a user's or base's stops the line. ``source_files`` are re-hashed before launch;
-    ``env_inherit`` names the host environment the server may see.
+    ``env_inherit`` names the host environment the server may see. ``framework_python`` is the one interpreter the
+    server runs in and the version probe and parser check read.
     """
 
     base: BaseRef
