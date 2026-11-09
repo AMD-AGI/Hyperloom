@@ -95,7 +95,7 @@ ran on, and GEAK starts its servers from that round's `launch.json` under its ow
 environment, so only a process-env ROCr mask renumbers them.
 
 `tp` in the handoff is read from the same resolved recipe as `gpu_ids`, so the
-two cannot disagree when the materializer clamps `TP` to the visible GPU count.
+two cannot disagree.
 
 A consumer that re-exports `HIP_VISIBLE_DEVICES` and leaves ROCr alone should
 use `gpu_ids`; that is correct in both coordinate systems, because whatever

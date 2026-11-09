@@ -34,7 +34,6 @@ _LEAKY_ENV = (
     "HYPERLOOM_PROFILE_MAX_ITERS",
     "HYPERLOOM_PROFILE_DELAY_ITERS",
     "HYPERLOOM_PROFILE_MAX_STEPS_CAP",
-    "INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT",
     "INFERENCE_OPTIMIZER_SERVER_ARGS",
     "XDIT_QUALITY_REF",
     "XDIT_QUALITY_REF_WRITE",
@@ -46,7 +45,6 @@ def _isolate(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     # Pin what would otherwise depend on the host (GPU count, runtime patching, and the reference recipe in the host's
     # session state), keeping the golden output byte-stable.
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
     monkeypatch.setattr(we, "session_server_base", ServerBase)
 
