@@ -26,19 +26,20 @@ decide whether a change survives.
 | **Implementer** | The only writable agent: reads the plan, edits the kernel sources, compiles and exercises them through Bash. `--lanes` runs several concurrently, each in its own workspace copy |
 | **Validation** | The driver-owned complete correctness suite, run by the loop as an SNR pre-filter |
 | **Benchmark** | The canonical benchmark, scored per case against the current best |
-| **Acceptance** | For the assembly backend only: the task's own verdict — its `compile_command`, then its `correctness_command` — re-run on a candidate about to become the incumbent, carrying the `numerical_validation` evidence that backend requires. Every other backend is judged by the driver above and measured through it, so it is not asked a second time |
+| **Acceptance** | For the assembly and mono backends: the task's own verdict — its `compile_command`, then its `correctness_command` — re-run on a candidate about to become the incumbent; assembly also carries the `numerical_validation` evidence its contract requires, and a workspace without the task's `config.yaml` is refused. Every other backend is judged by the driver above and measured through it, so it is not asked a second time |
 | **Keep or revert** | A measured improvement that the acceptance step passes is committed and becomes the new best; every other candidate is discarded back to the last validated commit |
 | **Supervisor** | When the search stalls, reviews the trajectory and writes a ruling that redirects the next plan instead of ending the run |
 | **Knowledge base** | Hardware, methodology and per-language knowledge injected into the implementer's prompt; lessons from the run are written back |
 
 ## Kernel backends
 
-Ten kernel backends carry backend expertise. A campaign selects one with
+Eleven kernel backends carry backend expertise. A campaign selects one with
 `--kernel-backend <backend>`, and that backend contributes the domain prompt for
 the kernel the loop is editing.
 
 | KernelBackend | Backend expertise |
 |:-------|:------------------|
+| `assembly` | Compiler-emitted AMDGPU assembly behind the original launcher: one `.s`, a frozen binding, a mandatory numerical contract |
 | `ck` | Composable Kernel C++ templates: tile shapes, pipelines, instance factories |
 | `flydsl` | MLIR-based DSL for MFMA-heavy compute: layouts, warp shapes |
 | `triton` | Triton JIT kernels: block sizes, warps, stages, autotuning |
@@ -48,6 +49,7 @@ the kernel the loop is editing.
 | `hipblaslt` | Dense GEMM via hipBLASLt: TensileLite solutions, FP8, fused epilogues |
 | `fusion` | Decode-path kernel fusion for sglang and vLLM: CUDA-graph-safe Triton kernels |
 | `ave` | [AveLang](https://github.com/causalflow-ai/avelang) GPU kernels: register tiling, LDS layouts, memory access and synchronization |
+| `mono` | [sgl-amd-mono](https://github.com/sgl-project/sgl-amd-mono) monokernels: persistent whole-span launches, in-kernel TP collectives, judged by the repository's own tests |
 
 ## The measurement surface
 

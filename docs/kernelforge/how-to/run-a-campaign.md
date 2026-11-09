@@ -69,7 +69,7 @@ The flags that decide what a campaign is:
   talks to it over stdout, and blocks edits to it.
 - `--kernel-backend` — which backend's domain knowledge is injected into the agent's
   prompt: one of `assembly`, `ck`, `flydsl`, `triton`, `gluon`, `aiter`, `hip`,
-  `hipblaslt`, or `ave`, written as the bare `<backend>` key.
+  `hipblaslt`, `fusion`, `ave`, or `mono`, written as the bare `<backend>` key.
 - `--snr-threshold` — the correctness gate in dB, fixed for the campaign.
 - `--max-hours` — the wall-clock budget (minimum 1.0). The campaign is
   time-driven; it does not stop at a fixed iteration count. It stops when what
@@ -97,6 +97,16 @@ Python launcher as the anchor. Automatic capture currently supports a single exp
 FlyDSL compile call. It can follow a source-language campaign as an optional second stage. See
 {doc}`Assembly candidates </kernelforge/how-to/assembly>` for the compiler,
 launcher, and measurement contract.
+
+To optimize a monokernel in [sgl-amd-mono](https://github.com/sgl-project/sgl-amd-mono),
+use `--kernel-backend mono` on a checkout of that repository; forge also infers it for
+sources under the `sgl_amd_mono/` package. The workspace root must carry a `config.yaml`
+whose `compile_command` and `correctness_command` run the repository's own tests for the
+launch. Forge runs them on every candidate it would otherwise keep, and refuses the
+candidate when the file is missing. A tensor-parallel launch is measured by a multi-rank
+driver inside `dist_harness` (`--nproc-per-node`). When one SNR cannot state the launch's
+contract, such as an output that must stay bitwise next to a toleranced one, each case
+brings a `judge`, and `verify_replay=True` also judges the last timed graph replay.
 
 Before the first iteration, the loop checks the driver against the contract it
 enforces at run time and repairs it if needed. When that fails the run aborts

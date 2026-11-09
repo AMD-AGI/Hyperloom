@@ -15,15 +15,17 @@ blocked by the system, so no change is ever accepted without measured evidence.
 1. **Build** — compile the kernel; stale artifacts are auto-cleaned so an edit
    cannot be silently benchmarked against old code.
 2. **SNR pre-filter** — run the correctness driver; a change must clear the
-   signal-to-noise threshold (default 30 dB) before it can be benchmarked.
+   signal-to-noise threshold (default 30 dB), or report `allclose: True` from a
+   driver that judges each output itself, before it can be benchmarked.
 3. **Benchmark** — measure wall-clock and kernel time (median over iterations).
 4. **Register check** — read the candidate's VGPR usage from the build and record
    it with the measurements. Hardware counters are not read per candidate: the
    Analysis Agent profiles the current best, and planning reads that evidence.
-5. **Accept** (assembly only) — run the task's own `compile_command`, then its
-   `correctness_command`, stopping at the first failure, and judge the
-   `numerical_validation` evidence the assembly backend's contract requires.
-   Keep the change only if all pass, otherwise revert. The compile step matters
+5. **Accept** (assembly and mono) — run the task's own `compile_command`, then
+   its `correctness_command`, stopping at the first failure; for assembly, also
+   judge the `numerical_validation` evidence its contract requires. A workspace
+   without the task's `config.yaml` is refused rather than kept on the driver's
+   verdict. Keep the change only if all pass, otherwise revert. The compile step matters
    on its own — the task often builds a smaller shape than the one the loop
    measures. Every other backend was judged by the driver in step 2 and has been
    measured through it since, so its keep rests on that verdict and nothing
