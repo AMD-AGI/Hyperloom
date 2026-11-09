@@ -205,6 +205,13 @@ What is still yours:
   accuracy. Nothing after you is guaranteed to catch it.
 * Declare one `Case` per case id the task's invocation specification lists.
 
+When one SNR cannot state the contract — an output that must match exactly next
+to one held to a tolerance — give every `Case` a `judge=`: it receives
+`(ctx, got, want)` on one rank and returns `Judgement(passed, metrics)` (also
+imported from `dist_harness`). The harness then reports `allclose` from the
+worst rank, and `verify_replay=True` also judges the last timed graph replay of
+a candidate whose answer depends only on its inputs.
+
 The deterministic check confirms that {nproc} ranks launched and that every one
 of them measured inside the harness. A driver that launches ranks itself is
 rejected for that, whatever else it got right.
