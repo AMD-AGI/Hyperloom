@@ -908,12 +908,17 @@ async def generate_directions(checkout: Path, profile: Path, out: Path) -> Path:
 
 
 async def _directions(checkout: Path, written: tuple[Path, ...], *args: str) -> None:
-    """Run ``python3 -m arbor.directions`` with ``args`` in ``checkout``; raise :class:`SplitFailed` with what it
-    printed when it fails or leaves any of ``written`` unwritten."""
+    """Run ``python3 -m arbor.directions`` with ``args`` in ``checkout``, as Arbor's other commands with no site
+    settings file (:data:`SETTINGS_ENV`); raise :class:`SplitFailed` with what it printed when it fails or leaves any
+    of ``written`` unwritten."""
 
     argv = [PYTHON, "-m", "arbor.directions", *args]
     process = await asyncio.create_subprocess_exec(
-        *argv, cwd=checkout, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        *argv,
+        cwd=checkout,
+        env={**os.environ, SETTINGS_ENV: os.devnull},
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
     output, _ = await process.communicate()
     said = " | ".join(line.strip() for line in output.decode(errors="replace").strip().splitlines()[-_TAIL_LINES:])
