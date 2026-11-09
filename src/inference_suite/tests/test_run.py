@@ -253,8 +253,9 @@ class _Rig:
             self.port = sock.getsockname()[1]
         self.installed = "0.5.23"
         self.refusal: FlagRefusal | None = None
+        self.probe_cwds: list[Path] = []
         monkeypatch.setattr(run, "probe_install", self._probe)
-        monkeypatch.setattr(parser_check, "check", lambda *_args: self.refusal)
+        monkeypatch.setattr(parser_check, "check", self._check)
         monkeypatch.setattr(run, "_lm_eval_version", lambda: "0.4.9")
         monkeypatch.setattr(run, "GpuPowerRecorder", functools.partial(gpu_telemetry.GpuPowerRecorder, query=_AmdSmi()))
         planned = EvalPlan.invocation
@@ -270,9 +271,14 @@ class _Rig:
         self.busy_gpus: str | None = None
         monkeypatch.setattr(runtime_server, "unavailable_gpus", lambda gpus: self.busy_gpus)
 
-    def _probe(self, python, framework, env):
+    def _probe(self, python, framework, env, *, cwd):
         assert env["HF_TOKEN"] == _SECRET
+        self.probe_cwds.append(cwd)
         return FrameworkInstall(python, "3.12.3", "/site-packages/sglang/__init__.py", self.installed)
+
+    def _check(self, launch, python, env, *, cwd):
+        self.probe_cwds.append(cwd)
+        return self.refusal
 
     def config(self, run_dir: str, **changes) -> SuiteConfig:
         base = _config()
@@ -335,6 +341,7 @@ def test_a_fixed_round_with_eval_reports_what_it_measured_and_leaves_its_run_dir
     assert report.eval.results_file == "eval/served/results_2026-11-06T00-00-00.json"
     assert report.server is not None and not report.server.reused and report.server.log_range is None
     assert not layout.server_pid.exists()
+    assert rig.probe_cwds == [layout.root, layout.root]
 
     settled = _snapshot(layout.root)
     time.sleep(0.5)
@@ -612,7 +619,7 @@ def test_a_round_writes_only_into_an_empty_run_dir(rig):
         run.run_round(config)
 
 
-def _crashed_parser(*_args):
+def _crashed_parser(*_args, **_kwargs):
     raise FrameworkProbeError("the probe exited 1 with no answer: KeyError: 'libamd_smi.so'")
 
 
