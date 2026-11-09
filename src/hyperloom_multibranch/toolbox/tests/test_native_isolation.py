@@ -471,7 +471,7 @@ async def test_under_bubblewrap_a_cu_edit_is_built_stored_and_laid_from_a_worker
 
 def test_a_runner_given_what_chooses_its_isolation_asks_it_at_each_build(tmp_path: Path) -> None:
     """A bubblewrap whose probe gave no answer in time at the start of the session may answer at a later build."""
-    answers: list[Isolation | None] = [None, Isolation((), None)]
+    answers: list[Isolation | Unisolated] = [Unisolated("no answer in time"), Isolation((), None)]
     tree = _tree(tmp_path / "tree", _MARKED_CHILD)
 
     with pytest.raises(BuildInfraError, match="cannot isolate a native build"):
