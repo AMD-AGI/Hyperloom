@@ -57,6 +57,7 @@ __all__ = [
     "DRM_VRAM_KEY",
     "ENV_CONC",
     "ENV_EP",
+    "ENV_EVAL_ONLY",
     "ENV_ISL",
     "ENV_MAGPIE_EVAL_LIMIT",
     "ENV_MAGPIE_EVAL_TASKS",
@@ -76,6 +77,7 @@ __all__ = [
     "HIP_NO_KERNEL_IMAGE",
     "HIP_UNDEFINED_SYMBOL",
     "HSA_STATUS_ERROR",
+    "HUB_RATE_LIMITED",
     "INITIAL_PID_NAMESPACE",
     "KFD_NODES",
     "KFD_NODE_GPU_ID",
@@ -86,6 +88,7 @@ __all__ = [
     "KFD_RENDER_MINOR_KEY",
     "KFD_ROOT",
     "KFD_VRAM_PREFIX",
+    "MAGPIE_AGENTX_CLIENT_LOG",
     "PID_NAMESPACE_LINK",
     "PY_IMPORT_ERROR",
     "PY_MODULE_NOT_FOUND_ERROR",
@@ -229,6 +232,7 @@ _inferencex = _PACK.names(
     "random_range_ratio",
     "conc",
     "run_eval",
+    "eval_only",
     "num_prompts",
     "num_warmups",
     "max_model_len",
@@ -243,6 +247,7 @@ ENV_OSL = _inferencex["osl"]
 ENV_RANDOM_RANGE_RATIO = _inferencex["random_range_ratio"]
 ENV_CONC = _inferencex["conc"]
 ENV_RUN_EVAL = _inferencex["run_eval"]
+ENV_EVAL_ONLY = _inferencex["eval_only"]
 ENV_NUM_PROMPTS = _inferencex["num_prompts"]
 ENV_NUM_WARMUPS = _inferencex["num_warmups"]
 ENV_MAX_MODEL_LEN = _inferencex["max_model_len"]
@@ -280,6 +285,9 @@ _aiperf_source = _PACK.names("aiperf_source", "submodule", "parser_file", "outpu
 AIPERF_SUBMODULE = _aiperf_source["submodule"]
 AIPERF_PARSER_FILE = _aiperf_source["parser_file"]
 AIPERF_OUTPUT_LENGTH_FILE = _aiperf_source["output_length_file"]
+
+MAGPIE_AGENTX_CLIENT_LOG = _PACK.names("magpie_agentx_client_log", "file")["file"]
+HUB_RATE_LIMITED = _PACK.pattern("hub_rate_limited")
 
 
 def spaced(phrase: str) -> str:

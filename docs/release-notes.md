@@ -32,6 +32,17 @@ it.
   having already taken a variant slot. The refusal at materialization stays as
   the backstop for launches the filter does not compose.
 
+- **Bump validated vLLM stack to 0.33.0 (ROCm 10 docker) and accept the relocated graph-capture marker.**
+  Switches the recommended vLLM image to `docker.io/vllm/vllm-openai-rocm:v0.33.0-rocm100`
+  (docs, examples, `models.tsv`, installer hint), bumps the bare-metal defaults
+  (`VLLM_VERSION=0.33.0`, `VLLM_ROCM_VARIANT=rocm72`, `VLLM_SOURCE_REF` at the `v0.33.0`
+  release commit), and clears the image entrypoint in the Slurm `docker run` branch.
+  The TraceLens patch check now looks for `capture_traces` in `vllm/profiler/wrapper.py`
+  from vLLM 0.32, where the patch writes it, so a correctly patched tree is no longer
+  rolled back. **Upgrade note:** move from
+  `rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0` to
+  `vllm/vllm-openai-rocm:v0.33.0-rocm100` (or match `VLLM_VERSION` and `VLLM_SOURCE_REF` on bare metal).
+
 - **Bump validated SGLang stack to 0.5.23 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
   `lmsysorg/sglang-rocm:v0.5.23-rocm10-*` image tags, `models.tsv`, the

@@ -16,11 +16,10 @@ import pytest
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.specialists import runner as sr
+from hyperloom.orchestrator.specialists.failure_class import SpecialistFailureType, classify_specialist_failure
 from hyperloom.orchestrator.specialists.runner import (
-    SpecialistFailureType,
     SpecialistRunner,
     build_empty_specialist_done,
-    classify_specialist_failure,
 )
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -215,6 +214,15 @@ def test_write_specialist_done(tmp_path):
     r._write_specialist_done(tmp_path, {"proposal_set": []})
     payload = json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
     assert payload["proposal_set"] == [] and "ts" in payload
+
+
+def test_write_specialist_done_scrubs_credentials(tmp_path):
+    r = _runner()
+    reason = "clone failed: Authorization: Bearer abcdefgh12345678 ghp_abcdef123456"
+    r._write_specialist_done(tmp_path, {"reason": reason, "n": 2})
+    text = (tmp_path / "specialist_done.json").read_text(encoding="utf-8")
+    assert "abcdefgh12345678" not in text and "ghp_abcdef123456" not in text
+    assert json.loads(text)["n"] == 2
 
 
 def test_write_specialist_done_atomic_leaves_no_tmp(tmp_path):

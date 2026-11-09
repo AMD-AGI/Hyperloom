@@ -133,6 +133,7 @@ from ..session.paths import ENV_USER_DATA_PATH, asset_system_prompts_dir, make_s
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 
 from .gpu_power_apply import gpu_power_restore_guard
+from .stack_dump import dump_thread_stacks_on_sigusr1
 from .custom_specialist import (
     CUSTOM_SPECIALIST_ONLY_ENV,
     _apply_custom_specialist_resume as _apply_custom_specialist_resume,
@@ -514,14 +515,12 @@ def _preflight_agentx_backend(args: argparse.Namespace) -> None:
         raise SystemExit(2)
 
 
-def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
-    """Warn when AgentX is enabled without an explicit session budget."""
-    if not _agentx_enabled():
+def _apply_default_budget(args: argparse.Namespace) -> None:
+    """Give a run that neither ``--max-hours`` nor its archive budgeted the default, warning when AgentX is on."""
+    if args.max_hours is not None:
         return
-    # ``--max-hours`` carries no argparse default, so absence reads as ``None``
-    # here: this runs before either path settles the budget. An explicit value
-    # is a deliberate choice even when it equals the default, and gets no note.
-    if getattr(args, "max_hours", None) is None:
+    args.max_hours = DEFAULT_MAX_HOURS
+    if _agentx_enabled():
         print(
             f"NOTE: AgentX replay is configured and --max-hours is at its default of {DEFAULT_MAX_HOURS}. "
             "One AgentX round (corpus load + warmup + drain + measurement window) "
@@ -1199,8 +1198,7 @@ def _open_next_leg(args: argparse.Namespace, state: SharedState, session: _Sessi
     print(f"  → cleared stop_reason and crash_count (was {prior_crash}) for this leg{override_note}")
     for line in _restore_budget_and_objective(args, state, session.manifest):
         print(line)
-    if args.max_hours is None:
-        args.max_hours = DEFAULT_MAX_HOURS
+    _apply_default_budget(args)
     for line in _resume_budget_lines(state, extend_hours=extend_hours):
         print(line)
 
@@ -1626,7 +1624,6 @@ async def _prepare_run(args: argparse.Namespace) -> _ProviderIntent:
         if _scope_error:
             print(f"ERROR: {_scope_error}.", file=sys.stderr)
             raise SystemExit(2)
-    _apply_agentx_budget_profile(args)
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
     resolve_benchmark_timeouts()
@@ -1739,8 +1736,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if args.resume_from:
         session = await _resume_session(args)
     else:
-        if args.max_hours is None:
-            args.max_hours = DEFAULT_MAX_HOURS
+        _apply_default_budget(args)
         session = await _seed_fresh_session(args, nodes_resolved=nodes_resolved)
     session_dir = session.session_dir
     session_lock = session.session_lock
@@ -1835,11 +1831,9 @@ def main(argv: list[str] | None = None) -> int:
     # Strict on purpose.
     args = parser.parse_args(argv)
     level = logging.WARNING - 10 * min(args.verbose, 2)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
-    )
+    logging.basicConfig(level=level, format="%(asctime)s %(name)s [%(levelname)s] %(message)s")
     if args.command == "optimize":
+        dump_thread_stacks_on_sigusr1()
         # Resolve any --*-prompt that point at a file.
         for attr in ("orch_prompt", "critic_prompt"):
             v = getattr(args, attr)

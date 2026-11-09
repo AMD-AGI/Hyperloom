@@ -39,12 +39,20 @@ LAUNCH_BOUND_CATEGORIES: frozenset[str] = frozenset(
 # Calibration finding (5 measured models, kernel/docs/fusion_calibration.json): launch_bound_share is a POOR
 # discriminator of real cg-ON gain -- GraniteMoE has the BEST measured gain (+5.32%) yet a LOW share (0.17), because
 # its big MoE GEMM/expert kernels dilute the launch-bound share.
+# The bar is judged on non-collective launch-bound time: a collective is a rank's wait, not a foldable launch. On TP4
+# MoE decode traces that takes the share from 0.23-0.30 to 0.115-0.151, still above it.
 DEFAULT_MIN_LAUNCH_BOUND_SHARE = 0.10
 DEFAULT_MAX_BUSY_WALL = 0.45
 
 # Ordered (first-match-wins) kernel-name -> category rules.
 _KERNEL_CATEGORY_RULES: tuple[tuple[str, str], ...] = (
-    # MoE first: its kernels are GEMMs too, and the table reports them separately.
+    # Collectives before reduce/copy/rmsnorm, which their names also match; a rank's collective time includes its wait.
+    (
+        "collective",
+        r"all_?reduce|reduce_?scatter|all_?gather|all_?to_?all|cross_device_reduce|quick_?reduce|\bcustom_ar\b"
+        r"|nccl|rccl|local_device_load_rmsnorm",
+    ),
+    # MoE first among compute: its kernels are GEMMs too, and the table reports them separately.
     ("moe", r"fused_moe|mfma_moe|moe_align|moe_sum|moe_reduction|_routing|expert|grouped_topk"),
     # Norms before the bare ``gemm`` substring, as in TraceLens: CamelCase ``GemmaRMSNorm`` still spells it.
     ("rmsnorm", r"rmsnorm|rms_norm|_rms_"),

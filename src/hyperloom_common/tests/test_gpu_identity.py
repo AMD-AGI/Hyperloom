@@ -19,10 +19,32 @@ def test_a_device_id_belongs_to_one_board():
 
 @pytest.mark.parametrize(
     ("device_id", "board"),
-    [("0x75a3", "mi355x"), ("0x75A3", "mi355x"), (0x75A3, "mi355x"), ("0x74a1", "mi300x"), ("0x74a5", "mi325x")],
+    [
+        ("0x75a3", "mi355x"),
+        ("0x75A3", "mi355x"),
+        (0x75A3, "mi355x"),
+        ("0x75a0", "mi350x"),
+        ("0x75b0", "mi350x"),
+        ("0x74a1", "mi300x"),
+        ("0x74a5", "mi325x"),
+    ],
 )
 def test_the_boards_the_measured_nodes_report(device_id, board):
     assert gpu_type_for_device_id(device_id) == board
+
+
+def test_the_mi350x_is_the_mi355x_die_at_the_lower_peak_clock():
+    """AMD publishes the MI350X at a 2.2 GHz peak engine clock and the MI355X at 2.4 GHz, on the same gfx950 die."""
+    mi350x, mi355x = AMD_GPU_BOARDS["mi350x"], AMD_GPU_BOARDS["mi355x"]
+    assert (mi350x.gfx, mi350x.compute_units, mi350x.hbm_gb, mi350x.hbm_bw_gbps) == (
+        mi355x.gfx,
+        mi355x.compute_units,
+        mi355x.hbm_gb,
+        mi355x.hbm_bw_gbps,
+    )
+    assert mi350x.vendor_peak_tflops.keys() == mi355x.vendor_peak_tflops.keys()
+    for precision, peak in mi355x.vendor_peak_tflops.items():
+        assert mi350x.vendor_peak_tflops[precision] == pytest.approx(peak * 2.2 / 2.4, abs=0.1), precision
 
 
 @pytest.mark.parametrize("device_id", [None, "", "0x", "not-an-id", "0x0000", True, "0x74a2", "0x74b6", "0x7551"])
