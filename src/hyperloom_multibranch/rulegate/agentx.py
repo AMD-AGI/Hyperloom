@@ -22,6 +22,7 @@ from hyperloom.common.perf_metric import (
     GRADED_ERROR_RATE,
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
+    GRADED_INTVTY_P50_CHECKPOINT,
     GRADED_OUTPUT,
     GRADED_REQUESTS_TOTAL,
     GRADED_UNSERVED_REQUESTS,
@@ -43,8 +44,11 @@ SPEED_GATES = frozenset(
     {*BELOW_THRESHOLD, *(guard.refusal for objective in AgentXObjective for guard in objective.guards)}
 )
 #: Every axis any objective's bar or guards read is among them, so a judgement records what its session is graded on.
+#: The checkpoint median is read by no bar or guard: a committed candidate records it as the reference its children's
+#: AgentX checkpoint compares against.
 _RECORDED_AXES = (
     GRADED_INTVTY_P50,
+    GRADED_INTVTY_P50_CHECKPOINT,
     TOTAL_TOKEN_THROUGHPUT,
     GRADED_INTVTY,
     GRADED_OUTPUT,
