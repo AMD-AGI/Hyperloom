@@ -36,7 +36,7 @@
               "const": "hyperloom.workflow_evaluation.v3"
             },
             "contract_digest": {
-              "const": "5fa3cef20ed8c141e92df816c132fcb0f44a7b6d578a0883213d5b8554fefad4"
+              "const": "e0d44b1ababa0febbcf0bf1b416b11f62dd52d4ff3a8877cfc8f8c709e774516"
             },
             "run_flags": {
               "type": "object",
@@ -729,6 +729,7 @@
             "environment_fault",
             "framework_agent_phase_done",
             "global_converged",
+            "host_gpus_unavailable",
             "max_ticks",
             "model_config_incompatible",
             "model_context_window_too_small",

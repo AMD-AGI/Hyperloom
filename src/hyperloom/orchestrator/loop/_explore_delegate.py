@@ -43,7 +43,7 @@ def explore_grid_key(params: Mapping[str, Any], *, macro_cycle: int) -> str:
     grid = params.get("grid")
     if not isinstance(grid, list) or not grid:
         return ""
-    from ..actions.executors.measured_variants import stack_of
+    from ..actions.executors.explore_prefilter.measured_variants import stack_of
 
     prints: list[str] = []
     for variant in grid:
@@ -96,7 +96,7 @@ async def _observe(router: Any, source: str, kind: str, hint: str, **fields: Any
 
 async def _keep_unqueued_variants(router: Any, source: str, params: dict[str, Any], active: list[Any]) -> bool:
     """Narrow ``params['grid']`` to the variants the queue is not already measuring; ``False`` when none is left."""
-    from ..actions.executors.measured_variants import unqueued_variants
+    from ..actions.executors.explore_prefilter.measured_variants import unqueued_variants
 
     before = list(params.get("grid") or ())
     if not before:
@@ -143,7 +143,7 @@ async def _explore_grid_covered(router: Any, request: Any, idempotency_key: str)
     A task already queued or running under ``idempotency_key`` is not counted against the grid: re-sending the key
     is answered as a duplicate by the enqueue, not as coverage.
     """
-    from ..actions.executors.measured_variants import explore_grid_already_covered
+    from ..actions.executors.explore_prefilter.measured_variants import explore_grid_already_covered
 
     retry_prefix = f"{idempotency_key}-retry"
     active = [

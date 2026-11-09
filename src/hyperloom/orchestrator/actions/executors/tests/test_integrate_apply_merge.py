@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -15,7 +16,13 @@ from hyperloom.orchestrator.actions.executors._integrate_apply import _apply_pat
 from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.actions.executors.patch_conflict_merge import STRATEGY_THREE_WAY
-from hyperloom.orchestrator.tests._helpers import diff_against_head, git, init_git_repo
+
+_GIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "merge-test",
+    "GIT_AUTHOR_EMAIL": "merge-test@local",
+    "GIT_COMMITTER_NAME": "merge-test",
+    "GIT_COMMITTER_EMAIL": "merge-test@local",
+}
 
 _MODULE = "serving_base.py"
 
@@ -27,27 +34,42 @@ def beta():
 """
 
 
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=repo, env={**os.environ, **_GIT_IDENTITY}, capture_output=True, text=True, check=True
+    )
+    return result.stdout
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    init_git_repo(tmp_path / "framework", seed_file=_MODULE, seed_text=_BASE)
-    return tmp_path / "framework"
+    repo = tmp_path / "framework"
+    repo.mkdir()
+    _git(repo, "init", "--initial-branch=main")
+    _git(repo, "config", "core.autocrlf", "false")
+    (repo / _MODULE).write_text(_BASE, encoding="utf-8")
+    _git(repo, "add", _MODULE)
+    _git(repo, "commit", "-m", "base")
+    return repo
 
 
 def _authored(repo: Path, name: str, text: str) -> Path:
     """Diff ``text`` against the original file, as a specialist on its own worktree would."""
+    (repo / _MODULE).write_text(text, encoding="utf-8")
     patch = repo.parent / f"{name}.patch"
-    patch.write_text(diff_against_head(repo, _MODULE, text), encoding="utf-8")
+    patch.write_text(_git(repo, "diff"), encoding="utf-8")
+    _git(repo, "checkout", "--", _MODULE)
     return patch
 
 
 def _keep(repo: Path, patch: Path) -> None:
-    git(repo, "apply", str(patch))
-    git(repo, "commit", "-am", f"keep {patch.stem}")
+    _git(repo, "apply", str(patch))
+    _git(repo, "commit", "-am", f"keep {patch.stem}")
 
 
 async def _series(repo: Path, patch: Path) -> tuple[IntegrateAttempt, object]:
     attempt = IntegrateAttempt(task_id="integrate-b", specialist_task_id="spec-b", framework_root=repo)
-    head = git(repo, "rev-parse", "HEAD")
+    head = _git(repo, "rev-parse", "HEAD").strip()
     series = await _apply_patch_series(attempt, [patch], git_head=head, backup_root=repo.parent / "backups")
     return attempt, series
 
@@ -98,7 +120,7 @@ async def test_an_overlapping_edit_goes_back_to_its_author(repo: Path, monkeypat
     assert "three-way left conflicts" in stderr
     assert series.feedback
     assert (repo / _MODULE).read_text(encoding="utf-8") == kept
-    assert git(repo, "status", "--porcelain") == ""
+    assert _git(repo, "status", "--porcelain") == ""
 
 
 def test_the_integrate_result_names_the_merged_patches(tmp_path: Path) -> None:

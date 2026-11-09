@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,6 +37,7 @@ from kernelforge.workflows.forge_fusion.author import (
     run_author,
 )
 from kernelforge.workflows.forge_fusion.agent_selection import _create_agent_backend, _resolve_agent_choice
+from kernelforge.workflows.forge_fusion.campaign import CLOSING_RESERVE_SEC, _failed_campaign
 from kernelforge.workflows.forge_fusion.locate import _framework_repo_root, _package_root
 from kernelforge.workflows.forge_fusion.source_snapshot import _reset_fusion_source, _snapshot_fusion_source
 from kernelforge.cli.forge_fuse_command import forge_fuse as main
@@ -668,6 +670,45 @@ def test_autoloop_runs_one_forge_loop_campaign_per_recipe(tmp_path, monkeypatch)
     # The author is given a module that is already tracked, not left to create one that ``git add -u`` could never
     # commit.
     assert seen[0]["brief"].fused_module.endswith("qwen3_fused_residual_add_rmsnorm.py")
+
+
+def test_each_campaign_is_dealt_its_share_of_the_runs_deadline(tmp_path, monkeypatch):
+    """Recipes run one after another, so one deadline handed to all lets the first spend every recipe's time."""
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    source = model_dir / "qwen3.py"
+    source.write_text("SOURCE = 'baseline'\n", encoding="utf-8")
+    recipes = [replace(_autoloop_recipe(source), pattern_id=f"chain_{index}") for index in range(3)]
+    run_end = time.time() + 1800.0
+    deadlines: list[float] = []
+
+    def fake_campaign(recipe, workspace, brief, runtime, target_speedup):
+        deadlines.append(runtime.deadline_unix)
+        return _failed_campaign("not kept")
+
+    monkeypatch.setattr(cli_module, "_author_baseline_harness", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(cli_module, "run_recipe_campaign", fake_campaign)
+    cli_module._run_fusion_autoloop(
+        recipes,
+        cli_module._FusionRun(
+            out=tmp_path,
+            repo_root=str(model_dir),
+            pristine_dir="",
+            framework_root="",
+            repo_scope=False,
+            session=cli_module.ServingSession("vllm", "", "0", 512, 64),
+            author=cli_module.AuthorAgent(backend=object, gpu="0", model="m", max_turns=1),
+            gpu_arch="",
+            target_speedup=1.03,
+            deadline_unix=run_end,
+        ),
+        cli_module._LoopPlan(author=True),
+        cli_module.CampaignRuntime(gpu="0", model="m"),
+    )
+
+    assert len(deadlines) == 3
+    assert time.time() < deadlines[0] < deadlines[1] < deadlines[2] <= run_end - CLOSING_RESERVE_SEC
+    assert deadlines[0] <= time.time() + 1800.0 / 3
 
 
 def test_autoloop_gives_the_loop_a_git_workspace(tmp_path, monkeypatch):
@@ -1516,22 +1557,17 @@ def test_the_fuse_cli_names_its_model_and_target_as_the_loop_does():
     assert "--gpu-arch" not in help_text
 
 
-def test_every_campaign_inherits_the_runs_deadline(tmp_path):
-    """``forge-fuse --deadline-unix`` reaches the runtime each recipe's forge-loop is built from."""
-    run = cli_module._FusionRun(
-        out=tmp_path,
-        repo_root=str(tmp_path),
-        pristine_dir="",
-        framework_root="",
-        repo_scope=False,
-        session=cli_module.ServingSession("sglang", "", "0", 512, 64),
-        author=cli_module.AuthorAgent(backend=object, gpu="0", model="m", max_turns=1),
-        gpu_arch="gfx950",
-        target_speedup=1.03,
-        deadline_unix=1792893600.5,
-    )
-    agent = cli_module.FuseAgentOptions(
-        agent_backend="claude", agent_sandbox_mode="workspace-write", llm_model="m", max_turns=1
-    )
+@pytest.mark.parametrize(("argv", "deadline"), [(["--deadline-unix", "1792893600.5"], 1792893600.5), ([], 0.0)])
+def test_the_fuse_cli_hands_its_deadline_to_the_run(monkeypatch, argv, deadline):
+    """The run's end is what every campaign's share is dealt from; 0 leaves each loop its default budget."""
+    seen: list[float] = []
 
-    assert cli_module._campaign_runtime(run, agent, "m").deadline_unix == 1792893600.5
+    def fake_fuse(request):
+        seen.append(request.deadline_unix)
+        return SimpleNamespace(summary={}, exit_code=0)
+
+    monkeypatch.setattr("kernelforge.cli.forge_fuse_command.fuse", fake_fuse)
+    result = CliRunner().invoke(main, argv)
+
+    assert result.exit_code == 0, result.output
+    assert seen == [deadline]

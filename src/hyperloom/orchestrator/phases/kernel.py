@@ -234,7 +234,7 @@ class KernelPhase(
         if not landed:
             log.warning("kernel-entry reprofile produced no new snapshot; the phase targets the existing trace")
             return landed
-        # The anchor is the projection the trace was taken at, the same quantity the watermark compares it with.
+        # The anchor is the projection the trace was taken at, the quantity the watermark compares it with.
         state.last_roofline_tput = anchor_tput
         # Record the workload (incl. serving_config) that this trace reflects; _profile_config_changed derives the
         # config signature from it, so last_profile_args stays the plain-args field it is everywhere else.
@@ -782,9 +782,6 @@ class KernelPhase(
         # what lets a campaign name its own baseline -- the diff's starting
         # point, and the state a borrowed repository is handed back at.
         baselines = self._seal_campaign_baselines()
-        if await self._integrate_unintegrated_attempts():
-            # The new attempt diffs against the tree that now carries those KEEPs.
-            baselines = self._seal_campaign_baselines()
         from ..kernel.forge_handoff import write_forge_handoff
 
         env_spec = self._coord.writeback.build_env_spec()
@@ -857,10 +854,8 @@ class KernelPhase(
                 result["reclaimed_repositories"] = reclaimed
         except ValueError:
             log.exception("KERNEL entry: reclaiming the campaign repositories failed")
-        from ..actions.executors._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE
-
-        if result.get("returncode") == ORCHESTRATOR_CANCELLED_RETURNCODE:
-            # Not settled: the resumed entry re-enters KERNEL and integrates what this attempt published.
+        if result["status"] == "cancelled":
+            # Unsettled: the resumed entry runs a fresh Controller.
             log.warning("KERNEL entry: Controller attempt %s was cancelled; leaving it to the resume", output_dir.name)
             return
         await self._integrate_controller_output(result, output_dir)
@@ -1080,23 +1075,22 @@ class KernelPhase(
             return False
         return cur / last_rl >= ROOFLINE_WATERMARK_RATIO
 
-    async def release_finished_roofline_gate(self) -> str:
-        """Drop an in-flight marker that names a roofline which already finished; the state it ended in, or ``""``."""
+    async def release_finished_roofline_gate(self) -> None:
+        """Drop an in-flight marker that names a roofline which already finished."""
         pending = (self.shared_state.auto_roofline_pending_task_id or "").strip()
         if not pending:
-            return ""
+            return
         try:
             task = await self.tasks.get(pending)
         except TaskNotFound:
             task = None
         if task is not None and str(getattr(task, "state", "")) not in TERMINAL_STATES:
-            return ""
+            return
         self.shared_state.auto_roofline_pending_task_id = ""
         log.info(
             "watermark-roofline: released in-flight gate held by finished task=%s",
             pending,
         )
-        return str(getattr(task, "state", "") or "")
 
     async def maybe_enqueue_watermark_roofline(
         self,

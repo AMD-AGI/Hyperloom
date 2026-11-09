@@ -12,15 +12,17 @@ from hyperloom_common.coerce import to_float
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_QUEUED, EventSpan, record_event
+from ..actions.executors.benchmark_result import is_valid_measurement
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..policy.gate import SPECIALIST_ACTION_NAME
 from ..policy.specialist_in_flight import specialist_in_flight_denial
 from ..specialists.domains import gap_backfilled_domain
 from ..state.shared_state import inject_stack_base_params
-from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec
+from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec, create_on_free_key
 from ..collaborator import CoordinatorCollaborator
 from ._explore_grid import explore_grid_denial
+from ._integrate_promotion import _confirmed_task_outcome
 
 if TYPE_CHECKING:
     from .coordinator import Coordinator
@@ -28,8 +30,6 @@ if TYPE_CHECKING:
 import logging as _logging
 
 log = _logging.getLogger(__name__)
-
-_MAX_IDEMPOTENCY_ATTEMPTS: int = 6
 
 
 @dataclass
@@ -286,12 +286,12 @@ def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
     )
 
 
-def _twin_skip_reason(action_name: str, twin_state: str) -> str:
-    """Why an existing task of the same content answers a proposal, or ``""`` when a fresh key may retry it."""
-    if twin_state not in TERMINAL_STATES:
-        return "duplicate_proposal_content"
-    # A measured baseline answers every later proposal of the same content; only a failed one is retried.
-    return "baseline_already_succeeded" if action_name == "baseline" and twin_state == "succeeded" else ""
+def _twin_answers(action_name: str, twin: Task) -> bool:
+    """Whether an existing task of a proposal's content answers it, rather than leaving a retry key to it."""
+    if twin.state not in TERMINAL_STATES:
+        return True
+    # A baseline that measured answers a repeat of its content; the row state is ``succeeded`` for any result.
+    return action_name == "baseline" and is_valid_measurement(_confirmed_task_outcome(twin))
 
 
 class ProposalsCollaborator(CoordinatorCollaborator):
@@ -372,39 +372,32 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         if not await self._seed_materialized_params(pending, params, approved_variant_names):
             return
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(pending.action_name)
-        # Content-addressed so a batch of proposals that would launch identical work collapses to one task; a
-        # terminated twin still gets a fresh key so a legitimate retry after failure is never locked out.
+        # Content-addressed so a batch of proposals that would launch identical work collapses to one task; an
+        # ended twin gets a fresh key so a retry after failure is never locked out, unless it is a measured baseline.
         raw_key = self._approved_idempotency_key(pending.action_name, params)
         # Preserve the authoritative config-proposal join on the materialized task. Keep this out of the
         # content-addressed idempotency key above so two proposals for identical grids still collapse to one task.
         if pending.action_name == "explore" and pending.proposal_msg_id:
             params["proposal_msg_id"] = str(pending.proposal_msg_id)
-        task = None
-        was_existing = False
-        for attempt in range(_MAX_IDEMPOTENCY_ATTEMPTS):
-            idempotency_key = raw_key if attempt == 0 else f"{raw_key}-retry{attempt}"
-            task, was_existing = await self.tasks.create_or_return_existing(
-                TaskSpec(
-                    kind=pending.action_name,
-                    params=params,
-                    idempotency_key=idempotency_key,
-                    requires_lanes=lanes,
-                    lease_ttl_sec=ttl,
-                    dispatch_class="llm",
-                )
-            )
-            if not was_existing:
-                break
-            if reason := _twin_skip_reason(pending.action_name, task.state):
-                await self._record_materialize_skipped(pending, reason, task_id=task.task_id, task_state=task.state)
-                return
-        else:
-            await self._record_materialize_skipped(
-                pending,
-                "idempotency_key_exhausted",
-                task_id=task.task_id if task is not None else "",
-                task_state=task.state if task is not None else "",
-            )
+        created = await create_on_free_key(
+            self.tasks,
+            TaskSpec(
+                kind=pending.action_name,
+                params=params,
+                idempotency_key=raw_key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="llm",
+            ),
+            spent=lambda twin: not _twin_answers(pending.action_name, twin),
+        )
+        if created is None:
+            await self._record_materialize_skipped(pending, "idempotency_key_exhausted", idempotency_key=raw_key)
+            return
+        task, was_existing = created
+        if was_existing:
+            reason = "duplicate_proposal_content" if task.state not in TERMINAL_STATES else "baseline_already_succeeded"
+            await self._record_materialize_skipped(pending, reason, task_id=task.task_id, task_state=task.state)
             return
         # The round the authoring specialist opened runs on under this task id.
         await self._coord.enablement_lane.handoff_enablement_round(task)

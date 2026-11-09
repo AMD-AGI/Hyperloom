@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 import subprocess
@@ -13,13 +12,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+from hyperloom_common.io import atomic_write_json
+from hyperloom_common.jsonio import read_json
 from kernelforge.utils.git import git
 from kernelforge.workflows.forge_loop.api import PRODUCER_PATH_PATTERNS, runtime_gitignore_globs
 
 log = logging.getLogger("forge_fusion")
 
 _GIT_TIMEOUT_SEC = 120
-_TEXT_ENCODING = "utf-8"
 
 #: Branch the baseline is committed onto. The loop refuses a workspace on an
 #: unnamed, ``main`` or ``master`` branch, and a fresh repository is on one.
@@ -188,7 +188,7 @@ def ensure_git_workspace(
         for path in extra_paths:
             placeholder = Path(path)
             placeholder.parent.mkdir(parents=True, exist_ok=True)
-            placeholder.write_text("", encoding=_TEXT_ENCODING)
+            placeholder.write_text("", encoding="utf-8")
         # A placeholder normally sits inside the package the scope admits, but a framework whose source is directly in
         # the export root has no such package, so each is named too.
         indexed = list(dict.fromkeys([*scopes, *(_relative(root, p) for p in extra_paths)]))
@@ -200,7 +200,7 @@ def ensure_git_workspace(
         (git_path / "info").mkdir(parents=True, exist_ok=True)
         (git_path / "info" / "exclude").write_text(
             _EXCLUDE_HEADER + "".join(f"{_admit(root, entry)}\n" for entry in indexed) + _EXCLUDE_ARTIFACTS,
-            encoding=_TEXT_ENCODING,
+            encoding="utf-8",
         )
         shadow = ShadowRepo(
             root=str(root),
@@ -210,7 +210,7 @@ def ensure_git_workspace(
             created_paths=tuple(extra_paths),
             pointer_path="" if detached else str(pointer),
         )
-        (git_path / _SHADOW_RECORD).write_text(json.dumps(asdict(shadow)), encoding=_TEXT_ENCODING)
+        atomic_write_json(git_path / _SHADOW_RECORD, asdict(shadow))
     except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
         log.error("could not initialize a shadow repo over %s: %s", repo_root, exc)
         if not detached:
@@ -236,10 +236,8 @@ def reclaim_killed_shadow(output_dir: str) -> str:
     Returns the tree restored, or "" when the run left no shadow behind. A tree
     whose reset fails keeps its shadow, the only record of what it should be.
     """
-    record = Path(output_dir) / SHADOW_GIT_DIRNAME / _SHADOW_RECORD
-    try:
-        fields = json.loads(record.read_text(encoding=_TEXT_ENCODING))
-    except FileNotFoundError:
+    fields = read_json(Path(output_dir) / SHADOW_GIT_DIRNAME / _SHADOW_RECORD, require_dict=True)
+    if fields is None:
         return ""
     shadow = ShadowRepo(**{**fields, "created_paths": tuple(fields["created_paths"])})
     if not shadow.reset_to_base():

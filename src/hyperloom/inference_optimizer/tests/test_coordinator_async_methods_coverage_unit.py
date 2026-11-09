@@ -1474,3 +1474,83 @@ async def test_baseline_executor_signs_stdout_as_well_as_stderr(coord: Coordinat
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-out-1"), oom)
     await coord.writeback.handle_unpromotable_result(_baseline_task("bl-out-2"), nccl)
     assert coord.shared_state.stop_reason != "baseline_failed"
+
+
+_GPU0_BUSY_STDERR = (
+    "Magpie.utils.gpu - INFO - Detected AMD GPU: gfx950\n"
+    "Magpie.utils.gpu - WARNING - find_idle_gpus: requested 8 but only 7 idle ([1, 2, 3, 4, 5, 6, 7]); "
+    "rejected: ['GPU 0: has running compute process']\n"
+    "Magpie.utils.gpu - INFO - find_idle_gpus: selected [1, 2, 3, 4, 5, 6, 7] (free GB: ['287.7', '287.7'])\n"
+    "Magpie.main - ERROR - Benchmark failed: "
+    "['gpu_selection.auto: needed 8 idle GPU(s) but only found 7 ([1, 2, 3, 4, 5, 6, 7])']\n"
+)
+_NO_IDLE_GPU_STDERR = (
+    "Magpie.main - ERROR - Benchmark failed: ['gpu_selection.auto failed: find_idle_gpus: no idle GPU available "
+    "(GPU 0: has running compute process; GPU 1: only 0.4 GB free (< 1.0 GB threshold)). Free a GPU, raise "
+    "gpu_selection.min_free_memory_gb, or set HIP_VISIBLE_DEVICES manually in envs.']\n"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace", [False, True], ids=["no_workspace", "workspace_without_report"])
+@pytest.mark.parametrize(
+    ("stderr", "named"),
+    [
+        (_GPU0_BUSY_STDERR, "rejected: ['GPU 0: has running compute process']"),
+        (_NO_IDLE_GPU_STDERR, "GPU 0: has running compute process; GPU 1: only 0.4 GB free"),
+    ],
+    ids=["fewer_idle_than_needed", "none_idle"],
+)
+async def test_a_baseline_refused_for_want_of_idle_gpus_stops_the_run_instead_of_entering_enablement(
+    coord: Coordinator, tmp_path, monkeypatch, workspace: bool, stderr: str, named: str
+) -> None:
+    """No server started and no patch frees a GPU another workload holds, so the first refusal ends the run."""
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import HOST_GPUS_UNAVAILABLE
+    from hyperloom.orchestrator.phases import machine_state as phase_state
+
+    result = await _executor_nonzero_result(tmp_path, monkeypatch, "gpus", stderr, workspace=workspace)
+    assert result["error_class"] == HOST_GPUS_UNAVAILABLE
+    assert named in result["error"]
+
+    coord.shared_state.phase = phase_state.PHASE_PRELUDE
+    assert coord.enablement_lane.enablement_admitted()
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-gpus"), result)
+
+    state = coord.shared_state
+    assert state.stop_reason == HOST_GPUS_UNAVAILABLE
+    assert state.last_action_failures[-1]["error_class"] == HOST_GPUS_UNAVAILABLE
+    assert named in state.last_action_failures[-1]["error_excerpt"]
+    assert not (state.enablement.launch_log or "").strip()
+    assert state.baseline_failure_streak == 0
+    phase, reason, _ = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True))
+    assert (phase, reason) == (phase_state.PHASE_CLOSE, HOST_GPUS_UNAVAILABLE)
+
+
+@pytest.mark.asyncio
+async def test_a_baseline_refused_for_want_of_idle_gpus_stops_in_enablement_too(
+    coord: Coordinator, tmp_path, monkeypatch
+) -> None:
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import HOST_GPUS_UNAVAILABLE
+    from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
+
+    coord.shared_state.phase = PHASE_ENABLEMENT
+    result = await _executor_nonzero_result(tmp_path, monkeypatch, "gpus-en", _GPU0_BUSY_STDERR, workspace=False)
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-gpus-en"), result)
+
+    assert coord.shared_state.stop_reason == HOST_GPUS_UNAVAILABLE
+    assert not (coord.shared_state.enablement.launch_log or "").strip()
+
+
+@pytest.mark.asyncio
+async def test_magpie_pinning_the_gpus_it_found_is_not_a_gpu_shortfall(tmp_path, monkeypatch) -> None:
+    """Magpie names ``gpu_selection.auto`` on every launch; only its refusal is a host without idle GPUs."""
+    stderr = (
+        "Magpie.modes.benchmark.benchmarker - INFO - gpu_selection.auto: pinned benchmark to physical GPU(s) "
+        "0,1,2,3 (vendor=AMD)\n"
+        "RuntimeError: worker 3 died\n"
+    )
+
+    result = await _executor_nonzero_result(tmp_path, monkeypatch, "pinned", stderr, workspace=False)
+
+    assert result["error_class"] == "subprocess_nonzero"

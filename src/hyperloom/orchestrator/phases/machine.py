@@ -118,20 +118,16 @@ class MachinePhase(CoordinatorCollaborator):
     def _reopen_a_session_that_was_left_closed(self) -> None:
         """Put a session persisted in CLOSE back at the phase machine's entrance, as the next macro-cycle.
 
-        The closed cycle's records -- the Forge controller's terminal result above all -- describe a pass through the
-        phases that has ended. Kept as the reopened pass's own, they end its KERNEL on the first tick.
+        The closed cycle's records -- the Forge controller's terminal result above all -- describe a pass that has
+        ended; kept as the reopened pass's own, they would end its KERNEL on the first tick.
         """
         state = self.shared_state
-        prior_cycle = state.macro_cycle
-        state.open_macro_cycle(no_gain_cycle_streak=state.no_gain_cycle_streak)
-        self._coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
         log.info(
             "Coordinator: session resumed in CLOSE, a phase with no way out; "
-            "reopening at PRELUDE as macro-cycle %d -> %d so the new budget can be spent on the work "
-            "the earlier leg stopped short of.",
-            prior_cycle,
-            state.macro_cycle,
+            "reopening at PRELUDE so the new budget can be spent on the work "
+            "the earlier leg stopped short of."
         )
+        self._open_next_macro_cycle(state.no_gain_cycle_streak, trigger="reopen")
         _phase_state.record_phase_transition(
             state,
             to_phase=_phase_state.PHASE_PRELUDE,
@@ -198,11 +194,8 @@ class MachinePhase(CoordinatorCollaborator):
             state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
 
     async def _framework_round_fits(self) -> bool:
-        """Whether FRAMEWORK_AGENT has a round left: work queued or running, or one it admits fits the time left.
-
-        Priced through the dispatcher's own time gate, as the orchestration prompt's affordability line is.
-        """
-        if self.shared_state.phase.upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+        """Whether FRAMEWORK_AGENT has a round left: work queued or running, or an action its time gate still admits."""
+        if str(self.shared_state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return True
         if await self.tasks.queued() or await self.tasks.running():
             return True
@@ -212,15 +205,13 @@ class MachinePhase(CoordinatorCollaborator):
             for action in _phase_state.allowed_actions_for(_phase_state.PHASE_FRAMEWORK_AGENT)
         )
 
-    async def _next_phase(
-        self, *, in_flight: _phase_state.WorkInFlight, framework_round_fits: bool
-    ) -> tuple[str, str, dict[str, Any]] | None:
+    async def _next_phase(self, *, in_flight: _phase_state.WorkInFlight) -> tuple[str, str, dict[str, Any]] | None:
         """The transition the predicates ask for, held while the operator-defined specialist's work is pending."""
         state = self.shared_state
         next_phase = _phase_state.compute_next_phase(
             state,
             in_flight=in_flight,
-            framework_round_fits=framework_round_fits,
+            framework_round_fits=await self._framework_round_fits(),
             flags=self.phase_flags(),
         )
         if next_phase is None or str(state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
@@ -268,13 +259,15 @@ class MachinePhase(CoordinatorCollaborator):
         ):
             state.no_gain_cycle_streak = int(move.evidence.get("no_gain_cycle_streak_effective", 0) or 0)
 
-    def _open_looped_back_cycle(self, move: Transition, prior_cycle: int) -> None:
-        """Open the macro-cycle a loopback transition has just entered."""
+    def _open_next_macro_cycle(self, no_gain_cycle_streak: int, *, trigger: str) -> None:
+        """Open the next macro-cycle and record the strategy it starts on."""
         state = self.shared_state
-        state.open_macro_cycle(no_gain_cycle_streak=int(move.evidence.get("no_gain_cycle_streak_effective") or 0))
+        prior_cycle = state.macro_cycle
+        state.open_macro_cycle(no_gain_cycle_streak=no_gain_cycle_streak)
         self._coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
         log.info(
-            "Coordinator: macro-cycle reloop %d -> %d (no_gain_streak=%d, gain_anchor=%.4f)",
+            "Coordinator: macro-cycle %s %d -> %d (no_gain_streak=%d, gain_anchor=%.4f)",
+            trigger,
             prior_cycle,
             state.macro_cycle,
             state.no_gain_cycle_streak,
@@ -334,7 +327,7 @@ class MachinePhase(CoordinatorCollaborator):
             evidence=move.evidence,
         )
         if is_loopback:
-            self._open_looped_back_cycle(move, prior_cycle)
+            self._open_next_macro_cycle(int(move.evidence.get("no_gain_cycle_streak_effective") or 0), trigger="reloop")
         # Mirror the phase boundary into the operator-facing lifecycle log using the ENTER status (a point-in-time
         # marker, not a START/END interval).
         _phase_state.record_lifecycle_event(
@@ -392,7 +385,6 @@ class MachinePhase(CoordinatorCollaborator):
                 kernel=kernel_facts.agent_in_flight,
                 prelude=in_prelude and await self._prelude_work_in_flight(),
             ),
-            framework_round_fits=await self._framework_round_fits(),
         )
         await self._coord.phase_internal.maybe_enqueue_trajectory_reviewer()
         dispatcher = self._coord.dispatcher
@@ -433,18 +425,24 @@ class MachinePhase(CoordinatorCollaborator):
         the writeback that settles the phase's hold, so the hold would run to its allowance.
         """
         phase = str(self.shared_state.phase or "").upper()
+        if phase == _phase_state.PHASE_PRELUDE:
+            await self._ask_again_for_a_cancelled_initial_analysis()
         if phase in (_phase_state.PHASE_PRELUDE, _phase_state.PHASE_ENABLEMENT):
-            # Both phases hold their exit for this marker. A cancelled initial analysis never ran, so PRELUDE asks again.
-            state = self.shared_state
-            gone = state.auto_roofline_pending_task_id
-            ended = await self._coord.phase_kernel.release_finished_roofline_gate()
-            if ended == "cancelled" and phase == _phase_state.PHASE_PRELUDE and not state.roofline_attempts:
-                # A fresh key: the cancelled task still holds the initial one, and reusing it hands that task back.
-                await self._coord.phase_prelude.maybe_enqueue_prelude_initial_analysis_after_baseline(
-                    idem_scope=f"-after-{gone[:8]}"
-                )
+            # Both phases hold their exit for this marker.
+            await self._coord.phase_kernel.release_finished_roofline_gate()
         # SWEEP waits for its conc_sweep's outcome; checked on a resumed process's first decision only.
         await self._coord.phase_sweep.resume_unsettled_sweep()
+
+    async def _ask_again_for_a_cancelled_initial_analysis(self) -> None:
+        """Request PRELUDE's initial analysis again when the task its hold names was cancelled before it analyzed."""
+        state = self.shared_state
+        prelude = self._coord.phase_prelude
+        named = (state.auto_roofline_pending_task_id or "").strip()
+        task = await self.tasks.find(named, kind=prelude.internal_analysis_kind()) if named else None
+        if task is None or task.state != "cancelled":
+            return
+        state.auto_roofline_pending_task_id = ""
+        await prelude.maybe_enqueue_prelude_initial_analysis_after_baseline()
 
     async def _drain_for_transition(self, *, prior: str, target: str, reason: str, evidence: Any) -> bool:
         """Clear the way to ``target`` and return whether the transition may commit on this tick.

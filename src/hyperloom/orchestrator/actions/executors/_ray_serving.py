@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 from hyperloom.common.proctree import TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 
-from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC, REAP_MARK_ENV
+from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
 
 if TYPE_CHECKING:
     from ._ray_backend import SessionKillRound
@@ -29,6 +29,10 @@ log = logging.getLogger(__name__)
 # before claiming a new one.
 _ACTOR_TIMEOUT_RC: int = -916
 _RAY_ACTOR_DIED_RC: int = -913
+
+# Marks a lease round for the dead-actor reap alone; the actor's round teardown reaps by REAP_MARK_ENV, which would
+# also kill the server a ``cleanup: false`` round leaves up for the next round.
+_ROUND_MARK_ENV = "HYPERLOOM_RAY_ROUND_MARK"
 
 # Timeout for ray.get probes on specialist actor methods (is_alive/exit_code/stop).
 _LEASE_PROBE_TIMEOUT_SEC: float = 30.0
@@ -247,16 +251,9 @@ def _stop_request(waited: float, wait_ceiling: float, cancel_scope: Any) -> _Sto
     return None
 
 
-def _marked_round(bench_round: SessionKillRound) -> SessionKillRound:
-    """The round carrying a reap mark in its env; a mark the caller already set is kept."""
-    env = dict(bench_round.env or {})
-    env.setdefault(REAP_MARK_ENV, uuid.uuid4().hex)
-    return replace(bench_round, env=env)
-
-
 def _reap_marked_round(mark: str) -> int:
     """Stop every process on this host that inherited ``mark``; return how many were found."""
-    pids = marked_pids(REAP_MARK_ENV, mark)
+    pids = marked_pids(_ROUND_MARK_ENV, mark)
     if pids:
         kill_tree(collect_tree(pids))
     return len(pids)
@@ -549,7 +546,8 @@ class ServingLease:
         except (RayInfeasibleError, RuntimeError) as exc:
             log.warning("ServingLease.run_session_kill: cluster ensure failed: %r", exc)
             return 1, "", f"ray_ensure_error: {exc}"[:2000]
-        bench_round = _marked_round(bench_round)
+        # Stamped over the caller's env, so a mark it inherited cannot join this round to another launch.
+        bench_round = replace(bench_round, env={**bench_round.env, _ROUND_MARK_ENV: uuid.uuid4().hex})
         # Registered before the round is submitted, so a cancel that arrives while Ray is still scheduling it is one
         # this call is counted as able to hear -- the same window the local path opens around its spawn.
         with cancel_scope_listener() as cancel_scope:
@@ -587,9 +585,9 @@ class ServingLease:
         except _actor_err as exc:
             # The actor (worker) itself died — e.g. its server OOM-killed the worker, or raylet reaped it. Drop the
             # dead handle so the next round re-creates a fresh actor via ``ensure()`` and this round surfaces as a
-            # benchmark failure instead of cascading. The round it ran sits in its own session and outlives a SIGKILLed
-            # actor, so it is reaped here by its mark before the GPUs and the port are handed to the next round.
-            reaped = _reap_marked_round((bench_round.env or {})[REAP_MARK_ENV])
+            # benchmark failure instead of cascading. The round sits in its own session and outlives a killed actor,
+            # so it is reaped here by its mark before the GPUs and the port go to the next round.
+            reaped = _reap_marked_round(bench_round.env[_ROUND_MARK_ENV])
             log.warning("ServingLease.run_session_kill: ray actor died: %r; reaped %d leftover pids", exc, reaped)
             self._actor = None
             from ._ray_backend import mark_ray_backend_unhealthy

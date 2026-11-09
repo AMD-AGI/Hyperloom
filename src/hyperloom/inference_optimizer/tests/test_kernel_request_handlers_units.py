@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_common.llm import llm_config
+from hyperloom.common.ports import DEV_SANDBOX_PORTS, RAY_WORKER_PORTS
 from hyperloom.common.codex_session import (
     CODEX_SANDBOX_MODE_ENV,
     DEFAULT_CODEX_SANDBOX_MODE,
@@ -34,6 +35,7 @@ from hyperloom_common.llm.llm_config import (
     DEFAULT_CODEX_MODEL,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.kernel import _aiter_tuner_support as aiter_tuner_support
 from hyperloom.orchestrator.kernel import _forge_fusion_run as forge_fusion_run
 from hyperloom.orchestrator.kernel import _forge_gemm_probe as forge_gemm_probe
 from hyperloom.orchestrator.kernel import _forge_gemm_tuning as forge_gemm_tuning
@@ -1689,6 +1691,7 @@ class TestForgeGemmHelperCoverage:
         "'torch.bfloat16', 'torch.float8_e4m3fn', 'torch.float4_e2m1fn_x2', "
         "'QuantType.per_1x32', True, False)"
     )
+    _REAL_MOE_MISS = _REAL_MOE_DISPATCH.replace("using 2stage default for", "no tuned FlyDSL config for")
 
     @staticmethod
     def _moe_state(tmp_path):
@@ -1713,11 +1716,11 @@ class TestForgeGemmHelperCoverage:
         )
 
     async def _run_on_moe_log(self, tmp_path, monkeypatch, task_id: str) -> dict:
-        """Run the gemm lane on a serving log that dispatched one MoE GEMM and return its input JSON."""
+        """Run the gemm lane on a serving log whose one MoE GEMM missed its tuned row and return its input JSON."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
         log = tmp_path / "server.log"
-        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+        log.write_text(self._REAL_MOE_DISPATCH + "\n" + self._REAL_MOE_MISS + "\n", encoding="utf-8")
 
         async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
             return 0, self._sentinel(), ""
@@ -1746,38 +1749,18 @@ class TestForgeGemmHelperCoverage:
         assert values["q_dtype_w"] == "torch.float4_e2m1fn_x2"
         assert values["q_type"] == "QuantType.per_1x32"
 
-    @pytest.mark.asyncio
-    async def test_the_token_column_is_what_the_moe_lookups_missed_not_the_dense_m(self, tmp_path, monkeypatch):
-        """aiter pads the token count before the MoE lookup, so a raw dense M keys a row no lookup reads."""
-        self._moe_state(tmp_path)
-        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-
-        def moe_miss(token: int) -> str:
-            return self._REAL_MOE_DISPATCH.replace("using 2stage default", "no tuned FlyDSL config").replace(
-                "256, 256, 4096", f"256, {token}, 4096"
-            )
-
+    def test_the_token_column_is_the_tokens_the_key_missed(self, tmp_path):
+        """A token the lookup hit is already served; only the missed ones are worth a tuning row."""
         log = tmp_path / "server.log"
-        log.write_text(
-            "\n".join(["[aiter] shape is M:16639, N:4096, K:4096, not found tuned config in bf16_tuned_gemm.csv"])
-            + "\n"
-            + "\n".join(moe_miss(token) for token in (8, 32768))
-            + "\n",
-            encoding="utf-8",
+        hit = self._REAL_MOE_DISPATCH.replace(", 256, 256, ", ", 256, 32, ").replace(
+            "2stage default", "2stage (kernelName1='k1', kernelName2='k2')"
         )
+        log.write_text("\n".join([hit, self._REAL_MOE_DISPATCH, self._REAL_MOE_MISS]) + "\n", encoding="utf-8")
 
-        async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
-            return 0, self._sentinel(), ""
+        csv_path, _report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(str(log), tmp_path / "ws")
 
-        monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
-        monkeypatch.setattr(forge_gemm_tuning, "resolve_forge_server_log", lambda *_a: str(log))
-
-        await forge_gemm_tuning._run_forge_gemm_tuning({"task_id": "moe-tokens"}, session_dir=tmp_path)
-
-        written = _FORGE_GEMM_PAYLOADS[-1]
-        assert "16639" in str(written.get("tokens"))
-        rows = Path(written["moe_untuned_csv"]).read_text(encoding="utf-8").strip().splitlines()
-        assert [row.split(",")[0] for row in rows[1:]] == ["8", "32768"]
+        rows = Path(csv_path).read_text(encoding="utf-8").strip().splitlines()
+        assert [r.split(",")[0] for r in rows[1:]] == ["256"]
 
     @pytest.mark.asyncio
     async def test_the_moe_csv_reaches_the_forge_argv(self, tmp_path, monkeypatch):
@@ -2285,7 +2268,6 @@ class TestRunGemmTuningHandler:
                 return {"status": "succeeded"}
 
         monkeypatch.setattr(baseline_module, "BaselineExecutor", FakeBaselineExecutor)
-        monkeypatch.setattr(shape_capture, "pick_server_port", lambda: 19001)
 
         result = asyncio.run(
             shape_capture._capture_vllm_tunableop_shapes(
@@ -2310,7 +2292,10 @@ class TestRunGemmTuningHandler:
         assert task.params["extra_envs"]["PYTORCH_TUNABLEOP_TUNING"] == "0"
         assert task.params["extra_envs"]["PYTORCH_TUNABLEOP_RECORD_UNTUNED"] == "1"
         assert task.params["extra_envs"]["HL_TUNABLEOP_MODE"] == ""
-        assert task.params["extra_envs"]["PORT"] == "19001"
+        capture_port = int(task.params["extra_envs"]["PORT"])
+        ephemeral_start = int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text(encoding="utf-8").split()[0])
+        assert capture_port < ephemeral_start and capture_port not in DEV_SANDBOX_PORTS
+        assert capture_port not in RAY_WORKER_PORTS
         assert task.params["extra_envs"]["TP"] == "1"
         assert task.params["extra_envs"]["CONC"] == "128"
         assert task.params["extra_envs"]["ISL"] == "1024"

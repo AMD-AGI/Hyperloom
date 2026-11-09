@@ -31,6 +31,7 @@ from hyperloom.orchestrator.measurement.runtime_findings import (
     load_runtime_findings,
     render_runtime_findings,
 )
+from hyperloom.orchestrator.prompts.agentx_context import corpus_lines
 from kernelforge.workflows.rewrite_controller import (
     SERVING_CONTEXT_FILENAME,
     TRACE_EVIDENCE_FILENAME,
@@ -61,8 +62,6 @@ def build_workload_md(state: Any) -> str:
     An agentic replay's request shape comes from its corpus, so its measured distribution replaces the ISL/OSL in
     state, which are placeholders there.
     """
-    from hyperloom.orchestrator.prompts.agentx_context import corpus_lines
-
     context = _workload_context(state)
     corpus = corpus_lines(getattr(state, "agentx_corpus_shape", None))
     lengths = (

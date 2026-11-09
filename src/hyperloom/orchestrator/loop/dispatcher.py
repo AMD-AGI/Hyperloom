@@ -50,7 +50,7 @@ from ..bus.resource_lock import (
     KNOWN_LANES,
     _expand_lanes,
 )
-from ._dead_holder import account_dead_holder_failures
+from ._dead_holder import DeadHolderAccountingMixin
 from ._explore_grid import explore_grid_denial
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension
@@ -149,7 +149,7 @@ class _InflightAction(NamedTuple):
     scope: CancelScope
 
 
-class DispatcherCollaborator(CoordinatorCollaborator):
+class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator):
     """Handles specialist dispatch: budget gating, action routing, and task enqueue."""
 
     def __init__(self, coordinator) -> None:
@@ -446,10 +446,10 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 )
         except (sqlite3.Error, ValueError):
             log.exception("dispatcher: dead-running task reclaim failed")
-        dead_tasks.extend(self._coord.reconciler.last_report.failed_tasks)
+        dead_tasks.extend(self._coord.reconciler.take_failed_tasks())
         if dead_tasks:
             try:
-                await account_dead_holder_failures(self, dead_tasks, reason="dead_holder_pump")
+                await self._account_dead_holder_failures(dead_tasks, reason="dead_holder_pump")
             except (OSError, sqlite3.Error):
                 log.exception("dispatcher: dead-holder failure accounting failed")
         try:
@@ -525,10 +525,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 continue
             base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
             child_key_prefix = f"{base_key}-reconcile"
-            if await self.tasks.exists_with_key_prefix(
-                task.kind,
-                child_key_prefix,
-                states=("succeeded", "queued", "running"),
+            if any(
+                child.state in ("succeeded", "queued", "running")
+                for child in await self.tasks.with_key_prefix(task.kind, child_key_prefix)
             ):
                 continue
             for attempt in range(1, 6):

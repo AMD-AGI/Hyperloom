@@ -32,6 +32,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from hyperloom_common.fs_utils import read_bytes_nofollow
+from hyperloom_common.git_safety import repo_root, safe_directory_args
 from hyperloom.common.env_safety import ungrounded_env_file_reason
 from hyperloom_common.unified_diff import strip_diff_path, strip_path_components
 
@@ -296,12 +297,25 @@ def _resolved_dir(path: Path) -> Path | None:
     return resolved if resolved.is_dir() else None
 
 
-def _git_apply_check(root: Path, patch_text: str) -> bool | None:
-    """Whether ``patch_text`` applies cleanly in ``root``; ``None`` when git reaches no verdict about the patch.
+def _repo_unusable(root: Path) -> bool:
+    """True when ``root`` sits in a git repository that git cannot open (e.g. a worktree whose parent is gone)."""
+    if repo_root(root) is None:
+        return False
+    try:
+        proc = subprocess.run(
+            ["git", *safe_directory_args(["-C", str(root), "rev-parse", "--git-dir"])],
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return True
+    return proc.returncode != 0
 
-    Git either never ran or failed on the repository itself (``_GIT_FATAL_RC``) before reading the patch -- a
-    worktree whose parent checkout is gone, a tree another uid owns. Both are evidence about the machine, not the patch.
-    """
+
+def _git_apply_check(root: Path, patch_text: str) -> bool | None:
+    """Whether ``patch_text`` applies cleanly in ``root``; ``None`` when git cannot run or cannot open the repo."""
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), "apply", "--check", "-"],
@@ -313,9 +327,9 @@ def _git_apply_check(root: Path, patch_text: str) -> bool | None:
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
-    if proc.returncode == _GIT_FATAL_RC:
-        return None
-    return proc.returncode == 0
+    if proc.returncode == 0:
+        return True
+    return None if _repo_unusable(root) else False
 
 
 def resolve_patch_apply_root(
@@ -629,11 +643,9 @@ GROUND_NOT_DIFF = "not_diff"  # not a unified diff (no hunk header)
 GROUND_PATH_ESCAPE = "path_escape"  # patch path escapes the tree
 GROUND_MISSING_TARGET = "missing_target"  # modify/delete target absent from base
 GROUND_AMBIGUOUS_ROOT = "ambiguous_root"  # patch targets match more than one disjoint tree
-GROUND_UNCHECKED = "unchecked"  # no base available / git unavailable
-#: git's exit code for a fatal error about the repository rather than the input.
-_GIT_FATAL_RC = 128
+GROUND_UNCHECKED = "unchecked"  # no base available / git or the repo unavailable
 
-# Verdict for each ``git apply --check`` outcome; ``None`` is git failing to run.
+# Verdict for each ``git apply --check`` outcome; ``None`` is git failing to run or to open the repo.
 _APPLY_CHECK_VERDICTS: dict[bool | None, str] = {True: GROUND_APPLIES, False: GROUND_STALE, None: GROUND_UNCHECKED}
 
 

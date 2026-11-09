@@ -200,7 +200,8 @@ class ResumeConsistencyMixin:
 
         No-op unless resumed while parked in ``KERNEL_AGENT``.
         """
-        from ..phases.machine_state import PHASE_KERNEL_AGENT, kernel_controller_settled
+        from ..phases.controller_settlement import kernel_controller_settled
+        from ..phases.machine_state import PHASE_KERNEL_AGENT
 
         if not self._resumed_from.get("is_resume"):
             return

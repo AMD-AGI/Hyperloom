@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
-from hyperloom_common.coerce import to_float
+from hyperloom_common.coerce import to_float, to_int
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradingAnchor, constraint_fields, graded_axes_of
 from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
@@ -51,7 +51,7 @@ from ..actions.executors.benchmark_run.warm_patches import revert_warm_kernel_pa
 from ..actions.executors.explore import restates_the_baseline_launch
 from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
-from ..state.task_registry import Task, TaskSpec
+from ..state.task_registry import Task, TaskSpec, create_on_free_key
 from ..loop.time_budget import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
@@ -1638,7 +1638,6 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
         self,
         *,
         baseline_tput: float | None = None,
-        idem_scope: str = "",
     ) -> None:
         """Enqueue the PRELUDE-bootstrap roofline/profile task after baseline; skipped while warm-replay is in_flight (GPU/port contention)."""
         state = self.shared_state
@@ -1674,7 +1673,7 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
             self._record_prelude_arm_dropped("initial_analysis", evidence)
             return
         try:
-            rl_task = await self.enqueue_internal_analysis_task(reason="prelude_initial", idem_scope=idem_scope)
+            rl_task = await self.enqueue_internal_analysis_task(reason="prelude_initial")
             if rl_task is None:
                 return
             state.auto_roofline_pending_task_id = rl_task.task_id
@@ -1692,25 +1691,21 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
 
     def _analysis_attempt_suffix(self, kind: str) -> str:
         """Idempotency-key suffix separating a re-armed roofline retry from the attempt that failed."""
-        if kind != "roofline":
-            return ""
-        try:
-            streak = int(self.shared_state.roofline_failure_streak or 0)
-        except (TypeError, ValueError):
-            streak = 0
+        streak = to_int(self.shared_state.roofline_failure_streak, 0) if kind == "roofline" else 0
         return f"-a{streak}" if streak > 0 else ""
 
     async def enqueue_internal_analysis_task(self, *, reason: str, idem_scope: str = "") -> "Task | None":
-        """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key
-        internal-analysis-<reason><idem_scope>; ``idem_scope`` separates repeated triggers that share a reason.
-        Returns None when the stack cannot produce a GPU trace for it to analyze.
+        """Build + enqueue a Coordinator-internal analysis task (roofline or profile) keyed internal-analysis-<reason>
+        <idem_scope> (``idem_scope`` separates triggers sharing a reason), stepped past cancelled attempts. Returns None
+        when the stack cannot produce a GPU trace for it to analyze, or every retry key holds a cancelled attempt.
         """
         params = self.internal_analysis_params(reason=reason)
         if params is None:
             return None
         kind = self.internal_analysis_kind()
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(kind)
-        task, was_existing = await self.tasks.create_or_return_existing(
+        created = await create_on_free_key(
+            self.tasks,
             TaskSpec(
                 kind=kind,
                 params=params,
@@ -1721,8 +1716,12 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
                 dispatch_class="coordinator",
-            )
+            ),
+            spent=lambda existing: existing.state == "cancelled",
         )
+        if created is None:
+            return None
+        task, was_existing = created
         if was_existing:
             log.info(
                 "internal-analysis task already exists (idempotent: kind=%s task_id=%s, state=%s)",

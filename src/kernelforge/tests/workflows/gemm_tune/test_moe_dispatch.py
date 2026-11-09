@@ -305,7 +305,7 @@ class TestReadingBackWhatAiterServed:
 
 
 class TestOperandsFollowTheKeysActivation:
-    """The per_1x32 fp4 MoE path is accepted at Silu as well."""
+    """The per_1x32 fp4 MoE path is served at Silu as well as SwiGLU, and is re-timed at the key's own."""
 
     @staticmethod
     def _aiter_with_a_recording_tuner(monkeypatch, tmp_path) -> list[object]:
@@ -330,6 +330,8 @@ class TestOperandsFollowTheKeysActivation:
         (codegen / "gemm_moe_tune.py").write_text("", encoding="utf-8")
         monkeypatch.setitem(sys.modules, "aiter", aiter)
         monkeypatch.setitem(sys.modules, "gemm_moe_tune", tuner)
+        fake_torch = SimpleNamespace(bfloat16="bf16", float4_e2m1fn_x2="fp4x2")
+        monkeypatch.setattr(dp._FusedMoeAdapter, "_torch", staticmethod(lambda: fake_torch))
         return seen
 
     @pytest.mark.parametrize("activation", ["Silu", "Swiglu"])

@@ -50,8 +50,11 @@ def test_config_levers_preserve_envs_and_args() -> None:
             ]
         }
     )
-    assert levers["extra_server_args"] == '--enable-x --compilation-config {"mode":"max-autotune"} --bare'
-    assert levers["extra_envs"] == {"VLLM_FOO": "1"}
+    assert levers == {
+        "name": "",
+        "extra_server_args": '--enable-x --compilation-config {"mode":"max-autotune"} --bare',
+        "extra_envs": {"VLLM_FOO": "1"},
+    }
 
 
 def test_config_levers_args_as_list() -> None:
@@ -72,8 +75,11 @@ def test_invalid_config_args_preserve_independent_env_overrides() -> None:
             ]
         }
     )
-    assert levers["extra_server_args"] == ""
-    assert levers["extra_envs"] == {"SAFE_ENV": "1"}
+    assert levers == {
+        "name": "",
+        "extra_server_args": "",
+        "extra_envs": {"SAFE_ENV": "1"},
+    }
 
 
 def test_config_levers_json_args_as_list_stay_unquoted() -> None:
@@ -90,8 +96,11 @@ def test_config_levers_json_args_as_list_stay_unquoted() -> None:
             ]
         }
     )
-    assert levers["extra_server_args"] == '--json-model-override-args {"rope_scaling":null}'
-    assert levers["extra_envs"] == {}
+    assert levers == {
+        "name": "",
+        "extra_server_args": '--json-model-override-args {"rope_scaling":null}',
+        "extra_envs": {},
+    }
 
 
 # _framework_agent_audit_skip_confident
@@ -339,6 +348,66 @@ async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -
     assert params["extra_server_args"] == "--speculative 4"
     assert params["extra_envs"] == {"VLLM_MTP": "1"}
     assert "config_changes" not in params
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_config_names_the_round_after_the_lever_it_benches(coord: Coordinator) -> None:
+    done = {
+        "proposal_set": [
+            {"name": "research-notes"},
+            {"name": "eagle-spec", "extra_args": "--speculative-algorithm EAGLE --speculative-num-steps 3"},
+        ]
+    }
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    params = (next(iter(coord.state.pending_proposals.values())).payload or {}).get("params") or {}
+    assert (params["patch_name"], params["extra_server_args"]) == (
+        "eagle-spec",
+        "--speculative-algorithm EAGLE --speculative-num-steps 3",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "removals",
+    [["--disable-cuda-graph"], ["--disable-cuda-graph", "--disable-cuda-graph"]],
+    ids=["once", "repeated"],
+)
+async def test_a_removal_only_lever_is_benched_and_its_ledger_verdict_found_again(
+    coord: Coordinator, tmp_path, monkeypatch, removals
+) -> None:
+    from hyperloom.agents.framework.kb import KB_ROOT_ENV
+    from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
+    from hyperloom.orchestrator.actions.executors._integrate_perf_gate import _GateBasis, _weigh_gate
+    from hyperloom.orchestrator.knowledge.kb_writeback import (
+        OUTCOME_REVERTED_SMOKE_FAIL,
+        FrameworkOutcome,
+        write_framework_record,
+    )
+
+    monkeypatch.setenv(KB_ROOT_ENV, str(tmp_path / "kb"))
+    done = {"proposal_set": [{"name": "no-cuda-graph-off", "remove_args": removals}]}
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    (prop,) = coord.state.pending_proposals.values()
+    params = prop.payload["params"]
+    assert (params["patch_name"], params["remove_args"]) == ("no-cuda-graph-off", removals)
+
+    attempt = IntegrateAttempt(task_id="t-int", specialist_task_id="spec-1", shared_state=coord.shared_state)
+    measured = _weigh_gate(attempt, params, {}, {"accuracy": 0.5}, _GateBasis(100.0, 1.0)).measured
+    await write_framework_record(
+        FrameworkOutcome(
+            pr_url="cand-1",
+            pr_sha="",
+            patch_path="",
+            outcome=OUTCOME_REVERTED_SMOKE_FAIL,
+            tps_delta_pct=0.0,
+            session_id="s",
+            applicability=measured.cfg_fingerprint,
+            accuracy_delta_pct=-2.0,
+        )
+    )
+    coord.state.pending_proposals.clear()
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task("spec-2"), done_payload=done)
+    assert not coord.state.pending_proposals
 
 
 @pytest.mark.asyncio

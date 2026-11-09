@@ -10,6 +10,7 @@ import dataclasses
 import logging
 import shutil
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -35,6 +36,7 @@ from .campaign import (
     CampaignWorkspace,
     _safe_artifact_id,
     fused_module_path,
+    recipe_deadline_unix,
     run_recipe_campaign,
 )
 from .anchor import AnchorReport
@@ -1004,6 +1006,9 @@ def _run_fusion_autoloop(recipes, run: _FusionRun, plan: _LoopPlan, campaign: Ca
                 harness_path=_harness_path_for(recipe),
                 target_speedup=keep_bar,
             )
+        nonlocal recipes_left
+        deadline_unix = recipe_deadline_unix(run.deadline_unix, recipes_left, time.time())
+        recipes_left -= 1
         # A fresh campaign refuses to start where the previous one left state, and the loop anchors that state to the
         # workspace rather than to ``--experiments-dir``.
         shutil.rmtree(Path(shadow.root) / LOOP_CAMPAIGN_STATE, ignore_errors=True)
@@ -1044,7 +1049,7 @@ def _run_fusion_autoloop(recipes, run: _FusionRun, plan: _LoopPlan, campaign: Ca
                 repo_scope=repo_scope,
                 tracked_roots=tracked_roots,
             ),
-            campaign,
+            dataclasses.replace(campaign, deadline_unix=deadline_unix),
             target_speedup=keep_bar,
         )
         if outcome.experiment_id:
@@ -1089,6 +1094,8 @@ def _run_fusion_autoloop(recipes, run: _FusionRun, plan: _LoopPlan, campaign: Ca
         target_speedup=keep_bar,
         output_dir=str(out),
     )
+    # The recipes ``run_fusion_loop`` will run one after another, each dealt a share of the run's deadline.
+    recipes_left = min(cfg.max_recipes, sum(not recipe.already_satisfied for recipe in loop_recipes))
     try:
         result = run_fusion_loop(
             loop_recipes,

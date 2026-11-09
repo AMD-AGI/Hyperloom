@@ -274,25 +274,6 @@ def next_forge_attempt_dir(session_dir: Path, macro_cycle: int) -> Path:
     return forge_attempt_dir(session_dir, macro_cycle, highest + 1)
 
 
-def unintegrated_forge_attempt_dirs(session_dir: Path, macro_cycle: int) -> tuple[Path, ...]:
-    """Return this cycle's attempts with a published patch that integration never wrote a result for, oldest first."""
-    cycle_root = forge_cycle_dir(session_dir, macro_cycle)
-    if not cycle_root.is_dir():
-        return ()
-    found: list[tuple[int, Path]] = []
-    for entry in cycle_root.iterdir():
-        number = entry.name[len("attempt-") :]
-        if not entry.is_dir() or not entry.name.startswith("attempt-") or not number.isdigit():
-            continue
-        patches = entry / "result" / _PATCHES
-        results = entry / "integration" / "results"
-        published = sum(not patch.name.startswith(".") for patch in patches.iterdir()) if patches.is_dir() else 0
-        written = len(list(results.glob("*.json"))) if results.is_dir() else 0
-        if written < published:
-            found.append((int(number), entry))
-    return tuple(entry for _number, entry in sorted(found))
-
-
 def competitor_target_json(session_dir: Path) -> Path:
     """``<sd>/competitor_target.json`` — LLM-authored competitor target numbers (each per-concurrency entry carries its own source)."""
     return Path(session_dir) / "competitor_target.json"
@@ -302,6 +283,11 @@ def competitor_target_json(session_dir: Path) -> Path:
 def agent_dir(session_dir: Path, role: str) -> Path:
     """Compute ``<sd>/agents/<role>/``, the per-agent artefact root."""
     return Path(session_dir) / "agents" / role
+
+
+#: ``<sd>/agents/resources.jsonl``, relative to the session directory: the agent runner's resource readings of each
+#: specialist's run and of the container, one JSON object a line.
+RESOURCES_RELATIVE_PATH = Path("agents") / "resources.jsonl"
 
 
 def agent_prompt_snapshot(session_dir: Path, role: str, *, macro_cycle: int, phase: str = "") -> Path:
@@ -435,6 +421,7 @@ def failure_evidence_path(session_dir: Path, failure_id: str) -> Path:
 
 __all__ = [
     "BREAKDOWN_FILENAME",
+    "RESOURCES_RELATIVE_PATH",
     "allocate_turn_workdir",
     "agent_dir",
     "agent_mcp_setup_path",

@@ -355,9 +355,7 @@ def _campaign_patches_on_disk(root: Path) -> list[dict[str, Any]]:
             published = _published_best_patch(Path(best_manifest)) if best_manifest else None
             if published is None:
                 continue
-            # Exported as ``on_keep`` would have: the published copy sits in the workspace's own
-            # forge_experiments, which the next Forge campaign in that repository archives away before
-            # the queued integrate reads it.
+            # Exported as ``on_keep`` would: the next campaign in the repository archives the published copy.
             shutil.copyfile(published, patch_file)
         target_file = _patch_target_file(patch_file)
         if not target_file:
@@ -502,8 +500,7 @@ async def run_forge_fusion(args: dict[str, Any]) -> dict[str, Any]:
     for stale_glob in ("fusion_*.patch", "forge_loop_*.json"):
         for stale in output_root.glob(stale_glob):
             stale.unlink(missing_ok=True)
-    # The lane's budget is when the work must end, and every recipe's forge-loop is told so. The kill waits a watchdog
-    # grace past it to backstop a run that hangs, not to race one finishing on time.
+    # The lane's budget is when forge-fuse must finish; the kill waits a watchdog grace past it.
     budget_sec = int(args["timeout"])
     cmd += ["--deadline-unix", str(time.time() + budget_sec)]
     timeout_sec = int(watchdog_timeout_sec(budget_sec))

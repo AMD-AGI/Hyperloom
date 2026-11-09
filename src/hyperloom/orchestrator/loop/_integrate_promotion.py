@@ -22,6 +22,7 @@ from ..measurement.integrate_performance import integrate_measurement_fields
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ..state.task_registry import Task
 from ._keep_patch_column import _is_patch_column_keep, _lever_for_keep, _source_layer_handles
+from .launch_controls import LAUNCH_CONTROL_KEYS
 from ._promote_outcome import IntegrateRecoveryIncomplete, _PromoteOutcome
 
 log = logging.getLogger(__name__)
@@ -142,14 +143,29 @@ def _integrate_verdict(status: str, *, lifted: bool, kept: bool) -> Verdict:
     return Verdict.FAILED
 
 
-def _patch_recipe_delta(result: Mapping[str, Any], declared: Mapping[str, Any]) -> dict[str, Any]:
+def _patch_recipe_delta(result: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "extra_server_args": str(result.get("extra_server_args_applied") or ""),
         "extra_envs": dict(result.get("extra_envs_applied") or {}),
-        "remove_args": to_str_list(declared.get("remove_args")),
-        "unset_envs": to_str_list(declared.get("unset_envs")),
-        "args_mode": str(result.get("args_mode") or declared.get("args_mode") or "append").strip().lower(),
+        "remove_args": to_str_list(result.get("remove_args")),
+        "unset_envs": to_str_list(result.get("unset_envs")),
+        "args_mode": str(result.get("args_mode") or "append").strip().lower(),
     }
+
+
+def _kept_launch_controls(result: Mapping[str, Any], measurement: Mapping[str, Any]) -> dict[str, Any]:
+    """The removal controls a KEEP launched with and the args it keeps, as an explore KEEP lifts them.
+
+    A persisted KEEP replaces the launch with the argv its bench ran; a native one keeps the stack relative to the
+    recipe. Either way the previous args still hold what was removed, so the lift must not merge onto them.
+    """
+    controls = {key: result[key] for key in LAUNCH_CONTROL_KEYS if result.get(key)}
+    if not controls:
+        return {}
+    launched = result.get("effective_extra_server_args")
+    if launched is None:
+        return {**controls, "extra_server_args": str(measurement["effective_config"]["extra_server_args"])}
+    return {**controls, "extra_server_args": launched, "effective_extra_server_args": launched}
 
 
 def _integrate_keep_origin(
@@ -197,7 +213,8 @@ def _integrate_keep_variant(
         "task_id": getattr(task, "task_id", "") if task is not None else "",
         "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
         "candidate_extra_envs": dict(result.get("extra_envs_applied") or {}),
-        "recipe_delta": _patch_recipe_delta(result, task_params),
+        "recipe_delta": _patch_recipe_delta(result),
+        **_kept_launch_controls(result, measurement),
         "extra_envs": dict(result.get("extra_envs_applied") or {}),
         "tput": tput,
         **integrate_measurement_fields(measurement),
@@ -353,13 +370,11 @@ class IntegratePromotionMixin:
         levers = result.get("framework_levers")
         if not (isinstance(levers, list) and levers):
             return False
-        default_on = str(result.get("framework_lever_outcome") or "") == "default_on"
-        layer = {key: result.get(key) for key in ("source_snapshot", "source_snapshot_complete", "framework_root")}
         recorded = self.shared_state.record_authored_framework_levers(
             levers,
-            default_on=default_on,
+            default_on=str(result.get("framework_lever_outcome") or "") == "default_on",
             specialist_task_id=str(result.get("specialist_task_id") or ""),
-            source_layer=None if default_on or not layer["source_snapshot"] else layer,
+            source_layer=self._dormant_source_layer(result) if result.get("status") == "kept_inert" else None,
         )
         if result.get(SCREEN_PARAM) == SCREEN_CYCLE:
             # Admitted unmeasured: the cycle bench, not a replay bundle, decides what these levers are worth.
@@ -371,6 +386,18 @@ class IntegratePromotionMixin:
         if recorded:
             await self._coord.phase_framework.enqueue_dormant_lever_bundle()
         return recorded
+
+    def _dormant_source_layer(self, result: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The source layer of a dormant keep, placed after every stack entry committed before it."""
+        handles = _source_layer_handles(result)
+        if not handles["source_snapshot"]:
+            return None
+        return {
+            "scope": "source_patch",
+            "name": str(result.get("specialist_task_id") or ""),
+            "stack_position": len(self.shared_state.optimization_stack or []),
+            **handles,
+        }
 
     async def _lift_integrate_keep(
         self,

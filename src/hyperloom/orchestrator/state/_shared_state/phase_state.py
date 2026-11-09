@@ -361,18 +361,32 @@ class _PhaseStateMixin:
             return ""
         return self.specialist_patch_verdicts.get(sid, "") or ""
 
-    def apply_explore_search_update(self, update: dict[str, Any]) -> None:
-        """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket."""
+    def apply_explore_search_update(self, update: dict[str, Any], *, advance_round: bool = True) -> None:
+        """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket.
+
+        ``advance_round=False`` merges verdicts landed while their round still runs, leaving the round ordinal and
+        ``last_round`` to the round's settlement; rows merge by fingerprint, so settling a landed row rewrites nothing.
+        """
         if not isinstance(update, dict):
             return
-        self.record_explore_verdicts(update)
-        prior = self.explore_search
+        prior = self.explore_search if isinstance(self.explore_search, dict) else {}
         merged = dict(prior)
         cur_cycle = int(getattr(self, "macro_cycle", 0) or 0)
+        # The executor reports the round it just benched; accumulating it over the
+        # durable ledger is this layer's job, and a re-measured fingerprint replaces
+        # its earlier row because that is what a fresh measurement means.
+        tested = {**(prior.get("tested") or {}), **(update.get("tested") or {})}
+        _stamp_cycle(tested.values(), cur_cycle)
+        merged["tested"] = _cap_tested_ledger(tested)
+        rejected = _merge_rejected(prior.get("rejected"), update.get("rejected"))
+        _stamp_cycle(rejected, cur_cycle)
+        merged["rejected"] = rejected
         # The round ordinal, not the ledger's size: consumers key idempotency and
-        # round ids on it, so it has to advance once per benched round.
-        merged["cursor"] = int(prior.get("cursor") or 0) + 1
-        merged["last_round"] = dict(update.get("last_round") or {})
+        # round ids on it, so it has to advance once per benched round. It is always
+        # written, since a load without one derives it from the ledger's size.
+        merged["cursor"] = int(prior.get("cursor") or 0) + int(advance_round)
+        if advance_round:
+            merged["last_round"] = dict(update.get("last_round") or {})
         # Append-only history fields — merge instead of overwrite.
         merged["winners_history"] = _merge_winners_history(
             prior.get("winners_history"),
@@ -381,22 +395,6 @@ class _PhaseStateMixin:
         )
         # Preserve accepted bucket from prior runs (record_explore_accepted is its writer).
         merged["accepted"] = list(prior.get("accepted") or [])
-        self.explore_search = merged
-
-    def record_explore_verdicts(self, update: dict[str, Any]) -> None:
-        """Merge an update's ``tested`` and ``rejected`` rows by fingerprint, without closing a round."""
-        prior = self.explore_search
-        merged = dict(prior)
-        cur_cycle = self.macro_cycle
-        # A re-measured fingerprint replaces its earlier row because that is what a fresh measurement means.
-        tested = {**(prior.get("tested") or {}), **(update.get("tested") or {})}
-        _stamp_cycle(tested.values(), cur_cycle)
-        merged["tested"] = _cap_tested_ledger(tested)
-        rejected = _merge_rejected(prior.get("rejected"), update.get("rejected"))
-        _stamp_cycle(rejected, cur_cycle)
-        merged["rejected"] = rejected
-        # Loading derives a missing cursor from the ledger's size, which a row landed mid-round would inflate.
-        merged.setdefault("cursor", 0)
         self.explore_search = merged
 
     def record_explore_accepted(self, variant: dict[str, Any]) -> None:
@@ -456,7 +454,8 @@ class _PhaseStateMixin:
     ) -> bool:
         """Register accepted framework-rewrite switches as search levers.
 
-        A dormant patch's *source_layer* is kept on its rows, as no stack entry carries it to a resumed tree.
+        ``source_layer`` is the snapshot of dormant code no stack entry carries, replayed at resume. A switch is one
+        row, so a later patch registering the same switch replaces the earlier patch's layer.
         """
         if not isinstance(switches, list) or not switches:
             return False
@@ -468,11 +467,11 @@ class _PhaseStateMixin:
             if not isinstance(entry, dict):
                 continue
             row = _lever_row(entry, bool(default_on), specialist_task_id=specialist_task_id, ts=now)
-            if source_layer:
-                row["source_layer"] = dict(source_layer)
             name = row["switch"]
             if not name:
                 continue
+            if source_layer:
+                row["source_layer"] = source_layer
             index = by_switch.get(name)
             if index is None:
                 rows.append(row)
@@ -484,27 +483,14 @@ class _PhaseStateMixin:
             # registration.
             row["attributed_gain_pct"] = prior.get("attributed_gain_pct")
             row["attribution_source"] = str(prior.get("attribution_source") or "")
+            if not source_layer and prior.get("source_layer"):
+                row["source_layer"] = prior["source_layer"]
             if prior != row:
                 rows[index] = row
                 changed = True
         if changed:
             self.authored_framework_levers = rows
         return changed
-
-    def dormant_source_layers(self) -> list[dict[str, Any]]:
-        """The source layers of patches admitted dormant, one per patch, shaped as the stack's source-patch entries.
-
-        A lever switched on later by a replay round still runs this code, so its row is not skipped.
-        """
-        layers: dict[str, dict[str, Any]] = {}
-        for row in self.authored_framework_levers:
-            layer = row.get("source_layer")
-            if layer:
-                layers.setdefault(
-                    layer["source_snapshot"],
-                    {**layer, "scope": "source_patch", "variant_name": row.get("specialist_task_id"), "ts": row["ts"]},
-                )
-        return list(layers.values())
 
     def record_framework_lever_attribution(
         self,

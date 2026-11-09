@@ -19,6 +19,7 @@ from typing import Any, Callable, Mapping, NamedTuple, Sequence
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.outside_facts import AITER_LOG_TUNED_CONFIG_ENV
 from hyperloom_common.coerce import to_str_list
 from hyperloom_common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
@@ -26,7 +27,6 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 log = logging.getLogger(__name__)
 
 _ENCODING = "utf-8"
-_HIT_LOGGING_ENV = "AITER_LOG_TUNED_CONFIG"
 _MAGPIE_LAUNCH_MODULE = "Magpie.modes.benchmark.agentx_launch"
 
 
@@ -280,13 +280,13 @@ def materialize_agentx(
 
 
 def _log_tuned_config_hits(bench: dict[str, Any]) -> None:
-    """Have the server log aiter's tuned-config hits; without them a served key reads as an unserved one."""
+    """Have the server log aiter's tuned-config hits unless the candidate unsets it; apply verification reads them."""
     agentx = bench.get("agentx")
     if not isinstance(agentx, dict):
         return
     launch = agentx.setdefault("launch_overrides", {"version": 1})
-    if _HIT_LOGGING_ENV not in (launch.get("unset_env") or []):
-        launch.setdefault("env", {}).setdefault(_HIT_LOGGING_ENV, "1")
+    if AITER_LOG_TUNED_CONFIG_ENV not in launch.get("unset_env", []):
+        launch.setdefault("env", {}).setdefault(AITER_LOG_TUNED_CONFIG_ENV, "1")
 
 
 def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> None:
@@ -327,8 +327,9 @@ def enable_profile(config_path: Path) -> None:
     field is true and raises when the server lacks it, so claiming it on a runtime the patch
     did not reach ends the round before the server starts.
     """
+    from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
+
     from ._profile_setup import (
-        annotations_supported,
         apply_sglang_shape_tool,
         patch_for_profile,
         shape_discovery_enabled,
@@ -337,20 +338,20 @@ def enable_profile(config_path: Path) -> None:
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     bench = config["benchmark"]
     framework = str(bench["framework"]).lower()
-    envs = bench.setdefault("envs", {})
-    _, sitecustomize = patch_for_profile(envs, framework)
-    # In sitecustomize mode annotations also profile SGLang's graph capture, which crashes without TraceLens's patch.
-    capture_patched = not sitecustomize or envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] != "unavailable"
+    patch = patch_for_profile(bench.setdefault("envs", {}), framework)
     apply_launch_changes(bench, LaunchChanges())
     launch = bench["agentx"]["launch_overrides"]
     server_env = launch["env"]
     profile_env: dict[str, str] = {}
-    if sitecustomize:
+    if patch.sitecustomize or patch.site is not None:
         if "PYTHONPATH" in server_env:
             profile_env["PYTHONPATH"] = str(server_env["PYTHONPATH"])
         if "PYTHONPATH" in launch["unset_env"]:
             profile_env["PYTHONPATH"] = ""
-        apply_sglang_shape_tool(profile_env, shape_discovery=capture_patched and shape_discovery_enabled(bench))
+    if patch.site is not None:
+        prepend_launch_path(profile_env, "PYTHONPATH", str(patch.site))
+    if patch.sitecustomize:
+        apply_sglang_shape_tool(profile_env, shape_discovery=shape_discovery_enabled(bench))
     if framework == "vllm":
         name = "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
         inherited = "1200" if name in launch["unset_env"] else os.environ.get(name, "1200")
@@ -363,7 +364,7 @@ def enable_profile(config_path: Path) -> None:
     # The replay's opening burst runs past 300 s; a capture started there missed the steady-state batch mix.
     torch_profiler.setdefault("start_seconds", 900)
     torch_profiler.setdefault("interval_seconds", 900)
-    torch_profiler.setdefault("detailed_annotations", capture_patched and annotations_supported(envs))
+    torch_profiler.setdefault("detailed_annotations", patch.annotations)
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 

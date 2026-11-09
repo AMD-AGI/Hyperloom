@@ -576,14 +576,17 @@ def _framework_state_inside_its_budget() -> SharedState:
 
 
 def test_a_framework_phase_no_round_fits_is_spent():
-    """A remainder shorter than every round the phase admits never admits another; one sat out 44 idle minutes."""
+    """A remainder shorter than every round the phase admits never admits another, so the phase is spent."""
     state = _framework_state_inside_its_budget()
     assert phase_state.compute_next_phase(state) is None
 
     out = phase_state.compute_next_phase(state, framework_round_fits=False)
 
     assert out is not None and out[1] == "optimize_phase_budget_exhausted"
-    assert out[2]["evidence"] == "no_round_fits" and out[2]["remaining_seconds"] > 0
+    evidence = out[2]
+    assert evidence["evidence"] == "no_round_fits" and evidence["remaining_seconds"] > 0
+    assert evidence["entry_elapsed_seconds"] == 60.0
+    assert "cumulative_elapsed_seconds" in evidence
 
 
 def test_a_framework_record_frozen_before_round_fits_replays_as_decided():
@@ -603,7 +606,7 @@ async def test_the_machine_reads_a_round_fits_off_the_queue_and_the_time_gate(qu
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.phases.machine import MachinePhase
-    from hyperloom.orchestrator.policy.gate import PolicyDenied
+    from hyperloom.orchestrator.policy.denial import PolicyDenied
 
     async def _queued():
         return [SimpleNamespace(kind=kind) for kind in queued]

@@ -9,20 +9,6 @@ import math
 from typing import Any, Mapping
 
 
-def map_corpus_shape(result: Mapping[str, Any]) -> dict[str, Any]:
-    """Build a ``SharedState.agentx_corpus_shape`` record from an MLPerf result."""
-    return {
-        "corpus_loader": str(result.get("corpus_loader") or ""),
-        "isl": dict(result.get("isl_distribution") or {}),
-        "osl": dict(result.get("osl_distribution") or {}),
-        "completed_requests": int(result.get("completed") or 0),
-        "duration_s": float(result.get("duration") or 0.0),
-        "prefix_cache_hit": float(result.get("theoretical_prefix_cache_hit") or 0.0),
-        "request_error_rate": float(result.get("request_error_rate") or 0.0),
-        "source": "measured",
-    }
-
-
 class MlperfReportError(ValueError):
     """An MLPerf harness file does not have the upstream shape :func:`map_mlperf` reads."""
 

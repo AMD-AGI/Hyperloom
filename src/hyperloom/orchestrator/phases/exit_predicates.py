@@ -19,16 +19,18 @@ def budget_exit(
     evidence: dict[str, Any],
 ) -> tuple[str, dict[str, Any]] | None:
     remaining = to_float(budget.get("remaining_sec"))
-    elapsed = to_float(budget.get("entry_elapsed_sec")) or 0.0
-    cumulative = to_float(budget.get("cumulative_elapsed_sec")) or 0.0
-    timing = {
-        **evidence,
-        "entry_elapsed_seconds": elapsed,
-        "cumulative_elapsed_seconds": cumulative,
-    }
     if remaining is not None and remaining <= 0.0:
-        return exhausted_reason, timing
+        return exhausted_reason, _with_budget_timing(budget, evidence)
     return None
+
+
+def _with_budget_timing(budget: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
+    """``evidence`` with the phase-entry and cumulative elapsed seconds every budget exit carries."""
+    return {
+        **evidence,
+        "entry_elapsed_seconds": to_float(budget.get("entry_elapsed_sec")) or 0.0,
+        "cumulative_elapsed_seconds": to_float(budget.get("cumulative_elapsed_sec")) or 0.0,
+    }
 
 
 class FrameworkPlateau(NamedTuple):
@@ -77,12 +79,13 @@ def framework_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
         return "optimize_no_more_leverage", {**arms, "evidence": "skip_to_sweep", "hint": hint}
     if plateau.config_dry and plateau.source_dry:
         return "optimize_no_more_leverage", {**arms, "evidence": "both_arms_plateaued", "plateau": True}
-    # A record frozen before this fact existed carries no value and replays as it was decided.
+    # Time is left but no round the phase admits fits it; a record frozen without the fact replays as decided.
     if budget.get("round_fits") is False:
+        remaining = to_float(budget.get("remaining_sec"))
         return "optimize_phase_budget_exhausted", {
-            **arms,
+            **_with_budget_timing(budget, arms),
             "evidence": "no_round_fits",
-            "remaining_seconds": to_float(budget.get("remaining_sec")),
+            "remaining_seconds": remaining,
         }
     return None
 

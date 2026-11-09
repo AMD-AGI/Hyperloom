@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors.measured_variants import unqueued_variants
+from hyperloom.orchestrator.actions.executors.explore_prefilter.measured_variants import unqueued_variants
 from hyperloom.orchestrator.loop._explore_delegate import _keep_unqueued_variants
 
 

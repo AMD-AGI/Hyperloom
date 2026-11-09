@@ -184,7 +184,7 @@ def _demand_shapes_within_budget(
     decode_m: Sequence[int],
     budget: int,
     *,
-    served: frozenset[tuple[int, int]] = frozenset(),
+    served: frozenset[tuple[int, int]],
 ) -> list[dict[str, Any]]:
     """The highest-ranked demand shapes whose decode band ``budget`` can also pay for.
 
@@ -205,7 +205,8 @@ def _demand_shapes_within_budget(
         key = (int(shape["N"]), int(shape["K"]))
         trial = dict(group_m)
         trial[key] = group_m.get(key, set()) | {int(shape["M"])}
-        band = sum(len(b) for g, ms in trial.items() if g not in served for b in _decode_band_buckets([ms], decode_m))
+        unserved = [ms for group, ms in trial.items() if group not in served]
+        band = sum(len(b) for b in _decode_band_buckets(unserved, decode_m))
         if len(taken) + 1 + band <= budget:
             group_m = trial
             taken.append(shape)
@@ -287,7 +288,7 @@ def _ensure_decode_m_coverage(
     needs_q_dtype_w: bool = False,
     served: frozenset[tuple[int, int]] = frozenset(),
 ) -> Path:
-    """Guarantee every tuned dispatch group covers the decode-band M."""
+    """Guarantee every tuned dispatch group covers the decode-band M, except the ``served`` (N, K) groups."""
     from ..dense_shapes import compute_decode_m_values
 
     try:

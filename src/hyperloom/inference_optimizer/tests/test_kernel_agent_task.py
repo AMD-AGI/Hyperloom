@@ -207,7 +207,6 @@ async def _next_leg(coord):
 
 @pytest.mark.asyncio
 async def test_a_leg_resumed_mid_forge_round_requeues_the_kernel_agent_and_stays_in_kernel(coord):
-    # The dead leg's kernel_agent is reaped on resume; without a replacement the next tick reads KERNEL as settled.
     _arm_kernel_phase(coord.shared_state)
     coord.shared_state.kernel_optimizer = "forge"
     leg = await _next_leg(coord)

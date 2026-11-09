@@ -13,7 +13,6 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
-from hyperloom.orchestrator.loop._dead_holder import account_dead_holder_failures
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
@@ -115,6 +114,21 @@ async def test_pump_accounts_for_the_reconcilers_confirmed_deaths(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_a_death_survives_a_second_reconcile_before_the_pump(session_dir):
+    import time
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        task = await _running_task_with_dead_lease(c, key="reconciler-death-twice")
+        assert (await c.reconciler.run(time.time())).failed_tasks == [task.task_id]
+        assert (await c.reconciler.run(time.time())).failed_tasks == []
+        await c.dispatcher.pump_dispatcher_once()
+        assert c.shared_state.baseline_failure_streak == 1
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_three_lease_reaped_baselines_trip_the_streak_stop(session_dir):
     """--enablement=off: three lease-reaped baselines trip the three-strike stop."""
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -135,7 +149,7 @@ async def test_accounting_is_idempotent_per_task(session_dir):
     try:
         task = await _running_task_with_dead_lease(c, key="k-dead-once")
         await c.dispatcher.pump_dispatcher_once()
-        await account_dead_holder_failures(c.dispatcher, [task.task_id], reason="dead_holder_pump")
+        await c.dispatcher._account_dead_holder_failures([task.task_id], reason="dead_holder_pump")
         assert c.shared_state.baseline_failure_streak == 1
         assert len(c.shared_state.last_action_failures) == 1
     finally:
