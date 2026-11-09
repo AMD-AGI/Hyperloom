@@ -218,20 +218,16 @@ def _assert_every_reader_gets(checkout: Path, workspace: Path, expected: dict[st
         assert _sourced_credentials(checkout, workspace, where, line) == expected, where
 
 
-# Of _OTHER_LINES, what a .env another account can write still holds once an install rewrote it: the comments. Every
-# assignment it would not lend (HF_HOME, the backend order, the OpenAI side) is gone with the credentials.
-_COMMENT_LINES = tuple(line for line in _OTHER_LINES if line.startswith(b"#"))
-
-
 def _assert_only_what_it_lends_is_kept(dotenv: Path) -> None:
-    """A shared ``.env`` an install rewrote: no credential, nothing it would not lend, its comments in order."""
+    """A shared ``.env`` an install rewrote: no credential, nothing it would not lend, and none of _OTHER_LINES, not
+    even a comment: it is rebuilt from the assignments it lends, each one NAME=VALUE on a line of its own."""
     text = dotenv.read_bytes()
     assignments = _assignments(dotenv)
     assert not set(assignments) & {*_CREDENTIAL_KEYS, "ANTHROPIC_AUTH_TOKEN"}
     assert not [secret for secret in _SECRETS if secret in text]
     assert {key: value for key, value in assignments.items() if not is_lent(key, value)} == {}
-    assert [line for line in text.splitlines(keepends=True) if line.startswith(b"#")] == list(_COMMENT_LINES)
-    assert not [line for line in _OTHER_LINES if line not in _COMMENT_LINES and line.rstrip(b"\r\n") in text]
+    assert not [line for line in _OTHER_LINES if line.rstrip(b"\r\n") in text]
+    assert text.splitlines(keepends=True) == [f"{key}={value}\n".encode() for key, value in assignments.items()]
 
 
 @pytest.fixture
@@ -478,8 +474,8 @@ def test_a_reinstall_in_the_same_container_takes_the_credentials_from_its_file(t
 _RECORD_EVERY_DOTENV_WRITE = """
 eval "_shipped_$(declare -f upsert_dotenv_var)"
 eval "_shipped_$(declare -f remove_dotenv_var)"
-upsert_dotenv_var() { cat -- "$DOTENV" >> "$RECORD_FILE"; _shipped_upsert_dotenv_var "$@"; }
-remove_dotenv_var() { cat -- "$DOTENV" >> "$RECORD_FILE"; _shipped_remove_dotenv_var "$@"; }
+upsert_dotenv_var() { { echo '--- before a write'; cat -- "$DOTENV" 2>/dev/null || echo 'no .env'; } >> "$RECORD_FILE"; _shipped_upsert_dotenv_var "$@"; }
+remove_dotenv_var() { { echo '--- before a write'; cat -- "$DOTENV" 2>/dev/null || echo 'no .env'; } >> "$RECORD_FILE"; _shipped_remove_dotenv_var "$@"; }
 """
 
 
@@ -498,8 +494,9 @@ def test_no_later_write_copies_a_credential_line_of_a_shared_dotenv(tmp_path, co
         {**_openai_side_only(), "RECORD_FILE": str(record)},
     )
 
-    # Each of those writes found .env (its first comment), and none found a credential or a line it does not lend.
-    assert record.read_bytes().count(_COMMENT_LINES[0]) > 5
+    # Each of those writes found .env, and none found a credential or a line it does not lend.
+    assert record.read_bytes().count(b"--- before a write\n") > 5
+    assert b"no .env" not in record.read_bytes()
     assert not [secret for secret in _SECRETS if secret in record.read_bytes()]
     assert b"HF_HOME=" not in record.read_bytes()
 
@@ -835,7 +832,8 @@ def test_an_install_writes_nothing_into_a_directory_a_dotenv_link_points_at(tmp_
 
 def test_removal_renames_a_file_written_beside_dotenv(tmp_path, container, monkeypatch):
     """The kept lines are written in .env's own directory, so the rename over .env is one atomic step on one
-    filesystem: a temporary file elsewhere (TMPDIR) would be copied across, and a reader could see part of it."""
+    filesystem: a temporary file elsewhere (TMPDIR) would be copied across, and a reader could see part of it. The
+    rename names both through the directory it opened (/proc/self/fd), which the stand-in resolves as mv sees it."""
     checkout, _ = container
     dotenv = checkout / ".env"
     shim = tmp_path / "shim"
@@ -844,7 +842,7 @@ def test_removal_renames_a_file_written_beside_dotenv(tmp_path, container, monke
     real_mv = shutil.which("mv")
     assert real_mv is not None
     (shim / "mv").write_text(
-        f'#!/bin/sh\nprintf "%s\\n" "$@" >> {shlex.quote(str(record))}\nexec {shlex.quote(real_mv)} "$@"\n',
+        f'#!/bin/sh\nfor a; do readlink -m -- "$a"; done >> {shlex.quote(str(record))}\nexec {shlex.quote(real_mv)} "$@"\n',
         encoding="utf-8",
     )
     (shim / "mv").chmod(0o755)
