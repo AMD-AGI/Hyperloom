@@ -28,14 +28,14 @@ from ..base import md_kv_list
 _GRADED_ROWS: tuple[tuple[str, str], ...] = (
     ("e2e_norm_intvty_p50", "e2e_norm_intvty_p50 (objective)"),
     ("e2e_norm_intvty_p90", "e2e_norm_intvty_p90 (guard, frontier x)"),
-    ("output_tput_per_gpu", "output_tput_per_gpu (guard, frontier y)"),
+    ("output_tput_per_gpu", "output_tput_per_gpu (reported, not graded)"),
     ("ttft_p50_ms", "ttft_p50_ms"),
     ("ttft_p90_ms", "ttft_p90_ms"),
     ("tpot_p50_ms", "tpot_p50_ms"),
     ("tpot_p90_ms", "tpot_p90_ms"),
     ("duration_seconds", "duration_seconds (comparability)"),
     ("request_error_rate", "request_error_rate (comparability)"),
-    ("total_throughput", "total_throughput (reported, not graded)"),
+    ("total_throughput", "total_throughput (guard)"),
     ("input_throughput", "input_throughput (reported, not graded)"),
 )
 
