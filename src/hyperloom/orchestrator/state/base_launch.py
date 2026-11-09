@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 
-from hyperloom.common.env_safety import is_allowed_external_env_key
 from hyperloom.inference_optimizer.session.base_launch import base_launch_path, read_base_launch, write_base_launch
 from hyperloom.inference_optimizer.session.paths import session_dir
 from inference_suite import INFERENCEX_CLIENT_COMMIT, runner_owned
@@ -34,7 +33,8 @@ class BaseLaunchMismatch(RuntimeError):
 class ServerBase:
     """The server half of the base, its golden layer last: argv as one string and the environment a launch may set.
 
-    Redacted values and keys a launch may not set from outside stay in ``base_launch.json`` and never reach a server.
+    A redacted value is a credential the runner fills from its host and stays in ``base_launch.json``; every other
+    setting is served as the base holds it, which the freeze already held to what a launch may take from a source.
     """
 
     args: str = ""
@@ -48,13 +48,11 @@ def server_argv(base: BaseLaunch) -> tuple[str, ...]:
 
 
 def server_base(base: BaseLaunch) -> ServerBase:
-    """The server half of ``base`` as a launch is seeded with: its argv and the environment a launch may set."""
+    """The server half of ``base`` as a launch is seeded with: its argv and its environment but the redacted values."""
     golden = base.golden_al
     args = server_argv(base)
     layers = {**base.env, **golden.env} if golden is not None else base.env
-    env = {
-        name: value for name, value in layers.items() if isinstance(value, str) and is_allowed_external_env_key(name)
-    }
+    env = {name: value for name, value in layers.items() if isinstance(value, str)}
     return ServerBase(args=" ".join(args), env=MappingProxyType(env))
 
 
