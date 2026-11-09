@@ -33,6 +33,22 @@ session is refused. Repositories are read at the head of their `main` and record
 with that commit; the vLLM recipes site has no commit and is recorded as the
 response it was read from.
 
+To match a run made at an older InferenceX, pin it with `--inferencex-commit
+<sha>` (`resolve`, `hyperloom optimize` and `hyperloom-multibranch run` all take
+it): a full sha, or a prefix of 7 or more hex digits of a commit on one of
+InferenceX's branches or at the head of one of its refs, a pull request's
+included. The base records the full sha it read. Only InferenceX is pinned; the
+cookbooks, the vLLM recipes site and ATOM's catalog are still read at `main`. A
+resume keeps its frozen base whatever the flag says. The commit is refused, with
+exit 2, when InferenceX has no such commit or the prefix names more than one, and
+when the commit lacks a function the resolver runs from InferenceX's own code
+(for example, a commit without `acceptance_length`, `generation_role` and
+`verifier` in `infx.srt_slurm.synthetic_acceptance`); the message names what it
+lacks. To run on such a commit, resolve the base where its code was run and hand
+the session the frozen `base_launch.json` as `--reference-script` (for
+`hyperloom-multibranch run`, as `--agent-launch` beside an Arbor
+`--autonomous-agent`).
+
 A launch script is read, never run. It must launch the session's framework and fix
 every flag in its own text: a flag whose value names a shell variable, or a
 `# hyperloom-launch-controls:` line, is refused.
@@ -163,7 +179,7 @@ python -m inference_suite.staging check --tool-cache <dir>
 |---|---|
 | `run --config <config.yaml> --run-dir <dir>` | Runs one round into an absent or empty directory and prints the `report.json` path. SIGTERM and SIGINT cancel the round, which still reaps what it started and writes its report. |
 | `stop --pid-dir <dir>` | Reaps the server the directory's `server.pid` records and prints `{"reaped": [...], "survivors": [...]}`. |
-| `resolve --query <query.json> --gpus <n> --out <base_launch.json> [--user-file <file>]` | Reads the sources once and writes the base they give, printing its digest. |
+| `resolve --query <query.json> --gpus <n> --out <base_launch.json> [--user-file <file>] [--inferencex-commit <sha>]` | Reads the sources once and writes the base they give, printing its digest. With `--inferencex-commit`, InferenceX is read at that commit instead of the head of its `main`. |
 | `stage --tool-cache <dir> [--source <InferenceX checkout>]` | Stages the pinned tools into the tool cache unless it holds them intact, fetching InferenceX at its pin without `--source`, and prints the manifest's sha256. |
 | `publish --stagings <dir> [--source <InferenceX checkout>]` | Publishes the staging of the pins in force as `<dir>/<staging key>`, staging it there when absent, and prints its path. |
 
@@ -171,7 +187,7 @@ Exit codes: `0` when the round completed (or nothing survived `stop`, a base was
 written, or a staging is in place); `1` when the round did not complete, or a
 process outlived `stop`; `2` when the config, query or pidfile breaks its contract,
 the run directory is not empty, no source holds a base, in which case each
-source's reason is printed to stderr, or a staging cannot be built or verified,
+source's reason is printed to stderr, `--inferencex-commit` is refused, or a staging cannot be built or verified,
 printed as `staging_missing: <reason>`.
 
 ## Run directory

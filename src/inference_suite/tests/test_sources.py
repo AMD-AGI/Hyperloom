@@ -45,17 +45,21 @@ from inference_suite.recipe.inferencex import INFERENCEX_REPO, PROJECT, Inferenc
 from inference_suite.recipe.model import InferencexSelection, InferencexSnapshot
 from inference_suite.recipe.resolve import UnreadSource
 from inference_suite.recipe.user_file import UserFile, parse_user_file
+from inference_suite import cli
 from inference_suite.recipe.sources import (
     MAIN,
     SRT_SLURM,
     Checkout,
+    InferencexCommitRefused,
     SourceFetchError,
+    checkout_commit,
     checkout_main,
     fetch_response,
     fetch_sources,
     inferencex_answers,
     inferencex_python,
     latest_release,
+    parse_inferencex_commit,
 )
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "inferencex" / "ce35bc935.json.gz"
@@ -172,11 +176,19 @@ _AGENTX_QUERY = LaunchQuery("deepseek-ai/DeepSeek-R1-0528", "sglang", "mi355x", 
 
 
 @pytest.fixture
-def read_inferencex(monkeypatch, tmp_path: Path) -> None:
-    """InferenceX reads as the main fixture; a test makes a later source unreadable."""
+def read_inferencex(monkeypatch, tmp_path: Path) -> list[str]:
+    """InferenceX reads as the main fixture at whichever commit it is asked for; a test makes a later source
+    unreadable. Holds every commit InferenceX was read at, ``""`` for the head of its ``main``."""
     fixture = _main_fixture()
     checkout = Checkout(INFERENCEX_REPO, fixture.bundle.commit, tmp_path)
-    monkeypatch.setattr(sources, "_inferencex", lambda into: (checkout, fixture))
+    commits: list[str] = []
+
+    def read(into: Path, commit: str) -> tuple[Checkout, InferencexSnapshot]:
+        commits.append(commit)
+        return checkout, fixture
+
+    monkeypatch.setattr(sources, "_inferencex", read)
+    return commits
 
 
 def _unreachable(*args, **kwargs):
@@ -242,7 +254,7 @@ def test_an_agentx_shell_user_file_reads_inferencex_alone_for_the_corpus(read_in
 
 
 def test_an_agentx_shell_user_file_names_an_unreadable_inferencex(monkeypatch) -> None:
-    def unreachable(into):
+    def unreachable(into, commit):
         raise SourceFetchError("git clone exited 128: could not resolve host")
 
     monkeypatch.setattr(sources, "_inferencex", unreachable)
@@ -255,7 +267,7 @@ def test_an_agentx_shell_user_file_names_an_unreadable_inferencex(monkeypatch) -
 
 
 def test_an_unreadable_inferencex_is_named_and_stops_the_reading(monkeypatch) -> None:
-    def unreachable(into):
+    def unreachable(into, commit):
         raise SourceFetchError("git clone exited 128: could not resolve host")
 
     monkeypatch.setattr(sources, "_inferencex", unreachable)
@@ -429,3 +441,149 @@ def test_the_main_inferencex_fixture_is_what_inferencex_answers_at_its_commit(tm
     assert answers.golden_lengths == {
         asked.key: GoldenLength(selection.acceptance_length, curve=selection.golden_curve)
     }
+
+
+def _pull_request_head(origin: Path) -> str:
+    """A commit no branch of ``origin`` holds, advertised only as a pull request's head, as GitHub advertises one."""
+    _git(origin, "checkout", "-q", "-b", "contributor", MAIN)
+    commit = _commit(origin, {"docs/a.txt": "pull request\n"}, "pull request")
+    _git(origin, "update-ref", "refs/pull/7/head", commit)
+    _git(origin, "checkout", "-q", "trunk")
+    _git(origin, "branch", "-q", "-D", "contributor")
+    return commit
+
+
+def test_a_pinned_checkout_reads_the_commit_a_prefix_names_and_records_its_full_sha(
+    origin: Path, tmp_path: Path
+) -> None:
+    first = _git(origin, "rev-list", "--max-parents=0", "trunk")
+
+    checkout = checkout_commit(f"file://{origin}", first[:9], ("docs",), tmp_path / "clone")
+
+    assert checkout.commit == first
+    assert checkout.bundle(checkout.paths("docs", ".txt")).files == {"docs/a.txt": "trunk\n"}
+    assert not (tmp_path / "clone" / "other").exists()
+
+
+def test_a_pinned_checkout_reads_a_pull_request_head_no_branch_holds(origin: Path, tmp_path: Path) -> None:
+    commit = _pull_request_head(origin)
+
+    checkout = checkout_commit(f"file://{origin}", commit[:10], ("docs",), tmp_path / "clone")
+
+    assert checkout.commit == commit
+    assert checkout.bundle(["docs/a.txt"]).files == {"docs/a.txt": "pull request\n"}
+
+
+def test_a_commit_the_repository_does_not_have_is_refused(origin: Path, tmp_path: Path) -> None:
+    with pytest.raises(InferencexCommitRefused, match="has no commit 0badc0ffee"):
+        checkout_commit(f"file://{origin}", "0badc0ffee", ("docs",), tmp_path / "clone")
+    with pytest.raises(InferencexCommitRefused, match=f"has no commit {'0' * 40}"):
+        checkout_commit(f"file://{origin}", "0" * 40, ("docs",), tmp_path / "full")
+
+
+@pytest.mark.parametrize("value", ["", "abc12", "--upload-pack=x", "g" * 7, "a" * 41])
+def test_a_pinned_commit_must_be_seven_to_forty_hex_digits(value: str) -> None:
+    with pytest.raises(InferencexCommitRefused, match="is not a commit"):
+        parse_inferencex_commit(value)
+
+
+def test_inferencex_is_read_at_main_unless_a_commit_is_pinned(read_inferencex: list[str], monkeypatch) -> None:
+    monkeypatch.setattr(sources, "_require_resolver_api", lambda checkout: None)
+    monkeypatch.setattr(sources, "_recipe_reads", lambda *args: ())
+
+    fetch_sources(_QUERY)
+    fetch_sources(_QUERY, inferencex_commit="8A76A78E41")
+
+    assert read_inferencex == ["", "8a76a78e41"]
+
+
+def _pinned_checkout(tmp_path: Path, lacking: tuple[str, ...]) -> Checkout:
+    """An InferenceX checkout whose ``synthetic_acceptance`` defines none of ``lacking``."""
+    root = tmp_path / "inferencex"
+    _stand_in_project(root / PROJECT, [])
+    acceptance = root / PROJECT / "infx/srt_slurm/synthetic_acceptance.py"
+    kept = [
+        block
+        for block in acceptance.read_text(encoding="utf-8").split("\n\n")
+        if not any(f"def {name}(" in block for name in lacking)
+    ]
+    acceptance.write_text("\n\n".join(kept), encoding="utf-8")
+    return Checkout(INFERENCEX_REPO, "8a76a78e410a412b74c43ebcb969a1bd2fa7549f", root)
+
+
+def test_a_pinned_commit_lacking_the_resolver_s_code_is_refused_naming_what_it_lacks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    checkout = _pinned_checkout(tmp_path, ("acceptance_length", "generation_role", "verifier"))
+    monkeypatch.setattr(sources, "_inferencex", lambda into, commit: (checkout, _main_fixture()))
+    monkeypatch.setattr(sources, "_recipe_reads", _never)
+
+    with pytest.raises(InferencexCommitRefused) as refused:
+        fetch_sources(_QUERY, inferencex_commit="8a76a78e41")
+
+    assert str(refused.value).startswith(f"InferenceX {checkout.commit} lacks what the base launch resolver runs: ")
+    for name in ("acceptance_length", "generation_role", "verifier"):
+        assert f"infx.srt_slurm.synthetic_acceptance.{name}" in str(refused.value)
+    assert "build_overrides" not in str(refused.value)
+    assert "base_launch.json" in str(refused.value)
+
+
+def test_a_pinned_commit_holding_the_resolver_s_code_is_read_on(tmp_path: Path, monkeypatch) -> None:
+    checkout = _pinned_checkout(tmp_path, ())
+    monkeypatch.setattr(sources, "_inferencex", lambda into, commit: (checkout, _main_fixture()))
+    monkeypatch.setattr(sources, "_recipe_reads", lambda *args: ())
+
+    snapshot = fetch_sources(_QUERY, inferencex_commit="8a76a78e41")
+
+    assert (snapshot.inferencex, snapshot.unread) == (_main_fixture(), None)
+
+
+def test_a_pinned_commit_serves_an_agentx_shell_user_file_s_corpus_without_the_resolver_s_code(
+    tmp_path: Path, monkeypatch
+) -> None:
+    checkout = _pinned_checkout(tmp_path, ("acceptance_length",))
+    commits: list[str] = []
+
+    def read(into: Path, commit: str) -> tuple[Checkout, InferencexSnapshot]:
+        commits.append(commit)
+        return checkout, _main_fixture()
+
+    monkeypatch.setattr(sources, "_inferencex", read)
+    user_file = parse_user_file("launch.sh", b"python3 -m sglang.launch_server --tp-size 8\n", framework="sglang")
+
+    snapshot = fetch_sources(_AGENTX_QUERY, user_file=user_file, inferencex_commit="8a76a78e41")
+
+    assert (commits, snapshot.inferencex, snapshot.unread) == (["8a76a78e41"], _main_fixture(), None)
+
+
+def _resolve_argv(tmp_path: Path, *extra: str) -> list[str]:
+    query = tmp_path / "query.json"
+    query.write_text(json.dumps(_QUERY.to_document()), encoding="utf-8")
+    return ["resolve", "--query", str(query), "--gpus", "8", "--out", str(tmp_path / "base_launch.json"), *extra]
+
+
+def test_resolve_reads_inferencex_at_the_commit_it_is_given_and_at_main_without_one(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    asked: list[str] = []
+
+    def fetch(query, *, user_file=None, inferencex_commit=""):
+        asked.append(inferencex_commit)
+        return sources.SourceSnapshot(_main_fixture(), 1_793_000_000)
+
+    monkeypatch.setattr(cli, "fetch_sources", fetch)
+
+    assert cli.main(_resolve_argv(tmp_path)) == cli.EXIT_OK
+    assert cli.main(_resolve_argv(tmp_path, "--inferencex-commit", "8a76a78e41")) == cli.EXIT_OK
+    assert asked == ["", "8a76a78e41"]
+
+
+def test_resolve_exits_2_naming_why_a_pinned_commit_is_refused(tmp_path: Path, monkeypatch, capsys) -> None:
+    def refuse(query, *, user_file=None, inferencex_commit=""):
+        raise InferencexCommitRefused(f"InferenceX {inferencex_commit} lacks infx.srt_slurm.x.verifier")
+
+    monkeypatch.setattr(cli, "fetch_sources", refuse)
+
+    assert cli.main(_resolve_argv(tmp_path, "--inferencex-commit", "8a76a78e41")) == cli.EXIT_REFUSED
+    assert "InferenceX 8a76a78e41 lacks infx.srt_slurm.x.verifier" in capsys.readouterr().err
+    assert not (tmp_path / "base_launch.json").exists()

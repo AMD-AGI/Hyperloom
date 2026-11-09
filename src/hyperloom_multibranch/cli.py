@@ -43,7 +43,9 @@ directory, or one given with no agent, is a usage error, and a pack the Arbor ch
 starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX recipe's adds to, as resolved from InferenceX,
 or is a base launch record (``hyperloom-base-launch/1``) frozen elsewhere, which the session freezes as its base without
 reading any recipe source and each Arbor checks its launch against; a file the adapter cannot use, an unfilled template
-among them, or one given with no agent, is a usage error. Each ``--specialist-prompt`` file holds a direction the user
+among them, or one given with no agent, is a usage error. ``--inferencex-commit SHA`` resolves a fresh session's base
+launch from InferenceX at that commit instead of the head of its ``main``; one that is not 7 to 40 hex digits is a
+usage error. Each ``--specialist-prompt`` file holds a direction the user
 wrote for one specialist: its branch opens at PRELUDE's root ahead of the opening batch, counted within
 ``--max-branches``, its specialist sees the text in every launch prompt, and the judge neither stops it nor lowers its K
 for its first judged tests; an empty or unreadable file, or more files than ``--max-branches``, is a usage error.
@@ -192,6 +194,7 @@ from hyperloom_multibranch.scheduling.settings import (
     Workload,
 )
 from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_INDEX, ArborRefused, read_launch
+from inference_suite import parse_inferencex_commit
 
 PROG = "hyperloom-multibranch"
 EXIT_FAILED = 1
@@ -290,6 +293,18 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
         choices=[optimizer.value for optimizer in KernelOptimizer],
         default=KernelOptimizer.FORGE.value,
         help="Kernel optimizer the session's recipes are scoped to.",
+    )
+    run.add_argument(
+        "--inferencex-commit",
+        dest="inferencex_commit",
+        default="",
+        metavar="SHA",
+        help=(
+            "Resolve the session's base launch from InferenceX at this commit (a full sha, or a prefix of 7 or more hex"
+            " digits) instead of the head of its main, and record the full sha in the frozen base; the cookbooks are"
+            " still read at main. A commit InferenceX does not have, or one that lacks code the resolver runs, stops"
+            " the session before PRELUDE; a resumed session keeps its frozen base."
+        ),
     )
 
 
@@ -754,6 +769,7 @@ def settings_from(
         stop_after_map=_stop_after_map(args.stop_after_map, agents, args.agent_directions),
         agent_dossier=_agent_dossier(args.agent_dossier, args.agent_directions),
         review_gate=args.review_gate,
+        inferencex_commit=parse_inferencex_commit(args.inferencex_commit) if args.inferencex_commit else "",
     )
 
 

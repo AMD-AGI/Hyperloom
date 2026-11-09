@@ -20,6 +20,21 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **The base launch can be resolved from InferenceX at a given commit.**
+  `--inferencex-commit SHA` on `hyperloom optimize`, `hyperloom-multibranch
+  run` and `python -m inference_suite resolve` reads InferenceX at that
+  commit (a full sha, or a prefix of 7 or more hex digits; a pull request's
+  head commit included) instead of the head of `main`, so a session can match
+  a CI run; `base_launch.json` records the full sha. Before, InferenceX was
+  always read at `main`. The cookbooks, vLLM recipes and ATOM catalog are
+  still read at `main`, and a resumed session keeps its frozen base. A commit
+  InferenceX does not have, or one that lacks the functions the resolver runs
+  (such as `acceptance_length`), is refused before the session starts,
+  naming what it lacks; resolve that
+  base elsewhere and pass the frozen `base_launch.json` as
+  `--reference-script`. See
+  [Base launch](reference/inference-suite.md#base-launch).
+
 - **A `custom` workload's entrypoint is named after the board itself.**
   `--benchmark-scripts-dir` is searched for `custom_<gpu-type>.sh` with the
   board as given, so `mi308x`, `mi325x` and `mi350x` now look for
