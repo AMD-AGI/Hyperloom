@@ -301,15 +301,16 @@ def test_native_power_reaches_baseline_and_keep_budgets(report, tmp_path, watts,
 
     workspace = tmp_path / "benchmark_sglang_round"
     workspace.mkdir()
-    (tmp_path / "gpu_power.json").write_text(
-        json.dumps(
-            {
-                "started_unix": started,
-                "avg_power_w": watts,
-                "serving_gpus": [0],
-                "per_gpu": {"0": {"avg_power_w": watts}},
-            }
-        )
+    valid = watts is not None
+    energy = {
+        "window": {"duration_s": 10.0},
+        "per_gpu": {"0": {"integral_j": None if watts is None else watts * 10.0}},
+        "avg_power_w": watts,
+        "power_valid": int(valid),
+        "reasons": [] if valid else ["sampling_gap_exceeded"],
+    }
+    (tmp_path / "power.json").write_text(
+        json.dumps({"started_unix": started, "scope": {"energy_gpus": [0], "serving_gpus": [0]}, "energy": energy})
     )
     report["gpu_monitor"] = {"sample_count": 10, "power_watts": {"avg": 100.0}}
     measurement = extract_benchmark_measurement(report, workspace=workspace, subprocess_started_unix=1000.0)

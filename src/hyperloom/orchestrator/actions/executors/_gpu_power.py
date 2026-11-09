@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Hyperloom's wiring of the measured-phase GPU recorder, and the readers of what it wrote.
+"""Hyperloom's wiring of the power recorder, and the reader of what it wrote.
 
 A benchmark report's ``gpu_monitor`` block samples one card over the whole process, so it describes
-neither the serving cards nor the load being measured; :class:`hyperloom_common.gpu_telemetry.GpuPowerRecorder` does.
-This module builds that recorder for a round (:func:`build_gpu_power_recorder`), names the same sampling for an
+neither the serving cards nor the load being measured; :class:`hyperloom_common.gpu_telemetry.PowerRecorder` does.
+This module builds that recorder for a GEAK replay (:func:`build_gpu_power_recorder`), names the same sampling for an
 inference_suite round, which runs the recorder itself (:func:`round_gpu_telemetry`), drives it from the server logs of a
-child the watchdog does not own (:class:`ServerLogPhaseDriver`), and reads the round's ``gpu_power.json`` back for the
-power-budget checks.
+child the watchdog does not own (:class:`ServerLogPhaseDriver`), and reads the round's energy back as measurement
+fields (:func:`round_power_fields`) for the power-budget checks and the search.
 """
 
 from __future__ import annotations
@@ -18,27 +18,50 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from hyperloom_common.amd_smi import metric_value
 from hyperloom_common.env import EnvValueError, env_float
-from hyperloom_common.gpu_telemetry import DEFAULT_INTERVAL_SEC, MIN_INTERVAL_SEC, GpuPhase, GpuPowerRecorder
+from hyperloom_common.gpu_telemetry import (
+    DEFAULT_INTERVAL_SEC,
+    MIN_INTERVAL_SEC,
+    GpuPhase,
+    PowerRecorder,
+    RecorderScope,
+    RecorderTiming,
+    fast_interval,
+)
 from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
-from inference_suite.contracts import GpuTelemetry
+from inference_suite.contracts import REPORT_SCHEMA, GpuTelemetry, PowerSummary
+from inference_suite.contracts.layout import POWER
 
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "GPU_POWER_ARTIFACT_NAME",
+    "POWER_FIELDS",
     "ServerLogPhaseDriver",
     "build_gpu_power_recorder",
-    "read_measured_gpu_power",
-    "read_measured_gpu_power_by_gpu",
     "round_gpu_telemetry",
+    "round_power_fields",
+    "round_power_summary",
 ]
 
-#: Artifact written beside the round's ``server.log``.
-GPU_POWER_ARTIFACT_NAME = "gpu_power.json"
+#: The window a GEAK replay's recorder measures comes from polling its server logs, not from phase marks.
+_SERVER_LOG_WINDOW = "server_log_poll"
+
+#: The measurement fields a round's power fills, each from the :class:`PowerSummary` figure it names (``None`` for
+#: ``power_valid``, which is the summary's own). Scalars only: ``hosted_executor`` publishes a round's finite numbers
+#: and drops dicts and ``None``, so an invalid round carries ``power_valid`` 0 and no energy.
+POWER_FIELDS = {
+    "gpu_power_avg_w": "avg_power_w",
+    "gpu_power_p75_w": "p75_power_w",
+    "gpu_power_p90_w": "p90_power_w",
+    "gpu_energy_j": "total_gpu_energy_j",
+    "joules_per_input_token": "joules_per_input_token",
+    "joules_per_output_token": "joules_per_output_token",
+    "joules_per_total_token": "joules_per_total_token",
+    "joules_per_successful_query": "joules_per_successful_query",
+}
 
 _INTERVAL_ENV = "HYPERLOOM_GPU_POWER_INTERVAL_S"
 
@@ -121,8 +144,9 @@ class ServerLogPhaseDriver:
         self._poll_logs()
 
 
-def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | None) -> GpuPowerRecorder | None:
-    """The round's power recorder, or ``None`` when sampling is off or there is no ``amd-smi`` to sample with."""
+def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | None) -> PowerRecorder | None:
+    """A GEAK replay's power recorder, writing ``power.json`` beside ``server_log_path``; ``None`` when sampling is off
+    or there is no ``amd-smi`` to sample with. The caller starts it."""
     if not server_log_path or gpu_power_sampling_unavailable():
         return None
     try:
@@ -136,34 +160,45 @@ def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | 
             # Serving cards are still found by the VRAM they hold, as on a host with no mask.
             log.warning("gpu_power: %s; sampling every card", exc)
             gpus = None
-        return GpuPowerRecorder(
-            output_path=str(Path(server_log_path).parent / GPU_POWER_ARTIFACT_NAME),
-            gpus=gpus,
-            interval_sec=env_float(_INTERVAL_ENV, DEFAULT_INTERVAL_SEC),
+        scope = RecorderScope(gpus=None if gpus is None else tuple(sorted(gpus)), window_source=_SERVER_LOG_WINDOW)
+        return PowerRecorder(
+            output_path=str(Path(server_log_path).parent / POWER),
+            scope=scope,
+            timing=RecorderTiming(fast_sec=_interval_sec()),
         )
     except EnvValueError:
         log.warning("gpu_power: recorder could not be built; this round samples nothing", exc_info=True)
         return None
 
 
+def _interval_sec() -> float:
+    """The operator's sampling interval, as :func:`fast_interval` takes it.
+
+    Raises:
+        EnvValueError: the variable is not a number, or :func:`fast_interval` refuses it.
+    """
+    requested = env_float(_INTERVAL_ENV, DEFAULT_INTERVAL_SEC)
+    try:
+        return fast_interval(requested)
+    except ValueError as exc:
+        raise EnvValueError(f"{_INTERVAL_ENV}: {exc}") from exc
+
+
 def round_gpu_telemetry() -> GpuTelemetry:
     """The GPU sampling an inference_suite round runs: on where ``amd-smi`` can sample, at the operator's interval."""
     try:
-        interval_sec = env_float(_INTERVAL_ENV, DEFAULT_INTERVAL_SEC)
+        interval_sec = _interval_sec()
     except EnvValueError:
-        log.warning("gpu_power: the sampling interval is unreadable; this round samples nothing", exc_info=True)
+        log.warning("gpu_power: the sampling interval is unusable; this round samples nothing", exc_info=True)
         return GpuTelemetry(enabled=False, interval_sec=DEFAULT_INTERVAL_SEC)
-    return GpuTelemetry(enabled=not gpu_power_sampling_unavailable(), interval_sec=max(MIN_INTERVAL_SEC, interval_sec))
+    return GpuTelemetry(enabled=not gpu_power_sampling_unavailable(), interval_sec=interval_sec)
 
 
-def _read_round_artifact(workspace: Path | None, subprocess_started_unix: float | None) -> dict[str, Any] | None:
-    """This round's ``gpu_power.json``, beside the report or one level up; ``None`` when no recorder ran for it."""
-    if workspace is None:
-        return None
-    for directory in (Path(workspace), Path(workspace).parent):
-        path = directory / GPU_POWER_ARTIFACT_NAME
+def _read_power_json(workspace: Path, subprocess_started_unix: float | None) -> dict[str, Any] | None:
+    """This round's ``power.json``, beside the report or one level up; ``None`` when no recorder ran for it."""
+    for directory in (workspace, workspace.parent):
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads((directory / POWER).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         if not isinstance(payload, dict):
@@ -177,35 +212,28 @@ def _read_round_artifact(workspace: Path | None, subprocess_started_unix: float 
     return None
 
 
-def read_measured_gpu_power(
-    workspace: Path | None, *, subprocess_started_unix: float | None = None
-) -> tuple[bool, float | None]:
-    """``(found, avg_power_w)`` from the round's ``gpu_power.json``.
+def round_power_summary(
+    report: Mapping[str, Any] | None, workspace: Path | None, *, subprocess_started_unix: float | None = None
+) -> PowerSummary | None:
+    """The round's power: an inference_suite report's ``power`` section, else the ``power.json`` a GEAK replay left
+    in ``workspace``; ``None`` when no recorder ran for the round."""
+    if report and report.get("schema") == REPORT_SCHEMA:
+        section = report.get("power")
+        return None if section is None else PowerSummary.from_document(section)
+    if workspace is None:
+        return None
+    document = _read_power_json(Path(workspace), subprocess_started_unix)
+    return None if document is None else PowerSummary.of(POWER, document)
 
-    ``found`` is ``True`` whenever this round's artifact exists, even when it holds no reading, so a caller can tell
-    "the recorder ran and measured nothing" (fail closed) from "no recorder ran" (fall back to the report).
+
+def round_power_fields(summary: PowerSummary) -> dict[str, Any]:
+    """The measurement fields of a round's power.
+
+    ``gpu_power_by_gpu_w`` is ``None`` when any card's energy is, so a per-card budget never passes a card it cannot
+    see; every figure is ``None`` unless ``power_valid`` is 1.
     """
-    payload = _read_round_artifact(workspace, subprocess_started_unix)
-    return (False, None) if payload is None else (True, metric_value(payload.get("avg_power_w")))
-
-
-def read_measured_gpu_power_by_gpu(
-    workspace: Path | None, *, subprocess_started_unix: float | None = None
-) -> tuple[bool, dict[str, float] | None]:
-    """``(found, {gpu_id: avg_power_w})`` for the round's serving cards; ``None`` when no serving card had a reading,
-    or when a card that may be serving could not be read (``unread_gpus``), since the budget cannot cover it.
-
-    Keyed by the physical ``amd-smi`` index as a string, the same ids ``--max-per-gpu-power-w`` names.
-    """
-    payload = _read_round_artifact(workspace, subprocess_started_unix)
-    if payload is None:
-        return False, None
-    if payload.get("unread_gpus"):
-        return True, None
-    per_gpu = payload.get("per_gpu") if isinstance(payload.get("per_gpu"), dict) else {}
-    readings = {
-        str(gpu): watts
-        for gpu in payload.get("serving_gpus") or []
-        if (watts := metric_value((per_gpu.get(str(gpu)) or {}).get("avg_power_w"))) is not None
+    return {
+        **{field: summary.metrics[name] for field, name in POWER_FIELDS.items()},
+        "gpu_power_by_gpu_w": None if summary.per_gpu_avg_power_w is None else dict(summary.per_gpu_avg_power_w),
+        "power_valid": summary.power_valid,
     }
-    return True, (readings or None)
