@@ -1250,9 +1250,7 @@ template in the relevant YAML and point it at your script under
 map to `runner_type=gfx12`, Magpie's
 `vllm_gfx12.sh`, and run with `--framework vllm` only: pass
 `--framework vllm`, since another framework (including the default) exits
-with code 2 at launch. The two products keep separate identities (64 and 48 CUs);
-a bare `gfx1201` is not product evidence for either, and a board's identity says
-nothing about whether its capacity or GEAK policy has been qualified.
+with code 2 at launch.
 
 Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use
