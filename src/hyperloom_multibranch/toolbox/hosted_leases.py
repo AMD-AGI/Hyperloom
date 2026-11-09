@@ -177,6 +177,12 @@ class HostedBranchLeases:
         with self._guard:
             return self._capacity()
 
+    def reserved(self) -> tuple[int, int]:
+        """How many of the grant's sandboxes and GPUs the leases hold or are promised, safe from any thread."""
+
+        with self._guard:
+            return len(self._promised), min(sum(self._promised.values()), self._grant.max_gpus)
+
     def tests_at_once(self) -> int:
         """How many tests the cards and sandboxes left for measurement run at once, at least one so that a toolbox
         which lost them fails its tests instead of parking them."""
