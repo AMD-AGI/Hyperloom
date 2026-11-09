@@ -237,12 +237,19 @@ class _Rig:
         harness_python.chmod(0o755)
         server_script = tmp_path / "fake_server.py"
         server_script.write_text(_SERVER)
+        # The framework python: records the argv it serves and runs the fake server in place of its server module.
+        self.served = tmp_path / "served_argv"
+        self.framework_python = tmp_path / "framework_python"
+        self.framework_python.write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "{self.served}"\nshift 2\nexec "{sys.executable}" "{server_script}" "$@"\n'
+        )
+        self.framework_python.chmod(0o755)
+        self.probed: list[str] = []
         self.eval_script = tmp_path / "fake_eval.py"
         self.eval_script.write_text(_EVAL)
         self.base = _base(
             query=replace(_base().query, workload=Workload.FIXED, isl=_FIXED.isl, osl=_FIXED.osl),
             golden_al=None,
-            entrypoint=(sys.executable, str(server_script)),
             args=("--disable-radix-cache",),
             env={"SGLANG_USE_AITER": "1", "HF_TOKEN": Redacted(hashlib.sha256(_SECRET.encode()).hexdigest())},
         )
@@ -274,6 +281,7 @@ class _Rig:
     def _probe(self, python, framework, env, *, cwd):
         assert env["HF_TOKEN"] == _SECRET
         self.probe_cwds.append(cwd)
+        self.probed.append(python)
         return FrameworkInstall(python, "3.12.3", "/site-packages/sglang/__init__.py", self.installed)
 
     def _check(self, launch, python, env, *, cwd):
@@ -286,6 +294,7 @@ class _Rig:
             base.server,
             base=BaseRef(str(self.base_path), self.base.digest()),
             port=self.port,
+            framework_python=str(self.framework_python),
             source_files={},
             absent_source_files=(),
             env_inherit=("FAKE_CLIENT_CALLS", "HF_TOKEN"),
@@ -346,6 +355,17 @@ def test_a_fixed_round_with_eval_reports_what_it_measured_and_leaves_its_run_dir
     settled = _snapshot(layout.root)
     time.sleep(0.5)
     assert _snapshot(layout.root) == settled
+
+
+def test_the_server_runs_in_the_interpreter_the_round_probed_and_launch_json_records_its_argv(rig):
+    result = run.run_round(rig.config("r1"))
+
+    assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
+    launch = Launch.from_document(json.loads(result.layout.launch.read_text()))
+    assert rig.probed == [str(rig.framework_python)]
+    assert tuple(rig.served.read_text().splitlines()) == launch.argv
+    assert launch.argv[:3] == (str(rig.framework_python), "-m", "sglang.launch_server")
+    assert result.report.launch_digest == launch.digest()
 
 
 def test_gpu_samples_cover_the_measured_window_alone(rig):

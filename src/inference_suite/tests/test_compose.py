@@ -85,7 +85,7 @@ def test_layers_apply_in_the_fixed_order():
         ("--enable-metrics", (), "runner", ()),
     ]
     assert launch.removed == (Removal("--disable-radix-cache", LayerSource.CANDIDATE),)
-    assert launch.argv[:3] == ("python3", "-m", "sglang.launch_server")
+    assert launch.argv[:3] == ("/opt/venv/bin/python", "-m", "sglang.launch_server")
     assert launch.env["SGLANG_USE_AITER"] == "0"
     assert launch.env["PYTHONPATH"] == "/farm"
     assert launch.env[GPU_MASK_ENV] == "0,1,2,3,4,5,6,7"
@@ -256,6 +256,42 @@ def test_the_accuracy_round_leaves_golden_out_and_forces_nothing():
     assert launch.to_document()["golden"] is None
     assert "--speculative-algorithm" not in launch.argv
     assert "SGLANG_SIMULATE_ACC_LEN" not in launch.env
+
+
+@pytest.mark.parametrize(
+    "framework, entrypoint, server",
+    [
+        ("sglang", ("python3", "-m", "sglang.launch_server"), ("-m", "sglang.launch_server")),
+        ("vllm", ("vllm", "serve"), ("-m", "vllm.entrypoints.cli.main", "serve")),
+    ],
+)
+def test_the_server_runs_under_the_interpreter_the_round_probes(framework, entrypoint, server):
+    base = _base(framework=framework, entrypoint=entrypoint, args=("--tensor-parallel-size", "8"))
+    launch = _launch(base, framework_python="/envs/serve/bin/python")
+
+    assert launch.argv[: 1 + len(server)] == ("/envs/serve/bin/python", *server)
+    assert launch.argv[0] == launch.framework.python
+    assert launch.to_document()["argv"] == list(launch.argv)
+    assert launch.base == base and launch.to_document()["base_digest"] == base.digest()
+
+
+def test_a_base_whose_entrypoint_is_not_its_framework_server_is_refused():
+    refusal = _refusal(base=_base(entrypoint=("/other/bin/python", "-m", "sglang.launch_server")))
+
+    assert (refusal.step, refusal.source) == (FailedStep.CONFIG_INVALID, LayerSource.BASE)
+    assert "server.framework_python" in refusal.detail
+
+
+def test_a_launch_document_without_an_entrypoint_ran_the_base_entrypoint():
+    launch = _launch()
+    recorded = replace(launch, entrypoint=launch.base.entrypoint)
+    document = recorded.to_document()
+    del document["entrypoint"]
+
+    again = Launch.from_document(json.loads(json.dumps(document)))
+    assert again == recorded
+    assert again.argv[:3] == ("python3", "-m", "sglang.launch_server")
+    assert again.digest() == document["digest"]
 
 
 def test_round_trip_through_json_keeps_the_launch_and_its_digest():

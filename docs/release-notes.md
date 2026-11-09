@@ -62,6 +62,18 @@ it.
   `--reference-script`. See
   [Options of `run`](how-to/run-multibranch.md#options-of-run).
 
+- **A serving round's server runs in the interpreter its framework checks
+  read.** The server now starts as `<framework_python> -m sglang.launch_server`
+  (vLLM: `-m vllm.entrypoints.cli.main serve`; ATOM: `-m
+  atom.entrypoints.openai_server`) instead of the base's `python3 -m ...` or
+  `vllm serve` through `PATH`, which could run another install than the one the
+  version probe and flag parser had validated. `launch.json` records the command
+  as `entrypoint` and in `argv`, so launch digests of new rounds differ from
+  earlier ones; base digests and earlier `launch.json` files read as before.
+  **Upgrade note:** a frozen base whose entrypoint is not its framework's
+  default (for example a hand-edited interpreter path) is refused as
+  `config_invalid`; set `framework_python` to that interpreter instead.
+
 - **A `custom` workload's entrypoint is named after the board itself.**
   `--benchmark-scripts-dir` is searched for `custom_<gpu-type>.sh` with the
   board as given, so `mi308x`, `mi325x` and `mi350x` now look for
