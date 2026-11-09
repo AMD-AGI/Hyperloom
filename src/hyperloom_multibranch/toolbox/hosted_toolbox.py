@@ -28,8 +28,13 @@ from hyperloom.measure.framework.base import SESSION_SNAPSHOT_DIR, framework_env
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
+from hyperloom.measure.sandboxes import (
+    DEFAULT_HANDOVER_TIMEOUT_SEC,
+    DEFAULT_MAX_PARALLEL_TESTS,
+    MEASUREMENT_ROLE,
+    Handover,
+)
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
-from hyperloom.measure.sandboxes import DEFAULT_MAX_PARALLEL_TESTS, MEASUREMENT_ROLE, Handover
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy
 from hyperloom.sandbox.socket import Role, SandboxProvider
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -217,6 +222,10 @@ class HostedOptions:
     runner sandboxes read it at the same path: the image's when omitted, ``""`` for none. The snapshot is named to every
     runner sandbox by ``HYPERLOOM_FRAMEWORK_SNAPSHOT`` and ``HYPERLOOM_FRAMEWORK_SESSION_SHA256``, which the runner
     template must therefore accept; without it a test that adds tuned rows to a default table is refused.
+    ``handover_timeout_sec`` is how long the sandbox of a finished test is kept for the next test's sandbox to run
+    (make-before-break, :func:`handover_for`), bounded by the grant's ``max_runtime_sec``: by default
+    :data:`~hyperloom.measure.sandboxes.DEFAULT_HANDOVER_TIMEOUT_SEC`, which outlasts several gateway cuts of a create
+    that queues for a node.
     """
 
     policy: QueuePolicy | None = None
@@ -229,6 +238,7 @@ class HostedOptions:
     lease_tuning: LeaseTuning = LeaseTuning()
     short_prompts: ShortPromptSetup | None = None
     framework_configs: str | None = None
+    handover_timeout_sec: float = DEFAULT_HANDOVER_TIMEOUT_SEC
 
 
 class HostedToolbox(LeasedToolbox):
@@ -370,14 +380,24 @@ def _leases(provider: SandboxProvider, inputs: HostedToolboxInputs, tuning: Leas
     return HostedBranchLeases(provider, grant, DevSession(inputs.run_id, inputs.tp, dev), tuning)
 
 
-def handover_for(grant: GrantLimits | None, leases: HostedBranchLeases | None) -> Handover | None:
+def handover_for(
+    grant: GrantLimits | None, leases: HostedBranchLeases | None, timeout_sec: float = DEFAULT_HANDOVER_TIMEOUT_SEC
+) -> Handover | None:
     """Make-before-break between two tests (:class:`~hyperloom.measure.sandboxes.Handover`): the sandbox of a test
     whose result landed is kept until the next test's sandbox runs, while the grant has room for both beside what the
     branch leases hold; without grant limits the room cannot be counted, and every sandbox is closed when its test ends.
+
+    The kept sandbox waits at most ``timeout_sec`` (:attr:`HostedOptions.handover_timeout_sec`), and never longer than
+    the grant's ``max_runtime_sec``, past which the platform ends any sandbox of the grant anyway.
     """
     if grant is None:
         return None
-    return Handover(grant.max_sandboxes, grant.max_gpus, reserved=leases.reserved if leases is not None else _none)
+    return Handover(
+        grant.max_sandboxes,
+        grant.max_gpus,
+        timeout_sec=min(float(timeout_sec), float(grant.max_runtime_sec)),
+        reserved=leases.reserved if leases is not None else _none,
+    )
 
 
 def _none() -> tuple[int, int]:
@@ -494,7 +514,7 @@ def build_hosted_toolbox(
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,
-        handover=handover_for(grant, leases),
+        handover=handover_for(grant, leases, options.handover_timeout_sec),
     )
     backend = started_backend(provider, config)
     executor = HostedExecutor(

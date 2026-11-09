@@ -77,8 +77,11 @@ MEASUREMENT_ROLE: Role = "measurement"
 DEFAULT_MAX_PARALLEL_TESTS = 8
 DEFAULT_RUNNER_START_TIMEOUT_SEC = 3600
 DEFAULT_TIMEOUT_SLACK_SEC = 900
-#: How long a handed-over sandbox is kept for the next test's sandbox to run before it is closed anyway.
-DEFAULT_HANDOVER_TIMEOUT_SEC = 600.0
+#: How long a handed-over sandbox is kept for the next test's sandbox to run before it is closed anyway. The service's
+#: gateway answers a blocking create that still queues for a node with a 502 after about 600 s, and the provider sends
+#: the create again with the same key to go on waiting (:meth:`~hyperloom.sandbox.e2b.E2BSandboxProvider.create`). The
+#: kept sandbox is there for exactly that queue wait, so it outlasts three such cut-and-resend cycles, not one.
+DEFAULT_HANDOVER_TIMEOUT_SEC = 1800.0
 #: The name of the thread that closes a handed-over sandbox when its timeout passes.
 HANDOVER_TIMER_NAME = "sandbox-handover-timeout"
 REQUEST_ID_KEY = "hyperloom.request-id"
@@ -147,13 +150,20 @@ class Handover:
     ``max_sandboxes`` and ``max_gpus`` are the grant's: the idle sandbox is kept only while the grant has room for it,
     every other sandbox of the pool (held or still being created) and the next one, with their GPUs. ``reserved`` says how many sandboxes and GPUs of
     the grant are held for other uses (the branches' ``dev`` sandboxes); it is asked from the threads that measure.
-    ``timeout_sec`` is how long the idle sandbox waits for the next one to run before it is closed anyway.
+    ``timeout_sec`` is how long the idle sandbox waits for the next one to run before it is closed anyway: long enough
+    for a create that queues for a node through several gateway cuts (:data:`DEFAULT_HANDOVER_TIMEOUT_SEC`).
+    A gateway's 502 to the blocking create is no failed create: the provider sends it again with the same key, and the
+    kept sandbox stays until the sandbox that send finds runs.
     """
 
     max_sandboxes: int
     max_gpus: int
     timeout_sec: float = DEFAULT_HANDOVER_TIMEOUT_SEC
     reserved: Callable[[], tuple[int, int]] = field(default=_nothing_reserved, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.timeout_sec <= 0:
+            raise ValueError("a handed-over sandbox needs a positive timeout_sec")
 
 
 @dataclass(frozen=True)

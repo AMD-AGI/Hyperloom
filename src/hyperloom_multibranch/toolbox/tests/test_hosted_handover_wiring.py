@@ -12,7 +12,7 @@ from pathlib import Path
 
 from hyperloom.measure.sandboxes import Handover
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
-from hyperloom_multibranch.toolbox.hosted_toolbox import handover_for
+from hyperloom_multibranch.toolbox.hosted_toolbox import HostedOptions, handover_for
 from hyperloom_multibranch.toolbox.queue import QueuedTest, State
 from hyperloom_multibranch.toolbox.tests.helpers import req
 from hyperloom_multibranch.toolbox.tests.test_hosted_toolbox import _GRANT, _toolbox
@@ -31,8 +31,26 @@ def test_the_backend_counts_the_grant_and_what_the_leases_hold(tmp_path: Path) -
 def test_without_grant_limits_no_sandbox_is_kept(tmp_path: Path) -> None:
     toolbox = _toolbox(None, tmp_path, grant_limits=None)
     assert toolbox.backend._config.handover is None
-    grant = GrantLimits(max_sandboxes=3, max_gpus=2, gpu_hours=1.0, max_runtime_sec=60)
+    grant = GrantLimits(max_sandboxes=3, max_gpus=2, gpu_hours=1.0, max_runtime_sec=7200)
     assert handover_for(grant, None) == Handover(3, 2) and handover_for(grant, None).reserved() == (0, 0)
+
+
+def test_a_kept_sandbox_outlasts_several_gateway_cuts_of_the_next_create() -> None:
+    # Hosted smoke #12: the service's gateway cut the blocking create of a sandbox that queued for a node with a 502
+    # about every 600 s, and the create was sent again with the same key. One cycle is no wait to keep a node for.
+    gateway_cut_sec = 600
+    grant = GrantLimits(max_sandboxes=3, max_gpus=2, gpu_hours=1.0, max_runtime_sec=7200)
+    assert handover_for(grant, None).timeout_sec >= 3 * gateway_cut_sec
+    assert handover_for(grant, None, 2400).timeout_sec == 2400, "the option is the timeout"
+    short = dataclasses.replace(grant, max_runtime_sec=900)
+    assert handover_for(short, None).timeout_sec == 900, "no sandbox of the grant lives past max_runtime_sec"
+
+
+def test_the_hosted_option_sets_how_long_a_sandbox_is_kept(tmp_path: Path) -> None:
+    options = HostedOptions(framework_configs="", handover_timeout_sec=1234)
+    toolbox = _toolbox(None, tmp_path, options=options, grant_limits={**_GRANT, "max_sandboxes": 3, "max_gpus": 2})
+    assert toolbox.backend._config.handover.timeout_sec == 1234
+    assert toolbox.backend.pool._handover.timeout_sec == 1234
 
 
 async def test_the_pool_hears_which_tests_wait_or_run_after_every_change_of_the_queue(tmp_path: Path) -> None:
