@@ -56,6 +56,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
+import yaml
+
 from hyperloom.common.gain_math import (
     ACCURACY_THRESHOLD,
     AGENTX_ERROR_RATE_THRESHOLD_PCT,
@@ -80,8 +82,9 @@ from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunch, BaseLaunch
 #: What makes a checkout Arbor's, run as a component: the mode, the entry point and the host's contract.
 MARKERS = ("arbor/component.py", "arbor/__main__.py", "docs/hosts.md")
 HOST = "hyperloom-mb"
-#: Arbor's serving template, the pack a host runs it on unless the spec names another, and the validator scripts every
-#: pack the adapter runs has.
+#: Arbor's serving template, the pack a host runs it on unless the spec names another, and the validator scripts a pack
+#: has when its pack.yaml names none (``validator.bench`` and ``validator.correctness`` name its own: the agentx pack's
+#: is ``validator/bench_agentx.sh``).
 PACK = "serving"
 BENCH_SCRIPT = "validator/bench.sh"
 CORRECTNESS_SCRIPT = "validator/correctness.sh"
@@ -150,11 +153,19 @@ _SITE_UNREAD = (
     f'f"this Arbor does not read {SITE_ENV}, so it cannot import what pip installed in {{site}}: '
     f'pin Arbor {SITE_SINCE} or later")'
 )
+#: The oldest Python the checkout runs on: its ``arbor/version.py`` ``PYTHON_MIN`` (3.10 from Arbor ``6126676``), read
+#: without importing Arbor, since nothing is installed yet; 3.11, what Arbor needed before it named one, without it.
+_PYTHON_MIN = (
+    'import os, re, sys; p = "arbor/version.py"; t = open(p).read() if os.path.exists(p) else ""; '
+    'm = re.search(r"PYTHON_MIN[^=]*=\\s*\\((\\d+),\\s*(\\d+)\\)", t); '
+    "need = tuple(int(g) for g in m.groups()) if m else (3, 11); "
+    'sys.exit(sys.version_info[:2] < need and "Arbor needs Python %d.%d or newer" % need)'
+)
 #: What Arbor needs beyond the image (its docs/getting-started.md, and the third-party modules arbor/ imports outside
-#: its tests): Python 3.11, PyYAML and the Claude agent SDK, which brings its CLI. Each is installed only when Arbor
-#: cannot import it, and the last command checks that Arbor imports both.
+#: its tests): the Python its checkout names, PyYAML and the Claude agent SDK, which brings its CLI. Each is installed
+#: only when Arbor cannot import it, and the last command checks that Arbor imports both.
 INSTALL = (
-    f"{PYTHON} -c 'import sys; sys.exit(sys.version_info < (3, 11) and \"Arbor needs Python 3.11 or newer\")'",
+    f"{PYTHON} -c '{_PYTHON_MIN}'",
     f"{ARBOR_PYTHON} -c 'import arbor, yaml' 2>/dev/null || {PYTHON} -m pip install --quiet pyyaml",
     f"{ARBOR_PYTHON} -c 'import arbor, claude_agent_sdk' 2>/dev/null"
     f" || {PYTHON} -m pip install --quiet claude-agent-sdk",
@@ -518,6 +529,19 @@ def _written(root: Path, shipped: frozenset[str]) -> list[Path]:
     return [path for path in root.iterdir() if path.name not in shipped and (path / DOSSIER_INDEX).is_file()]
 
 
+def validator_script(pack: Path, key: str, default: str) -> str:
+    """The script ``pack``'s pack.yaml names for ``key`` under ``validator:`` (``bench``, ``correctness``), relative to
+    the pack; ``default`` when it names none, or the file does not read (Arbor then refuses the pack itself)."""
+
+    try:
+        manifest = yaml.safe_load((pack / "pack.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return default
+    validator = manifest.get("validator") if isinstance(manifest, dict) else None
+    named = validator.get(key) if isinstance(validator, dict) else None
+    return named.strip() if isinstance(named, str) and named.strip() else default
+
+
 def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, Any]:
     """Arbor's config for ``run`` of ``spec``: in component mode on the host, the recipe's launch on the pack the spec
     names in ``checkout`` (the serving template by default), ending by the spec's deadline, its patches made against
@@ -561,8 +585,8 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
         "tp": spec.tp,
         "server_flags": server_flags(spec, launch.server_flags),
         "server_env": {ACCURACY_FLOOR_ENV: str(DEFAULT_ENABLEMENT_ACCURACY_FLOOR), **launch.server_env, **spec.envs},
-        "bench_script": str(pack / BENCH_SCRIPT),
-        "correctness_script": str(pack / CORRECTNESS_SCRIPT),
+        "bench_script": str(pack / validator_script(pack, "bench", BENCH_SCRIPT)),
+        "correctness_script": str(pack / validator_script(pack, "correctness", CORRECTNESS_SCRIPT)),
         "workspace_root": spec.workspace,
         "session_root": str(checkout / run.session_dir),
         "port": spec.port,
