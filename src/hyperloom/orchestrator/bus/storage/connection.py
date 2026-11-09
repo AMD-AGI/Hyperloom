@@ -16,7 +16,8 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs, open_shared, ownership
+from hyperloom.inference_optimizer.session.paths import PRIVATE_STORAGE_DIRNAME
+from hyperloom_common.shared_storage import SHARED_FILE_MODE, make_shared_dirs, open_directory, open_shared, ownership
 
 from .schema import ensure_schema
 
@@ -94,61 +95,42 @@ def _apply_pragmas(conn: sqlite3.Connection, journal_mode: str) -> None:
 _SIDE_FILES = ("-wal", "-shm", "-journal")
 #: The permission bits of the group and of others.
 _OTHERS = 0o077
+#: The mode of the owner-only directory and of the files in it.
+_OWNER_DIRECTORY = stat.S_IRWXU
+_OWNER_FILE = stat.S_IRUSR | stat.S_IWUSR
+_DIRECTORY = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 class DatabaseNotPrivate(PermissionError):
-    """The session holds a credential, so its database and the files beside it must be owner-only, and one of them cannot
-    be made so: the credential would be written to a file the group can read."""
+    """The session holds a credential, so its database must live in a directory only this account can enter, and that
+    cannot be had: the credential would be written where another account of the group can read it."""
 
 
-def _refusal(path: Path, file_mode: int, why: str) -> str:
-    message = f"{path}{ownership(path)} {why}"
-    if file_mode & _OTHERS:
-        return message
+def _this_account() -> int:
+    return os.geteuid()
+
+
+def _refusal(path: Path, why: str) -> str:
     return (
-        f"{message}; the session holds a credential and its database must be {file_mode:04o}, or the credential would be "
-        "written to a file the group can read. Resume it as the account that owns the file, or start a new session"
+        f"{path}{ownership(path)} {why}; the session holds a credential, so its database must be kept in a directory "
+        "only this account can enter. Resume it as the account that owns that directory, or start a new session"
     )
 
 
-def _cannot_narrow(path: Path, file_mode: int, why: str) -> None:
-    """Say that ``path`` cannot be narrowed to ``file_mode``: an error when that mode is owner-only (nothing may be
-    written to a wider file), else a warning, as a session without a credential still resumes."""
-    if file_mode & _OTHERS:
-        log.warning("%s", _refusal(path, file_mode, why))
-    else:
-        raise DatabaseNotPrivate(_refusal(path, file_mode, why))
-
-
 def _narrow(descriptor: int, path: Path, file_mode: int) -> None:
-    """Narrow the open file to what it has in common with ``file_mode``, or say that it cannot be."""
+    """Narrow the open file to what it has in common with ``file_mode``, or warn that it cannot be."""
     current = stat.S_IMODE(os.fstat(descriptor).st_mode)
     if current & ~file_mode:
         try:
             os.fchmod(descriptor, current & file_mode)
         except OSError as exc:
-            _cannot_narrow(
-                path, file_mode, f"is {current:04o}, wider than {file_mode:04o}, and not narrowed ({exc.strerror})"
-            )
-
-
-def _open_database_file(db_path: Path, file_mode: int) -> int:
-    """The database file, created ``file_mode`` when it is not there; a refusal to open it (another account's, a link)
-    is a :class:`DatabaseNotPrivate` when the mode is owner-only, else it is raised as it is."""
-    try:
-        return open_shared(db_path, os.O_RDWR, file_mode)
-    except OSError as exc:
-        if file_mode & _OTHERS:
-            raise
-        raise DatabaseNotPrivate(_refusal(db_path, file_mode, f"cannot be opened ({exc.strerror})")) from exc
+            log.warning("%s is %04o, wider than %04o, and not narrowed (%s)", path, current, file_mode, exc.strerror)
 
 
 def _make_database_file(db_path: Path, file_mode: int) -> None:
     """Create the database ``file_mode`` before SQLite does, and narrow it and the side files a killed process left when
-    they are wider (a credential has come into the session since). Each is opened without following a link. When
-    ``file_mode`` is owner-only, a file that cannot be opened or narrowed (another account's, a link, a failed
-    ``fchmod``) is a :class:`DatabaseNotPrivate`, raised before SQLite opens anything: otherwise a warning."""
-    descriptor = _open_database_file(db_path, file_mode)
+    they are wider. Each is opened without following a link; one that cannot be opened or narrowed is a warning."""
+    descriptor = open_shared(db_path, os.O_RDWR, file_mode)
     try:
         _narrow(descriptor, db_path, file_mode)
     finally:
@@ -160,12 +142,162 @@ def _make_database_file(db_path: Path, file_mode: int) -> None:
         except FileNotFoundError:
             continue
         except OSError as exc:
-            _cannot_narrow(side, file_mode, f"cannot be opened to narrow it ({exc.strerror})")
+            log.warning("%s cannot be opened to narrow it to %04o (%s)", side, file_mode, exc.strerror)
             continue
         try:
             _narrow(descriptor, side, file_mode)
         finally:
             os.close(descriptor)
+
+
+def _private_directory(storage: int, shown: Path) -> int:
+    """The owner-only directory below ``storage`` (a descriptor of it), made with its mode when it is not there, reached
+    without following a link. One that is there already must be this account's with no access for anyone else: another
+    account's, or a wider one, is refused."""
+    try:
+        os.mkdir(shown.name, _OWNER_DIRECTORY, dir_fd=storage)
+    except FileExistsError:
+        pass
+    try:
+        descriptor = os.open(shown.name, _DIRECTORY, dir_fd=storage)
+    except OSError as exc:
+        raise DatabaseNotPrivate(
+            _refusal(shown, f"cannot be opened as a directory without following a link ({exc.strerror})")
+        ) from exc
+    info = os.fstat(descriptor)
+    if info.st_uid != _this_account() or info.st_mode & _OTHERS:
+        os.close(descriptor)
+        raise DatabaseNotPrivate(
+            _refusal(shown, "is not a directory of this account's that no other account can enter")
+        )
+    return descriptor
+
+
+def _files_of(name: str) -> list[str]:
+    return [name, *(name + suffix for suffix in _SIDE_FILES)]
+
+
+def _regular_file_of_ours(directory: int, name: str) -> bool | None:
+    """Whether ``name`` in the directory held open as ``directory`` is a regular file of this account's, without following
+    a link; ``None`` when it is not there."""
+    try:
+        descriptor = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+    except FileNotFoundError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    return stat.S_ISREG(info.st_mode) and info.st_uid == _this_account()
+
+
+def _move_in(storage: int, private: int, name: str, shown: Path) -> None:
+    """Move the database a session made before it held a credential, with the side files a killed process left, from
+    ``storage`` into the owner-only directory: all of them must be this account's regular files, or it is refused (a
+    journal another account left beside the database would be rolled into it). Where the owner-only directory holds a
+    database already, that one is the session's, and where ``storage`` holds none there is nothing to move: files
+    beside a database that is not there are never read, since SQLite looks only in the owner-only directory."""
+    if _regular_file_of_ours(private, name) is not None or _regular_file_of_ours(storage, name) is None:
+        return
+    present = []
+    for each in _files_of(name):
+        ours = _regular_file_of_ours(storage, each)
+        if ours is False:
+            raise DatabaseNotPrivate(
+                _refusal(
+                    shown.parent / each,
+                    "was made before the session held a credential and is not a regular file of this account's",
+                )
+            )
+        if ours:
+            present.append(each)
+    for each in present:
+        try:
+            os.rename(each, each, src_dir_fd=storage, dst_dir_fd=private)
+        except OSError as exc:
+            raise DatabaseNotPrivate(
+                _refusal(shown.parent / each, f"cannot be moved into the owner-only directory ({exc.strerror})")
+            ) from exc
+
+
+def _open_in_private(private: int, each: str, *, create: bool, shown: Path) -> int | None:
+    """The file ``each`` of the owner-only directory, opened without following a link and made when ``create`` and it is
+    not there; ``None`` for a file that is not there and is not made. One that cannot be opened is refused."""
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        if create:
+            try:
+                return os.open(each, flags | os.O_CREAT | os.O_EXCL, _OWNER_FILE, dir_fd=private)
+            except FileExistsError:
+                pass
+        return os.open(each, flags, dir_fd=private)
+    except OSError as exc:
+        if isinstance(exc, FileNotFoundError) and not create:
+            return None
+        raise DatabaseNotPrivate(_refusal(shown / each, f"cannot be opened ({exc.strerror})")) from exc
+
+
+def _prepare_private(private: int, name: str, shown: Path) -> None:
+    """Create the database in the owner-only directory when it is not there, and narrow it and the side files in it to
+    owner-only: each opened without following a link, and each must be a regular file of this account's."""
+    for each in _files_of(name):
+        descriptor = _open_in_private(private, each, create=each == name, shown=shown)
+        if descriptor is None:
+            continue
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != _this_account():
+                raise DatabaseNotPrivate(_refusal(shown / each, "is not a regular file of this account's"))
+            try:
+                os.fchmod(descriptor, stat.S_IMODE(info.st_mode) & _OWNER_FILE)
+            except OSError as exc:
+                raise DatabaseNotPrivate(_refusal(shown / each, f"cannot be made owner-only ({exc.strerror})")) from exc
+        finally:
+            os.close(descriptor)
+
+
+def _private_database(db_path: Path) -> tuple[int, Path]:
+    """The database of a session that holds a credential, made ready in the owner-only directory below ``storage/``
+    (a descriptor of it, and the path of the database in it), before SQLite opens anything: the directory is made (or
+    found, and refused unless it is this account's and closed to everyone else), a database a session made before it
+    held a credential is moved into it, and the files are narrowed. The session directory is one the group can write,
+    and SQLite makes its journal files by name: a file another account put there first would be written to."""
+    inside = db_path.parent.name == PRIVATE_STORAGE_DIRNAME
+    shared = db_path.parent.parent if inside else db_path.parent
+    shown = shared / PRIVATE_STORAGE_DIRNAME
+    make_shared_dirs(shared)
+    storage = open_directory(shared)
+    try:
+        private = _private_directory(storage, shown)
+        try:
+            _move_in(storage, private, db_path.name, shown)
+            _prepare_private(private, db_path.name, shown)
+        except BaseException:
+            os.close(private)
+            raise
+    finally:
+        os.close(storage)
+    return private, shown / db_path.name
+
+
+def _is_same_file(path: Path, directory: int) -> bool:
+    """Whether ``path`` names the file of that name in the directory held open as ``directory``."""
+    try:
+        reached = os.stat(path)
+        held = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+    except OSError:
+        return False
+    return (reached.st_dev, reached.st_ino) == (held.st_dev, held.st_ino)
+
+
+def _connect(path: Path, directory: int | None) -> sqlite3.Connection:
+    """The connection to the database at ``path``; for one in an owner-only directory (held open as ``directory``),
+    refused when SQLite reached another file by that name (the directory was replaced since it was checked)."""
+    conn = sqlite3.connect(path, timeout=30.0, isolation_level=None, check_same_thread=False)
+    if directory is not None and not _is_same_file(path, directory):
+        conn.close()
+        raise DatabaseNotPrivate(_refusal(path.parent, "was replaced while the database was opened"))
+    return conn
 
 
 def open_connection(
@@ -183,7 +315,10 @@ def open_connection(
             environment when omitted.
         file_mode (int): The most the database file's permission bits may be:
             ``664`` so the next account of the group can open it, ``600`` when
-            the session holds a credential the bus then stores.
+            the session holds a credential the bus then stores. At ``600``, and
+            for a database already in the owner-only directory
+            (:data:`~hyperloom.inference_optimizer.session.paths.PRIVATE_STORAGE_DIRNAME`
+            below its directory), the database lives in that directory.
 
     Returns:
         sqlite3.Connection: A ready-to-use connection.
@@ -191,19 +326,24 @@ def open_connection(
     Raises:
         JournalModeError: When the mode is unknown, or the database did not
             enter it.
-        DatabaseNotPrivate: When ``file_mode`` is owner-only and the database
-            or a file beside it cannot be made so; nothing has been written.
+        DatabaseNotPrivate: When the database must be private and the
+            owner-only directory, or a file in it, cannot be had; nothing has
+            been written.
     """
     mode = resolve_journal_mode(journal_mode)
     db_path = Path(db_path)
-    make_shared_dirs(db_path.parent)
-    _make_database_file(db_path, file_mode)
-    conn = sqlite3.connect(
-        db_path,
-        timeout=30.0,
-        isolation_level=None,
-        check_same_thread=False,
-    )
+    private = file_mode & _OTHERS == 0 or db_path.parent.name == PRIVATE_STORAGE_DIRNAME
+    directory = None
+    if private:
+        directory, db_path = _private_database(db_path)
+    else:
+        make_shared_dirs(db_path.parent)
+        _make_database_file(db_path, file_mode)
+    try:
+        conn = _connect(db_path, directory)
+    finally:
+        if directory is not None:
+            os.close(directory)
     try:
         conn.row_factory = sqlite3.Row
         _apply_pragmas(conn, mode)

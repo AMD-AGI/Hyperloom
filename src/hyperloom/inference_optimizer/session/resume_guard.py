@@ -21,7 +21,8 @@ from hyperloom_common.timeutil import now_iso
 from . import lock as session_lock
 from . import session_paths
 from .coordinator_db import OlderCoordinatorDB, refuse_older_schema
-from .paths import SESSION_FILES, db_path_for
+from .optimization_journal import journal_path
+from .paths import PRIVATE_STORAGE_DIRNAME, SESSION_FILES, db_path_for
 
 
 class ResumeBlocked(RuntimeError):
@@ -202,10 +203,16 @@ def _require_readable(session_dir: Path) -> None:
     """Refuse, naming the file, a session file this account cannot read.
 
     ``state.json`` and ``manifest.json`` are owner-only while the operator's ``--extra-env`` or ``--server-args`` hold a
-    credential: another account of the group is refused here, not handed it.
+    credential, the optimization journal while a recorded decision does, and the database, in a directory only its owner
+    can enter, while the session holds one: another account of the group is refused here, not handed it. A journal that
+    cannot be read is never replaced by a fresh one (that would lose its history), nor a database by an empty one.
     """
-    for name in SESSION_FILES:
-        path = session_dir / name
+    owner_only = (
+        *(session_dir / name for name in SESSION_FILES),
+        journal_path(session_dir),
+        session_dir / "storage" / PRIVATE_STORAGE_DIRNAME / "coordinator.db",
+    )
+    for path in owner_only:
         try:
             with path.open("rb"):
                 pass
@@ -213,9 +220,9 @@ def _require_readable(session_dir: Path) -> None:
             continue  # said by the checks that need the file
         except PermissionError as exc:
             raise ResumeBlocked(
-                f"cannot read {path}{ownership(path)}. A session whose --extra-env or --server-args hold a credential "
-                "keeps its state and manifest owner-only: resume it as the account that made it, or start a new "
-                "session."
+                f"cannot read {path}{ownership(path)}. A session that holds a credential keeps its state, manifest, "
+                "optimization journal and database where only the account that made it can read them: resume it as "
+                "that account, or start a new session."
             ) from exc
 
 

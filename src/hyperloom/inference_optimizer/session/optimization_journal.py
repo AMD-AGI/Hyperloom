@@ -16,7 +16,7 @@ from typing import Any, Callable
 from hyperloom_common.coerce import optional_positive_float, to_int
 from hyperloom.common.session_files import shared_options
 from hyperloom_common.io import atomic_write_text
-from hyperloom_common.shared_storage import make_shared_dirs
+from hyperloom_common.shared_storage import make_shared_dirs, ownership
 from hyperloom_common.jsonio import read_json
 from hyperloom_common.timeutil import now_iso
 
@@ -152,6 +152,10 @@ class JournalEntry:
         )
 
 
+class JournalNotReadable(PermissionError):
+    """The journal of a session is there and this account cannot read it: it is never replaced by a fresh one."""
+
+
 @dataclass
 class Journal:
     """In-memory representation of the journal file (mutations write through to disk before returning)."""
@@ -171,11 +175,22 @@ class Journal:
     # Construction
     @classmethod
     def load_or_create(cls, session_dir: Path, fresh: Journal) -> Journal:
-        """Return the existing journal if on disk, else ``fresh`` (on-disk header fields win only where ``fresh`` leaves them empty)."""
+        """Return the existing journal if on disk, else ``fresh`` (on-disk header fields win only where ``fresh`` leaves them empty).
+
+        Raises:
+            JournalNotReadable: When the file is there and cannot be read, as another account of the group meets one that
+                holds a credential: a fresh journal would replace it, so the resume is refused instead.
+        """
         path = journal_path(session_dir)
         make_shared_dirs(path.parent)
 
         def _warn(exc: BaseException) -> None:
+            if isinstance(exc, OSError):
+                raise JournalNotReadable(
+                    f"{path}{ownership(path)} is there but cannot be read ({exc.strerror}): a fresh journal would "
+                    "replace it and lose its history. A journal that holds a credential in a recorded decision is "
+                    "owner-only: resume the session as the account that made it, or start a new session."
+                ) from exc
             log.warning("optimization_journal: failed to parse %s (%s); recreating fresh", path, exc)
 
         blob = _read_blob(path, _warn)
@@ -258,8 +273,15 @@ def journal_path(session_dir: Path) -> Path:
 
 
 def _read_blob(path: Path, on_error: Callable[[BaseException], None] | None) -> dict[str, Any]:
-    """The journal file's top-level object, ``{}`` when absent or unparseable."""
-    if not path.exists():
+    """The journal file's top-level object, ``{}`` when absent or unparseable (and reported to ``on_error``, as one that
+    is there and cannot be read is)."""
+    try:
+        path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return {}
+    except OSError as exc:
+        if on_error is not None:
+            on_error(exc)
         return {}
     return read_json(path, default={}, require_dict=True, on_error=on_error)
 
@@ -373,6 +395,7 @@ __all__ = [
     "JOURNAL_FILENAME",
     "Journal",
     "JournalEntry",
+    "JournalNotReadable",
     "KIND_BACKEND",
     "KIND_BASELINE",
     "KIND_ENV",

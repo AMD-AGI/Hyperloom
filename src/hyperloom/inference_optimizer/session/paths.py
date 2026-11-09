@@ -63,6 +63,11 @@ ARCHIVE_MODE = 0o2770
 #: shown to a specialist.  Whatever copies a session directory elsewhere must leave these out.
 PRIVATE_SESSION_SUBDIRS: tuple[str, ...] = (ARCHIVE_DIRNAME,)
 
+#: The directory below ``storage/`` that only its owner can enter, where the coordinator database lives while the
+#: session holds a credential: the session directory is one the group can write, and SQLite makes its journal files by
+#: path, so a database kept there could be read through a file another account put beside it.
+PRIVATE_STORAGE_DIRNAME = "private"
+
 #: The workspace root and its ``runtime/``, where the installer puts what later steps source or run (GEAK litellm config,
 #: source mirrors): the group may enter and read them, only their owner may change them, so no other account can swap
 #: what a run uses. The session directory below the root, with its own ``runtime/`` (lock, ledger, breakdown), is
@@ -245,8 +250,17 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target
 
 
 def db_path_for(session_dir: Path) -> Path:
-    """Return the canonical SQLite database path for a session."""
-    return Path(session_dir) / "storage" / "coordinator.db"
+    """Return the canonical SQLite database path for a session: ``storage/coordinator.db``, or the one in the owner-only
+    directory (:data:`PRIVATE_STORAGE_DIRNAME`) once the session has made it there."""
+    shared = Path(session_dir) / "storage" / "coordinator.db"
+    private = shared.parent / PRIVATE_STORAGE_DIRNAME / shared.name
+    try:
+        os.stat(private)
+    except FileNotFoundError:
+        return shared
+    except OSError:
+        pass  # a directory this account cannot enter holds it: the caller is refused when it opens it
+    return private
 
 
 def asset_root() -> Path:
@@ -357,6 +371,7 @@ __all__ = [
     "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
     "PRIVATE_SESSION_SUBDIRS",
+    "PRIVATE_STORAGE_DIRNAME",
     "SESSION_FILES",
     "asset_prompt_references_dir",
     "asset_root",

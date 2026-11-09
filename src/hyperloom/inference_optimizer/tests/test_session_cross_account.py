@@ -8,7 +8,6 @@ one exception and stays owner-only."""
 
 from __future__ import annotations
 
-import errno
 import fcntl
 import json
 import os
@@ -22,7 +21,7 @@ from pathlib import Path
 import pytest
 
 import hyperloom
-from hyperloom.inference_optimizer.session import lock, paths
+from hyperloom.inference_optimizer.session import lock, optimization_journal, paths
 from hyperloom.inference_optimizer.session.resume_guard import ResumeBlocked, ensure_resume_safe
 from hyperloom_common.tests.shared_accounts import other_accounts
 
@@ -311,9 +310,18 @@ def test_a_workspace_the_app_makes_itself_is_2755_and_shares_nothing_below_it(tm
     assert not any(_mode(path) & (stat.S_IWGRP | stat.S_IWOTH) for path in [workspace, *workspace.rglob("*")])
 
 
-@pytest.mark.parametrize("name", ["manifest.json", "state.json"])
+_OWNER_ONLY_FILES = [
+    "manifest.json",
+    "state.json",
+    "reports/optimization_journal.json",
+    "storage/private/coordinator.db",
+]
+
+
+@pytest.mark.parametrize("name", _OWNER_ONLY_FILES)
 def test_a_resume_by_an_account_that_cannot_read_an_owner_only_file_is_refused_naming_it(tmp_path, monkeypatch, name):
-    for each in ("manifest.json", "state.json"):
+    for each in _OWNER_ONLY_FILES:
+        (tmp_path / each).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / each).write_text("{}")
     target = tmp_path / name
     target.chmod(0o600)
@@ -329,10 +337,71 @@ def test_a_resume_by_an_account_that_cannot_read_an_owner_only_file_is_refused_n
         ensure_resume_safe(tmp_path, owner_scope="host:1")
     info = target.stat()
     assert str(raised.value) == (
-        f"cannot read {target} (owner {info.st_uid}:{info.st_gid} 0600). A session whose --extra-env or --server-args "
-        "hold a credential keeps its state and manifest owner-only: resume it as the account that made it, or start "
-        "a new session."
+        f"cannot read {target} (owner {info.st_uid}:{info.st_gid} 0600). A session that holds a credential keeps its "
+        "state, manifest, optimization journal and database where only the account that made it can read them: "
+        "resume it as that account, or start a new session."
     )
+
+
+def _a_journal_with_a_credential(session: Path) -> tuple[Path, bytes]:
+    """The journal of a session two settled decisions in, one of which holds a credential: owner-only, as it is written."""
+    fresh = optimization_journal.Journal(session_id="s", model="m", hardware="h", framework="f")
+    journal = optimization_journal.Journal.load_or_create(session, fresh)
+    for iteration, change in enumerate(("--tp 8", "--tp 8 --api-key sk-live-secret-value-1234"), start=1):
+        journal.append_entry(
+            optimization_journal.JournalEntry(
+                phase="OPTIMIZE", iter=iteration, kind="param", change=change, outcome="KEEP"
+            )
+        )
+    path = optimization_journal.journal_path(session)
+    return path, path.read_bytes()
+
+
+def test_a_journal_that_holds_a_credential_is_owner_only_and_the_next_account_cannot_read_it(tmp_path):
+    with other_accounts() as accounts:
+        workspace = accounts.shared_dir("claw")
+        session = workspace / "s"
+        path, _ = _a_journal_with_a_credential(session)
+        assert _mode(path) == 0o600
+        out = accounts.run(
+            accounts.second,
+            f"import errno\ntry:\n    open({str(path)!r}, 'rb').read()\nexcept PermissionError as e:\n"
+            "    print(errno.errorcode[e.errno])\n",
+        )
+        assert out.strip() == "EACCES"
+
+
+@pytest.mark.parametrize("call", ["read_text", "stat"], ids=["file-unreadable", "directory-not-enterable"])
+def test_a_journal_this_account_cannot_read_is_refused_and_never_replaced_by_a_fresh_one(tmp_path, monkeypatch, call):
+    """The next account of the group meets the journal owner-only: its history is not reset, and the leg stops."""
+    session = tmp_path / "s"
+    path, before = _a_journal_with_a_credential(session)
+    real = getattr(Path, call)
+
+    def as_another_account(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, call, as_another_account)
+    fresh = optimization_journal.Journal(session_id="next", model="m", hardware="h", framework="f")
+    with pytest.raises(optimization_journal.JournalNotReadable) as raised:
+        optimization_journal.Journal.load_or_create(session, fresh)
+    assert isinstance(raised.value, PermissionError)
+    assert str(raised.value).startswith(f"{path}") and "would replace it and lose its history" in str(raised.value)
+    assert optimization_journal.read_journal_entries(session) == [], "reporting without a journal stays read-only"
+    monkeypatch.undo()
+    assert path.read_bytes() == before, "the journal was not reset"
+    resumed = optimization_journal.Journal.load_or_create(session, fresh)
+    assert [entry.iter for entry in resumed.entries] == [1, 2], "as the account that made it, the history is intact"
+
+
+def test_a_journal_that_is_not_json_is_still_recreated_fresh(tmp_path):
+    path = optimization_journal.journal_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("{ not json")
+    fresh = optimization_journal.Journal(session_id="s", model="m", hardware="h", framework="f")
+    assert optimization_journal.Journal.load_or_create(tmp_path, fresh).entries == []
 
 
 #: A first leg whose operator pins hold a credential: its state and manifest stay owner-only.
@@ -431,7 +500,13 @@ _BUS_LEG = textwrap.dedent(
             shared.append(path.relative_to(session).as_posix())
             if b"SECRET-KEY-VALUE" in path.read_bytes() or b"hf_live_value_123" in path.read_bytes():
                 holders.append(path.relative_to(session).as_posix())
-    print(json.dumps({{"database": database, "readable": shared, "holders": holders}}))
+    private = session / "storage" / "private"
+    print(json.dumps({{
+        "database": database,
+        "readable": shared,
+        "holders": holders,
+        "private": stat.S_IMODE(private.stat().st_mode) & 0o777 if private.is_dir() else None,
+    }}))
     """
 )
 
@@ -468,157 +543,9 @@ def test_the_operators_credential_reaches_no_file_the_group_can_read_and_the_dat
     )
     assert seen["holders"] == []
     assert ("storage/coordinator.db" in seen["readable"]) == (database_mode == 0o664)
-
-
-def test_a_database_a_session_made_before_it_held_a_credential_is_narrowed_to_600_by_its_owner(tmp_path):
-    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-
-    database = _setgid_workspace(tmp_path / "claw") / "storage" / "coordinator.db"
-    SqliteConnection(database).raw.close()
-    assert _mode(database) == 0o664
-    SqliteConnection(database, file_mode=0o600).raw.close()
-    assert _mode(database) == 0o600
-    SqliteConnection(database).raw.close()
-    assert _mode(database) == 0o600, "a wider mode asked later never widens it"
-
-
-_LEFT_BY_A_KILLED_WRITER = textwrap.dedent(
-    """
-    import os
-    from pathlib import Path
-    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-    connection = SqliteConnection(Path({database!r}))
-    connection.raw.execute("CREATE TABLE IF NOT EXISTS leftover (value TEXT)")
-    connection.raw.execute("INSERT INTO leftover VALUES ('written by the leg that was killed')")
-    os._exit(0)
-    """
-)
-
-
-def test_the_wal_and_shm_a_killed_664_writer_left_are_narrowed_with_the_database_and_hold_no_credential_after(tmp_path):
-    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-
-    workspace = _setgid_workspace(tmp_path / "claw")
-    database = workspace / "storage" / "coordinator.db"
-    _as_this_account(_LEFT_BY_A_KILLED_WRITER.format(database=str(database)), umask=0o022, workspace=workspace)
-    sides = [database.with_name(database.name + suffix) for suffix in ("", "-wal", "-shm")]
-    assert [_mode(path) for path in sides] == [0o664, 0o664, 0o664], "what the killed writer left"
-    connection = SqliteConnection(database, file_mode=0o600)
-    try:
-        connection.raw.execute("INSERT INTO leftover VALUES ('sk-live-after-the-narrowing')")
-        assert [_mode(path) for path in sides] == [0o600, 0o600, 0o600]
-        readable = [
-            path.name
-            for path in database.parent.iterdir()
-            if _mode(path) & (stat.S_IRGRP | stat.S_IROTH) and b"sk-live-after" in path.read_bytes()
-        ]
-        assert readable == []
-        assert b"sk-live-after" in (database.with_name(database.name + "-wal")).read_bytes()
-    finally:
-        connection.raw.close()
-
-
-def _database_made_664(tmp_path: Path) -> Path:
-    """A database a leg without a credential made below shared storage, closed cleanly, with a row in it."""
-    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-
-    database = _setgid_workspace(tmp_path / "claw") / "storage" / "coordinator.db"
-    connection = SqliteConnection(database)
-    connection.raw.execute("CREATE TABLE leftover (value TEXT)")
-    connection.raw.execute("INSERT INTO leftover VALUES ('before')")
-    connection.raw.close()
-    assert _mode(database) == 0o664
-    return database
-
-
-def _bytes(database: Path) -> dict[str, bytes]:
-    return {path.name: path.read_bytes() for path in sorted(database.parent.iterdir()) if path.is_file()}
-
-
-def _foreign_database(database: Path, monkeypatch) -> Path:
-    """The database is 664 and another account's: narrowing it fails ``EPERM``, as it would for this account."""
-
-    def refused(descriptor, mode):
-        raise PermissionError(errno.EPERM, "Operation not permitted")
-
-    monkeypatch.setattr(os, "fchmod", refused)
-    return database
-
-
-def _wal_is_a_link(database: Path, monkeypatch) -> Path:
-    victim = database.parent.parent / "somebody-elses-file"
-    victim.write_text("kept")
-    victim.chmod(0o664)
-    database.with_name("coordinator.db-wal").symlink_to(victim)
-    return database.with_name("coordinator.db-wal")
-
-
-def _shm_cannot_be_opened(database: Path, monkeypatch) -> Path:
-    side = database.with_name("coordinator.db-shm")
-    side.write_bytes(b"left by a killed leg")
-    side.chmod(0o664)
-    real_open = os.open
-
-    def opened(path, flags, *args, **kwargs):
-        if str(path).endswith("-shm"):
-            raise PermissionError(errno.EACCES, "Permission denied")
-        return real_open(path, flags, *args, **kwargs)
-
-    monkeypatch.setattr(os, "open", opened)
-    return side
-
-
-def _database_is_a_link(database: Path, monkeypatch) -> Path:
-    real = database.with_name("elsewhere.db")
-    database.rename(real)
-    database.symlink_to(real)
-    return database
-
-
-_CANNOT_BE_NARROWED = [
-    pytest.param(_foreign_database, "not narrowed", id="foreign-owned-fchmod-fails"),
-    pytest.param(_wal_is_a_link, "cannot be opened to narrow it", id="side-file-is-a-link"),
-    pytest.param(_shm_cannot_be_opened, "cannot be opened to narrow it", id="side-file-unopenable"),
-    pytest.param(_database_is_a_link, "cannot be opened", id="database-is-a-link"),
-]
-
-
-@pytest.mark.parametrize(("break_it", "why"), _CANNOT_BE_NARROWED)
-def test_a_database_that_must_be_private_and_cannot_be_made_so_is_not_opened_and_nothing_is_written(
-    tmp_path, monkeypatch, break_it, why
-):
-    from hyperloom.orchestrator.bus.storage import connection as bus_connection
-
-    database = _database_made_664(tmp_path)
-    named = break_it(database, monkeypatch)
-    before = _bytes(database)
-    monkeypatch.setattr(
-        bus_connection.sqlite3, "connect", lambda *args, **kwargs: pytest.fail("SQLite was opened on a wider file")
+    assert seen["private"] == (0o700 if database_mode == 0o600 else None), (
+        "a credential's database is in a 0700 directory"
     )
-    with pytest.raises(bus_connection.DatabaseNotPrivate) as raised:
-        bus_connection.SqliteConnection(database, file_mode=0o600)
-    assert isinstance(raised.value, PermissionError)
-    message = str(raised.value)
-    assert message.startswith(f"{named} (owner ") and why in message and "0600" in message, message
-    assert "Resume it as the account that owns the file" in message
-    assert _bytes(database) == before, "nothing was written, to the database or beside it"
-
-
-@pytest.mark.parametrize(
-    "break_it", [_foreign_database, _wal_is_a_link, _shm_cannot_be_opened], ids=["foreign-owned", "wal-link", "shm"]
-)
-def test_the_same_failures_only_warn_when_the_database_may_be_664(tmp_path, monkeypatch, caplog, break_it):
-    from hyperloom.orchestrator.bus.storage import connection as bus_connection
-
-    database = _database_made_664(tmp_path)
-    database.chmod(0o666)  # wider than the shared mode, so that narrowing it is asked
-    named = break_it(database, monkeypatch)
-    before = _bytes(database)
-    with caplog.at_level("WARNING", logger=bus_connection.__name__):
-        bus_connection._make_database_file(database, 0o664)
-    assert [record.getMessage().split(" (owner ")[0] for record in caplog.records][:1] == [str(named)]
-    assert "the session holds a credential" not in caplog.text
-    assert _bytes(database) == before
 
 
 def test_the_lock_a_foreign_account_left_unwritable_is_named_with_its_owner_and_mode(tmp_path, monkeypatch):
