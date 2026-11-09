@@ -29,7 +29,7 @@ from pathlib import Path
 
 import yaml
 
-from hyperloom_common.gpu_telemetry import GpuPhase, GpuPowerRecorder
+from hyperloom_common.gpu_telemetry import GpuPhase, GpuPowerRecorder, RecorderOptions
 from hyperloom_common.io import atomic_write_json
 from inference_suite import framework_version, parser_check, staging
 from inference_suite.compose import Refusal, RoundFacts, compose
@@ -144,9 +144,9 @@ def _recorder(config: SuiteConfig, layout: RunLayout) -> GpuPowerRecorder | None
         return None
     return GpuPowerRecorder(
         output_path=str(layout.gpu_power),
-        samples_path=str(layout.gpu_samples),
         gpus=set(config.server.gpus),
         interval_sec=telemetry.interval_sec,
+        options=RecorderOptions(samples_path=str(layout.gpu_samples), energy=telemetry.energy),
     )
 
 

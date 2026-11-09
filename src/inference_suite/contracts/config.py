@@ -611,18 +611,25 @@ class EvalConfig:
 class GpuTelemetry:
     enabled: bool
     interval_sec: float
+    #: Also read each card's energy counter at the edges of the measured window. Written to the document only when
+    #: off, so a config with the default reads the same to a runner from before this field.
+    energy: bool = True
 
     def __post_init__(self) -> None:
         _FIELDS.boolean(self.enabled, "the GPU telemetry's enabled")
         _positive(self.interval_sec, "the GPU telemetry interval")
+        _FIELDS.boolean(self.energy, "the GPU telemetry's energy")
 
     def to_document(self) -> dict[str, object]:
-        return {"enabled": self.enabled, "interval_sec": self.interval_sec}
+        document: dict[str, object] = {"enabled": self.enabled, "interval_sec": self.interval_sec}
+        if not self.energy:
+            document["energy"] = False
+        return document
 
     @classmethod
     def from_document(cls, document: object) -> GpuTelemetry:
         fields = _FIELDS.known(document, field_names(cls), "the GPU telemetry")
-        return cls(fields.get("enabled"), fields.get("interval_sec"))
+        return cls(fields.get("enabled"), fields.get("interval_sec"), fields.get("energy", True))
 
 
 @dataclass(frozen=True)

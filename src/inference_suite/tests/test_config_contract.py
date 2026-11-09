@@ -277,6 +277,20 @@ def test_the_kv_telemetry_switch_round_trips():
         replace(config.telemetry, kv="yes")
 
 
+def test_the_gpu_energy_switch_is_written_only_when_it_is_off():
+    """A config with the default reads the same to a runner from before the switch existed."""
+    default = _config()
+    assert default.telemetry.gpu.energy is True
+    assert "energy" not in default.to_document()["telemetry"]["gpu"]
+    assert SuiteConfig.from_document(default.to_document()) == default
+
+    off = _config(telemetry=replace(default.telemetry, gpu=replace(default.telemetry.gpu, energy=False)))
+    assert off.to_document()["telemetry"]["gpu"]["energy"] is False
+    assert SuiteConfig.from_document(off.to_document()).telemetry.gpu.energy is False
+    with pytest.raises(ConfigError, match="the GPU telemetry's energy"):
+        GpuTelemetry(enabled=True, interval_sec=0.5, energy="no")
+
+
 def test_defaulted_deadline_keys_may_be_omitted():
     document = _config().to_document()
     del document["deadlines"]["pre_ready_silence_sec"]
