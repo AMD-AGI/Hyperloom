@@ -17,6 +17,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from hyperloom.measure import hosted
 from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED
@@ -218,10 +220,35 @@ def test_a_runner_that_does_not_exit_after_its_result_landed_releases_its_sandbo
     recording.exit_code = lambda real: None  # the sandbox can tell, and the runner never exits
     try:
         backend.pool.note_upcoming({"req-1", "req-2"})
+        outcomes: list[TestOutcome] = []
         with caplog.at_level(logging.INFO, logger="hyperloom.measure.hosted"):
-            assert _run(backend, tmp_path, "req-1").returncode == 0
+            worker = threading.Thread(target=lambda: outcomes.append(_run(backend, tmp_path, "req-1")), daemon=True)
+            worker.start()
+            worker.join(30)
+            assert not worker.is_alive(), "the test waited for its runner to exit past the bound"
+        assert outcomes[0].returncode == 0
         assert backend.pool.parked is None and _live(rig) == []
         assert "its runner has not exited" in caplog.text
+    finally:
+        backend.close()
+        rig.provider.close()
+
+
+@pytest.mark.parametrize("how", ["the test", "the run"])
+def test_a_test_stopped_after_its_result_landed_releases_its_sandbox(tmp_path, how: str) -> None:
+    stopping = threading.Event()
+    rig, recording, backend = _backend(tmp_path, should_stop=stopping.is_set)
+    land = backend._land
+
+    def land_then_stop(attempt: Any, verified: Any) -> None:
+        land(attempt, verified)
+        (attempt.stop if how == "the test" else stopping).set()
+
+    backend._land = land_then_stop  # type: ignore[method-assign]
+    try:
+        backend.pool.note_upcoming({"req-1", "req-2"})
+        assert _run(backend, tmp_path, "req-1").returncode == 0, "the result had landed"
+        assert backend.pool.parked is None and _live(rig) == [], "a stopping test keeps no sandbox"
     finally:
         backend.close()
         rig.provider.close()

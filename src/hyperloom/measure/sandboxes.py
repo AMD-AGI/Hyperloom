@@ -21,7 +21,8 @@ Make-before-break (:class:`Handover`): on a cluster that queues sandboxes, a san
 the queue, and the next test's sandbox asks again behind every other job of its priority. A test that is done with its
 sandbox may therefore hand it over (:meth:`SandboxPool.hand_over`) instead of releasing it: while another test of the
 session waits for a sandbox (:meth:`SandboxPool.note_upcoming`) and the grant has room for one more sandbox and its
-GPUs, the idle sandbox is kept until the next test's sandbox runs, then closed. It is kept for one test at a time,
+GPUs beside the sandboxes the pool holds and those it is creating, the idle sandbox is kept until the next test's
+sandbox runs, then closed. It is kept for one test at a time,
 never takes a slot of ``max_parallel_tests``, and is closed anyway after :attr:`Handover.timeout_sec`, when the test
 that would take its place is gone, when that test's create fails or is stopped, and when the pool closes.
 """
@@ -144,7 +145,7 @@ class Handover:
     """When a sandbox a test is done with is kept until the next test's sandbox runs (make-before-break).
 
     ``max_sandboxes`` and ``max_gpus`` are the grant's: the idle sandbox is kept only while the grant has room for it,
-    every other sandbox of the pool and the next one, with their GPUs. ``reserved`` says how many sandboxes and GPUs of
+    every other sandbox of the pool (held or still being created) and the next one, with their GPUs. ``reserved`` says how many sandboxes and GPUs of
     the grant are held for other uses (the branches' ``dev`` sandboxes); it is asked from the threads that measure.
     ``timeout_sec`` is how long the idle sandbox waits for the next one to run before it is closed anyway.
     """
@@ -239,6 +240,9 @@ class SandboxPool:
         self._parked: _Parked | None = None
         self._upcoming: frozenset[str] = frozenset()
         self._claims = 0
+        # The creates and re-attaches that took a slot and whose sandbox is not held yet, with their GPUs (``None`` when
+        # not known): the grant's room counts them, since their sandboxes will be.
+        self._creating: dict[object, int | None] = {}
         self._closed = False
         self._ended = 0  # how many held sandboxes have ended: a create waiting for quota wakes on a change
 
@@ -303,22 +307,26 @@ class SandboxPool:
         metadata = self._metadata(tag.request_id, tag.attempt, tag.avoid_nodes, tag.meta or {})
         wait = _Wait(f"test {tag.request_id} attempt {tag.attempt}", _wait_budget(timeout_sec, remaining_sec))
         self._take_slot(stop, wait=wait)
-        parked = self._claim_parked(gpu_count, wait.label)
+        creating = object()
+        parked: _Parked | None = None
         handed = "its create failed or was stopped"
         try:
             try:
+                parked = self._claim_parked(int(gpu_count), wait.label, creating)
                 sandbox = self._create(template, lifetime, metadata, stop, wait)
             except BaseException:
-                self._give_slot()
+                self._give_slot(creating)
                 raise
             with self._cond:
                 closed = self._closed
             if closed:  # the pool closed while the create waited: nobody will release this one
-                self._close_handle(sandbox)
-                self._give_slot()
+                try:
+                    self._close_handle(sandbox)
+                finally:
+                    self._give_slot(creating)
                 raise PoolClosed("the sandbox pool closed while the sandbox was being created")
             log.info("%s: sandbox %s is running after %.0fs", wait.label, sandbox.sandbox_id, wait.elapsed())
-            runner = self._adopt(sandbox, _Hold(int(gpu_count), tag.request_id))
+            runner = self._adopt(sandbox, _Hold(int(gpu_count), tag.request_id), creating)
             handed = f"sandbox {runner.sandbox_id} of {wait.label} is running"
             return runner
         finally:
@@ -338,12 +346,15 @@ class SandboxPool:
         """
         budget = float("inf") if timeout_sec is None else max(0.0, float(timeout_sec))
         self._take_slot(stop, reattaching=sandbox_id, wait=_Wait(f"sandbox {sandbox_id} (re-attaching)", budget))
+        creating = object()
+        with self._cond:
+            self._creating[creating] = None  # its GPUs are not known
         try:
             sandbox = self._provider.connect(sandbox_id, role=MEASUREMENT_ROLE)
         except BaseException:
-            self._give_slot()
+            self._give_slot(creating)
             raise
-        return self._adopt(sandbox, _Hold(None, None))
+        return self._adopt(sandbox, _Hold(None, None), creating)
 
     def release(self, runner: RunnerSandbox) -> None:
         """Close the sandbox and free its slot; calling it again changes nothing."""
@@ -573,20 +584,25 @@ class SandboxPool:
         running.discard(reattaching or "")
         return len(running)
 
-    def _give_slot(self) -> None:
+    def _give_slot(self, creating: object) -> None:
+        """Give back the slot of a create or re-attach whose sandbox the pool will not hold."""
         with self._cond:
+            self._creating.pop(creating, None)
             self._claims = max(0, self._claims - 1)
             self._cond.notify_all()
 
-    def _adopt(self, sandbox: Sandbox, hold: _Hold) -> RunnerSandbox:
+    def _adopt(self, sandbox: Sandbox, hold: _Hold, creating: object) -> RunnerSandbox:
         try:
             info = sandbox.info()
         except BaseException:
-            self._close_handle(sandbox)
-            self._give_slot()
+            try:
+                self._close_handle(sandbox)
+            finally:
+                self._give_slot(creating)
             raise
         metadata = dict(info.metadata)
         with self._cond:
+            self._creating.pop(creating, None)
             self._held[sandbox.sandbox_id] = _Hold(hold.gpus, hold.request_id or metadata.get(REQUEST_ID_KEY))
         return RunnerSandbox(
             sandbox_id=sandbox.sandbox_id,
@@ -624,13 +640,13 @@ class SandboxPool:
         return frozenset(self._upcoming - holding - {own.request_id if own else runner.metadata.get(REQUEST_ID_KEY)})
 
     def _room_for(self, more_gpus: int | None) -> str | None:
-        """Why the grant has no room for the sandboxes the pool holds, one more of ``more_gpus`` GPUs and what is
-        reserved; ``None`` when it has. Called with the lock held."""
+        """Why the grant has no room for the sandboxes the pool holds or is creating, one more of ``more_gpus`` GPUs
+        and what is reserved; ``None`` when it has. Called with the lock held."""
         handover = self._handover
         if handover is None:
             return "no grant to count the sandboxes in"
         reserved_sandboxes, reserved_gpus = handover.reserved()
-        gpus = [hold.gpus for hold in self._held.values()]
+        gpus = [hold.gpus for hold in self._held.values()] + list(self._creating.values())
         if more_gpus is None or any(count is None for count in gpus):
             return "a sandbox of the pool has GPUs it does not know"
         sandboxes = len(gpus) + reserved_sandboxes + 1
@@ -657,15 +673,20 @@ class SandboxPool:
             return "no test waits for a sandbox"
         return self._room_for(hold.gpus)
 
-    def _claim_parked(self, gpu_count: int, label: str) -> _Parked | None:
-        """The handed-over sandbox ``label``'s create now replaces, kept until that create ends; ``None`` when there is
-        none to replace. One the grant has no room beside the new sandbox for is closed before the create."""
+    def _claim_parked(self, gpu_count: int, label: str, creating: object) -> _Parked | None:
+        """Count ``label``'s create (``creating``) in the grant, and return the handed-over sandbox it now replaces,
+        kept until that create ends; ``None`` when there is none to replace. A handed-over sandbox the grant has no room
+        for beside every sandbox the pool holds or creates and the new one is closed before the create, also when
+        another test's create replaces it already."""
         with self._cond:
             parked = self._parked
-            if parked is None or parked.claimed_by is not None:
+            refusal = None if parked is None else self._room_for(gpu_count)
+            self._creating[creating] = gpu_count
+            if parked is None:
                 return None
-            refusal = self._room_for(int(gpu_count))
             if refusal is None:
+                if parked.claimed_by is not None:
+                    return None
                 parked.claimed_by = label
                 kept = time.monotonic() - parked.since
                 log.info(
