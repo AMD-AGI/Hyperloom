@@ -134,6 +134,12 @@ ARBOR_OBJECTIVES = {GRADED_INTVTY_P50: "e2e_norm_intvty_p50", TOTAL_TOKEN_THROUG
 #: ``df9b55a`` added the total token throughput.
 OBJECTIVE_MODULE = "arbor/objective.py"
 OBJECTIVE_SINCE = {"e2e_norm_intvty_p50": "9c455df", "total_token_throughput": "df9b55a"}
+#: Where the gate's AgentX round report (``report.json``) holds each metric an AgentX session keeps on; throughput is
+#: the server's, not per GPU.
+REPORT_PATHS = {
+    GRADED_INTVTY_P50: "agentx.e2e_norm_intvty.p50",
+    TOTAL_TOKEN_THROUGHPUT: "agentx.throughput.total_tokens_per_second",
+}
 #: SGLang reads its TP from these flags only. Arbor gives vLLM its TP itself, but MB names it too, so a vLLM branch's
 #: server_flags are never empty, which Arbor refuses (a plain baseline root has no launch of its own).
 SGLANG = "sglang"
@@ -703,8 +709,8 @@ def host_rules(spec: AgentSpec) -> list[str]:
     if kind == AGENTX and spec.client:
         rules.append(
             f"{HOST_RULE}: MB's client is its own AgentX round, a replay of the workload's trace window: each run"
-            f" writes {REPORT_FILE} in its output directory. Its agentx.throughput.output_tokens_per_second is the output"
-            " throughput and agentx.e2e_norm_intvty.p50 the p50 interactivity MB keeps a change on; a run whose"
+            f" writes {REPORT_FILE} in its output directory. Its {REPORT_PATHS[spec.metric]} is the {spec.metric} MB"
+            " keeps a change on, and agentx.throughput.output_tokens_per_second the output throughput; a run whose"
             f" run_status is not {RunStatus.COMPLETED.value} measured nothing."
         )
     if spec.source_unkept:
