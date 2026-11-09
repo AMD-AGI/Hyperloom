@@ -1093,11 +1093,17 @@ class _GemmTuningMixin:
         # tuned entries.
         return self._merged_candidate_envs(cand)
 
+    def _defer_gemm_env_win(self, verdict: dict[str, Any], tuner_name: str, env: dict[str, str]) -> None:
+        """Hold an unblocked candidate the KEEP gate refused for the sub-threshold bundle."""
+        from ..kernel.subthreshold_bundle import defer_env_win
+
+        server_args = self._gemm_candidate_server_args(tuner_name)
+        defer_env_win(self.shared_state, verdict, tuner=tuner_name, envs=env, server_args=server_args)
+
     async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
         """Sequentially E2E-validate each tuning candidate's env independently."""
         from ..actions.executors._aiter_jit import drop_serving_so_for_envs
         from ..actions.executors._aiter_serving_once import under_host_lock
-        from ..kernel.subthreshold_bundle import defer_env_win
 
         candidates = self._gemm_canonical_candidates(result)
         if not candidates:
@@ -1147,8 +1153,7 @@ class _GemmTuningMixin:
                     kept.append(keep_row)
                     continue
             if not blockers:
-                server_args = self._gemm_candidate_server_args(tuner_name)
-                defer_env_win(self.shared_state, verdict, tuner=tuner_name, envs=env, server_args=server_args)
+                self._defer_gemm_env_win(verdict, tuner_name, env)
             reverted.append({**cand, "reason": _gemm_revert_reason(decision, gain_pct, blockers)})
             await asyncio.to_thread(
                 under_host_lock, _GEMM_LANE_MOVE, drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir
