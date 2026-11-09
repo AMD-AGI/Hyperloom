@@ -27,15 +27,14 @@ what to read back, and whether a dossier's directions can go into a pack
 ## The dossier
 
 A dossier is written once per model, workload and GPU type, then refreshed part by part. It has
-twelve parts: model, system, code reading, target, workload, baseline, profile, kernels, reference
-platform, earlier optimizations, directions and fast bench. Part 11, the directions, ends with the
+eleven parts: model, system, code reading, target, workload, baseline, profile, kernels, earlier
+optimizations, directions and fast bench. Part 11, the directions, ends with the
 map a campaign works.
 
 ### Where dossiers are, and how one is found
 
 - **In a repository:** `docs/dossier/<model>-<workload>-<gpu>/`. `README.md` is the index, with one
-  file per part (`NN-<part>.md`) and one per part per update round (`NN.uK-<part>.md`). Arbor has
-  Model M on MI350X and on MI355X.
+  file per part (`NN-<part>.md`) and one per part per update round (`NN.uK-<part>.md`).
 - **The lookup:** `bash .claude/skills/dossier/find-dossier.sh` lists every dossier the checkout can
   see, each with its header (project, pins, platform, workload, date):
   - this checkout's `docs/dossier/`, and the enclosing project's when Arbor is a submodule;
@@ -55,7 +54,7 @@ What the agent does:
      serves.
    - **Missing:** it writes one as LEARN iterations, in the order
      `packs/serving/knowledge/dossier-and-profile.md` gives. Parts 6 and 7 use the node.
-   - **What only a person can answer** (a reference platform's traces, AMD's earlier work on the
+   - **What only a person can answer** (AMD's earlier work on the
      model, the target) goes under "Open asks" in the index, and the campaign goes on.
 2. **It states the map** with one `DIRECTIONS: [...]` line, taken from the newest part 11.
    - The harness keeps the map in `<session>/directions.json`, and the map starts at the next
@@ -69,15 +68,14 @@ What the agent does:
 What you do:
 
 - **Before the launch:** if a dossier exists, put it where the lookup will find it. Commit it to
-  `docs/dossier/` on the branch the campaign runs from; on the clusters, that is the branch the
-  mirror carries.
+  `docs/dossier/` on the branch the campaign runs from.
 - **While it runs:**
   - The map is in `<session>/directions.json`; the dashboard shows it as a checklist.
   - A stop that waits for the operator writes `MAP_STOP.md`.
   - Never edit `directions.json`: only the harness writes it, and a hand edit is undone.
 - **After it ends:** a dossier the campaign wrote or refreshed sits in the node's Arbor checkout,
   not in the repository. Bring it back either way:
-  - commit it to `docs/dossier/<name>/`, as the Model M dossier and its rounds were;
+  - commit it to `docs/dossier/<name>/`, with its rounds;
   - or share it with the campaign's knowledge, where the lookup finds it:
     `python3 -m arbor.collect knowledge --session <session> --config <cfg> --dossier <dir>`.
 
@@ -182,9 +180,8 @@ So it depends on what you want.
 The agent emits that list in its first iterations, and the map starts from it.
 - **Carry over what is settled.** Give a direction that is already done, killed or below the floor
   that status and a `why`, instead of leaving it out, so the campaign does not add it back.
-- **Neither dossier in Arbor has a `## Map` line yet**: they were written before map rounds. A
-  campaign that starts from them writes its own map from part 11's tables. To decide the list
-  yourself, add the line.
+- **A dossier written before map rounds has no `## Map` line.** A campaign that starts from it
+  writes its own map from part 11's tables. To decide the list yourself, add the line.
 
 **Several campaigns, each on its own share:** use component mode, and give each campaign a
 `component.plan` from
@@ -197,7 +194,6 @@ The agent emits that list in its first iterations, and the map starts from it.
 **What the map does not hold** goes in a hand-off in the pack's knowledge: what the base already
 has, each kill and whether it can be reopened, the bar, the lessons.
 - **The source:** cut it from the dossier's 10.uK.
-- **The example:** `packs/model-m-c8-tp4/knowledge/c4-handoff.md`.
 - **Its rules:**
   - **Map IDs:** cite the dossier's IDs, and keep the ranked list in the dossier only. The agent is
     told to emit part 11's list, and a second list in the knowledge gives it two to choose from.

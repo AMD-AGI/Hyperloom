@@ -102,7 +102,7 @@ constraints:
   - "THE DOSSIER'S DIRECTIONS ARE THE MAP. Give each direction in part 11 a map ID (`m-<component>`, e.g. `m-moe-experts`, `m-attn`), cite it in DONE lines and ledger records, and refresh parts 7 and 8 after every KEEP: the bottleneck moves."
   - "A REWRITE IS NOT A SINGLE ITERATION: write its kernel plan (the dossier skill's kernel-plan.md) and build it in stages, each with its own gate."
   - "PROFILE WITH THE `profiler` SKILL: the host's profile first (component.profile, in component mode), then TraceLens on a PyTorch-profiler trace of the served program; an eager trace only for op attribution, labelled eager. A KEEP never carries the profiler settings. Reports go to <session>/profiles/<name>/PROFILE.md. Profile the measured phase, not the bench's warmup, and record how many requests were running in the window. Stop any traced server before DONE."
-  - "LOOK FOR THE CUDA COUNTERPART. If the model code has an NVIDIA or common path beside its ROCm one, diff them per component: it feeds the dossier's part 8. The CUDA path is the specification for what should exist."
+  - "LOOK FOR THE CUDA COUNTERPART. If the model code has a CUDA or common path beside its ROCm one, diff them per component: it feeds the dossier's part 8. The CUDA path is the specification for what should exist."
 
   # ======================================================================
   # 4. HOW TO CLOSE AN ITERATION

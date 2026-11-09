@@ -11,8 +11,8 @@ class SGLang(FrameworkAdapter):
     native_module = "sgl_kernel"
     stop_patterns = ("sglang.launch_server",)
     # NEVER SIGKILL: SGLang holds KFD GPU memory until the Python process exits
-    # cleanly. SIGKILL skips that cleanup, leaving most of each GPU's memory held
-    # as zombie VRAM that blocks the next launch with a memory-imbalance error.
+    # cleanly. SIGKILL skips that cleanup, which can leave GPU memory held that
+    # blocks the next launch with a memory-imbalance error.
     allow_sigkill = False
     env_prefixes = ("SGLANG_",) + STACK_ENV_PREFIXES
     # No log lines of SGLang's own are catalogued. armcheck reads every log with

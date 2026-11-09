@@ -15,7 +15,7 @@ which the launcher deploys as `base_vmu`), its own worktree of the run's
 pinned Arbor commit (lanes must not share a pack's eval or calibration files),
 its config (the template campaign's, with the overrides of `kinds.py`), and
 its map, seeded into its session (`arbor.stages seed`, or the direction as one
-item). The launcher runs it as a rolling chain (scripts/cluster/chunk_lib.sh);
+item). The launcher runs it as a rolling chain (its chunk library);
 the chain's head is found through `<session>/chain/next_of_<job>`.
 
 A lane's clocks, in `lane.json`: created, deps_met, queued, first_submitted,
