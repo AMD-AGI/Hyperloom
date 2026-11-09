@@ -970,7 +970,9 @@ def test_withheld_cards_of_a_launcher_that_outlived_its_wait_come_back_through_i
 
     def _kill_launchers(procs, **kw) -> reaper.Leftovers:
         popens.extend(procs)
-        _immortal(monkeypatch, procs[0].pid)  # it outlives its wait and the sweep, as while the kernel tears it down
+        # It outlives its wait and the sweep, as while the kernel tears it down; stopped, it cannot end once its tree has.
+        os.kill(procs[0].pid, signal.SIGSTOP)
+        _immortal(monkeypatch, procs[0].pid)
         return kill_launchers(procs, **kw)
 
     def _reap_exited_children(processes) -> int:
