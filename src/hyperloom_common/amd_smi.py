@@ -13,6 +13,7 @@ __all__ = [
     "NPM_ENABLED",
     "NPM_STATES",
     "AmdSmiError",
+    "energy_joules",
     "gfx_clock_limits",
     "gpu_rows",
     "gpus_in_rocm_order",
@@ -26,6 +27,16 @@ _READ_TIMEOUT_SEC = 30.0
 #: The NPM states ``amd-smi node -p`` reports, lowercased.
 NPM_ENABLED = "enabled"
 NPM_STATES = (NPM_ENABLED, "disabled")
+#: Joules per unit of an energy reading. amd-smi prints ``TOTAL_ENERGY_CONSUMPTION`` in J; the micro units are spelt
+#: with the micro sign, the Greek mu or a plain ``u``, depending on who wrote the reading.
+_JOULES_PER_MICROJOULE = 1e-6
+_JOULES_PER_UNIT = {
+    "J": 1.0,
+    "mJ": 1e-3,
+    "uJ": _JOULES_PER_MICROJOULE,
+    "\u00b5J": _JOULES_PER_MICROJOULE,
+    "\u03bcJ": _JOULES_PER_MICROJOULE,
+}
 
 
 class AmdSmiError(RuntimeError):
@@ -60,6 +71,19 @@ def metric_value(block: Any) -> float | None:
     if isinstance(block, dict):
         block = block.get("value")
     return float(block) if isinstance(block, (int, float)) and not isinstance(block, bool) else None
+
+
+def energy_joules(block: Any) -> float | None:
+    """An ``amd-smi`` energy reading in joules: bare, which is J, or ``{"value": n, "unit": ...}`` in J, mJ or uJ.
+
+    ``None`` for anything else, a unit it does not know included: a reading in a unit it cannot convert is not one.
+    """
+    value = metric_value(block)
+    if value is None:
+        return None
+    unit = block.get("unit", "J") if isinstance(block, dict) else "J"
+    scale = _JOULES_PER_UNIT.get(str(unit).strip())
+    return None if scale is None else value * scale
 
 
 def gfx_clock_limits(clock: Any) -> frozenset[float]:

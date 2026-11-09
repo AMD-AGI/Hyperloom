@@ -9,6 +9,7 @@ import pytest
 from hyperloom_common import amd_smi
 from hyperloom_common.amd_smi import (
     AmdSmiError,
+    energy_joules,
     gfx_clock_limits,
     gpu_rows,
     gpus_in_rocm_order,
@@ -51,6 +52,27 @@ def test_rows_and_values_read_both_amd_smi_shapes():
     assert gpu_rows({"gpu_data": rows}) == gpu_rows(rows) == [{"gpu": 0}]
     assert metric_value({"value": 750, "unit": "W"}) == metric_value(750) == 750.0
     assert metric_value("N/A") is None and metric_value(True) is None
+
+
+@pytest.mark.parametrize(
+    ("reading", "joules"),
+    [
+        ({"value": 14292727.274, "unit": "J"}, 14292727.274),
+        ({"value": 2500, "unit": "mJ"}, 2.5),
+        ({"value": 4_000_000, "unit": "uJ"}, 4.0),
+        ({"value": 4_000_000, "unit": "\u00b5J"}, 4.0),
+        ({"value": 4_000_000, "unit": "\u03bcJ"}, 4.0),
+        ({"value": 81.0}, 81.0),
+        (81, 81.0),
+    ],
+)
+def test_an_energy_reading_is_read_in_joules_whatever_unit_it_carries(reading, joules):
+    assert energy_joules(reading) == pytest.approx(joules)
+
+
+@pytest.mark.parametrize("reading", ["N/A", None, True, {"value": "N/A", "unit": "J"}, {"value": 3.0, "unit": "kWh"}])
+def test_an_energy_reading_that_is_not_one_reads_as_none(reading):
+    assert energy_joules(reading) is None
 
 
 def test_the_clock_limit_is_the_one_the_filled_gfx_slots_agree_on():

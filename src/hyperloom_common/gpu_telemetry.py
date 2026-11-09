@@ -18,6 +18,11 @@ On a node with Node Power Management enabled, each sample also reads the node's 
 on it. Firmware meets that limit by lowering every card's power, which the cards' own throttle accumulators do not
 count, so a round held back by the node limit reports how much of the phase it spent there.
 
+With ``energy`` on, the recorder also reads each card's energy counter (``amd-smi metric --energy``) as each measured
+window opens and closes. Firmware integrates the card's power into that counter, so the energy it gives for the phase
+holds however bursty the load is, which a mean of instantaneous readings two seconds apart does not. The summary's
+``energy`` block reports it beside the sampled power, which it does not replace.
+
 One batch of samples yields three views: the ``gpu_power.json`` v1 summary (:meth:`GpuPowerRecorder.summary`), one
 ``gpu_monitor`` block per serving card (:meth:`GpuPowerRecorder.gpu_monitor`), and every sample of every card as CSV.
 
@@ -40,7 +45,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
-from hyperloom_common.amd_smi import NPM_ENABLED, gfx_clock_limits, gpu_rows, metric_value, single_clock_limit
+from hyperloom_common.amd_smi import (
+    NPM_ENABLED,
+    energy_joules,
+    gfx_clock_limits,
+    gpu_rows,
+    metric_value,
+    single_clock_limit,
+)
 from hyperloom_common.io import atomic_write_json, atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -53,7 +65,9 @@ __all__ = [
     "GpuPowerRecorder",
     "GpuSample",
     "MetricStats",
+    "RecorderOptions",
     "parse_clock_sample",
+    "parse_energy_sample",
     "parse_gpu_sample",
     "parse_power_sample",
     "parse_throttle_sample",
@@ -84,6 +98,9 @@ _BOARD_GLOB = "/sys/class/drm/card*/device/board"
 #: The ``amd-smi metric`` fields each sample reads, and those read at each measured window's open and close.
 _SAMPLE_METRICS = ("--power", "--mem-usage", "--clock", "--temperature", "--usage")
 _THROTTLE_METRICS = ("--violation",)
+#: Read at the same edges as the throttle accumulators, in a call of its own: an amd-smi that cannot read energy then
+#: costs the round its energy reading and nothing else.
+_ENERGY_METRICS = ("--energy",)
 
 #: Temperature sensors in preference order: MI300-class cards report ``edge`` as N/A and ``hotspot`` as the die reading.
 _TEMPERATURE_SENSORS = ("hotspot", "edge")
@@ -100,6 +117,16 @@ class GpuPhase(str, Enum):
 
 
 _PHASE_VALUES = frozenset(GpuPhase)
+
+
+@dataclass(frozen=True)
+class RecorderOptions:
+    """What a recorder records beyond the ``gpu_power.json`` v1 summary; each is off unless asked for."""
+
+    #: Where every measured sample of every card is written as CSV on :meth:`GpuPowerRecorder.close`.
+    samples_path: str | None = None
+    #: Also read each card's energy counter at the edges of each measured window, into the summary's ``energy`` block.
+    energy: bool = False
 
 
 @dataclass(frozen=True)
@@ -230,6 +257,31 @@ def parse_throttle_sample(payload: Any) -> dict[int, tuple[float, float]]:
     return out
 
 
+def parse_energy_sample(payload: Any) -> dict[int, float]:
+    """``{gpu: joules}`` from ``amd-smi metric --energy --json``: each card's energy counter, which only grows while the
+    driver stays loaded.
+
+    amd-smi prints the counter as ``ENERGY: TOTAL_ENERGY_CONSUMPTION: <n> J``, read by :func:`energy_joules`. A card
+    that reports it N/A is left out.
+
+    Raises:
+        ValueError: cards were reported and not one carried a counter. The message quotes the first card's energy
+            block, so an amd-smi whose output changed shape says how, instead of reading as cards with nothing to count.
+    """
+    rows = gpu_rows(payload)
+    out: dict[int, float] = {}
+    for row in rows:
+        block = row.get("energy")
+        joules = energy_joules(block.get("total_energy_consumption")) if isinstance(block, dict) else None
+        if joules is not None:
+            out[row["gpu"]] = joules
+    if rows and not out:
+        raise ValueError(
+            f"amd-smi metric --energy read no counter: card {rows[0]['gpu']} energy={rows[0].get('energy')!r}"
+        )
+    return out
+
+
 def _read_node_power() -> tuple[float, float] | None:
     """``(node power W, enforced node limit W)`` while NPM is enabled; ``None`` on a node without it, or with it off.
 
@@ -307,6 +359,16 @@ def _power_fields(watts: list[float], peak_vram: float) -> dict[str, Any]:
     }
 
 
+def _energy_fields(joules: float, seconds: float, sampled_w: float | None) -> dict[str, Any]:
+    """A card's counted energy over the measured windows, its mean power, and that mean over the sampled mean."""
+    watts = joules / seconds
+    return {
+        "energy_j": round(joules, 1),
+        "avg_power_w": round(watts, 2),
+        "vs_sampled": round(watts / sampled_w, _FRACTION_DIGITS) if sampled_w else None,
+    }
+
+
 def _mhz(value: float | None) -> str:
     return "unread" if value is None else f"{value} MHz"
 
@@ -362,8 +424,8 @@ class GpuPowerRecorder:
 
     Exposes the same ``note_phase`` / ``tick`` / ``close`` surface as the KV-metrics recorder so the watchdog loop
     drives both identically. Sampling runs on its own thread because an ``amd-smi`` call takes a few hundred ms and the
-    watchdog loop must not stall on it; only :meth:`close` waits, for the sampler and the closing throttle-counter read
-    (about a second).
+    watchdog loop must not stall on it; only :meth:`close` waits, for the sampler and the closing counter reads (about
+    a second, a little more with energy on).
     """
 
     def __init__(
@@ -373,15 +435,16 @@ class GpuPowerRecorder:
         gpus: set[int] | None = None,
         interval_sec: float = DEFAULT_INTERVAL_SEC,
         query: Callable[..., Any] | None = None,
-        samples_path: str | None = None,
+        options: RecorderOptions | None = None,
     ) -> None:
         """Prepare a recorder without running anything.
 
-        ``output_path`` receives the ``gpu_power.json`` v1 summary and ``samples_path`` every measured sample as CSV,
-        each on :meth:`close`; either may be ``None`` to write nothing.
+        ``output_path`` receives the ``gpu_power.json`` v1 summary on :meth:`close`, or nothing when ``None``;
+        ``options`` adds the per-sample CSV and the energy counters (:class:`RecorderOptions`).
         """
+        options = options or RecorderOptions()
         self._output_path = output_path
-        self._samples_path = samples_path
+        self._samples_path = options.samples_path
         self._rows: list[GpuSample] = []
         self._gpus = None if gpus is None else set(gpus)
         self._interval = max(MIN_INTERVAL_SEC, float(interval_sec))
@@ -395,7 +458,14 @@ class GpuPowerRecorder:
         # window: summing only the windows that were read would publish the share of a different phase.
         self._window_open: dict[int, tuple[float, float]] | None = None
         self._throttle_totals: dict[int, list[float]] = {}
-        self._throttle_windows = 0
+        self._windows_closed = 0
+        # The energy counters the same way: their reading at the open of the window, stamped with the monotonic middle
+        # of the read, and per card ``[joules, seconds, windows read]``.
+        self._energy = options.energy
+        self._energy_open: tuple[float, dict[int, float]] | None = None
+        self._energy_totals: dict[int, list[float]] = {}
+        self._energy_errors = 0
+        self._energy_last_error: str | None = None
         self._phase = GpuPhase.BOOT
         self._samples: list[dict[int, tuple[float | None, float | None]]] = []
         self._errors = 0
@@ -405,6 +475,9 @@ class GpuPowerRecorder:
         self._started_unix = time.time()
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        # Set when the round leaves the measured phase, so the sampler closes the window then and not up to an interval
+        # later, when the counters would also have counted the start of what follows.
+        self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._closed = False
 
@@ -424,6 +497,8 @@ class GpuPowerRecorder:
         if self._phase == GpuPhase.MEASURED and self._thread is None:
             self._thread = threading.Thread(target=self._loop, name="gpu-power-sampler", daemon=True)
             self._thread.start()
+        elif self._phase != GpuPhase.MEASURED and self._thread is not None:
+            self._wake.set()
 
     def tick(self, mono: float) -> None:
         """No-op: the sampler keeps its own cadence."""
@@ -431,14 +506,21 @@ class GpuPowerRecorder:
     def _loop(self) -> None:
         while not self._stop.is_set():
             if self._phase == GpuPhase.MEASURED:
-                # Sampled first: the counter read takes about a second and must not delay the first power sample.
+                # Sampled first: the counter reads take about a second and must not delay the first power sample.
                 self._sample_once()
                 self._sample_node()
                 if self._window_open is None:
-                    self._window_open = self._read_throttle()
+                    self._open_window()
             elif self._window_open is not None:
                 self._close_window()
-            self._stop.wait(self._interval)
+            self._wake.wait(self._interval)
+            self._wake.clear()
+
+    def _open_window(self) -> None:
+        """Read the counters a measured window is measured from: energy first, the faster read, so its stamp sits
+        nearer the window's edge."""
+        self._energy_open = self._read_energy()
+        self._window_open = self._read_throttle()
 
     def _read_throttle(self) -> dict[int, tuple[float, float]]:
         try:
@@ -450,12 +532,31 @@ class GpuPowerRecorder:
             return {}
         return {gpu: row for gpu, row in counters.items() if self._gpus is None or gpu in self._gpus}
 
+    def _read_energy(self) -> tuple[float, dict[int, float]] | None:
+        """``(monotonic middle of the read, {gpu: joules})`` for the cards in scope, empty when the read failed;
+        ``None`` with energy off."""
+        if not self._energy:
+            return None
+        start = time.monotonic()
+        try:
+            counters = parse_energy_sample(self._query(*_ENERGY_METRICS))
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError, TypeError) as exc:
+            log.debug("gpu_power: amd-smi energy read failed", exc_info=True)
+            with self._lock:
+                self._energy_errors += 1
+                self._energy_last_error = str(exc)[:200]
+            counters = {}
+        middle = (start + time.monotonic()) / 2
+        return middle, {gpu: joules for gpu, joules in counters.items() if self._gpus is None or gpu in self._gpus}
+
     def _close_window(self) -> None:
-        """Add the throttle counters' movement over the measured window that just ended."""
+        """Add the counters' movement over the measured window that just ended."""
+        energy_opened, self._energy_open = self._energy_open, None
+        energy_closed = self._read_energy() if energy_opened and energy_opened[1] else None
         opened, self._window_open = self._window_open or {}, None
         closed = self._read_throttle()
         with self._lock:
-            self._throttle_windows += 1
+            self._windows_closed += 1
             for gpu in opened.keys() & closed.keys():
                 (ticks_0, ppt_0), (ticks_1, ppt_1) = opened[gpu], closed[gpu]
                 if ticks_1 > ticks_0 and ppt_1 >= ppt_0:
@@ -463,6 +564,22 @@ class GpuPowerRecorder:
                     total[0] += ticks_1 - ticks_0
                     total[1] += ppt_1 - ppt_0
                     total[2] += 1
+            if energy_opened and energy_closed:
+                self._add_energy(energy_opened, energy_closed)
+
+    def _add_energy(self, opened: tuple[float, dict[int, float]], closed: tuple[float, dict[int, float]]) -> None:
+        """Add each card's counter movement over one window. A counter that went back was reset, by a driver reload or
+        a GPU reset, so its card has no reading for that window. Called with the lock held."""
+        seconds = closed[0] - opened[0]
+        if seconds <= 0:
+            return
+        for gpu in opened[1].keys() & closed[1].keys():
+            joules = closed[1][gpu] - opened[1][gpu]
+            if joules >= 0:
+                total = self._energy_totals.setdefault(gpu, [0.0, 0.0, 0])
+                total[0] += joules
+                total[1] += seconds
+                total[2] += 1
 
     def _sample_once(self) -> None:
         try:
@@ -511,7 +628,48 @@ class GpuPowerRecorder:
         return {
             gpu: (ticks, ppt)
             for gpu, (ticks, ppt, windows) in self._throttle_totals.items()
-            if windows == self._throttle_windows
+            if windows == self._windows_closed
+        }
+
+    def _complete_energy_totals(self) -> dict[int, tuple[float, float]]:
+        """Each card's ``(joules, seconds)`` summed over every measured window, for the cards read across all of them.
+        Called with the lock held."""
+        return {
+            gpu: (joules, seconds)
+            for gpu, (joules, seconds, windows) in self._energy_totals.items()
+            if windows == self._windows_closed
+        }
+
+    def _energy_summary(
+        self, per_gpu: dict[str, dict[str, Any]], serving: list[int], unread: list[int]
+    ) -> dict[str, Any]:
+        """The ``energy`` block: each card's counted energy over the measured windows, and the serving cards' total.
+
+        The total fails closed like the sampled mean: a serving card without a reading in every window, or a card that
+        may be serving and could not be read, leaves it ``None`` rather than a sum over the cards that happened to read.
+        """
+        with self._lock:
+            totals = self._complete_energy_totals()
+            windows, errors, last_error = self._windows_closed, self._energy_errors, self._energy_last_error
+        cards = {
+            str(gpu): _energy_fields(joules, seconds, (per_gpu.get(str(gpu)) or {}).get("avg_power_w"))
+            for gpu, (joules, seconds) in sorted(totals.items())
+        }
+        counted = bool(serving) and not unread and all(gpu in totals for gpu in serving)
+        joules = round(sum(totals[gpu][0] for gpu in serving), 1) if counted else None
+        # One amd-smi call reads every card, so every card read across every window shares the same seconds.
+        seconds = totals[serving[0]][1] if counted else None
+        return {
+            "enabled": self._energy,
+            "source": "amd-smi metric --energy",
+            "boundary": "gpu",
+            "windows": windows,
+            "seconds": None if seconds is None else round(seconds, 3),
+            "total_energy_j": joules,
+            "total_power_w": round(joules / seconds, 2) if joules is not None and seconds else None,
+            "per_gpu": cards,
+            "query_errors": errors,
+            "last_error": last_error,
         }
 
     def summary(self, *, aborted: bool = False) -> dict[str, Any]:
@@ -570,17 +728,20 @@ class GpuPowerRecorder:
             "throttle_last_error": throttle_last_error,
             **self._node_summary(),
             "aborted": bool(aborted),
+            # Added after the v1 keys, which keep their order: a reader of v1 reads this summary unchanged.
+            "energy": self._energy_summary(per_gpu, serving, unread),
         }
 
     def close(self, *, aborted: bool = False) -> dict[str, Any]:
         """Stop sampling and write the artifact. Idempotent."""
         self._stop.set()
+        self._wake.set()
         if self._thread is not None:
             self._thread.join(timeout=_QUERY_TIMEOUT_SEC + self._interval)
             if self._thread.is_alive():
                 # Still blocked in amd-smi, possibly opening or closing a window: that window was not read across.
                 with self._lock:
-                    self._throttle_windows += 1
+                    self._windows_closed += 1
         if self._window_open is not None and not self._closed:
             self._close_window()
         payload = self.summary(aborted=aborted)
