@@ -358,7 +358,7 @@ def test_the_role_names_each_workload_s_bar_as_its_gate_sets_it():
     role = role_prompt(WORKLOAD)
 
     assert "on InferenceX from the spread of the baseline measurements" in role
-    assert "on AgentX a fixed threshold on the P50" in role
+    assert "on AgentX a fixed threshold on the metric the workload is graded on" in role
 
 
 def test_a_resumed_cli_hears_why_it_stopped_its_worktree_and_what_arrived_meanwhile():

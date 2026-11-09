@@ -63,6 +63,7 @@ from hyperloom.common.gain_math import (
     AGENTX_ERROR_RATE_THRESHOLD_PCT,
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
 )
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT
 from hyperloom.inference_optimizer.framework_registry import expert_parallel_flag
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.measure.compile import (
@@ -121,6 +122,15 @@ EVAL_ENVS = (ACCURACY_FLOOR_ENV, "GSM8K_LIMIT")
 HOST_RULE = "Host rule (MB)"
 #: The workload kind whose recipe the round resolves, the root's launch holding only what is added to it.
 AGENTX = "agentx"
+#: The config key Arbor optimizes a metric by in place of its pack's (``arbor/objective.py``), and the key it reads as
+#: each AgentX objective MB keeps on: ``e2e_norm_intvty_p50`` as MB reads it, and the total throughput per GPU, which
+#: ranks a change as MB's per-server figure does at a session's fixed TP. Another session's metric is its pack's own.
+OBJECTIVE_KEY = "opt_objective"
+ARBOR_OBJECTIVES = {GRADED_INTVTY_P50: "e2e_norm_intvty_p50", TOTAL_TOKEN_THROUGHPUT: "total_throughput"}
+#: Where an Arbor checkout lists the metrics it optimizes on :data:`OBJECTIVE_KEY` (``KNOWN``), and the commit from
+#: which it has both: ``e8d31b7`` added the key, and read P50 interactivity as decode alone until ``9c455df``.
+OBJECTIVE_MODULE = "arbor/objective.py"
+OBJECTIVE_SINCE = "9c455df"
 #: SGLang reads its TP from these flags only. Arbor gives vLLM its TP itself, but MB names it too, so a vLLM branch's
 #: server_flags are never empty, which Arbor refuses (a plain baseline root has no launch of its own).
 SGLANG = "sglang"
@@ -416,7 +426,11 @@ def arbor_manifest(spec: AgentSpec, checkout: ArborCheckout, run: ArborRun) -> A
     if spec.dossier:
         carry_dossier(path, Path(spec.dossier))
     config = arbor_config(spec, path, run)
-    reasons = [*_launch_refusals(spec), *refusals(config, declared_keys(path))]
+    reasons = [
+        *_launch_refusals(spec),
+        *_objective_refusals(config, path),
+        *refusals(config, declared_keys(path)),
+    ]
     if reasons:
         raise ArborRefused(reasons)
     (path / run.session_dir).mkdir(parents=True, exist_ok=True)
@@ -572,8 +586,10 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
         component["base_launch"] = {"path": launch.record, "digest": launch.digest}
     if launch.entrypoint and launch.entrypoint != ENTRYPOINTS.get(spec.framework):
         component["entrypoint"] = list(launch.entrypoint)
+    objective = ARBOR_OBJECTIVES.get(spec.metric)
     return {
         **({REVIEW_GATE_KEY: False} if gate == REVIEW_OFF else {}),
+        **({OBJECTIVE_KEY: objective} if objective else {}),
         "pack": name,
         "identity": f"{HOST} {Path(spec.model).name}",
         "goal": f"{spec.metric} of {spec.model} on {spec.framework} at TP{spec.tp} on {spec.gpu_type}, as MB measures it",
@@ -814,6 +830,40 @@ def _pin_refusals(component: Mapping[str, Any], declared: frozenset[str] | None)
         f"the pinned Arbor has no component.{key}: pin Arbor {KEY_SINCE.get(key, COMPONENT_SINCE)} or later"
         for key in lacking
     ]
+
+
+def _objective_refusals(config: Mapping[str, Any], checkout: Path) -> list[str]:
+    """An :data:`OBJECTIVE_KEY` the Arbor in ``checkout`` cannot optimize: one whose :data:`OBJECTIVE_MODULE` does not
+    list it (``e8d31b7`` read P50 interactivity as decode alone), or, from an Arbor without that module, which ignores
+    the key and climbs its pack's metric, any but P50 interactivity, which a session ran on such pins before the key
+    existed (the vendored v0.9.3 among them)."""
+
+    wanted = config.get(OBJECTIVE_KEY)
+    known = _known_objectives(checkout)
+    if not wanted or (wanted in known if known is not None else wanted == ARBOR_OBJECTIVES[GRADED_INTVTY_P50]):
+        return []
+    return [f"the pinned Arbor cannot optimize {wanted} ({OBJECTIVE_KEY}): pin Arbor {OBJECTIVE_SINCE} or later"]
+
+
+def _known_objectives(checkout: Path) -> frozenset[str] | None:
+    """The metric keys :data:`OBJECTIVE_MODULE` lists as ``KNOWN``, read without importing Arbor; ``None`` for a
+    checkout without that module, empty when it does not read."""
+
+    try:
+        text = (checkout / OBJECTIVE_MODULE).read_text(encoding=ENCODING)
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError):
+        return frozenset()
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return frozenset()
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "KNOWN" for t in node.targets):
+            if isinstance(node.value, ast.Dict):
+                return frozenset(k.value for k in node.value.keys if isinstance(k, ast.Constant))
+    return frozenset()
 
 
 def _host_refusals(config: Mapping[str, Any]) -> list[str]:

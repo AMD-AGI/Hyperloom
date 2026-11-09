@@ -20,6 +20,27 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **An MB AgentX session can be graded on total token throughput.**
+  `hyperloom-multibranch run --workload agentx --agentx-objective
+  total_token_throughput` keeps a change on the round's `total_token_throughput`
+  instead of `e2e_norm_intvty_p50`; the default, `p50_interactivity`, leaves
+  existing sessions as they were. The 3% bar, the P90 and output-throughput
+  guards, the retest and the error-rate threshold are unchanged. The objective is
+  recorded in the manifest and kept on resume; FINAL, the dashboard and
+  `MB-report.md` name it, and the bar's refusal reads
+  `total_throughput_gain_below_threshold`. Its Recipe KB record carries
+  `total_throughput_gain_pct`, not `interactivity_gain_pct`, and does not
+  replace an interactivity champion. Each Arbor is given the objective as its
+  config's `opt_objective` and optimizes it instead of its pack's metric; an
+  Arbor that cannot (before `9c455df`) is refused at preflight, except an older
+  one in a P50 session, which runs on its pack's metric as before.
+  `--agentx-objective` with
+  `--workload inferencex` exits 2. Before, an operator had to patch the source
+  to grade on total throughput.
+- **An MB AgentX session's Recipe KB record carries both total throughputs.**
+  The gate now records `total_token_throughput` on each AgentX judgement, so
+  `total_throughput` and `baseline_total_throughput` are written beside the
+  interactivity gain; before, they were always left out.
 - **A recipe image whose tag names no framework version no longer refuses an
   older install.** For an untagged image such as
   `lmsysorg/sglang-rocm:muse-spark-open`, the version InferenceSuite assumes

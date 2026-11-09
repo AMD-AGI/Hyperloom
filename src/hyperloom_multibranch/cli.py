@@ -7,7 +7,8 @@
 optimizer its recipes are scoped to, and the hard limits the judge works within. ``--workload`` names the workload
 kind: ``inferencex`` takes ``--isl`` and ``--osl``, and ``agentx`` refuses them, as the trace it replays fixes its
 requests; ``agentx`` takes ``--ep``, 1 when not given, and ``--agentx-duration-sec``, the trace window its tests
-replay (the measuring harness's default when not given), and ``inferencex`` refuses both. An agentx session serves its
+replay (the measuring harness's default when not given), and ``--agentx-objective``, the axis it is graded on
+(``p50_interactivity`` when not given, or ``total_token_throughput``), and ``inferencex`` refuses all three. An agentx session serves its
 model in the image ``HYPERLOOM_ACTIVE_IMAGE_REF`` names, and a ``--model`` that is a directory is recorded by its
 resolved path, which its benchmark pins. An operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than
 ``--workload``, or that names a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
@@ -134,6 +135,7 @@ from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -188,6 +190,7 @@ from hyperloom_multibranch.scheduling.session_environment import (
 )
 from hyperloom_multibranch.scheduling.settings import (
     AGENT_PORT,
+    DEFAULT_AGENTX_OBJECTIVE,
     DOSSIER_MINUTES,
     SHARE_MINUTES,
     InferenceXShape,
@@ -265,6 +268,30 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     run.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
 
 
+def _add_agentx_options(run: argparse.ArgumentParser) -> None:
+    """The options only an agentx workload takes."""
+
+    run.add_argument(
+        "--ep",
+        type=int,
+        default=None,
+        help=f"Expert-parallel size of an agentx workload, default {DEFAULT_EP}; refused for inferencex.",
+    )
+    run.add_argument(
+        "--agentx-duration-sec",
+        type=int,
+        default=None,
+        help="Trace window of an agentx workload's tests, written as the benchmark's DURATION; refused for inferencex.",
+    )
+    run.add_argument(
+        "--agentx-objective",
+        choices=[objective.value for objective in AgentXObjective],
+        default=None,
+        help=f"Axis an agentx workload is graded on, default {DEFAULT_AGENTX_OBJECTIVE.value}; the keep bar, "
+        "guards and error-rate threshold are the same under either. Refused for inferencex.",
+    )
+
+
 def _add_workload_options(run: argparse.ArgumentParser) -> None:
     """The fixed workload, spelled as ``hyperloom optimize`` spells it, and the kernel optimizer its recipes are scoped
     to."""
@@ -279,18 +306,7 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
     run.add_argument("--conc", type=int, required=True, help="Concurrency of the primary operating point.")
     for name in SEQUENCE_LENGTHS:
         run.add_argument(f"--{name}", type=int, default=None, help="Required for inferencex; refused for agentx.")
-    run.add_argument(
-        "--ep",
-        type=int,
-        default=None,
-        help=f"Expert-parallel size of an agentx workload, default {DEFAULT_EP}; refused for inferencex.",
-    )
-    run.add_argument(
-        "--agentx-duration-sec",
-        type=int,
-        default=None,
-        help="Trace window of an agentx workload's tests, written as the benchmark's DURATION; refused for inferencex.",
-    )
+    _add_agentx_options(run)
     run.add_argument("--precision", required=True, help="Model precision, as hyperloom optimize spells it.")
     run.add_argument(
         "--kernel-optimizer",
@@ -583,10 +599,10 @@ def _shape_errors(args: argparse.Namespace) -> list[str]:
 
 
 def _agentx_only_errors(args: argparse.Namespace) -> list[str]:
-    given = [name for name in ("ep", "agentx_duration_sec") if getattr(args, name) is not None]
+    given = [name for name in ("ep", "agentx_duration_sec", "agentx_objective") if getattr(args, name) is not None]
     if WorkloadKind(args.workload) is WorkloadKind.INFERENCEX:
         return [f"--{name.replace('_', '-')} is not taken by an inferencex workload" for name in given]
-    return _positive(args, tuple(given))
+    return _positive(args, tuple(name for name in given if name != "agentx_objective"))
 
 
 def _workload_shape(args: argparse.Namespace) -> InferenceXShape | None:
@@ -785,6 +801,7 @@ def settings_from(
         _workload_shape(args),
         DEFAULT_EP if args.ep is None else args.ep,
         args.agentx_duration_sec,
+        AgentXObjective(args.agentx_objective or DEFAULT_AGENTX_OBJECTIVE),
     )
     caps = RosterCaps(args.max_branches, args.max_k_per_branch, parallel)
     prompts, agents = args.specialist_prompts or [], args.agents or []

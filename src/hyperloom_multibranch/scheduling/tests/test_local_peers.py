@@ -58,6 +58,7 @@ from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, FixCase, read_case
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
 from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS
 from hyperloom_multibranch.rulegate.service import GateService
@@ -143,6 +144,7 @@ WORKLOAD = Workload(
     "/models/Llama-3-8B", "sglang", 2, 16, "bf16", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
 )
 AGENTX = replace(WORKLOAD, inferencex=None)
+TOTAL_AGENTX = replace(AGENTX, agentx_objective=AgentXObjective.TOTAL_TOKEN_THROUGHPUT)
 BASE = ServerBase(args="--tp-size 2 --enable-hierarchical-cache --hicache-size 180", env={"SGLANG_X": "true"})
 IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
 LOCAL = LocalCards((0, 1, 2, 3))
@@ -217,12 +219,22 @@ def test_the_rule_follows_the_workload(tmp_path: Path) -> None:
     blackboard = LocalBlackboard(tmp_path, Writer(Role.GATE, "rule-gate"))
 
     assert workload_rule(WORKLOAD, blackboard) == InferenceXRule(blackboard, WORKLOAD.conc)
-    assert isinstance(workload_rule(AGENTX, blackboard), AgentXRule)
+    assert workload_rule(AGENTX, blackboard) == AgentXRule(AgentXObjective.P50_INTERACTIVITY)
+    assert workload_rule(TOTAL_AGENTX, blackboard) == AgentXRule(AgentXObjective.TOTAL_TOKEN_THROUGHPUT)
+
+
+def test_the_agents_are_asked_for_the_metric_the_session_is_graded_on() -> None:
+    assert (_agent_spec(AGENTX).metric, _agent_spec(TOTAL_AGENTX).metric) == (
+        "e2e_norm_intvty_p50",
+        "total_token_throughput",
+    )
 
 
 def test_the_specialists_are_told_an_agentx_workload_and_no_sequence_lengths() -> None:
     assert _specialist_role(WORKLOAD) == "Llama-3-8B on sglang, bf16, TP 2, ISL 1024, OSL 512, concurrency 16, mi355x"
-    assert _specialist_role(AGENTX) == "Llama-3-8B on sglang, bf16, TP 2, AgentX trace replay, concurrency 16, mi355x"
+    assert _specialist_role(AGENTX) == (
+        "Llama-3-8B on sglang, bf16, TP 2, AgentX trace replay graded on e2e_norm_intvty_p50, concurrency 16, mi355x"
+    )
 
 
 def test_the_agents_spec_names_the_pack_the_session_gives_its_arbors_and_none_by_default() -> None:

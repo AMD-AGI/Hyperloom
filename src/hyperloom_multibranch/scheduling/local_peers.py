@@ -299,10 +299,10 @@ def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> N
 
 def workload_rule(workload: Workload, blackboard: CommitQuery) -> Rule:
     """The rule a session of ``workload`` is judged on: InferenceX throughput at the workload's conc against the
-    PRELUDE bar ``blackboard`` holds, or AgentX P50 interactivity with its guards."""
+    PRELUDE bar ``blackboard`` holds, or the AgentX objective with its guards."""
 
     if workload.inferencex is None:
-        return AgentXRule()
+        return AgentXRule(workload.agentx_objective)
     return InferenceXRule(blackboard, workload.conc)
 
 
@@ -626,7 +626,9 @@ def _specialist_role(workload: Workload) -> str:
     """The workload as the specialists' role prompt names it."""
 
     shape = workload.inferencex
-    requests = "AgentX trace replay" if shape is None else f"ISL {shape.isl}, OSL {shape.osl}"
+    requests = (
+        f"AgentX trace replay graded on {workload.metric}" if shape is None else f"ISL {shape.isl}, OSL {shape.osl}"
+    )
     return (
         f"{workload.model_basename} on {workload.framework}, {workload.precision}, TP {workload.tp}, "
         f"{requests}, concurrency {workload.conc}, {workload.gpu_type}"

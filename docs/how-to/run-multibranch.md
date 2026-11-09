@@ -50,10 +50,18 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
 `hyperloom-multibranch run --help` has the full text of each option.
 
 - **Workload:** `--model`, `--framework`, `--gpu-type`, `--workload` (`inferencex` or `agentx`), `--tp`, `--conc`,
-  `--precision`; `--isl`/`--osl` for `inferencex` only, `--ep` and `--agentx-duration-sec` (the trace window each
-  test replays, the harness's default when not given) for `agentx` only; `--kernel-optimizer`;
+  `--precision`; `--isl`/`--osl` for `inferencex` only, `--ep`, `--agentx-duration-sec` (the trace window each
+  test replays, the harness's default when not given) and `--agentx-objective` for `agentx` only; `--kernel-optimizer`;
   `--inferencex-commit SHA` to resolve the session's base launch from InferenceX at that commit instead of `main`
   (see [Base launch](../reference/inference-suite.md#base-launch)).
+- **AgentX objective:** `--agentx-objective p50_interactivity|total_token_throughput` (default
+  `p50_interactivity`) names the round metric an AgentX session keeps on: `e2e_norm_intvty_p50`, or
+  `total_token_throughput` (per server; a session's TP is fixed, so it ranks changes as the per-GPU figure does). The
+  rest of the rule is the same under either: a 3% bar, P90 interactivity and output throughput held within the noise
+  band, a retest of a gain a guard holds back, and the error-rate threshold. The manifest records it, so a resumed
+  session keeps it; the frontier, FINAL, the dashboard, `MB-report.md` and the Recipe KB record
+  (`total_throughput_gain_pct`) all read that metric. Each Arbor is told to optimize it (`opt_objective`); a
+  `total_token_throughput` session needs Arbor `9c455df` or later.
 - **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for
   `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source, and every
   Arbor is served the frozen base. Without it the base comes from the recipe sources.

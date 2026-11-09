@@ -57,7 +57,7 @@ from hyperloom.common.outside_facts.image_check import (
 )
 from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.owner_scope import local_owner_scope
-from hyperloom.common.perf_metric import GRADED_INTVTY_P50
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure import points
@@ -76,7 +76,8 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run
-from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
+from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version, read_manifest
 from hyperloom_multibranch.scheduling import local_peers
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
 from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
@@ -224,6 +225,52 @@ def test_an_agentx_run_replays_the_trace_window_it_names_and_the_harness_default
     assert _settings("--agentx-duration-sec", "600", workload=AGENTX_ARGS).workload.agentx_duration_sec == 600
 
 
+def test_an_agentx_run_is_graded_on_the_objective_it_names() -> None:
+    workload = _settings("--agentx-objective", "total_token_throughput", workload=AGENTX_ARGS).workload
+
+    assert (workload.agentx_objective, workload.metric) == (
+        AgentXObjective.TOTAL_TOKEN_THROUGHPUT,
+        TOTAL_TOKEN_THROUGHPUT,
+    )
+    assert _settings(workload=AGENTX_ARGS).workload.agentx_objective is AgentXObjective.P50_INTERACTIVITY
+
+
+def test_an_inferencex_run_refuses_an_agentx_objective_naming_the_option(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *WORKLOAD_ARGS, "--agentx-objective", "p50_interactivity"])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert "--agentx-objective is not taken by an inferencex workload" in capsys.readouterr().err
+
+
+def test_a_resumed_session_keeps_the_objective_its_manifest_recorded(tmp_path: Path) -> None:
+    settings = _settings("--agentx-objective", "total_token_throughput", workload=AGENTX_ARGS)
+    manifest = SessionManifest(
+        code_version=code_version(),
+        rule_pack=dict(rule_pack_identity()),
+        session_id="MB-x",
+        started_at=0.0,
+        deadline=3600.0,
+        settings=settings,
+        metric=settings.workload.metric,
+        policy_versions={},
+    )
+    manifest.write(tmp_path / "MB-manifest.json")
+
+    assert read_manifest(tmp_path / "MB-manifest.json").settings.workload.metric == TOTAL_TOKEN_THROUGHPUT
+
+
+def test_a_manifest_written_before_the_objective_was_recorded_reads_back_on_p50_interactivity(tmp_path: Path) -> None:
+    settings = _settings(workload=AGENTX_ARGS)
+    document = encode(
+        SessionManifest(code_version(), dict(rule_pack_identity()), "MB-x", 0.0, 3600.0, settings, "", {})
+    )
+    del document["settings"]["workload"]["agentx_objective"]
+    _write(tmp_path / "MB-manifest.json", document)
+
+    assert read_manifest(tmp_path / "MB-manifest.json").settings.workload.metric == GRADED_INTVTY_P50
+
+
 def test_run_help_names_the_ep_option(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         cli.main(["run", "--help"])
@@ -296,6 +343,8 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--ep", "2"],
         ["run", *AGENTX_ARGS, "--agentx-duration-sec", "0"],
         ["run", *WORKLOAD_ARGS, "--agentx-duration-sec", "600"],
+        ["run", *WORKLOAD_ARGS, "--agentx-objective", "total_token_throughput"],
+        ["run", *AGENTX_ARGS, "--agentx-objective", "output_throughput"],
     ],
 )
 def test_usage_errors_exit_two(argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
