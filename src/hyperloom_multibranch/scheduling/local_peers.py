@@ -124,7 +124,8 @@ class SessionWiring:
     tokens that grant a branch's specialist the MCP service's tools (a grant names the service's URL, so it is issued
     when a specialist starts), each branch's log, the session's briefs, its dev sandboxes, ``None`` when it lends
     none, the canonical configuration the toolbox rendered, which the gate's benchmark client is read from, the
-    native trees the branches edit (:func:`native_trees`) and the sandboxes autonomous agents run in."""
+    native trees the branches edit (:func:`native_trees`) and the sandboxes autonomous agents run in, ``None`` when the
+    session runs none."""
 
     setup: PeerSetup
     repo: ExperimentRepo
@@ -135,7 +136,7 @@ class SessionWiring:
     dev_leases: DevLeases | None
     canonical: Path
     native: Mapping[str, NativeTree]
-    agent_sandboxes: AgentSandboxes
+    agent_sandboxes: AgentSandboxes | None
 
 
 #: Builds the specialist runtime's session factory, and the worktree of each branch the worktree tools serve, on a
@@ -146,24 +147,29 @@ SpecialistSessions = Callable[[SessionWiring], "ModelSessions"]
 @dataclass(frozen=True)
 class BranchSandboxes:
     """Where a session's dev sandboxes and autonomous agents run: ``dev``, the sandbox of each dev lease, which takes
-    ``dev_cards`` unless the specialist asks for others, and ``agents``."""
+    ``dev_cards`` unless the specialist asks for others, and ``agents``, ``None`` for a session that runs none."""
 
     dev: SandboxFor
     dev_cards: int
-    agents: AgentSandboxes
+    agents: AgentSandboxes | None
 
 
 def branch_sandboxes(backend: ToolboxBackend, setup: PeerSetup, worktrees: WorktreeFor) -> BranchSandboxes:
     """This machine's sandboxes when ``backend`` measures on its cards; else the ``dev`` sandboxes of the hosted
     backend's leases, which have the session's TP cards and see the session directory at the path it has here."""
 
-    from hyperloom_multibranch.specialist.agent_sessions import LocalAgentSandboxes, RemoteAgentSandboxes
     from hyperloom_multibranch.specialist.dev_sandbox import hosted_dev_sandboxes, local_dev_sandboxes
 
+    agents = _agent_sandboxes(backend, setup) if setup.agents else None
     if backend.on_this_machine:
-        return BranchSandboxes(local_dev_sandboxes(worktrees, setup.processes), 1, LocalAgentSandboxes(setup.processes))
-    dev = hosted_dev_sandboxes(worktrees, setup.layout.branch_dir)
-    return BranchSandboxes(dev, setup.workload.tp, RemoteAgentSandboxes())
+        return BranchSandboxes(local_dev_sandboxes(worktrees, setup.processes), 1, agents)
+    return BranchSandboxes(hosted_dev_sandboxes(worktrees, setup.layout.branch_dir), setup.workload.tp, agents)
+
+
+def _agent_sandboxes(backend: ToolboxBackend, setup: PeerSetup) -> AgentSandboxes:
+    from hyperloom_multibranch.specialist.agent_sessions import LocalAgentSandboxes, RemoteAgentSandboxes
+
+    return LocalAgentSandboxes(setup.processes) if backend.on_this_machine else RemoteAgentSandboxes()
 
 
 @dataclass(frozen=True)
