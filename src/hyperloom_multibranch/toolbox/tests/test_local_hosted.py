@@ -657,7 +657,9 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
     _require_tool_checkout(repo, commit, tmp_path / "home", monkeypatch)
     session = tmp_path / "session"
     blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
-    toolbox = _toolbox_of(blackboard, tmp_path, session, commit, runner_envs={"INFERENCEX_REPO": str(repo)})
+    toolbox = _toolbox_of(
+        blackboard, tmp_path, session, commit, runner_envs={"INFERENCEX_REPO": str(repo)}, max_infra_retries=0
+    )
     try:
         assert toolbox._queue.policy.global_concurrency == 8, "the policy is held to 8 / TP"
         await toolbox.start()
@@ -668,10 +670,10 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
         result = TestResult.from_document(entry.outcome["result"])
         # No GPU here, so the shipped runner cannot serve a model: what this proves is the wiring. The real runner
         # started from the local template, signed a bundle, the backend verified it, and the toolbox took the cause
-        # the suite's framework probe names, quoted (no sglang package) as the candidate's failure, did not rerun it
-        # and wrote it to the blackboard.
-        assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.CANDIDATE
-        assert result.failure_reason is not None and result.failure_reason.startswith("import_error: ")
+        # the suite's framework probe names, quoted (no sglang package in an image the test did not rebuild) as the
+        # environment's failure and wrote it to the blackboard.
+        assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+        assert result.failure_reason is not None and "framework_unimportable: " in result.failure_reason
         assert "cannot import sglang" in result.failure_reason, "the reason quotes the probe's failure_detail"
         assert len(result.attempts) == 1 and result.manifest_sha256, result
         sandboxes = {rec.sandbox_id for rec in toolbox.backend.journal.records() if rec.request_id == request_id}
