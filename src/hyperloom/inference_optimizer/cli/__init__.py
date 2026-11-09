@@ -19,6 +19,7 @@ from typing import Any
 
 from hyperloom_common.llm import llm_config
 from hyperloom_common.env import EnvValueError, env_bool
+from hyperloom.common import agent_isolation
 from hyperloom.common.gpu_partition import PartitionModel
 from .lineup_banners import print_lineup_banners
 from .kb import (
@@ -1816,10 +1817,8 @@ def main(argv: list[str] | None = None) -> int:
     # Force line-buffering so output piped through a non-TTY sink flushes every line immediately instead of
     # block-buffering, which would otherwise freeze the top-level log for the duration of a blocking Magpie
     # subprocess.
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(line_buffering=True)
+    for stream in (sys.stdout, sys.stderr):
+        getattr(stream, "reconfigure", lambda **_: None)(line_buffering=True)
 
     # Absolutise before the parser defaults or any session path derive from it: subprocesses run with their own cwd,
     # so a relative value would diverge.
@@ -1834,6 +1833,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=level, format="%(asctime)s %(name)s [%(levelname)s] %(message)s")
     if args.command == "optimize":
         dump_thread_stacks_on_sigusr1()
+        agent_isolation.announce_agent_isolation()  # before any agent runs: the WARNING and the report's line
         # Resolve any --*-prompt that point at a file.
         for attr in ("orch_prompt", "critic_prompt"):
             v = getattr(args, attr)
