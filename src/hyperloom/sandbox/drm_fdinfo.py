@@ -9,6 +9,9 @@ processes themselves report: every descriptor of a render node has an fdinfo fil
 (the rule pack's ``drm_fdinfo``). Set against the kernel's total for a card, the difference is memory some process the
 reader does not see holds.
 
+Per open DRM file the reader also keeps which of its processes hold it (:func:`clients_by_render_minor`), so a count of the
+kernel's holders of a card can be set against how many processes of the reader's own have memory on its render node.
+
 A reading is either complete or refused: a process whose descriptors cannot be listed (another account's, where this one is
 not root) could hold anything, so a sum over the rest says nothing, and :class:`FdinfoUnreadable` says why.
 """
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Collection, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.outside_facts import (
@@ -27,7 +31,7 @@ from hyperloom.common.outside_facts import (
     DRM_VRAM_KEY,
 )
 
-__all__ = ["FdinfoUnreadable", "vram_by_render_minor"]
+__all__ = ["DrmClient", "FdinfoUnreadable", "clients_by_render_minor", "totals", "vram_by_render_minor"]
 
 #: What a process that is gone while its files are read raises: it holds nothing now.
 _GONE = (FileNotFoundError, ProcessLookupError, NotADirectoryError)
@@ -40,6 +44,32 @@ class FdinfoUnreadable(Exception):
     """The processes' descriptors cannot be read completely; the message says why."""
 
 
+@dataclass(frozen=True)
+class DrmClient:
+    """One open DRM file on render node ``minor``: the video memory its fdinfo says it holds, and the ids (in ``procfs``,
+    ascending) of the processes that have a descriptor of it (a forked child shares its parent's)."""
+
+    minor: int
+    vram: int
+    pids: tuple[int, ...]
+
+
+def clients_by_render_minor(procfs: Path, minors: Collection[int]) -> dict[int, tuple[DrmClient, ...]]:
+    """The open DRM files of the processes in ``procfs`` on each render node in ``minors``, each once however many
+    descriptors, of however many processes, share it.
+
+    Raises:
+        FdinfoUnreadable: When the processes cannot be listed or the descriptors of one cannot be read.
+    """
+    clients: dict[tuple[int, str], tuple[int, set[int]]] = {}
+    for process in _processes(procfs):
+        _collect(process, frozenset(minors), clients)
+    found: dict[int, list[DrmClient]] = {minor: [] for minor in minors}
+    for (minor, _), (vram, pids) in sorted(clients.items()):
+        found[minor].append(DrmClient(minor, vram, tuple(sorted(pids))))
+    return {minor: tuple(listed) for minor, listed in found.items()}
+
+
 def vram_by_render_minor(procfs: Path, minors: Collection[int]) -> dict[int, int]:
     """The bytes of video memory the processes in ``procfs`` hold on each render node in ``minors``.
 
@@ -48,13 +78,12 @@ def vram_by_render_minor(procfs: Path, minors: Collection[int]) -> dict[int, int
     Raises:
         FdinfoUnreadable: When the processes cannot be listed or the descriptors of one cannot be read.
     """
-    clients: dict[tuple[int, str], int] = {}
-    for process in _processes(procfs):
-        _collect(process, frozenset(minors), clients)
-    totals = dict.fromkeys(minors, 0)
-    for (minor, _), vram in clients.items():
-        totals[minor] += vram
-    return totals
+    return totals(clients_by_render_minor(procfs, minors))
+
+
+def totals(clients: Mapping[int, Collection[DrmClient]]) -> dict[int, int]:
+    """The bytes of video memory ``clients`` hold on each render node."""
+    return {minor: sum(client.vram for client in listed) for minor, listed in clients.items()}
 
 
 def _processes(procfs: Path) -> list[Path]:
@@ -64,7 +93,7 @@ def _processes(procfs: Path) -> list[Path]:
         raise FdinfoUnreadable(f"the processes of {procfs} cannot be listed ({type(exc).__name__})") from exc
 
 
-def _collect(process: Path, minors: frozenset[int], clients: dict[tuple[int, str], int]) -> None:
+def _collect(process: Path, minors: frozenset[int], clients: dict[tuple[int, str], tuple[int, set[int]]]) -> None:
     try:
         descriptors = [entry.name for entry in os.scandir(process / DRM_FD_DIR)]
     except _GONE:
@@ -80,7 +109,9 @@ def _collect(process: Path, minors: frozenset[int], clients: dict[tuple[int, str
         info = _fdinfo(process / DRM_FDINFO_DIR / descriptor)
         if info is not None:
             client = info.get(DRM_CLIENT_ID_KEY) or f"{process.name}/{descriptor}"
-            clients[(minor, client)] = _bytes(info.get(DRM_VRAM_KEY, "0"), process)
+            _, pids = clients.get((minor, client), (0, set()))
+            pids.add(int(process.name))
+            clients[(minor, client)] = (_bytes(info.get(DRM_VRAM_KEY, "0"), process), pids)
 
 
 def _render_minor(link: Path) -> int | None:
