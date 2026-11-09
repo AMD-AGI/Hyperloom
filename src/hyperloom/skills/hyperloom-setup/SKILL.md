@@ -428,6 +428,7 @@ that failed the glibc check:
 ```bash
 export REPO_ROOT="$(pwd -P)"
 export VLLM_VERSION=0.27.1
+export VLLM_ROCM_VARIANT=rocm723
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom setup -- --install-framework vllm --framework-env isolated --yes
 ```
 

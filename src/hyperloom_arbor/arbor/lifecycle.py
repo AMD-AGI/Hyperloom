@@ -1,24 +1,27 @@
-"""Arbor's lifecycle: its chapters, its events, and the three ways a skill takes part.
+"""Arbor's lifecycle: its chapters, its events, and where a campaign's skills take part.
 
-A session runs through ordered **chapters** (``CHAPTERS``). A skill takes part in up to three ways (``MODES``):
+A session runs through ordered **chapters** (``CHAPTERS``) and fires **events** (``EVENTS``).
 
-- ``run``: Arbor runs it in a chapter, in an agent turn of its own, in the order the pack lists it;
-- ``trigger``: Arbor runs it when an event fires (``EVENTS``), without holding the session up;
-- ``use``: the chapter's agent may use it whenever it chooses, as every skill is used today.
+A skill is one of two **types** (``TYPES``), declared as ``metadata.arbor.type`` in its ``SKILL.md``:
 
-A fourth mode, ``develop`` (``DEVELOP``), marks a skill for people working on Arbor itself, and their coding agents. It
-takes no part in a campaign: it lives in a family of its own, a pack that loads that family is refused, and the agent's
-SDK never gets it (``plugin_paths``).
+- **runtime** (the default): a campaign loads it;
+- **development**: for people working on Arbor itself, and their coding agents. It takes no part in a campaign: it
+  lives in a family of its own, a pack that loads it is refused, and the agent's SDK never gets it (``plugin_paths``).
+
+A runtime skill's own metadata says how it takes part (``MODES``) and where:
+
+- ``run``: Arbor runs it in its ``chapter``, in an agent turn of its own, after the skills it names in ``after`` and
+  before those in ``before``, else in the order the pack loads them;
+- ``use``: the agent of each of its ``chapters`` (every chapter when it names none) may use it whenever it chooses;
+- ``trigger``: Arbor runs it when one of its ``triggers`` (events) fires, without holding the session up.
+
+A pack only says which skills it loads, in ``pack.yaml``: ``lifecycle: {load: [...]}`` (``place`` turns that list into
+each chapter's and each event's skills). A pack without ``lifecycle:`` reads as before chapters, its ``skills:`` used
+in every chapter (``from_pack``).
 
 "Chapter", because "stage" (kernel-plan items, ``arbor/stages.py``) and "phase" (map, controller and component phases)
-are taken. "Trigger", because YAML reads a bare ``on`` as the boolean true.
-
-A pack declares where skills take part in ``pack.yaml``: ``plugins:`` (skill families, Claude Code plugins under
-``plugins/<family>/``), ``lifecycle:`` (a chapter's ``run`` and ``use`` lists) and ``triggers:`` (an event's skills).
-A skill says where it can take part under ``metadata.arbor`` in its ``SKILL.md`` (``arbor/skillcheck.py``).
-
-Nothing dispatches by chapter yet: until it does, a pack's ``skills:`` still decides what the agent gets, and a pack
-without ``lifecycle:`` reads as today, its skills ``use`` in every chapter (``from_pack``).
+are taken. "Trigger", because YAML reads a bare ``on`` as the boolean true. Design: docs/skills.md and
+docs/skill-integration.md.
 """
 
 from __future__ import annotations
@@ -57,22 +60,25 @@ EVENTS: tuple[tuple[str, str], ...] = (
     ("round_end", "the ROUND_END annotation"),
     ("rebaseline", "the REBASELINE annotation"),
     ("deadline_near", "the last iteration that fits before the deadline"),
+    ("stretch_end", "a worker's stretch ends: its report is written (arbor/worker.py)"),
     ("end", "the session's exit"),
 )
 EVENT_NAMES: tuple[str, ...] = tuple(name for name, _ in EVENTS)
 
-#: The three ways a skill takes part, and the per-chapter keys of a pack's ``lifecycle:``.
+#: A skill's two types: a campaign loads runtime skills; development skills are for people working on Arbor.
+RUNTIME, DEVELOPMENT = "runtime", "development"
+TYPES: tuple[str, ...] = (RUNTIME, DEVELOPMENT)
+#: The three ways a runtime skill takes part.
 MODES: tuple[str, ...] = ("run", "trigger", "use")
-CHAPTER_KEYS: tuple[str, ...] = ("run", "use")
-#: The mode of a skill for developing Arbor, never a campaign's; and every mode a skill may declare.
-DEVELOP = "develop"
-SKILL_MODES: tuple[str, ...] = (*MODES, DEVELOP)
+#: The one key of a pack's ``lifecycle:`` (and of its ``component.lifecycle``): the skills it loads.
+LOAD = "load"
 
 
 @dataclass(frozen=True)
 class Lifecycle:
-    """Which skills take part where: each chapter's ``run`` and ``use`` lists, and each event's skills."""
+    """Which skills take part where: the skills loaded, each chapter's ``run`` and ``use`` lists, each event's skills."""
 
+    load: tuple[str, ...] = ()
     run: dict[str, tuple[str, ...]] = field(default_factory=dict)
     use: dict[str, tuple[str, ...]] = field(default_factory=dict)
     triggers: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -87,9 +93,9 @@ class Lifecycle:
         return self.triggers.get(event, ())
 
     def named(self) -> tuple[str, ...]:
-        """Every skill named anywhere, once each, in order."""
+        """Every skill loaded, or named anywhere, once each, in order."""
 
-        found: list[str] = []
+        found: list[str] = list(self.load)
         for lists in (self.run, self.use, self.triggers):
             for names in lists.values():
                 found += [name for name in names if name not in found]
@@ -100,70 +106,153 @@ def _names(value: object) -> bool:
     return isinstance(value, list) and all(isinstance(s, str) and s and s.strip() == s for s in value)
 
 
-def errors(lifecycle: object, triggers: object) -> list[str]:
-    """What is wrong with a pack's ``lifecycle:`` and ``triggers:`` sections, by their shape alone."""
+def errors(lifecycle: object) -> list[str]:
+    """What is wrong with a pack's ``lifecycle:`` section (or its ``component.lifecycle``), by its shape alone."""
 
-    found: list[str] = []
-    if lifecycle is not None:
-        if not isinstance(lifecycle, dict):
-            return [f"lifecycle must map chapters to their run and use lists: {lifecycle!r}"]
-        for chapter, lists in lifecycle.items():
-            if chapter not in CHAPTER_NAMES:
-                found.append(f"lifecycle: unknown chapter {chapter!r} (chapters: {', '.join(CHAPTER_NAMES)})")
-                continue
-            if not isinstance(lists, dict) or not set(lists) <= set(CHAPTER_KEYS):
-                found.append(f"lifecycle: {chapter} takes only {' and '.join(CHAPTER_KEYS)} lists: {lists!r}")
-                continue
-            found += [
-                f"lifecycle: {chapter}.{key} must be a list of skill names: {names!r}"
-                for key, names in lists.items()
-                if not _names(names)
-            ]
-    if triggers is not None:
-        if not isinstance(triggers, dict):
-            return [*found, f"triggers must map events to skill names: {triggers!r}"]
-        for event, names in triggers.items():
-            if event not in EVENT_NAMES:
-                found.append(f"triggers: unknown event {event!r} (events: {', '.join(EVENT_NAMES)})")
-            elif not _names(names):
-                found.append(f"triggers: {event} must be a list of skill names: {names!r}")
+    if lifecycle is None:
+        return []
+    if not isinstance(lifecycle, dict):
+        return [f"lifecycle must be {{{LOAD}: [skill, ...]}}: {lifecycle!r}"]
+    if set(lifecycle) & set(CHAPTER_NAMES):
+        return [f"lifecycle: chapters with run and use lists are gone; list the skills to load, "
+                f"lifecycle: {{{LOAD}: [skill, ...]}}, and each skill's metadata places it"]
+    found = [f"lifecycle: unknown key {key!r}; it takes only {LOAD}" for key in lifecycle if key != LOAD]
+    names = lifecycle.get(LOAD)
+    if LOAD not in lifecycle:
+        found.append(f"lifecycle: no {LOAD} list")
+    elif not _names(names):
+        found.append(f"lifecycle: {LOAD} must be a list of skill names: {names!r}")
+    else:
+        found += [f"lifecycle: {LOAD} lists {name} twice" for name in dict.fromkeys(names) if names.count(name) > 1]
     return found
 
 
-def from_pack(lifecycle: dict | None, triggers: dict | None, skills: list[str] | None) -> Lifecycle:
+def place(load: list[str] | tuple[str, ...], found: dict) -> tuple[Lifecycle, list[str]]:
+    """Where the skills ``load`` names take part, by their metadata (``found`` is ``skillcheck.find``'s), and what is
+    wrong with that: a skill that is not there or is a development skill, an order that ``after`` and ``before`` make
+    a cycle. A run chapter's skills follow ``after`` and ``before``; ties, and everything else, follow ``load``. A run
+    skill without a chapter it can run in is left out of every chapter; its own check reports it (skillcheck)."""
+
+    run: dict[str, list[str]] = {}
+    use: dict[str, list[str]] = {}
+    triggers: dict[str, list[str]] = {}
+    problems: list[str] = []
+    for name in load:
+        skill = found.get(name)
+        if skill is None:
+            problems.append(f"skill not found: {name}")
+            continue
+        if skill.development:
+            problems.append(f"skill {name} is for developing Arbor, not for a campaign (its type is {DEVELOPMENT})")
+            continue
+        meta = skill.arbor
+        if "run" in skill.modes and meta.get("chapter") in CHAPTER_NAMES:
+            run.setdefault(meta["chapter"], []).append(name)
+        if "use" in skill.modes:
+            for chapter in meta.get("chapters") or CHAPTER_NAMES:
+                use.setdefault(chapter, []).append(name)
+        if "trigger" in skill.modes:
+            for event in meta.get("triggers") or ():
+                triggers.setdefault(event, []).append(name)
+    ordered = {}
+    for chapter, names in run.items():
+        ordered[chapter], cycle = _ordered(names, found)
+        if cycle:
+            problems.append(f"lifecycle: {chapter}'s run skills {', '.join(cycle)} must each come before another of "
+                            f"them (after and before make a cycle)")
+    plan = Lifecycle(load=tuple(load), run=ordered, use=_tuples(use), triggers=_tuples(triggers))
+    return plan, problems
+
+
+def _ordered(names: list[str], found: dict) -> tuple[tuple[str, ...], list[str]]:
+    """``names`` in the order their ``after`` and ``before`` ask, ties in the order given; and the names left in a
+    cycle, in the order given (``[]`` when there is none)."""
+
+    first = {name: set() for name in names}          # name -> the names that must come before it
+    for name in names:
+        meta = found[name].arbor
+        first[name] |= {other for other in meta.get("after") or [] if other in first and other != name}
+        for other in meta.get("before") or []:
+            if other in first and other != name:
+                first[other].add(name)
+    done: list[str] = []
+    while len(done) < len(names):
+        ready = [name for name in names if name not in done and first[name] <= set(done)]
+        if not ready:
+            return (*done, *(n for n in names if n not in done)), [n for n in names if n not in done]
+        done.append(ready[0])
+    return tuple(done), []
+
+
+def from_pack(lifecycle: dict | None, skills: list[str] | None, found: dict | None = None) -> Lifecycle:
     """The lifecycle a pack declares. A pack without ``lifecycle:`` gets its agent ``skills`` (``agent_skills``) to
-    ``use`` in every chapter, which is what its agent gets today. Call it on a pack ``errors`` found nothing in."""
+    ``use`` in every chapter, as before chapters. Call it on a pack ``errors`` and ``place`` found nothing in."""
 
     if lifecycle is None:
         everywhere = tuple(skills or ())
         use = {chapter: everywhere for chapter in CHAPTER_NAMES} if everywhere else {}
-        return Lifecycle(use=use, triggers=_tuples(triggers))
-    run = {chapter: tuple(lists.get("run") or ()) for chapter, lists in lifecycle.items() if lists.get("run")}
-    use = {chapter: tuple(lists.get("use") or ()) for chapter, lists in lifecycle.items() if lists.get("use")}
-    return Lifecycle(run=run, use=use, triggers=_tuples(triggers))
+        return Lifecycle(load=everywhere, use=use)
+    return place(lifecycle.get(LOAD) or [], found or {})[0]
 
 
-def _tuples(mapping: dict | None) -> dict[str, tuple[str, ...]]:
-    return {key: tuple(names) for key, names in (mapping or {}).items()}
+def _tuples(mapping: dict) -> dict[str, tuple[str, ...]]:
+    return {key: tuple(names) for key, names in mapping.items()}
 
 
-#: The keys of a pack's ``component:`` section that Arbor reads; the others proposed
+#: The keys of a pack's ``component:`` section that Arbor reads; the others once proposed
 #: (``knowledge``, ``void``, ``checks``, ``objective``) are refused until they are built.
 COMPONENT_KEYS = ("lifecycle",)
 
 
-def declared(campaign) -> Lifecycle | None:
-    """The lifecycle the campaign's pack declares, ``None`` when it declares none. Under a host (component mode), the
-    pack's ``component.lifecycle`` replaces the chapters it names, so a pack can say what changes when a host owns the
-    node, its client and its gate: a ``benchmark`` chapter the host's rules make empty, say."""
+def arbor_root(campaign):
+    """The Arbor checkout the campaign's pack lives in (``<root>/packs/<name>``)."""
+
+    from pathlib import Path
+
+    return Path(campaign.pack.pack_dir).resolve().parent.parent
+
+
+def loaded(campaign) -> list[str] | None:
+    """The skills the campaign's pack loads, ``None`` when it declares no ``lifecycle:``. Under a host (component mode),
+    the pack's ``component.lifecycle`` load list replaces it, so a pack can say what changes when a host owns the node,
+    its client and its gate: no ``benchmark:study`` when the host's rules apply, say."""
 
     pack = campaign.pack
     if getattr(pack, "lifecycle", None) is None:
         return None
-    chapters = dict(pack.lifecycle)
+    names = list(pack.lifecycle.get(LOAD) or [])
     if getattr(campaign, "mode", "standalone") == "component":
-        chapters.update(((getattr(pack, "component", None) or {}).get("lifecycle")) or {})
-    return from_pack(chapters, pack.triggers, None)
+        hosted = ((getattr(pack, "component", None) or {}).get("lifecycle")) or {}
+        if LOAD in hosted:
+            names = list(hosted[LOAD] or [])
+    return names
+
+
+def declared(campaign, root=None) -> Lifecycle | None:
+    """Where the campaign's skills take part (``place`` on ``loaded``), ``None`` when its pack declares no
+    ``lifecycle:``. ``root`` is the Arbor checkout whose skills it reads, the pack's by default. The session's
+    conflict decisions apply (``arbor/conflicts.py``): a dropped skill is out, a merged one in place of the one it
+    keeps."""
+
+    from pathlib import Path
+
+    from arbor import conflicts, skillcheck
+
+    names = loaded(campaign)
+    if names is None:
+        return None
+    found = skillcheck.find(Path(root) if root is not None else arbor_root(campaign))
+    session = getattr(campaign, "session_root", None)
+    if session and (Path(session) / conflicts.CONFLICTS_FILE).is_file():
+        names, found = conflicts.applied(session, names, found)
+    return place(names, found)[0]
+
+
+def session_of(campaign):
+    """The campaign's session directory, ``None`` when it has none (``session_root``)."""
+
+    session = getattr(campaign, "session_root", None)
+    return session if session else None
 
 
 # ── the chapter of an agent's turn ────────────────────────────────────────────
@@ -197,6 +286,24 @@ def sub_chapters(chapter: str) -> tuple[str, ...]:
     return MAP_CHAPTERS if chapter == MAP else (chapter,)
 
 
+# ── the master and its workers ────────────────────────────────────────────────
+
+#: Which side of a session runs each chapter (``arbor/roles.py``). The master
+#: sets the campaign up, writes the map, ends each round and ends the campaign; a worker runs the rounds. Under a host,
+#: the host is the master that owns the session, and calls Arbor's master, then its workers.
+MASTER, WORKER = "master", "worker"
+ROLES: dict[str, tuple[str, ...]] = {
+    MASTER: ("review", "init", "benchmark", "accuracy", *MAP_CHAPTERS, "round_end", "end"),
+    WORKER: (ITERATE,),
+}
+
+
+def role_of_chapter(chapter: str) -> str:
+    """The side that runs ``chapter`` (``map``, the map's three together, is the master's)."""
+
+    return WORKER if all(each in ROLES[WORKER] for each in sub_chapters(chapter)) else MASTER
+
+
 def turn_skills(campaign, state=None) -> tuple[str, list[str] | None]:
     """The chapter of the main agent's turn, and the skills it gets.
 
@@ -204,6 +311,7 @@ def turn_skills(campaign, state=None) -> tuple[str, list[str] | None]:
     without one gives ``agent_skills``, the same in every chapter, as before chapters; ``None`` when it declares no
     skills at all. ``run`` skills are not the agent's: Arbor runs them in turns of their own."""
 
+    from arbor import conflicts
     from arbor.pack.loader import agent_skills
 
     chapter = chapter_of(campaign, state)
@@ -213,20 +321,23 @@ def turn_skills(campaign, state=None) -> tuple[str, list[str] | None]:
     names: list[str] = []
     for each in sub_chapters(chapter):
         names += [name for name in plan.uses(each) if name not in names]
-    return chapter, names
+    return chapter, [conflicts.dispatch(session_of(campaign), name) for name in names]
 
 
-def plugin_paths(campaign, arbor_root) -> list[str]:
-    """The directories of the skill families the pack loads, for the SDK's ``plugins``. A family for developing Arbor
-    is never one of them, whatever the pack says (validate_pack refuses such a pack first)."""
+def plugin_paths(campaign, arbor_root, session_dir) -> list[str]:
+    """The families of the skills the pack loads, each built as a Claude Code plugin for the session
+    (``arbor/skills.py``), for the SDK's ``plugins``, with the session's merged skills in them
+    (``arbor/conflicts.py``). A family for developing Arbor is never one of them, whatever the pack says (validate_pack
+    refuses such a pack first); a pack without ``lifecycle:`` loads flat skills only."""
 
     from pathlib import Path
 
-    from arbor import skillcheck
+    from arbor import conflicts, skillcheck
 
-    develop = skillcheck.develop_families(Path(arbor_root))
-    return [str(Path(arbor_root) / "plugins" / name) for name in getattr(campaign.pack, "plugins", None) or []
-            if name not in develop]
+    development = skillcheck.development_families(Path(arbor_root))
+    plan = declared(campaign, arbor_root)            # the load list as the session's decisions leave it
+    families = [name.split(":", 1)[0] for name in (plan.load if plan else ()) if ":" in name]
+    return conflicts.plugins(arbor_root, session_dir, [f for f in families if f not in development])
 
 
 # ── the journal a host reads ──────────────────────────────────────────────────
@@ -249,8 +360,8 @@ def record(session_dir, kind: str, name: str, **detail) -> dict:
     return entry
 
 
-def last(session_dir, kind: str) -> dict | None:
-    """The journal's last entry of ``kind``; ``None`` when it has none or cannot be read."""
+def last(session_dir, kind: str, name: str | None = None) -> dict | None:
+    """The journal's last entry of ``kind`` (and ``name``, when given); ``None`` when it has none or cannot be read."""
 
     import json
     from pathlib import Path
@@ -264,7 +375,7 @@ def last(session_dir, kind: str) -> dict | None:
             entry = json.loads(line)
         except ValueError:
             continue
-        if isinstance(entry, dict) and entry.get("kind") == kind:
+        if isinstance(entry, dict) and entry.get("kind") == kind and name in (None, entry.get("name")):
             return entry
     return None
 

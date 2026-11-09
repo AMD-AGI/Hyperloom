@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import stat
+
 import pytest
 
 from hyperloom.measure.hosted import STOPPED_RETURNCODE
@@ -65,3 +67,13 @@ def test_the_stop_code_is_the_one_the_local_flow_uses() -> None:
     from hyperloom.orchestrator.actions.executors._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE
 
     assert STOPPED_RETURNCODE == ORCHESTRATOR_CANCELLED_RETURNCODE
+
+
+def test_the_journal_a_restarted_leg_re_attaches_from_is_the_group_s(tmp_path) -> None:
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
+    journal = MeasurementJournal(tmp_path / "hosted")
+    journal.append(_record("a", 1))
+
+    assert stat.S_IMODE(journal.path.stat().st_mode) == 0o664
+    assert stat.S_IMODE((tmp_path / "hosted").stat().st_mode) == 0o2775
+    assert stat.S_IMODE((tmp_path / "hosted" / "specs").stat().st_mode) == 0o2775

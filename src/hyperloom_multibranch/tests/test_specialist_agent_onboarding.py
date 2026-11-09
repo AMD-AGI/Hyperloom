@@ -4,6 +4,7 @@
 import asyncio
 import json
 import os
+import stat
 import subprocess
 import sys
 from dataclasses import replace
@@ -19,6 +20,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     GATEWAY_PAUSE_SECONDS,
     RETRY_SECONDS,
     AgentSpec,
+    AttemptFailed,
     CommandResult,
     ModelRefused,
     OnboardingSetup,
@@ -94,6 +96,16 @@ async def test_an_agent_is_fetched_onboarded_configured_installed_and_started(tm
     assert os.access(shim, os.X_OK)
     assert '"workspace": "/ws/sglang"' in onboard.prompts[0] and str(repo) in onboard.prompts[0]
     assert f"checkout, {ready.source_dir}, fetched from {repo}" in onboard.prompts[0]
+
+
+async def test_an_onboarded_agent_is_never_told_why_no_source_change_can_be_kept(tmp_path: Path) -> None:
+    spec = replace(SPEC, source_unkept="the image's sglang names no upstream commit")
+    sandbox, onboard = Sandbox([Process(None)], keep="run/session.json"), Onboarder([_manifest()])
+
+    ready = await make_ready(str(_agent_repo(tmp_path)), spec, tmp_path / "agent", _setup(sandbox, onboard))
+
+    assert spec.source_unkept not in onboard.prompts[0]
+    assert ready.source_unkept == ""
 
 
 def test_the_prompt_has_every_a_b_measured_with_the_gate_s_client_and_the_integration_notes_read() -> None:
@@ -380,3 +392,113 @@ def test_the_docker_shim_reads_a_device_mask_the_agent_gives_as_indices_into_its
     assert visible("CUDA_VISIBLE_DEVICES", "").stdout.strip() == "0,1/5,7"
     refused = visible("ROCR_VISIBLE_DEVICES", "2")
     assert refused.returncode != 0 and "card" in refused.stderr
+
+
+# -- the agent's directory is the group's, and its checkout's config is not this host's ------------------------------
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+async def test_a_clone_and_a_copy_are_the_group_s_to_write_and_the_shim_is_replaced_by_rename(tmp_path: Path) -> None:
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
+    repo = _agent_repo(tmp_path)
+    tree = tmp_path / "vendored"
+    (tree / "pkg").mkdir(parents=True)
+    (tree / "pkg" / "run.py").write_text("x", encoding="utf-8")
+    tree.chmod(0o755)
+
+    await fetch_source(str(repo), tmp_path / "agent" / "cloned")
+    await fetch_source(str(tree), tmp_path / "agent" / "copied")
+    shim = Path(agent_env(tmp_path / "agent")["PATH"].split(os.pathsep)[0]) / "docker"
+    (tmp_path / "earlier-shim").hardlink_to(shim)
+    agent_env(tmp_path / "agent")
+
+    for checkout in (tmp_path / "agent" / "cloned", tmp_path / "agent" / "copied"):
+        assert _mode(checkout) & 0o070 == 0o070, checkout
+        assert _mode(checkout / ".git" / "objects") & 0o070 == 0o070, checkout
+    assert _mode(tmp_path / "agent" / "copied" / "pkg") & 0o2070 == 0o2070
+    assert _mode(tmp_path / "agent" / "copied" / "pkg" / "run.py") & 0o060 == 0o060
+    assert _mode(tmp_path / "agent") == 0o2775 and _mode(shim.parent) == 0o2775 and _mode(shim) == 0o755
+    assert (tmp_path / "earlier-shim").stat().st_ino != shim.stat().st_ino, "replaced by rename, never written in place"
+
+
+async def test_no_program_the_agent_writes_into_its_checkout_s_config_runs_as_this_host(tmp_path: Path) -> None:
+    checkout = tmp_path / "agent" / "src"
+    await fetch_source(str(_agent_repo(tmp_path)), checkout)
+    ran = tmp_path / "ran"
+    program = tmp_path / "recording-filter"
+    program.write_text(f"#!/bin/sh\necho ran >> {ran}\ncat\n")
+    program.chmod(0o755)
+    hook = tmp_path / "hook"
+    hook.write_text(f"#!/bin/sh\necho ran >> {ran}\n")
+    hook.chmod(0o755)
+    with (checkout / ".git" / "config").open("a") as config:
+        config.write(
+            f'[filter "own"]\n\tclean = {program}\n\tsmudge = {program}\n'
+            f"[core]\n\tfsmonitor = {hook}\n\thooksPath = {tmp_path}\n"
+        )
+    (tmp_path / "post-checkout").write_text(f"#!/bin/sh\necho ran >> {ran}\n")
+    (tmp_path / "post-checkout").chmod(0o755)
+    (checkout / ".gitattributes").write_text("* filter=own\n")
+    (checkout / "README.md").write_text("changed\n")
+
+    for argv in (["git", "status", "--porcelain"], ["git", "add", "--all"], ["git", "checkout", "--", "README.md"]):
+        done = await agent_onboarding._git(argv, checkout)
+        assert done.returncode == 0, done.output
+
+    assert not ran.exists(), ran.read_text()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a checkout of another owner needs root to chown")
+async def test_a_checkout_another_account_of_the_group_made_is_read_with_no_program_of_its_config_run(
+    tmp_path: Path,
+) -> None:
+    checkout, source = tmp_path / "agent" / "src", str(_agent_repo(tmp_path))
+    commit = await fetch_source(source, checkout)
+    ran = tmp_path / "ran"
+    program = tmp_path / "recording-filter"
+    program.write_text(f"#!/bin/sh\necho ran >> {ran}\ncat\n")
+    program.chmod(0o755)
+    with (checkout / ".git" / "config").open("a") as config:
+        config.write(f'[filter "own"]\n\tclean = {program}\n\tsmudge = {program}\n')
+    (checkout / ".gitattributes").write_text("* filter=own\n")
+    (checkout / "README.md").unlink()
+    # An earlier attempt, or the run's earlier leg, was another account of the group.
+    for path in (checkout, *checkout.rglob("*")):
+        os.lchown(path, 65534, 65534)
+
+    again = await fetch_source(source, checkout)
+    checked = await agent_onboarding._checkout_git(["git", "checkout", "--", "README.md"], checkout)
+
+    assert again == commit
+    assert checked.returncode == 0, checked.output
+    assert not ran.exists(), ran.read_text()
+
+
+async def test_a_checkout_whose_commit_cannot_be_read_fails_the_attempt_naming_it(tmp_path: Path) -> None:
+    checkout = tmp_path / "agent" / "src"
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)  # an attempt cut short before its clone fetched
+
+    with pytest.raises(AttemptFailed, match=f"reading the commit of {checkout}"):
+        await fetch_source(str(_agent_repo(tmp_path)), checkout)
+
+
+async def test_a_checkout_its_agent_made_a_partial_clone_fetches_nothing_behind_this_host_s_git(tmp_path: Path) -> None:
+    checkout = tmp_path / "agent" / "src"
+    commit = await fetch_source(str(_agent_repo(tmp_path)), checkout)
+    ran, transport = tmp_path / "ran", tmp_path / "transport"
+    transport.write_text(f"#!/bin/sh\necho ran >> {ran}\nexit 1\n")
+    transport.chmod(0o755)
+    with (checkout / ".git" / "config").open("a") as config:
+        config.write(
+            f"[core]\n\trepositoryformatversion = 1\n\tsshCommand = {transport}\n"
+            '[extensions]\n\tpartialClone = promisor\n[remote "promisor"]\n\turl = ssh://example.invalid/r\n'
+            "\tpromisor = true\n"
+        )
+    for packed in (checkout / ".git" / "objects" / "pack").glob("*"):
+        packed.unlink()
+    (checkout / ".git" / "objects" / commit[:2] / commit[2:]).unlink(missing_ok=True)
+
+    done = await agent_onboarding._git(["git", "cat-file", "-p", commit], checkout)
+
+    assert done.returncode != 0 and not ran.exists()

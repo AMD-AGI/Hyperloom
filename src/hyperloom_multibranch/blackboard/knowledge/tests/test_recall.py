@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from hyperloom_kb import RemoteReadResult
 
+from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.blackboard.knowledge.recall import (
     CONDITION_KEYS,
@@ -18,6 +19,7 @@ from hyperloom_multibranch.blackboard.knowledge.recall import (
     INTERACTIVITY_OBJECTIVE,
     RECALL_LIMIT,
     THROUGHPUT_OBJECTIVE,
+    TOTAL_THROUGHPUT_OBJECTIVE,
     IdentityIndex,
     RecallQuery,
     RecallTier,
@@ -219,14 +221,21 @@ def test_the_read_carries_the_sessions_identity_workload_baseline_and_bottleneck
     assert context["observations"] == {"bottleneck": "attention", "branch": "s1"}
 
 
-def test_an_agentx_session_asks_for_the_interactivity_objective() -> None:
+def test_an_agentx_session_asks_for_the_objective_it_is_graded_on() -> None:
     reader = FakeExperienceReader(completed_read())
 
     recall_experiences(reader, profile(isl=None, osl=None), 4.5, ATTENTION)
+    recall_experiences(
+        reader, profile(isl=None, osl=None), 9000.0, RecallQuery("attention", metric=TOTAL_TOKEN_THROUGHPUT)
+    )
     recall_experiences(reader, profile(), 1000.0, ATTENTION)
 
-    agentx, inferencex = (context for _, context, _ in reader.calls)
+    agentx, total, inferencex = (context for _, context, _ in reader.calls)
     assert (agentx["objective"]["id"], agentx["benchmark_baseline"]["interactivity"]) == (INTERACTIVITY_OBJECTIVE, 4.5)
+    assert (total["objective"]["id"], total["benchmark_baseline"]["total_throughput"]) == (
+        TOTAL_THROUGHPUT_OBJECTIVE,
+        9000.0,
+    )
     assert inferencex["objective"]["id"] == THROUGHPUT_OBJECTIVE
 
 

@@ -29,9 +29,11 @@ a snapshot of each keep (Arbor's component mode) runs to that time as its absolu
 workspace starts on, and has its newest snapshot read whole, chained back to that commit, its launch only as it
 differs from the one MB started it with (:func:`read_snapshot`); a variable the measurement sets itself is left out of
 every keep and noted once; why it ended, from its exit file, goes into the branch log; one that refuses its config
-(exit 2) ends the branch with why, from its refusal file, and is never started again. An agent
-that exits 0 finishes the run once what it kept last settled; one that exits otherwise is a crash the runtime restarts
-it from. A session never ends idle: what the agent keeps, or does not, is its own business, bounded by the session's
+(exit 2) ends the branch with why, from its refusal file, and is never started again. So does an agent told at the
+preflight that no change to its component's source can land (:func:`~.worktree.source_unkept`) once a keep of it is
+refused for adding the component without its upstream repository and commit: keeps are cumulative, so every later one
+would be refused too. An agent that exits 0 finishes the run once what it kept last settled; one that exits otherwise
+is a crash the runtime restarts it from. A session never ends idle: what the agent keeps, or does not, is its own business, bounded by the session's
 stops. A watch beside the run's poll makes the run a lost session when the running agent writes nothing (no output,
 transcript or file), or the poll does not come round, for :data:`STALL_SECONDS`: the runtime then kills the agent and resumes it, and gives the branch
 up after a few such losses in a row, so a hung agent does not hold its cards and its branch's slot.
@@ -52,7 +54,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import KernelArtifact, KernelKind, LaunchConfig, PatchRef, RecipeDelta, RecipeError
+from hyperloom.contracts.recipe import (
+    KernelArtifact,
+    KernelKind,
+    LaunchConfig,
+    PatchRef,
+    Recipe,
+    RecipeDelta,
+    RecipeError,
+)
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, kernel_load_env, locate_installed_package
 from hyperloom.sandbox import SandboxGone
 from hyperloom.sandbox.socket import SandboxUnavailable
@@ -94,7 +104,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
 )
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, newest_write
-from hyperloom_multibranch.specialist.arbor_adapter import refused_reasons
+from hyperloom_multibranch.specialist.arbor_adapter import EXIT_REFUSED, exit_reason, refused_reasons
 from hyperloom_multibranch.specialist.dev_sandbox import MINUTE, TOO_MANY
 from hyperloom_multibranch.rulegate.rules import RETRACTION_ID
 from hyperloom_multibranch.specialist.judging import NOTICE
@@ -114,7 +124,7 @@ from hyperloom_multibranch.specialist.start_tables import (
     save_start_tables,
 )
 from hyperloom_multibranch.specialist.tools import sync_to_head
-from hyperloom_multibranch.specialist.worktree import Upstream, WorktreeError, installed_upstream
+from hyperloom_multibranch.specialist.worktree import Upstream, WorktreeError, installed_upstream, source_unkept
 from hyperloom.measure.framework.base import image_configs
 
 if TYPE_CHECKING:
@@ -123,6 +133,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 MANIFEST_FILE = "agent-manifest.json"
+#: How often the run reads the agent's keeps, output and blackboard.
+POLL_SECONDS = 5.0
 LEASE_FILE = "agent-lease.json"
 #: How often the agent's LLM spend is read and recorded while it runs: one record per CLI session a minute, not a poll.
 SPEND_SECONDS = 60.0
@@ -152,8 +164,6 @@ START_TABLES_FILE = "agent-start-tables.json"
 SETTLE_SECONDS = 120.0
 #: The toolbox's refusal of a delta it cannot compile, among them a launch the measurement's launcher overrides.
 LAUNCH_REFUSED = "delta_not_applicable"
-#: The exit code of an agent run as a component that refused its config, saying why on stderr and in its refusal file.
-REFUSED_CONFIG = 2
 #: The deadline of an agent run as a component when EXPLORE has none, which it refuses to run without; MB stops it
 #: long before.
 NO_DEADLINE_SECONDS = 365 * 24 * 3600.0
@@ -179,7 +189,7 @@ class AutonomousSetup:
     the repository they are read against, ``component``, the framework the agent edits, ``spend``, the agent's own LLM
     spend for the directories it works under, read with the file of what was read, ``aiter_configs``, the image's
     aiter tables the start commit's rows-only tables are laid over, and ``least_run_seconds``, the least the agent must
-    still run for its branch to wait for cards its lease was refused, asked again every ``lease_poll_seconds``."""
+    still run for its branch to wait for cards its lease was refused."""
 
     onboarding: Callable[[AgentSandbox], OnboardingSetup]
     sandbox: Callable[[BranchLease], AgentSandbox]
@@ -188,16 +198,10 @@ class AutonomousSetup:
     repo: ExperimentRepo
     component: str
     spend: Callable[[tuple[Path, ...], Path], AgentSpend]
-    poll_seconds: float = 5.0
-    cutoff_seconds: float = CUTOFF_SECONDS
-    upstream: Callable[[str], Upstream | None] = installed_component_upstream
-    settle_seconds: float = SETTLE_SECONDS
-    stall_seconds: float = STALL_SECONDS
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     clock: Callable[[], float] = time.time
     aiter_configs: Path = field(default_factory=image_configs)
     least_run_seconds: float = 0.0
-    lease_poll_seconds: float = LEASE_POLL_SECONDS
 
 
 @dataclass
@@ -211,7 +215,8 @@ class KeepWatch:
     what of the agent's launch the toolbox refused, which every later keep that still runs with it is imported
     without: ``refused_envs``, each variable with the value refused (``None``: the variable left unset), and
     ``refused_args``, server arguments refused as a whole; ``learnt``, for each finding of the agent's ledger the branch
-    learnt, the learning it became and a digest of what it said."""
+    learnt, the learning it became and a digest of what it said; ``source_unkept``, why the preflight told the agent no
+    change to its component's source can land, ``""`` when it told it none."""
 
     root: str
     seq: int = 0
@@ -224,6 +229,7 @@ class KeepWatch:
     refused_envs: dict[str, str | None] = field(default_factory=dict)
     refused_args: str | None = None
     learnt: dict[str, list[str]] = field(default_factory=dict)
+    source_unkept: str = ""
 
     @classmethod
     def load(cls, path: Path) -> KeepWatch:
@@ -245,6 +251,7 @@ class KeepWatch:
             "refused_envs": self.refused_envs,
             "refused_args": self.refused_args,
             "learnt": self.learnt,
+            "source_unkept": self.source_unkept,
         }
         path.write_text(json.dumps(document), encoding=ENCODING)
 
@@ -285,7 +292,9 @@ class AutonomousSession:
         root = self._place.worktree.commit()
         recipe = await self._setup.repo.read_recipe(self._start.start_commit)
         tables = await self._lay_start_tables(recipe.kernels)
+        unkept = await asyncio.to_thread(source_unkept, self._setup.component, recipe)
         lease = await self._lease(self._setup.spec.tp)
+        self._hold(lease)
         await self._notes.refresh()
         snapshot = await self._place.blackboard.snapshot()
         baseline = snapshot.baseline
@@ -302,6 +311,7 @@ class AutonomousSession:
             deadline=self._setup.clock() + (seconds or NO_DEADLINE_SECONDS),
             root=root,
             root_shares=None if baseline is None else snapshot.op_shares.get(baseline.root_commit),
+            source_unkept=unkept,
         )
         spec = replace(spec, cards=lease.gpu_ids)
         self._sandbox = self._setup.sandbox(lease)
@@ -313,8 +323,13 @@ class AutonomousSession:
         # Every snapshot of the agent's session is one of this branch's keeps, the first among them possibly written
         # while the preflight waited for the agent to start.
         mark = None if ready.manifest.snapshots is not None else self._mark(ready.manifest)
-        KeepWatch(root, mark=mark).save(self._place.workspace / WATCH_FILE)
+        KeepWatch(root, mark=mark, source_unkept=ready.source_unkept).save(self._place.workspace / WATCH_FILE)
         await self._note(f"the agent {ready.manifest.source} at {ready.manifest.commit} is running")
+        if unkept:
+            component = self._setup.component
+            await self._note(
+                f"no change to {component}'s source can be kept: {unkept}; only launch and env changes can"
+            )
         for note in ready.notes:
             await self._note(note)
 
@@ -334,7 +349,7 @@ class AutonomousSession:
         that, until EXPLORE ends; 0, no end, with no deadline."""
 
         deadline = self._start.task.deadline
-        return run_seconds(deadline - self._setup.clock(), records, self._setup.cutoff_seconds) if deadline else 0.0
+        return run_seconds(deadline - self._setup.clock(), records, CUTOFF_SECONDS) if deadline else 0.0
 
     async def run(self) -> None:
         manifest, process, sandbox = await self._running()
@@ -379,7 +394,7 @@ class AutonomousSession:
 
     async def _pause(self) -> None:
         self._polled_at = self._setup.clock()
-        await self._setup.sleep(self._setup.poll_seconds)
+        await self._setup.sleep(POLL_SECONDS)
 
     async def _listen(self, process: AgentProcess) -> None:
         output = await process.output()
@@ -388,13 +403,13 @@ class AutonomousSession:
 
     async def _stall(self, process: AgentProcess, written_at: Callable[[], float | None]) -> None:
         """Raise a lost :class:`SessionCrashed` once the poll has not come round, or the running agent has written
-        nothing, for :attr:`AutonomousSetup.stall_seconds`. Writing is its console, its CLI's transcripts or its
+        nothing, for :data:`STALL_SECONDS`. Writing is its console, its CLI's transcripts or its
         files: an agent may print nothing for hours while it works (GEAK captures its workflow's output), so the
         transcripts and files are read once the console has been quiet that long."""
 
-        bound = self._setup.stall_seconds
+        bound = STALL_SECONDS
         while True:
-            await self._setup.sleep(self._setup.poll_seconds)
+            await self._setup.sleep(POLL_SECONDS)
             now = self._setup.clock()
             if now - self._polled_at > bound:
                 raise SessionCrashed(f"the run has not polled the agent for {bound:g} s", lost=True)
@@ -422,7 +437,7 @@ class AutonomousSession:
         if manifest.signals_keeps or watch.collected or not deadline:
             return
         records = (await self._place.blackboard.snapshot()).records
-        if self._setup.clock() < deadline - collection_margin(records, self._setup.cutoff_seconds):
+        if self._setup.clock() < deadline - collection_margin(records, CUTOFF_SECONDS):
             return
         watch.collected = True
         await self._note("EXPLORE ends soon: the agent's workspace is taken as its keep now")
@@ -479,42 +494,54 @@ class AutonomousSession:
         manifest = AgentManifest.read(document)
         command = manifest.resume or manifest.launch
         checkout, env = self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir)
-        try:
-            sandbox = self._setup.sandbox(self._held())
-            process = await sandbox.start(command, checkout, env)
-        except SandboxGone as gone:
-            sandbox = await self._leased_again(manifest, gone)
+        sandbox: AgentSandbox | None = None
+        if (self._place.workspace / LEASE_FILE).exists():
+            try:
+                sandbox = self._setup.sandbox(self._held())
+                process = await sandbox.start(command, checkout, env)
+            except SandboxGone as gone:
+                await self._note(f"the agent's sandbox ended ({gone})")
+                await self.release()
+                (self._place.workspace / LEASE_FILE).unlink()
+                sandbox = None
+        if sandbox is None:
+            sandbox = await self._installed_again(manifest)
             process = await sandbox.start(command, checkout, env)
         self._manifest, self._process, self._sandbox = manifest, process, sandbox
         await self._note(f"the agent resumed with `{command}`")
         return manifest, process, sandbox
 
-    async def _leased_again(self, manifest: AgentManifest, gone: SandboxGone) -> AgentSandbox:
-        """A sandbox of a new lease in place of the one that ended, with the agent's install run in it again; what the
-        agent wrote is on this host and stays."""
+    async def _installed_again(self, manifest: AgentManifest) -> AgentSandbox:
+        """The sandbox of a new lease with the agent's install run in it again; what the agent wrote is on this host and
+        stays. The lease is held only once the install succeeded, so a later run never resumes the agent in a sandbox
+        without it; a lease whose install failed is given back."""
 
-        await self._note(f"the agent's sandbox ended ({gone}): the agent is installed in a new one and resumed")
-        await self.release()
-        sandbox = self._setup.sandbox(await self._lease(self._setup.spec.tp))
-        checkout = self._agent_dir / SOURCE_DIR
+        await self._note("the agent is installed in a new sandbox and resumed")
+        lease = await self._lease(self._setup.spec.tp)
+        installed = False
         try:
-            await install(manifest, self._setup.onboarding(sandbox), checkout, agent_env(self._agent_dir))
+            sandbox = self._setup.sandbox(lease)
+            await install(
+                manifest, self._setup.onboarding(sandbox), self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir)
+            )
+            installed = True
         except AttemptFailed as failed:
             raise SessionCrashed(f"the agent's install in its new sandbox failed: {failed}") from failed
+        finally:
+            if not installed:
+                await asyncio.shield(self._setup.toolbox.release_branch_sandbox(lease.lease_id))
+        self._hold(lease)
         return sandbox
 
     async def _lease(self, cards: int) -> BranchLease:
-        """Lease ``cards`` for the branch's sandbox, for as long as is left until the branch's deadline, and keep the
-        lease for :meth:`release` and a later run.
+        """Lease ``cards`` for the branch's sandbox, for as long as is left until the branch's deadline.
 
         Cards another lease or the session's tests hold now are given back within their lifetime, so a refusal for
         want of them (:data:`~.dev_sandbox.TOO_MANY`, or none free within the toolbox's own wait) is asked again every
-        ``lease_poll_seconds`` while the agent would still run ``least_run_seconds`` once it starts
+        :data:`LEASE_POLL_SECONDS` while the agent would still run ``least_run_seconds`` once it starts
         (:meth:`_may_wait`), the wait noted once in the branch log; past that, and on any other refusal, the
         preflight fails with why."""
 
-        # The lease is only given back through its file, so the file's directory must exist before the lease does.
-        self._place.workspace.mkdir(parents=True, exist_ok=True)
         began, noted = self._setup.clock(), False
         while True:
             try:
@@ -539,7 +566,12 @@ class AutonomousSession:
                 noted = True
                 log.info("the agent of %s waits for cards: %s", self._start.branch, busy)
                 await self._note(f"the agent's sandbox waits for cards, asked again until they are free: {busy}")
-            await self._setup.sleep(self._setup.lease_poll_seconds)
+            await self._setup.sleep(LEASE_POLL_SECONDS)
+        return lease
+
+    def _hold(self, lease: BranchLease) -> None:
+        """Keep ``lease`` for :meth:`release` and a later run."""
+
         document = {
             "lease_id": lease.lease_id,
             "branch_id": lease.branch_id,
@@ -549,7 +581,6 @@ class AutonomousSession:
             "remaining_cards": lease.remaining_cards,
         }
         (self._place.workspace / LEASE_FILE).write_text(json.dumps(document), encoding=ENCODING)
-        return lease
 
     async def _lease_now(self, cards: int) -> BranchLease:
         deadline = self._start.task.deadline
@@ -567,9 +598,9 @@ class AutonomousSession:
         deadline = self._start.task.deadline
         if not deadline:
             return True
-        left = deadline - self._setup.clock() - self._setup.lease_poll_seconds
+        left = deadline - self._setup.clock() - LEASE_POLL_SECONDS
         records = (await self._place.blackboard.snapshot()).records
-        return left > 0 and run_seconds(left, records, self._setup.cutoff_seconds) >= self._setup.least_run_seconds
+        return left > 0 and run_seconds(left, records, CUTOFF_SECONDS) >= self._setup.least_run_seconds
 
     def _held(self) -> BranchLease:
         document = json.loads((self._place.workspace / LEASE_FILE).read_text(encoding=ENCODING))
@@ -579,7 +610,7 @@ class AutonomousSession:
         """End the run of an agent that exited: for good when it refused its config, a crash when it failed, else once
         what it kept last settled."""
 
-        if process.returncode == REFUSED_CONFIG and manifest.snapshots is not None:
+        if process.returncode == EXIT_REFUSED and manifest.snapshots is not None:
             why = refused_reasons(self._agent_dir / SOURCE_DIR / manifest.snapshots_refused)
             refused = f"the agent refused its config: {why or tail(await process.output())}"
             await self._note(refused)
@@ -598,17 +629,7 @@ class AutonomousSession:
         raise SessionFinished(finished)
 
     def _exit_reason(self, manifest: AgentManifest) -> str:
-        """Why the agent run as a component says it ended, as the exit file it writes before an exit 0 has it."""
-
-        path = self._agent_dir / SOURCE_DIR / manifest.snapshots_exit
-        if not path.exists():
-            return "it wrote no exit reason"
-        try:
-            document = read_json(path)
-        except KeptChangeError as error:
-            return f"its exit reason cannot be read: {error}"
-        reason = document.get("reason") if isinstance(document, dict) else None
-        return reason if isinstance(reason, str) and reason else f"its exit file names no reason: {document!r}"
+        return exit_reason(self._agent_dir / SOURCE_DIR / manifest.snapshots_exit)
 
     async def _observe(self, manifest: AgentManifest, watch: KeepWatch) -> None:
         """Read the agent's state the moment its keep file shows a new keep: by the time an import can go, the agent
@@ -703,19 +724,25 @@ class AutonomousSession:
         A keep whose launch the toolbox cannot compile (``delta_not_applicable``) goes again without the part of its
         launch that is refused (:meth:`_narrowed`): keeps are cumulative, so a launch entry the measurement refuses,
         such as a variable its launcher sets itself, would otherwise refuse every keep after it, and is left out of
-        them from then on."""
+        them from then on. A keep refused for adding the component without its upstream, after the preflight told the
+        agent so (``source_unkept``), ends the branch (:meth:`_end_unkept`)."""
 
         kept = watch.pending
         if kept is None or await self._busy():
             return
         head = await self._setup.repo.head(self._start.branch)
-        launch = (await self._setup.repo.read_recipe(head)).launch
+        recipe = await self._setup.repo.read_recipe(head)
+        launch = recipe.launch
         kept = _without_refused(kept, launch, watch)
+        delta: RecipeDelta | None = None
         try:
-            await self._submitted(kept, head, await self._delta(kept, head), watch)
+            delta = await self._delta(kept, head)
+            await self._submitted(kept, head, delta, watch)
         except Backpressure:
             return
         except RequestRejected as error:
+            if watch.source_unkept and error.code == LAUNCH_REFUSED and _adds_unlabelled(delta, recipe):
+                await self._end_unkept(kept, error)
             narrowed = await self._narrowed(kept, launch, head, watch) if error.code == LAUNCH_REFUSED else None
             if narrowed is None:
                 await self._note(f"keep {kept.seq} was refused: {error.reason}")
@@ -729,6 +756,14 @@ class AutonomousSession:
             await self._note(f"keep {kept.seq} cannot be read against the branch head and is skipped: {error}")
         watch.pending = watch.waiting.pop(0) if watch.waiting else None
         watch.save(self._place.workspace / WATCH_FILE)
+
+    async def _end_unkept(self, kept: KeptChange, error: RequestRejected) -> None:
+        ended = (
+            f"keep {kept.seq} was refused: {error.reason}; the agent kept a source change to {self._setup.component}"
+            " after being told it cannot land"
+        )
+        await self._note(ended)
+        raise SessionRefused(ended)
 
     async def _submit_narrowed(self, kept: KeptChange, head: str, watch: KeepWatch) -> None:
         try:
@@ -777,7 +812,7 @@ class AutonomousSession:
             return delta
         if any(item.component == component for item in recipe.components):
             return delta
-        upstream = await asyncio.to_thread(self._setup.upstream, component)
+        upstream = await asyncio.to_thread(installed_component_upstream, component)
         return delta if upstream is None else added_at(delta, recipe, upstream)
 
     async def _increment(self, head: str, imported: tuple[PatchRef, ...], cumulative: str) -> str:
@@ -948,7 +983,7 @@ class AutonomousSession:
         """Whether a test of the branch is in flight, or measured and not judged yet within the settle time."""
 
         snapshot = await self._place.blackboard.snapshot()
-        settled_before = self._setup.clock() - self._setup.settle_seconds
+        settled_before = self._setup.clock() - SETTLE_SECONDS
         return any(
             record.request.branch == self._start.branch and (record.in_flight or _being_judged(record, settled_before))
             for record in snapshot.records
@@ -998,6 +1033,17 @@ def _without_refused(kept: KeptChange, launch: LaunchConfig, watch: KeepWatch) -
 
     names = tuple(name for name, value in watch.refused_envs.items() if kept.envs.get(name) == value)
     return _reverted(kept, launch, names, kept.server_args == watch.refused_args)
+
+
+def _adds_unlabelled(delta: RecipeDelta | None, recipe: Recipe) -> bool:
+    """Whether ``delta`` adds to ``recipe`` a component without its upstream repository and commit, which
+    :func:`~hyperloom.contracts.recipe.apply` refuses."""
+
+    present = {item.component for item in recipe.components}
+    return delta is not None and any(
+        change.component not in present and (change.upstream_repo is None or change.upstream_ref is None)
+        for change in delta.components
+    )
 
 
 def _reverted(kept: KeptChange, launch: LaunchConfig, names: tuple[str, ...], args: bool) -> KeptChange:

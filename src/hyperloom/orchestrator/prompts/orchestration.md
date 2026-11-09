@@ -165,11 +165,13 @@ phase advance directly by emitting
 judge FRAMEWORK_AGENT exhausted (see Hard rules).
 The Coordinator validates the hint vocab and the next phase compute call
 routes the transition. Emitting this hint is the **correct, expected** move
-when the current phase has no remaining actionable lever — it is strictly
+when FRAMEWORK_AGENT has no remaining actionable lever — it is strictly
 better than idling until the budget cap is reached, because it returns the
-unspent budget to later phases / macro-cycles. No hint ends the run: the
-Coordinator prices the remaining budget itself and closes with an honest
-terminal stop_reason. A hint outside the closed vocab is denied
+unspent budget to later phases / macro-cycles. No other phase has an advance
+hint: each exits on the Coordinator gate its phase goal names, and a
+`skip_to_kernel` sent from one is refused (`escalate_hint_phase`). No hint
+ends the run: the Coordinator prices the remaining budget itself and closes
+with an honest terminal stop_reason. A hint outside the closed vocab is denied
 (`escalate_hint_not_in_vocab`); there is no `skip_to_explore`: there is
 one optimisation phase, and the cyclic reloop returns to it for you.
 
@@ -306,8 +308,9 @@ the other. KERNEL exits once no kernel work is pending, or on budget cap.
 
 Integrate KEEP'd kernel patches. With no `kernel_agent` task in flight, the
 Coordinator exits to SWEEP when kernel work is drained
-(`kernel_no_more_leverage`), when the Forge rewrite controller reports a
-terminal status for this macro cycle with nothing pending
+(`kernel_no_more_leverage`), when the last GEAK run ended in `error` with
+nothing pending (`kernel_geak_failed`), when the Forge rewrite controller
+reports a terminal status for this macro cycle with nothing pending
 (`kernel_controller_done`), or when work is still pending but the agent has
 made no progress for `idle_max_ticks` ticks and `idle_min_seconds`
 (`kernel_no_more_leverage`, `evidence=kernel_idle_no_progress`). The phase
@@ -315,18 +318,18 @@ budget running out or hitting its cap exits regardless. Roofline is
 auto-managed.
 
 **Drain pending KEEPs first.** When `has_keep_pending_integrate=true`,
-`integrate` each `pending_keep_kernels` entry before emitting any
-`skip_to_*` hint or switching to explore-side work. Un-integrated KEEPs
-are not yet in `optimization_stack` and not e2e validated; benchmarking
-while any KEEP is pending silently omits its contribution.
+`integrate` each `pending_keep_kernels` entry before anything else.
+Un-integrated KEEPs are not yet in `optimization_stack` and not e2e
+validated; benchmarking while any KEEP is pending silently omits its
+contribution.
 
 **No actionable kernel lever — drain and settle, do not stall.** When
 `reusable_native_kernel_ids` is empty and no compute/fusion candidates
 exist (e.g. dominant kernels are vendor RCCL/NCCL binaries), drain
 `pending_keep_kernels`. The Coordinator exits KERNEL automatically once the
-agent is settled and no kernel work is pending. Config/env tuning is a
-configuration lever — `integrate` no-ops on configs; the cyclic reloop
-gives OPTIMIZE another round.
+agent is settled and no kernel work is pending; no hint advances it.
+Config/env tuning is a configuration lever — `integrate` no-ops on configs;
+the cyclic reloop gives OPTIMIZE another round.
 
 **Integrate defers while the kernel pipeline runs.** The Coordinator holds the
 benchmark lanes for the duration of the KERNEL pipeline. An `integrate` request
@@ -434,8 +437,8 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
 * **You CANNOT** delegate kernel_agent-owned actions; write a state field;
   read or write KB directly (Critic owns it). You **CAN** emit
   `escalate_strategy_change` with a `skip_to_kernel` hint —
-  and `prune_branch`; use `escalate_strategy_change` to advance a phase
-  whose lever is exhausted (see "Phase awareness").
+  and `prune_branch`; use `escalate_strategy_change` to advance
+  FRAMEWORK_AGENT once its lever is exhausted (see "Phase awareness").
 * **Never propose `profile` or `roofline`.** Both are Coordinator-managed
   (PRELUDE bootstrap + every +10% watermark refresh) and never in the
   per-phase proposable set; any proposal/delegate is denied as

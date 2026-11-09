@@ -12,10 +12,10 @@ Look for env-gated code paths in: AITER dispatch (fused_moe, attention), RCCL/NC
 ## Hardware characteristics (gfx950: MI355X at 1400 W, MI350X at 1000 W, the same chip)
 
 - 256 CUs (8 XCDs × 32), wave64; L2 is per XCD, not device-wide; 256 MiB Infinity Cache; LDS 160 KiB/CU, 64 banks
-- 288 GB HBM3E at 8 TB/s spec. Achievable is lower; measure it on the node and cite the measurement
+- 288 GB HBM3E at 8 TB/s spec. Achievable is lower; use a measured number and cite it (the hardware skill's table holds sourced readings), never the datasheet's
 - Matrix peaks (spec): BF16 2.5, FP8 5, FP4/FP6 10 PF; no TF32. Use the fp4 roofline for MXFP4 work
 - OCP float8_e4m3fn (NOT fnuz like MI300) — dtype mismatch silently corrupts results
-- XGMI, 8 GPUs fully connected; measure collective bus bandwidth on the node (RCCL tests)
+- XGMI, 8 GPUs fully connected; measure the collectives' bus bandwidth (all-reduce, reduce-scatter at the served TP) before pricing a communication change
 - Sources, the peak table, ISA and memory detail: `.claude/skills/hardware/` (read its SKILL.md first). The serving rules and the knob catalog: `.claude/skills/serving-playbook/`
 
 ## Server and bench lifecycle

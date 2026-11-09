@@ -9,14 +9,13 @@ Audience: an agent (or a person) about to start an optimization round, or one
 that has just finished. Arbor records each iteration (what changed, what the
 gate said); it does not record why the round tried what it tried, what it
 expected, or when a failed idea is worth reopening. A round plan carries that,
-before and after. The
-skeleton is [template.md](template.md). A planning campaign (pack `model-m-plan`)
-scores drafts with its linter, `packs/model-m-plan/validator/lint_plan.py`: run
-`python3 <that file> PLAN.md` to see what a draft is missing.
+before and after. The skeleton is [template.md](template.md). A planning
+campaign's pack scores drafts with its linter (its `validator/lint_plan.py`):
+run `python3 <that file> PLAN.md` to see what a draft is missing.
 
 ## Inputs, read in this order
 
-1. **The dossier** (the `dossier` skill finds it). Part 11 (directions) is
+1. **The dossier** (the `dossier-v1` skill finds it). Part 11 (directions) is
    where work items come from; part 4 says what counts as a win; part 6 gives
    the floor; parts 7 and 8 give each direction's share of the step and its
    ceiling; part 10 what was already done. Check each part's status and
@@ -28,7 +27,7 @@ scores drafts with its linter, `packs/model-m-plan/validator/lint_plan.py`: run
    what was kept and what was reverted, with the gate's reasons. A REVERT
    that was "not measured" says nothing about its idea.
 4. **Earlier rounds' plans and settlements**, and the project's own rules
-   for plans.
+   for plans, where it has them.
 
 ## What each section owes
 

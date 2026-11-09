@@ -24,7 +24,7 @@ from typing import Callable
 
 KEYS = ("image", "concurrency", "isl", "osl", "tp")
 _TP_FLAGS = ("--tensor-parallel-size", "-tp", "--tp", "--tp-size")
-# bench_output.json spellings (the Model M packs write `conc`).
+# bench_output.json spellings (some packs write `conc`).
 _BENCH_KEYS = {"concurrency": ("concurrency", "conc"), "isl": ("isl",), "osl": ("osl",),
                "tp": ("tp", "tensor_parallel_size")}
 
@@ -117,7 +117,7 @@ def short_image(image: str | None) -> str:
 
 
 def describe(scope: dict | None) -> str:
-    """``image <id>, C<conc>, ISL <n>, OSL <n>, TP<n>``; the parts that are known."""
+    """``image 58cb6b8618bd, C32, ISL 8192, OSL 1024, TP8``; the parts that are known."""
     s = scope or {}
     parts = []
     if s.get("image"):

@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
-from hyperloom.measure.tests.hosted_fixtures import point_yaml, runner_template, spec_context
+from hyperloom.measure.tests.hosted_fixtures import freeze_session_base, point_yaml, runner_template, spec_context
 from hyperloom.sandbox.card_occupancy import CardGuard, Holder, read_holders, read_listed
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, MeasurementCapacity, RequestRejected, WorkloadKind
@@ -59,6 +59,7 @@ async def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # The image's variables are this process's own (ROCM_PATH, LD_LIBRARY_PATH, HIP_* on a GPU machine): a test's
     # toolbox starts from ``runner_envs`` alone, so what a test asserts does not depend on the machine it runs on.
     monkeypatch.setattr(local_hosted, "image_env", dict)
+    monkeypatch.setattr(local_hosted, "host_hf_env", dict)
     # The same for the host's tool repositories, which a local runner's template carries when the host sets them.
     for name in local_hosted.HOST_TOOL_REPO_ENVS:
         monkeypatch.delenv(name, raising=False)
@@ -75,7 +76,7 @@ async def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         **branches: str,
     ) -> Any:
         session = tmp_path / f"session-{len(made)}"
-        session.mkdir()
+        freeze_session_base(session)
         points = {
             branch: point_yaml(session, f"{branch}.yaml", tp=tp, **_behaviour(behaviour))
             for branch, behaviour in branches.items()
@@ -84,7 +85,7 @@ async def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             LocalSession(session, f"run-{len(made)}", range(cards), tp=tp),
             lineage_blackboard(session / "blackboard") if blackboard is None else LocalBlackboard(blackboard, _TOOLBOX),
             AcceptanceSetup(FakeRepo(), _PointPerBranch(points), IMAGE, WorkloadKind.AGENTX),
-            spec_context(session, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")),
+            spec_context(session, blob_root=str(session / "hosted" / "blobs")),
             options=LocalOptions(
                 poll_interval_sec=0.05,
                 runner_envs=runner_envs,
@@ -133,9 +134,11 @@ async def test_the_lease_names_its_cards_its_directory_and_what_is_left(local: M
     lease = await box.lease_branch_sandbox("b02", 2)
     assert (lease.branch_id, len(lease.gpu_ids), lease.remaining_cards) == ("b02", 2, 2)
     assert lease.env["HIP_VISIBLE_DEVICES"] == ",".join(map(str, lease.gpu_ids))
-    assert lease.root.is_dir() and lease.root.parent == tmp_path / "session-0" / "branch-sandboxes"
+    assert lease.root.is_dir() and lease.root.parent == tmp_path / "session-0" / "branch-sandboxes" / "b02"
+    assert lease.root.parent == box.leases.holder_area("b02")
     other = await box.lease_branch_sandbox("b03", 1)
     assert other.remaining_cards == 1 and other.root != lease.root and not set(other.gpu_ids) & set(lease.gpu_ids)
+    assert other.root.parent == tmp_path / "session-0" / "branch-sandboxes" / "b03"
     assert await box.measurement_capacity() == MeasurementCapacity(4, 4, leased_cards=3)
 
 

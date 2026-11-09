@@ -10,13 +10,15 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.recipe import Recipe
+from hyperloom.measure.compile import PackageBase
+from hyperloom.sandbox import SandboxUnavailable
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import LeaseCharge
-from hyperloom_multibranch.specialist import arbor_adapter, dossier_pass
+from hyperloom_multibranch.specialist import arbor_adapter, dossier_pass, worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE
-from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_PASS, MAPPED
+from hyperloom_multibranch.specialist.arbor_adapter import ARBOR_PYTHON, DOSSIER_PASS, MAPPED
 from hyperloom_multibranch.specialist.dossier_pass import (
     DOSSIER_CHARGE,
     DOSSIER_HOLDER,
@@ -135,14 +137,15 @@ async def _pass(
         agent_dir,
         clock=clock,
         sleep=clock.sleep,
-        poll_seconds=0.05,
-        start_seconds=start_seconds,
-        exit_grace_seconds=0.3,
         holder=held_by[0],
         charge=held_by[1],
     )
     start = DossierStart(str(source), rig.root, clock() + seconds, SHARES, "kernel shares")
-    outcome = await run_dossier_pass(start, setup)
+    with pytest.MonkeyPatch.context() as waits:
+        waits.setattr(dossier_pass, "POLL_SECONDS", 0.05)
+        waits.setattr(dossier_pass, "START_SECONDS", start_seconds)
+        waits.setattr(dossier_pass, "EXIT_GRACE_SECONDS", 0.3)
+        outcome = await run_dossier_pass(start, setup)
     return outcome, toolbox, setup.agent_dir / "src", setup
 
 
@@ -188,6 +191,22 @@ async def test_the_pass_is_asked_for_the_start_s_launch_with_the_resolved_flags_
     assert (specs[0].server_args, specs[0].remove_args) == ("--max-num-seqs 128", ("--enforce-eager",))
 
 
+async def test_a_pass_on_a_framework_whose_source_changes_cannot_land_is_told_to_map_launch_and_env_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel = PackageBase("vllm", tmp_path / "site-packages" / "vllm", "vllm", "0.33.0rc1.dev711+gdd4e40142.rocm100")
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: wheel)
+    monkeypatch.setattr(worktree_module, "installed_upstream", lambda _package: None)
+
+    outcome, _toolbox, checkout, _setup = await _pass(
+        tmp_path, "mapped", root=Recipe(ROOT.base_image_digest, ROOT.launch)
+    )
+
+    assert outcome.reason == MAPPED
+    [told] = [rule for rule in json.loads((checkout / "seen-config.json").read_text())["directives"] if "wheel" in rule]
+    assert told.startswith(arbor_adapter.HOST_RULE) and "launch flags" in told
+
+
 async def test_a_mapping_branch_s_pass_leases_its_cards_as_the_branch_and_charges_them_to_it(tmp_path: Path) -> None:
     charge = LeaseCharge(LeaseKind.AUTONOMOUS, "b01")
 
@@ -215,7 +234,7 @@ async def test_a_pass_whose_agent_writes_the_dossier_in_its_session_is_found_the
         (
             "refuse",
             60.0,
-            "it did not start: attempt 1: `python3 -m arbor run --config hyperloom-mb/dossier.json` refused",
+            f"it did not start: attempt 1: `{ARBOR_PYTHON} -m arbor run --config hyperloom-mb/dossier.json` refused",
             False,
         ),
     ],
@@ -257,3 +276,20 @@ async def test_a_pass_whose_arbor_exited_is_still_killed_before_its_cards_go_bac
 
     assert outcome.map is None and killed and killed[-1] is not None
     assert toolbox.released == ["L1"]
+
+
+async def test_a_pass_whose_kill_fails_still_gives_its_cards_back_and_says_how_it_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    kill = LocalProcess.kill
+
+    async def unavailable(self: LocalProcess) -> None:
+        await kill(self)
+        raise SandboxUnavailable("the sandbox service timed out")
+
+    monkeypatch.setattr(LocalProcess, "kill", unavailable)
+    outcome, toolbox, _, _ = await _pass(tmp_path, "crash", seconds=0.6, start_seconds=0.0)
+
+    assert outcome.map is None and outcome.reason.startswith("it exited 1")
+    assert toolbox.released == ["L1"]
+    assert "the sandbox service timed out" in caplog.text

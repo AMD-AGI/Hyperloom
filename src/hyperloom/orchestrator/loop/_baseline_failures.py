@@ -8,9 +8,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping
 
+from inference_suite.contracts import STEPS_BEFORE_SPAWN, FailedStep
+
 from hyperloom_common.coerce import to_float
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
-from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
+from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON, HOST_GPUS_UNAVAILABLE
 
 from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
@@ -20,6 +22,7 @@ from ..actions.executors._accuracy_gate import (
     ENABLEMENT_REVALIDATION_REASON,
 )
 from ..actions.executors._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
+from ..actions.executors._failed_step import failed_step_error_class
 from ..actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..actions.stop_attribution import stopped_by_the_run_class
@@ -27,7 +30,7 @@ from ..bringup import ARGV_INVALID
 from ..bus.message_bus import Message
 from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_PRELUDE
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
-from ..state.failure_evidence import MAGPIE_NONZERO_INVALID_MEASUREMENT
+from ..state.failure_evidence import ROUND_NONZERO_INVALID_MEASUREMENT
 from ..state.shared_state import ActionAttempt
 from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
@@ -41,17 +44,30 @@ _BASELINE_MAX_TOTAL_FAILURES: int = 3
 
 _BASELINE_FAILED_STOP_REASON = "baseline_failed"
 
+#: inference_suite refused the round before it spawned a server: the operator's environment or config, never a
+#: framework error an enablement round could author against.
+_REFUSED_BEFORE_SPAWN_CLASSES: frozenset[str] = frozenset(failed_step_error_class(step) for step in STEPS_BEFORE_SPAWN)
+#: Refusals before spawn that the next attempt can clear by itself (a port or a held server freed meanwhile), so they
+#: count toward the streak instead of stopping the run at once.
+_TRANSIENT_BEFORE_SPAWN_CLASSES: frozenset[str] = frozenset(
+    failed_step_error_class(step) for step in (FailedStep.PORT_IN_USE, FailedStep.REUSE_NOT_OWNED)
+)
+
 #: Baseline failures a retry cannot change, each mapped to the stop reason it ends the run with on its FIRST
 #: occurrence, with no streak.
 _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
-    # A retry recomposes the same argv the installed parser already refused.
+    **dict.fromkeys(_REFUSED_BEFORE_SPAWN_CLASSES - _TRANSIENT_BEFORE_SPAWN_CLASSES, _BASELINE_FAILED_STOP_REASON),
+    # Refused before spawn, or by Hyperloom's own argv check: a retry recomposes the same argv.
     ARGV_INVALID: ARGV_INVALID,
     # The server booted and measured a cold cache. The next attempt launches the same server and no framework patch
     # changes the operator's flag; ``_authorable_launch_log`` keeps it out of enablement.
     PREFIX_CACHE_OFF_ERROR_CLASS: _BASELINE_FAILED_STOP_REASON,
-    # The round served its whole protocol and the harness around it still refused the result. The next
-    # attempt runs the same harness over the same workload, so it is refused the same way.
-    MAGPIE_NONZERO_INVALID_MEASUREMENT: _BASELINE_FAILED_STOP_REASON,
+    # The benchmark client, or the harness after serving its whole protocol, refused the result. The next
+    # attempt runs the same client over the same workload, so it is refused the same way.
+    ROUND_NONZERO_INVALID_MEASUREMENT: _BASELINE_FAILED_STOP_REASON,
+    FailedStep.CLIENT_FAILED.value: _BASELINE_FAILED_STOP_REASON,
+    # Refused before spawn: the host lacks the idle GPUs the round needs. Only the operator can free them.
+    HOST_GPUS_UNAVAILABLE: HOST_GPUS_UNAVAILABLE,
 }
 
 
@@ -68,11 +84,11 @@ def _authorable_launch_log(result_payload: dict[str, Any] | None, *, err_class: 
     """
     if not isinstance(result_payload, dict) or _is_ray_cluster_infeasible(result_payload):
         return ""
-    if err_class in (
-        "fast_exit_arg_error",
-        AGENTX_PREFLIGHT_ERROR_CLASS,
-        PREFIX_CACHE_OFF_ERROR_CLASS,
-    ) or stopped_by_the_run_class(err_class):
+    if (
+        err_class in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS, PREFIX_CACHE_OFF_ERROR_CLASS)
+        or err_class in _REFUSED_BEFORE_SPAWN_CLASSES
+        or stopped_by_the_run_class(err_class)
+    ):
         return ""
     parts: list[str] = []
     for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
@@ -147,7 +163,7 @@ class BaselineFailureMixin:
                 accuracy_floor=state.enablement.accuracy_floor,
                 observed_task=state.enablement.observed_task,
                 observed_metric=state.enablement.observed_metric,
-                eval_contract_fingerprint=state.enablement.eval_contract_fingerprint,
+                eval_definition_digest=state.enablement.eval_definition_digest,
                 probe_config_path=state.enablement.probe_config_path,
             ),
         )
@@ -451,6 +467,12 @@ class BaselineFailureMixin:
                 self.shared_state.baseline_failure_streak,
             )
         elif err_class in _STOPS_ON_FIRST_OCCURRENCE:
+            log.error(
+                "baseline %s failed with %s, which a retry cannot change; stopping the run: %s",
+                task.task_id,
+                err_class,
+                result_payload.get("error") or err_class,
+            )
             self.shared_state.set_stop_reason(_STOPS_ON_FIRST_OCCURRENCE[err_class])
         elif err_class == "fast_exit_arg_error":
             self.shared_state.baseline_arg_error_streak += 1

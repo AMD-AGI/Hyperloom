@@ -224,6 +224,124 @@ class TestCollectSplitChunks:
             )
 
 
+_UNKNOWN_FAMILY_MANIFEST = {
+    "status": 0,
+    "method": "family:unknown_only",
+    "phase_confidence": "unknown",
+    "n_roots": 40,
+    "root_family": "execute_context_<n>",
+    "root_family_known": False,
+}
+_KNOWN_ANNOTATION_MANIFEST = {
+    "status": 0,
+    "method": "annotation:tier",
+    "phase_confidence": "high",
+    "n_roots": 40,
+    "root_family": "execute_context_<n>",
+    "root_family_known": True,
+}
+
+
+class TestSplitManifest:
+    """Verify _run_trace_split reads the splitter's split_manifest.json."""
+
+    @staticmethod
+    def _split(tmp_path, monkeypatch, *, manifest, llm_inference, chunk_name):
+        split_dir = tmp_path / "split"
+        split_dir.mkdir()
+        with gzip.open(split_dir / chunk_name, "wt") as f:
+            json.dump({"traceEvents": []}, f)
+        if manifest is not None:
+            (split_dir / "split_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        monkeypatch.setattr(trace_split, "run_command", lambda *_a, **_kw: 0)
+        monkeypatch.setattr(trace_split, "_check_chunk_quality", lambda **_kw: None)
+        args = SimpleNamespace(
+            split_conc="",
+            split_osl="",
+            split_r="",
+            split_llm_inference=llm_inference,
+            split_num_steps=8,
+            steady_state_mode="mixed" if llm_inference else "generic",
+            budget_minutes=1,
+        )
+        warnings: list[dict] = []
+        _chunk, meta = trace_split._run_trace_split(
+            args, trace_split.TraceSplitJob(tmp_path / "trace.json.gz", split_dir, tmp_path), tmp_path / "log", warnings
+        )
+        return split_dir, meta, warnings
+
+    def test_llm_split_with_unconfirmed_phases_warns(self, tmp_path, monkeypatch):
+        split_dir, meta, warnings = self._split(
+            tmp_path,
+            monkeypatch,
+            manifest=_UNKNOWN_FAMILY_MANIFEST,
+            llm_inference=True,
+            chunk_name="mixed_steady_state_0.json.gz",
+        )
+
+        assert warnings == [
+            {
+                "code": "trace_split_phase_unconfirmed",
+                "severity": "warning",
+                "phase_confidence": "unknown",
+                "method": "family:unknown_only",
+                "root_family": "execute_context_<n>",
+                "split_dir": str(split_dir),
+                "message": (
+                    "TraceLens splitter rated its phase labels 'unknown' (method family:unknown_only); "
+                    "the phase chunks may not hold the phases they are named for."
+                ),
+            }
+        ]
+        assert {key: meta[key] for key in trace_split._SPLIT_MANIFEST_KEYS} == {
+            "status": 0,
+            "method": "family:unknown_only",
+            "phase_confidence": "unknown",
+            "root_family": "execute_context_<n>",
+            "root_family_known": False,
+        }
+
+    def test_llm_split_with_confirmed_phases_does_not_warn(self, tmp_path, monkeypatch):
+        _split_dir, meta, warnings = self._split(
+            tmp_path,
+            monkeypatch,
+            manifest=_KNOWN_ANNOTATION_MANIFEST,
+            llm_inference=True,
+            chunk_name="mixed_steady_state_0.json.gz",
+        )
+
+        assert (warnings, meta["phase_confidence"]) == ([], "high")
+
+    def test_generic_split_never_has_phases_to_confirm(self, tmp_path, monkeypatch):
+        _split_dir, meta, warnings = self._split(
+            tmp_path,
+            monkeypatch,
+            manifest=_UNKNOWN_FAMILY_MANIFEST,
+            llm_inference=False,
+            chunk_name="steady_state_0.json.gz",
+        )
+
+        assert (warnings, meta["phase_confidence"]) == ([], "unknown")
+
+    def test_chunks_without_a_manifest_warn(self, tmp_path, monkeypatch):
+        split_dir, _meta, warnings = self._split(
+            tmp_path,
+            monkeypatch,
+            manifest=None,
+            llm_inference=True,
+            chunk_name="mixed_steady_state_0.json.gz",
+        )
+
+        assert warnings == [
+            {
+                "code": "trace_split_manifest_missing",
+                "severity": "warning",
+                "split_dir": str(split_dir),
+                "message": "TraceLens splitter wrote no readable split_manifest.json; the split's quality is unrecorded.",
+            }
+        ]
+
+
 def _tracelens_importable() -> bool:
     """Check if TraceLens splitter is importable."""
     try:

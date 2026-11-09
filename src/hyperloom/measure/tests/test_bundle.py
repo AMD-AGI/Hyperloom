@@ -105,8 +105,18 @@ def test_an_unusable_public_key_is_not_reported_as_tampering(bundle) -> None:
 
 
 def test_a_signed_manifest_of_another_schema_is_rejected(bundle) -> None:
-    bundle.write_manifest(bundle.document | {"schema": "hyperloom.measurement-result/v2"})
+    bundle.write_manifest(bundle.document | {"schema": "hyperloom.measurement-result/v3"})
     assert _reason(bundle.staging, bundle) is RejectReason.SCHEMA_MISMATCH
+
+
+def test_a_v1_manifest_resigned_over_a_v2_sheet_is_rejected_naming_both_schemas(bundle) -> None:
+    bundle.write_manifest(bundle.document | {"schema": "hyperloom.measurement-result/v1"})
+
+    with pytest.raises(ResultRejected) as raised:
+        verify_bundle(bundle.staging, verify_args(bundle))
+
+    assert raised.value.reason is RejectReason.SCHEMA_MISMATCH
+    assert "measurement-result/v2" in str(raised.value) and "measurement-result/v1" in str(raised.value)
 
 
 def test_a_signed_manifest_that_breaks_the_contract_is_rejected(bundle) -> None:

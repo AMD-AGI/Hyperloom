@@ -118,12 +118,12 @@ if TYPE_CHECKING:
 
 
 def reap_orphaned_servers_best_effort(session_dir: Path, *, phase: str) -> None:
-    """Reap leftover single-node serving processes via this session's pidfiles.
+    """Stop the single-node servers this session's ``server.pid`` files still record.
 
-    Runs at boot, at shutdown and on resume. Every other teardown is in-band (a wrapper's signal trap, a ``killpg`` on
-    a handle still held), so none of it runs when the owner dies without getting to; this is the backstop, and with no
-    cgroup or pid namespace the only one: the pidfile outlives its writer. Scoped to this session's own pidfiles and
-    gated on a cmdline match, so a co-located session's server and a recycled pid are never touched.
+    Runs at boot, at shutdown and on resume. Every other teardown is in-band, so none of it runs when the owner dies
+    without getting to; this is the backstop, and with no cgroup or pid namespace the only one: the pidfile outlives
+    its writer. Scoped to this session's own pidfiles, and to the incarnation and run mark each one records, so a
+    co-located session's server and a recycled pid are never touched.
     """
     try:
         from ..actions.executors._multi_node_env import is_multi_node
@@ -589,6 +589,8 @@ class Coordinator:
             await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
         finally:
             await self.dispatcher.close_db_after_executions()
+            if self._signals is not None:  # Closed after teardown: a later SIGTERM must not kill the process mid-stop.
+                self._signals.close()
 
     def _bind_session_deadline(
         self,
@@ -934,10 +936,7 @@ class Coordinator:
 
     async def _close_run(self, stop_reason: str, *, ticks: int, tick_failed: bool, max_minutes: float) -> str:
         """Classify the stop, persist it, and release everything the run still holds."""
-        final_signals: AbstractSet[int] = frozenset()
-        if self._signals is not None:
-            final_signals = self._signals.close()
-            self._signals = None
+        final_signals = frozenset() if self._signals is None else frozenset(self._signals.received)
         stop_reason = self._classify_stop(final_signals, pending=stop_reason)
         self._stop_classification = stop_reason
         self.shared_state.closing_phase = False

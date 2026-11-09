@@ -33,7 +33,6 @@ __all__ = [
     "BOOT_WEIGHTS",
     "CLIENT_START",
     "ENV_REBUILD",
-    "EVAL_DEPS",
     "JIT_CACHE",
     "KERNEL_TABLES",
     "LANDED",
@@ -83,8 +82,6 @@ PREFLIGHT = "preflight"
 ENV_REBUILD = "env_rebuild"
 KERNEL_TABLES = "kernel_tables"
 JIT_CACHE = "jit_cache"
-#: Installing the accuracy evaluator before the server boots (``measure.runner.eval_deps``).
-EVAL_DEPS = "eval_deps"
 RESULT_SIGNING = "result_signing"
 # One round.
 ROUND_SETUP = "round_setup"
@@ -116,15 +113,14 @@ PHASE_ORDER = (
     SHEET_WAIT,
     PREFLIGHT,
     ENV_REBUILD,
-    EVAL_DEPS,
     JIT_CACHE,
     KERNEL_TABLES,
     ROUND_SETUP,
     SERVER_BOOT,
     CLIENT_START,
     WARMUP,
-    ACCURACY_EVAL,
     MEASURED,
+    ACCURACY_EVAL,
     REPRO_CASE,
     SHORT_PROMPTS,
     LONG_CONTEXT,

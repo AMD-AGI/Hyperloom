@@ -1061,7 +1061,7 @@ class KernelEventRecorder:
                     "baseline_flags": _text(payload.get("accepted_flags")),
                     "baseline_envs": _text(envs) if isinstance(envs, str) else _as_dict(envs),
                     "baseline_env_spec_present": bool(payload.get("baseline_env_spec")),
-                    "launch_recipe": _text(payload.get("launch_recipe")),
+                    "launch_digest": _text(_as_dict(payload.get("baseline_env_spec")).get("launch_digest")),
                     "raw_baseline_tput": _float_or_none(payload.get("raw_baseline_tput")),
                     "orchestrator_best_tput_same_config": _float_or_none(
                         payload.get("orchestrator_best_tput_same_config")

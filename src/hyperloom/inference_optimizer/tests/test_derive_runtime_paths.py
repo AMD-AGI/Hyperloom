@@ -84,11 +84,7 @@ def test_runtime_paths_make_known_source_roots_importable_by_children(monkeypatc
     source.mkdir(parents=True)
     (source / "hyperloom").mkdir()
     (source / "runtime_checkout_probe.py").write_text("VALUE = 'checkout'\n", encoding="utf-8")
-    magpie = tmp_path / "Magpie checkout"
-    magpie.mkdir()
-    (magpie / "runtime_magpie_probe.py").write_text("VALUE = 'magpie'\n", encoding="utf-8")
     monkeypatch.setenv("REPO_ROOT", str(root))
-    monkeypatch.setenv("MAGPIE_PATH", str(magpie))
     monkeypatch.setenv("PYTHONPATH", str(tmp_path / "operator-imports"))
 
     cli_preflight_env._derive_runtime_paths()
@@ -96,10 +92,9 @@ def test_runtime_paths_make_known_source_roots_importable_by_children(monkeypatc
 
     paths = os.environ["PYTHONPATH"].split(os.pathsep)
     assert paths.count(str(source)) == 1
-    assert paths.count(str(magpie)) == 1
     assert str(tmp_path / "operator-imports") in paths
     child = subprocess.run(
-        [sys.executable, "-c", "import runtime_checkout_probe, runtime_magpie_probe"],
+        [sys.executable, "-c", "import runtime_checkout_probe"],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -111,12 +106,9 @@ def test_runtime_paths_make_known_source_roots_importable_by_children(monkeypatc
 @pytest.mark.parametrize("mode", ["baremetal", "docker"])
 def test_preflight_runtime_file_reaches_children_without_shell_source(monkeypatch, tmp_path, mode):
     repo = Path(cli_preflight.__file__).resolve().parents[4]
-    magpie = tmp_path / "Magpie checkout"
-    magpie.mkdir()
-    (magpie / "runtime_child_probe.py").write_text("VALUE = 'runtime-child'\n", encoding="utf-8")
     runtime = tmp_path / "kernel-agent.env.sh"
     runtime.write_text(
-        f"MAGPIE_PATH='{magpie}'\nPYTHON=/host/python\nVIRTUAL_ENV=/host/venv\nINFERENCE_OPTIMIZER_FORCE_PYTHON=1\n",
+        "PYTHON=/host/python\nVIRTUAL_ENV=/host/venv\nINFERENCE_OPTIMIZER_FORCE_PYTHON=1\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("REPO_ROOT", str(repo))
@@ -125,15 +117,14 @@ def test_preflight_runtime_file_reaches_children_without_shell_source(monkeypatc
     monkeypatch.setenv("PYTHON", sys.executable)
     monkeypatch.setenv("VIRTUAL_ENV", "")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FORCE_PYTHON", "1")
-    for key in ("MAGPIE_PATH", "PYTHONPATH"):
-        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
 
     class ReachedCredentials(Exception):
         pass
 
     def check_child_before_external_work():
         child = subprocess.run(
-            [sys.executable, "-c", "import hyperloom, runtime_child_probe; print(runtime_child_probe.VALUE)"],
+            [sys.executable, "-c", "import hyperloom; print('runtime-child')"],
             cwd=tmp_path,
             capture_output=True,
             text=True,
@@ -152,7 +143,8 @@ def test_preflight_runtime_file_reaches_children_without_shell_source(monkeypatc
 
 @pytest.mark.parametrize("package_root", ["site-packages", "dist-packages"])
 def test_runtime_paths_do_not_cross_contaminate_site_packages(monkeypatch, tmp_path, package_root):
-    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / package_root))
+    (tmp_path / package_root / "hyperloom").mkdir(parents=True)
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path / package_root))
     monkeypatch.setenv("PYTHONPATH", str(tmp_path / "operator-imports"))
 
     cli_preflight_env._derive_runtime_paths()

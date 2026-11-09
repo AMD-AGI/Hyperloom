@@ -15,7 +15,7 @@ which the launcher deploys as `base_vmu`), its own worktree of the run's
 pinned Arbor commit (lanes must not share a pack's eval or calibration files),
 its config (the template campaign's, with the overrides of `kinds.py`), and
 its map, seeded into its session (`arbor.stages seed`, or the direction as one
-item). The launcher runs it as a rolling chain (scripts/cluster/chunk_lib.sh);
+item). The launcher runs it as a rolling chain (its chunk library);
 the chain's head is found through `<session>/chain/next_of_<job>`.
 
 A lane's clocks, in `lane.json`: created, deps_met, queued, first_submitted,
@@ -301,6 +301,8 @@ def submit(ctx, rec: Lane) -> Lane:
     rec.job_name = f"{rec.campaign}-c{len(rec.jobs)}"
     if rec.state != "SUBMITTING":
         _to(ctx, rec, "SUBMITTING", kind="lane.submitting", job_name=rec.job_name)
+    if not cl.lane_script:
+        raise ValueError("the run config names no cluster.lane_script, the launcher of a lane's campaign")
     env = {"CAMPAIGN": rec.campaign, "CAMPAIGN_CONFIG": rec.config_path, "CAMPAIGN_ARBOR": rec.worktree,
            "ARBOR_ROOT": rec.worktree, "CALIBRATE": "0", "MAX_CHUNKS": "0", "ROUND_AB": "0",
            "PAR_LANE_DIR": str(lane_dir(ctx, rec)), **kinds.env(rec.kind)}

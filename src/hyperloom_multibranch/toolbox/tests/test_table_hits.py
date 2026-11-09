@@ -12,6 +12,7 @@ logged ("not exercised"), a table the logs cannot speak for ("not observable"), 
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -29,6 +30,8 @@ from hyperloom_multibranch.toolbox import table_hits
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
 from hyperloom_multibranch.toolbox.table_hits import describe, read_table_hits, runtime_findings
 from hyperloom_multibranch.toolbox.tests.kernel_rows import BETA_HEAD, BETA_NEW, ENV, csv_text
+from inference_suite.contracts import LogRange, RunLayout, ServerFacts
+from inference_suite.tests.test_report_contract import _report
 
 IMAGE = "sha256:" + "a" * 64
 BF16_ENV = "AITER_CONFIG_GEMM_BF16"
@@ -123,6 +126,22 @@ class Session:
         path = self.output / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def sweep_arm(self, *rounds: tuple[str, ...]) -> None:
+        """The layout of a sweep arm under inference_suite: the arm's one server logs to ``server_arm/server.log``, and
+        each round's run_dir holds the stretch of that log it ran over, with the range its report records."""
+        live = self.output / "server_arm" / "server.log"
+        live.parent.mkdir(parents=True)
+        for index, lines in enumerate(rounds):
+            start = live.stat().st_size if live.exists() else 0
+            with live.open("a", encoding="utf-8") as handle:
+                handle.write("".join(f"{line}\n" for line in lines))
+            end = live.stat().st_size
+            run_dir = RunLayout(self.output / f"variant_{index:02d}_c{4 ** (index + 1)}" / "benchmark_sglang_0")
+            run_dir.root.mkdir(parents=True)
+            run_dir.server_log.write_bytes(live.read_bytes()[start:end])
+            facts = ServerFacts("127.0.0.1", 30000, "qwen", reused=index > 0, log_range=LogRange(start, end))
+            run_dir.report.write_text(json.dumps(_report(server=facts).to_document()), encoding="utf-8")
 
     def point(self, hits: object = None, name: str = "point.yaml") -> Path:
         path = self.root / name
@@ -379,3 +398,15 @@ def test_a_pack_whose_hit_line_has_no_group_for_the_shape_says_nothing_of_any_ta
     (hits,) = session.read(session.point(hits=1))
     assert hits.status == TABLE_NOT_OBSERVABLE and hits.rows_hit is None
     assert hits.reason == "the rule pack's aiter_tuned_hit pattern has no group K or table, so no hit line can be read"
+
+
+def test_a_sweep_arm_server_is_read_once_not_again_through_the_stretches_its_rounds_copied(session: Session) -> None:
+    """aiter logs a shape's hit at its first lookup, so the later rounds of a shared server log none of their own."""
+    session.put(csv_text(BETA_NEW))
+    session.sweep_arm((MISS, a8w8_hit(ROW_1_34816, MERGED), a8w8_hit(ROW_16_5120, MERGED)), (MISS,), (MISS,))
+    (hits,) = session.read()
+    assert (hits.status, hits.rows_hit, hits.hit_lines) == (TABLE_EXERCISED, 2, 2)
+    session.kernels.clear()
+    session.put("\n".join([BF16_HEADER, bf16_row(*QWEN3_8B_SHAPES[1])]).encode() + b"\n", env=BF16_ENV, target="bf16")
+    (hits,) = session.read()
+    assert hits.status == TABLE_NOT_EXERCISED, "the arm's one server logged hits, of another table"

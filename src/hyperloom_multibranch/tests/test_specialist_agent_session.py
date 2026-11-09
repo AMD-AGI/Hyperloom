@@ -5,9 +5,11 @@ import asyncio
 import json
 import math
 import os
+import stat
 import sys
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -28,7 +30,6 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.specialist.agent_session import (
     CLI_SESSION_FILE,
-    IDLE_TURNS,
     NUDGE_WAITS_S,
     RESUME_CONTEXT_MAX,
     SPECIALIST_SESSION_S,
@@ -54,6 +55,7 @@ ROOT = Recipe(
     components=(ComponentPatches("vllm", "https://github.com/vllm-project/vllm", "1" * 40),),
 )
 EXITED_WELL = AgentStatus("exited", 0, None)
+IDLE_TURNS = len(NUDGE_WAITS_S)
 NO_WAITS = (0.0,) * IDLE_TURNS
 LOST = AgentStatus("lost", None, None, error="no heartbeat for more than 300s")
 
@@ -227,6 +229,37 @@ async def test_a_session_that_ends_as_it_should_is_followed_by_a_fresh_one(rig):
     assert rig.worktree.head() == rig.root
 
 
+async def test_a_launch_shows_the_session_s_files_its_worktree_s_git_and_its_own_lease_area_that_exist(rig, tmp_path):
+    reference, model = tmp_path / "MB-reference" / "geak", tmp_path / "models" / "llama"
+    reference.mkdir(parents=True)
+    model.mkdir(parents=True)
+    areas = tmp_path / "branch-sandboxes"
+    (areas / BRANCH).mkdir(parents=True)
+    readable = (reference, model, tmp_path / "models" / "gone", Path("."))
+    session = rig.session(readable=(*readable, model), lease_area=lambda branch: areas / branch)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    await session.stop()
+    rig.runner.end(1, EXITED_WELL, 1.0)
+    await asyncio.wait_for(running, 1)
+
+    spec = rig.runner.specs[0]
+    assert spec.readable == (reference, model, areas / BRANCH)
+    assert spec.git_admin is not None and spec.git_admin == rig.worktree.admin
+    assert (spec.git_admin / "gitdir").read_text().strip() == str(rig.worktree.path / ".git")
+
+
+async def test_a_launch_without_a_lease_area_shows_no_lease(rig):
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    await session.stop()
+    rig.runner.end(1, EXITED_WELL, 1.0)
+    await asyncio.wait_for(running, 1)
+
+    assert rig.runner.specs[0].readable == rig.worktree.linked
+
+
 def _end_turn(rig, *rows) -> None:
     """Append ``rows`` and the ``result`` row that ends a turn to the CLI's log."""
     with (rig.workspace / "process.log").open("a") as log:
@@ -365,7 +398,7 @@ async def test_idle_turns_in_a_row_with_nothing_running_end_the_session_idle_wit
 
     with pytest.raises(SessionIdle, match=f"{IDLE_TURNS} turns in a row"):
         await asyncio.wait_for(running, 1)
-    assert IDLE_TURNS == len(NUDGE_WAITS_S) and len(rig.runner.sent) == IDLE_TURNS - 1
+    assert len(rig.runner.sent) == IDLE_TURNS - 1
     assert all("nothing new for your branch" in text for text in rig.runner.sent)
     assert (rig.runner.cancelled, rig.runner.collected) == ([1], [1])
 
@@ -1437,3 +1470,15 @@ async def test_a_run_that_ends_keeps_a_long_dev_lease_whose_process_runs_and_its
 
     await session.release()
     assert dev.toolbox.released == ["lease-1"] and not dev.forge.alive(), "the branch's stop ends it"
+
+
+async def test_the_workspace_a_session_makes_is_the_group_s_for_the_dev_sandboxes_and_the_next_leg(rig):
+    rig.workspace.parent.chmod(0o2775)  # the session directory, set up to be shared
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+
+    await _until(lambda: len(rig.runner.specs) == 1, "the first launch")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert stat.S_IMODE(rig.workspace.stat().st_mode) == 0o2775

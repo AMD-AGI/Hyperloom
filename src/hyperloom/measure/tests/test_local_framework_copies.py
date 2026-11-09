@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -51,8 +52,7 @@ from hyperloom.orchestrator.actions.executors import VariantResult
 
 
 @pytest.fixture(autouse=True)
-def magpie_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
+def clean_framework_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in list(os.environ):
         if name.startswith(("AITER_CONFIG_", "HYPERLOOM_FRAMEWORK_")):
             monkeypatch.delenv(name)
@@ -124,7 +124,6 @@ def _run(tmp_path: Path, name: str, point: Path | None = None, **kwargs: Any) ->
         output_dir=out,
         timeout_sec=900,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id=name,
         **kwargs,
     )
@@ -235,9 +234,7 @@ def test_the_copy_of_a_table_is_named_by_its_content_so_every_point_naming_it_ge
     listing = f"{first}{os.pathsep}{other}"
     names = (str(first), str(first), str(other), listing)
     points = tuple(_point(tmp_path / f"p{index}", AITER_CONFIG_GEMM=value) for index, value in enumerate(names))
-    call = TestCall(
-        points=points, output_dir=tmp_path / "out", timeout_sec=900, cwd=str(tmp_path), magpie_python="", task_id="t"
-    )
+    call = TestCall(points=points, output_dir=tmp_path / "out", timeout_sec=900, cwd=str(tmp_path), task_id="t")
 
     with private_framework(call) as private:
         values = [
@@ -346,6 +343,10 @@ def test_copies_that_cannot_be_made_do_not_stop_the_test_which_then_says_it_ran_
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(shutil, "copytree", full_disk)
+    # A temporary directory of the test's own: a shared one may hold the copies another test is making right now.
+    own_tmp = tmp_path / "tmp"
+    own_tmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(own_tmp))
     shared = tree_files(configs)
 
     evidence = _run(tmp_path, "t")
@@ -354,7 +355,7 @@ def test_copies_that_cannot_be_made_do_not_stop_the_test_which_then_says_it_ran_
     assert evidence is not None and evidence["isolation"] == "none" and "No space left" in evidence["reason"]
     assert evidence["matches_session"] is True, "the shared tables were the session's"
     assert tree_files(configs) == shared
-    assert not list(Path(os.environ.get("TMPDIR", "/tmp")).glob("hl-framework-*")), "nothing is left behind"
+    assert not list(own_tmp.glob("hl-framework-*")), "nothing is left behind"
 
 
 def test_a_process_without_a_snapshot_runs_the_call_as_it_is(tmp_path: Path, server: _Server) -> None:

@@ -3,7 +3,7 @@
 
 """The local sandbox provider: every sandbox is a temporary directory on this machine.
 
-Used for development, CI, the consistency check and multi-branch MB1. It speaks
+Used for development, CI, the consistency check and local multi-branch runs. It speaks
 the same socket as a hosted provider (:mod:`hyperloom.sandbox.socket`), with
 the same sealed policy, the same ``agent-sandbox.io/`` metadata and one process group
 per runner that is reaped as a tree.
@@ -24,6 +24,7 @@ from pathlib import Path
 
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
+from hyperloom.sandbox.confined import RunnerPlan, SandboxConfiner, sandbox_confiner
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.identity import generate_signing_identity
 from hyperloom.sandbox.node import node_name
@@ -49,21 +50,24 @@ from hyperloom.sandbox.templates import RESERVED_ENV_NAMES, LocalTemplate
 
 log = logging.getLogger(__name__)
 
-__all__ = ["LocalSandboxProvider", "LocalTemplate", "ProcessUsers"]
+__all__ = ["LocalSandboxProvider", "LocalTemplate", "ProcessUsers", "RunnerPlan"]
 
 
 @dataclass(frozen=True)
 class ProcessUsers:
-    """The python that runs each process's launcher and the accounts the processes run as.
+    """The python that runs each process's launcher, the accounts the processes run as, and what confines the
+    processes of a kind no account is named for.
 
     ``launcher_python`` must be executable by ``sealed_user`` / ``unsealed_user`` when those are set. ``sealed_user``
     is the optional ``(uid, gid)`` that sealed sandboxes' processes run as, ``unsealed_user`` the one for dev and
-    sub-run sandboxes.
+    sub-run sandboxes. ``plan`` is what those of a kind with neither read when they are confined
+    (:class:`~hyperloom.sandbox.confined.RunnerPlan`); without one nothing is confined.
     """
 
     launcher_python: str = sys.executable
     sealed_user: tuple[int, int] | None = None
     unsealed_user: tuple[int, int] | None = None
+    plan: RunnerPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -93,13 +97,20 @@ class LocalSandboxProvider:
         base_dir: Where sandbox directories live; a temporary directory that
             :meth:`close` removes when omitted.
         hostname: The node name to report; ``NODE_NAME`` or this machine's hostname by default (:func:`~hyperloom.sandbox.node.node_name`).
-        users: The launcher's python and the accounts the processes run as, see :class:`ProcessUsers`.
+        users: The launcher's python, the accounts the processes run as and the plan that confines the others, see
+            :class:`ProcessUsers`.
 
     Without a ``sealed_user`` and an ``unsealed_user`` every sandbox process runs as the
     calling account, so one sandbox's processes can read another's files,
     including its signing key: the sandboxes are separated by directory and by
     process tree, not by account. Giving the two kinds different accounts (this
-    needs root) puts the signing key out of reach of every other process.
+    needs root) puts the signing key out of reach of every other process. Given a
+    ``plan`` (:attr:`ProcessUsers.plan`), the processes of a kind no account is named for run in bubblewrap
+    where the chooser gives it (:mod:`hyperloom.sandbox.confined`): they reach their
+    own sandbox's tree and key and the plan's trees, never another sandbox's, the
+    app's state or credentials, or its processes; where it does not, they run as
+    before, which is said at WARNING, and a hosted run refuses (``IsolationRefused``,
+    raised here).
     """
 
     name = "local"
@@ -130,6 +141,14 @@ class LocalSandboxProvider:
         self._base.mkdir(parents=True, exist_ok=True)
         if sealed_user or unsealed_user:
             self._base.chmod(0o711)  # other accounts must traverse it to reach their own directory
+        self._confiner: SandboxConfiner | None = None
+        if users.plan is not None and None in (sealed_user, unsealed_user):
+            try:
+                self._confiner = sandbox_confiner(users.plan, base=self._base, python=self._launcher_python)
+            except BaseException:
+                if self._owns_base:
+                    shutil.rmtree(self._base, ignore_errors=True)
+                raise
         self._cond = threading.Condition()
         self._live: dict[str, LocalSandbox] = {}
         self._by_key: dict[tuple[Role, str], LocalSandbox | SandboxError] = {}
@@ -295,7 +314,8 @@ class LocalSandboxProvider:
             self._hand_over(directory, tpl)
             meta, platform_envs = self._platform_view(tpl, sandbox_id, directory, cards, metadata)
             plan = SandboxPlan(sandbox_id, tpl, role, directory, meta, order.envs, platform_envs, order.timeout_sec)
-            runtime = SandboxRuntime(self._on_end, self._launcher_python, self._users[tpl.sealed])
+            user = self._users[tpl.sealed]
+            runtime = SandboxRuntime(self._on_end, self._launcher_python, user, None if user else self._confiner)
             sandbox = LocalSandbox(plan, runtime)
             with self._cond:
                 self._live[sandbox_id] = sandbox

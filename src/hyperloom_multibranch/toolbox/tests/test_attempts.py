@@ -21,7 +21,15 @@ from hyperloom.contracts.measurement import (
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.measure.boot_watch import HUNG_BEFORE_READY
 from hyperloom.measure import hosted
-from hyperloom.measure.failures import HUB_RATE_LIMITED, INFRA_ERROR_CLASSES, JIT_BUILD_TIMEOUT, TEST_TIMEOUT_REASON
+from hyperloom.measure.failures import (
+    HF_CACHE_PERMISSION,
+    HUB_RATE_LIMITED,
+    INFRA_ERROR_CLASSES,
+    JIT_BUILD_TIMEOUT,
+    TEST_TIMEOUT_REASON,
+    FailureEvidence,
+    classify_test_failure,
+)
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
 from hyperloom_multibranch.toolbox.attempts import (
     NODE_BLAMELESS_INFRA_REASONS,
@@ -104,6 +112,18 @@ async def test_another_infrastructure_failure_is_still_retried_on_other_nodes(re
     assert reported == ["n1", "n2", "n3", "n4"]
 
 
+async def test_a_dataset_cache_lock_the_sandbox_may_not_take_is_not_retried_and_not_held_against_the_node() -> None:
+    lock = "/x/hf/datasets/_x_hf_datasets_openai___gsm8k_main_0.0.0_e53f048.lock"
+    log = f"PermissionError: [Errno 13] Permission denied: '{lock}'"
+    reason = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(log,))).failure_reason
+    assert reason is not None and reason.startswith(f"{HF_CACHE_PERMISSION}: ")
+    result, executor, reported = await _run(reason)
+    assert len(executor.jobs) == 1 and len(result.attempts) == 1, "every sandbox shares the cache and is refused alike"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == reason
+    assert reported == [], "the shared cache's permissions, not the node, refused the lock"
+
+
 JIT_REASON = f"{JIT_BUILD_TIMEOUT}: [TP0] Scheduler watchdog timeout (self.watchdog_timeout=300)"
 
 
@@ -160,9 +180,10 @@ def test_the_blameless_names_are_the_ones_the_runner_and_the_backend_report() ->
         "sandbox_create_failed",
         "hub_rate_limited",
         "sandbox_acquire_timeout",
+        "hf_cache_permission",
     }
-    assert NODE_BLAMELESS_INFRA_REASONS - {HUB_RATE_LIMITED} <= INFRA_ERROR_CLASSES, (
-        "the one a log, not a status, names"
+    assert NODE_BLAMELESS_INFRA_REASONS - {HUB_RATE_LIMITED, HF_CACHE_PERMISSION} <= INFRA_ERROR_CLASSES, (
+        "the ones a log, not a status, names"
     )
     assert RUNNER_LOST == hosted.RUNNER_LOST
     assert SANDBOX_CREATE_FAILED == hosted.SANDBOX_CREATE_FAILED

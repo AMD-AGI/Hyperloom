@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GPU pin and serving-fidelity resolution for the GEAK handoff."""
+"""GPU pins: the ROCR mask a benchmark point launches on, and the pin and serving fidelity for the GEAK handoff."""
 
 from __future__ import annotations
 
 
+import logging
 import os
 from collections.abc import Mapping
 from typing import Any
 
 from hyperloom_common.env import env_float, env_int
+from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.common.visible_devices import (
     HIP_LEVEL_VARS,
     VISIBLE_DEVICE_VARS,
@@ -22,38 +24,105 @@ from hyperloom.common.visible_devices import (
 from hyperloom.inference_optimizer.gpu_types import geak_identity_pin
 from hyperloom.inference_optimizer.grid_server_args import server_arg_value
 
+log = logging.getLogger(__name__)
+
+#: The pin source GEAK inherits; a mask from it is in force for the servers GEAK launches.
+_PROCESS_ENV = "process_env"
+_BASELINE_RECIPE = "baseline_recipe"
+
+
+#: Records the ROCR mask the materializer filled in, so a later pass tells it from a point's own pin.
+ROCR_AUTOFILL_ENV = "HYPERLOOM_ROCR_AUTOFILL"
+
+
+def session_cards_mask(cards: int) -> list[str]:
+    """The ``cards`` a launch whose point names no mask runs on: the front of the process's ROCR mask.
+
+    The process mask is the session's cards; with none, ``0..cards-1``. The result is narrower than ``cards`` only
+    when the process mask is.
+    """
+    return (mask_tokens(os.environ.get(ROCR_VISIBLE_DEVICES_ENV, "")) or [str(i) for i in range(cards)])[:cards]
+
+
+def pin_rocr_visible_devices(envs: dict[str, Any], *, cards: int) -> None:
+    """Set the ROCR mask a benchmark point launches on, at least the ``cards`` its launch occupies wide.
+
+    The point's own mask wins; the process's (the session's cards) fills it only when the
+    point names none, and a mask this function filled before (:func:`_is_autofilled_rocr`)
+    is not the point's, so a config re-run in another process lands on that process's
+    cards. ROCR ids are physical, so a point id outside the session's mask would land on
+    another session's card and is refused. A mask narrower than ``cards`` is widened from the
+    session's cards, or from ``0..cards-1`` when the process has no mask. No HIP-level mask is
+    written: the round starts its server on these ids as absolute cards and drops the masks it
+    inherits (``_suite.rounds``).
+
+    Raises:
+        ValueError: The point's mask names a card outside the process's mask.
+    """
+    value = _mask_value(envs.get(ROCR_VISIBLE_DEVICES_ENV))
+    point = [] if _is_autofilled_rocr(value=value, recipe_envs=envs) else mask_tokens(value)
+    session = mask_tokens(os.environ.get(ROCR_VISIBLE_DEVICES_ENV, ""))
+    outside = _cards_outside(point, session)
+    if outside:
+        raise ValueError(
+            f"benchmark.envs.{ROCR_VISIBLE_DEVICES_ENV}={value!r} names card(s) {','.join(outside)} "
+            f"outside this process's {ROCR_VISIBLE_DEVICES_ENV}={','.join(session)!r}; pin the point to cards "
+            f"inside the session's mask or drop its mask. A config materialized before {ROCR_AUTOFILL_ENV} "
+            "existed carries the mask of the process that wrote it and is read here as a pin: re-materialize "
+            "it from its source config instead of re-running the materialized copy."
+        )
+    mask = point or session
+    if len(mask) < cards:
+        widened = session_cards_mask(cards)
+        if mask and widened != mask:
+            log.warning(
+                "ROCR_VISIBLE_DEVICES=%r has %d devices but the launch needs %d; expanding to %r.",
+                ",".join(mask),
+                len(mask),
+                cards,
+                ",".join(widened),
+            )
+        mask = widened
+    envs[ROCR_VISIBLE_DEVICES_ENV] = ",".join(mask)
+    if mask == point:
+        envs.pop(ROCR_AUTOFILL_ENV, None)
+    else:
+        envs[ROCR_AUTOFILL_ENV] = envs[ROCR_VISIBLE_DEVICES_ENV]
+
+
+def _cards_outside(point: list[str], session: list[str]) -> list[str]:
+    """The ``point`` cards a non-empty ``session`` mask does not hold."""
+    session_ids = {_device_key(d) for d in session}
+    return [d for d in point if session and _device_key(d) not in session_ids]
+
+
+def _device_key(token: str) -> str:
+    return str(int(token)) if token.isdigit() else token
+
 
 def _is_autofilled_rocr(*, value: str, recipe_envs: Mapping[str, Any]) -> bool:
     """Is this recipe's ROCR mask the materializer's autofill rather than a pin?
 
-    ``materialize_config_with_envs`` unconditionally writes
-    ``ROCR_VISIBLE_DEVICES=0..tp-1`` into ``benchmark.envs`` whenever the mask
-    is absent or narrower than TP (``_workload_envs.py``). Every materialized
-    recipe therefore carries the key, so a recipe ROCR value that is
-    byte-identical to that default carries no information about where the run
-    is actually pinned — treating it as a pin is what made this resolver
-    override a real ``HIP_VISIBLE_DEVICES`` and re-pin GEAK to cards ``0..tp-1``.
+    :func:`pin_rocr_visible_devices` writes a mask into every materialized recipe and records
+    the ones it filled under ``ROCR_AUTOFILL_ENV``; a fill carries no information about where
+    the point asked to run, so a re-materialization refills it and the GEAK handoff reads the
+    process env instead.
 
-    A hand-authored ``ROCR_VISIBLE_DEVICES: "0,1"`` at ``TP=2`` is
-    indistinguishable from the autofill and is also treated as "not a pin";
-    that is harmless, because the unpinned path emits the same ``gpu_ids`` and
-    merely omits ``gpu_pin``.
-
-    When the recipe carries no usable ``TP`` — a hand-written or pre-clamp YAML
-    — there is no width to compare against, so the test falls back to the SHAPE
-    the materializer always produces: a mask that is exactly ``0..n-1`` for its
-    own length. Returning ``False`` there instead would let the synthetic mask
-    pose as a pin for precisely the recipes that never recorded a TP, which is
-    the hole this function exists to close.
+    A recipe an older materializer wrote carries its autofill, ``0..tp-1``, with no record, so
+    that value is treated as a fill too. A hand-authored
+    ``ROCR_VISIBLE_DEVICES: "0,1"`` at ``TP=2`` is indistinguishable from it; that is
+    harmless, because it lands on the same cards with no process mask and on the session's
+    with one. With no usable ``TP`` the test falls back to the ``0..n-1`` shape of the mask.
 
     Args:
         value: The recipe's ROCR mask, already stripped.
-        recipe_envs: The recipe's ``benchmark.envs`` (read for its resolved TP).
+        recipe_envs: The recipe's ``benchmark.envs`` (read for the record and its TP).
 
     Returns:
-        ``True`` when the value equals the ``0..tp-1`` the materializer would
-        have synthesized — or, absent a recipe TP, the ``0..n-1`` shape of one.
+        ``True`` when the value is the recorded fill or the ``0..tp-1`` default.
     """
+    if value and _mask_value(recipe_envs.get(ROCR_AUTOFILL_ENV)) == value:
+        return True
     tokens = mask_tokens(value)
     if not tokens:
         return False
@@ -110,7 +179,7 @@ def _resolve_inner_hip_mask(
     if not is_rocr_level(var):
         return {}
     for hip_var in HIP_LEVEL_VARS:
-        for source, table in (("process_env", env), ("baseline_recipe", recipe)):
+        for source, table in ((_PROCESS_ENV, env), (_BASELINE_RECIPE, recipe)):
             raw = table.get(hip_var)
             if raw is None:
                 continue
@@ -173,7 +242,7 @@ def resolve_gpu_pin(
         ``"process_env"`` or ``"baseline_recipe"``.
         A mask that is SET BUT EMPTY yields ``count == 0`` (zero devices
         visible) rather than ``{}``, and wins outright over anything below it
-        in the chain; when the winner is a ROCr-level mask and a HIP-level mask
+        in the chain; when the winner is a process-env ROCr-level mask and a HIP-level mask
         is also in force, the latter travels under ``"inner"`` because it
         selects a subset *within* the ROCr-visible set — and an EMPTY inner
         mask drives the pin's own ``count`` to 0, since it leaves nothing
@@ -184,7 +253,7 @@ def resolve_gpu_pin(
     env = os.environ if environ is None else environ
     recipe = dict(recipe_envs or {})
     for var in VISIBLE_DEVICE_VARS:
-        for source, table in (("process_env", env), ("baseline_recipe", recipe)):
+        for source, table in ((_PROCESS_ENV, env), (_BASELINE_RECIPE, recipe)):
             raw = table.get(var)
             if raw is None:
                 continue
@@ -211,7 +280,7 @@ def resolve_gpu_pin(
                 # died on that abort at server start.
                 return {"var": var, "value": "", "ids": [], "count": 0, "source": source}
             if (
-                source == "baseline_recipe"
+                source == _BASELINE_RECIPE
                 and is_rocr_level(var)
                 and _is_autofilled_rocr(value=value, recipe_envs=recipe)
             ):
@@ -223,7 +292,8 @@ def resolve_gpu_pin(
                 "count": len(effective_mask_tokens(value)),
                 "source": source,
             }
-            inner = _resolve_inner_hip_mask(var=var, env=env, recipe=recipe)
+            # A recipe ROCr mask names absolute cards (see :func:`_pin_renumbers_devices`), so nothing nests in it.
+            inner = _resolve_inner_hip_mask(var=var, env=env, recipe=recipe) if source == _PROCESS_ENV else {}
             if inner:
                 pin["inner"] = inner
                 if int(inner.get("count") or 0) <= 0:
@@ -246,10 +316,9 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
     ``HIP_VISIBLE_DEVICES``/``CUDA_VISIBLE_DEVICES`` for the servers it
     launches, and HIP indexes into the ROCr-visible set. So:
 
-      * pinned with a ROCr-level mask, from the process env or from the
-        baseline recipe — either way it is in force for the servers GEAK
-        launches and renumbers their devices, so the ids must be LOGICAL
-        positions inside it
+      * pinned with a ROCr-level mask from the process env — GEAK inherits it,
+        so it is in force for the servers GEAK launches and renumbers their
+        devices, and the ids must be LOGICAL positions inside it
         (``ROCR=6`` → ``"0"``), capped at ``tp`` (``ROCR=4,5,6,7`` with
         ``tp=2`` → ``"0,1"``) and at the mask width when ``tp`` overshoots it.
         Counted from :func:`effective_mask_tokens`, so a UUID mask resolves to
@@ -257,8 +326,8 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
         invent one. A HIP-level mask nested inside the ROCr slice is already in
         logical coordinates and is forwarded instead (``ROCR=4,5,6,7`` +
         ``HIP=2,3`` is cards 6 and 7, so ``"2,3"``);
-      * any other pin — ROCr still shows every card, so the mask's own tokens
-        pass through uncapped (``HIP=4,5`` → ``"4,5"``). They come from
+      * any other pin, a recipe-sourced ROCr mask included — the servers see
+        every card, so the mask's own tokens pass through uncapped (``HIP=4,5`` → ``"4,5"``). They come from
         :func:`effective_mask_tokens`, the same list ``gpu_pin["count"]`` is
         derived from, so whitespace is normalized without the id list and the
         advertised device count ever disagreeing. A NON-NUMERIC mask (a UUID
@@ -286,10 +355,8 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
     width = max(int(tp or 1), 1)
     pin = gpu_pin or {}
     ids = list(pin.get("ids") or [])
-    # Logical remapping applies to any ROCr-level pin, from either source: a
-    # process-env mask reaches the servers through GEAK, and a recipe mask
-    # reaches them directly as ``handoff["launch_recipe"]``. Either way the
-    # servers see a renumbered set, so absolute ids would index out of it.
+    # Only a process-env ROCr mask reaches GEAK's servers, through GEAK's own
+    # environment; they see a renumbered set, so absolute ids would index out of it.
     if _pin_renumbers_devices(pin):
         # Token count, not len(ids): a UUID mask parses to zero numeric ids but
         # still exposes that many cards to the child. Defaulted rather than
@@ -323,25 +390,21 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
 def _pin_renumbers_devices(pin: Mapping[str, Any] | None) -> bool:
     """Will this pin's ROCr slice be in force for the servers GEAK launches?
 
-    Only then are the handoff's ``gpu_ids`` logical -- and the question is about
-    the SERVERS, not about the GEAK process. An earlier version asked whether
-    GEAK itself inherits the mask (``source == "process_env"``), which is true
-    of the process env and false of the recipe. That was the wrong level: GEAK
-    starts its servers from ``handoff["launch_recipe"]``, and a recipe-sourced
-    ``ROCR_VISIBLE_DEVICES`` is applied to exactly those servers. The
-    renumbering still happens, one level down, so calling those ids absolute
-    made a mask index out of its own slice -- ``ROCR=4,5,6,7`` re-exported as
-    ``HIP=4,5,6,7`` indexes 4..7 into a four-element set and the server dies on
-    an invalid ordinal. Both sources renumber; only the LEVEL of the mask
-    decides.
+    Only then are the handoff's ``gpu_ids`` logical. GEAK starts its servers from
+    the measured round's ``launch.json`` under its own environment. That launch
+    carries no visibility mask a server would inherit: the round turned the
+    recipe's ROCr mask into the absolute card list its server ran on. So only a
+    ROCr mask in the process env, which GEAK inherits, renumbers the servers'
+    devices; a recipe-sourced one names absolute cards.
 
     Args:
         pin: The :func:`resolve_gpu_pin` result.
 
     Returns:
-        ``True`` for any ROCr-level pin, whatever its source.
+        ``True`` for a ROCr-level pin taken from the process env.
     """
-    return is_rocr_level(str((pin or {}).get("var") or ""))
+    pin = pin or {}
+    return is_rocr_level(str(pin.get("var") or "")) and pin.get("source") == _PROCESS_ENV
 
 
 def _resolve_handoff_gpu_identity(gpu_type: str | None) -> dict[str, str]:

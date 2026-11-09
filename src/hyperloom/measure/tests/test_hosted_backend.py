@@ -18,7 +18,7 @@ from hyperloom.contracts.measurement import AccuracyValue
 from hyperloom.measure import signing
 from hyperloom.measure.bundle import RejectReason, ResultRejected
 from hyperloom.measure.failures import SANDBOX_ACQUIRE_TIMEOUT
-from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedMeasurementBackend, HostedStartError
+from hyperloom.measure.hosted import PRE_SWITCH, STOPPED_RETURNCODE, HostedMeasurementBackend, HostedStartError
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED
 from hyperloom.measure.manifest import encode_manifest
 from hyperloom.measure.returncodes import (
@@ -29,6 +29,7 @@ from hyperloom.measure.returncodes import (
 )
 from hyperloom.measure.spec import MeasurementSpec
 from hyperloom.measure.tests.bundle_factory import DEFAULT_FILES, manifest_document, spec_document
+from hyperloom.measure.tests.fake_runner import REPORT_PATH
 from hyperloom.measure.tests.hosted_fixtures import (
     HOSTNAME,
     Rig,
@@ -37,7 +38,20 @@ from hyperloom.measure.tests.hosted_fixtures import (
     point_yaml,
     runner_template,
 )
-from hyperloom.sandbox.socket import SandboxCreateFailed, SandboxGone
+from hyperloom.sandbox.e2b import E2BSandboxProvider
+from hyperloom.sandbox.socket import IDEMPOTENCY_KEY, SandboxCreateFailed, SandboxGone
+from hyperloom.sandbox.tests.test_sandbox_e2b import (
+    FAST,
+    GATEWAY_CUTS,
+    KEY_MEASUREMENT,
+    PENDING_TIMEOUT_MESSAGE,
+    SAFE_CREATE_FAILED_MESSAGE,
+    _Service,
+    key_spent_body,
+    service,  # noqa: F401 (the canned service the platform cases run against)
+)
+
+REPORT_DIR = REPORT_PATH.split("/")[0]
 
 
 @pytest.fixture
@@ -72,8 +86,8 @@ def test_a_signed_result_is_verified_archived_and_landed(rig, tmp_path) -> None:
     call, outcome = _run(r, tmp_path, fake_throughput=4321.5, fake_completed=77)
     assert outcome.returncode == 0
     assert outcome.failure_class is None and outcome.failure_reason is None
-    report = call.output_dir / "benchmark_fake_20000101_000000" / "benchmark_report.json"
-    assert json.loads(report.read_text())["throughput"]["output_throughput"] == 4321.5
+    report = call.output_dir / REPORT_PATH
+    assert json.loads(report.read_text())["fixed"]["output_throughput"] == 4321.5
     assert (call.output_dir / "server.log").read_bytes() == b"server up\nserver down\n"
     assert outcome.sandbox.node_name == HOSTNAME and outcome.sandbox.backend == "hosted"
     assert outcome.sandbox.gpu_model == "FakeGPU" and outcome.sandbox.gpu_ids
@@ -114,13 +128,13 @@ def test_rounds_come_from_the_runners_rounds_file_when_it_lists_one(rig, tmp_pat
     r = rig()
     _, outcome = _run(r, tmp_path, fake_rounds="true")
     assert [(x.point, x.phase, x.returncode) for x in outcome.rounds] == [(0, "measure", 0)]
-    assert outcome.rounds[0].output_dir.name == "benchmark_fake_20000101_000000"
+    assert outcome.rounds[0].output_dir.name == REPORT_DIR
 
 
 def test_without_a_rounds_file_a_report_in_the_warmup_directory_is_not_a_measuring_round(rig, tmp_path) -> None:
     r = rig()
     _, outcome = _run(r, tmp_path, fake_warmup="true")
-    assert [(x.phase, x.output_dir.name) for x in outcome.rounds] == [("measure", "benchmark_fake_20000101_000000")]
+    assert [(x.phase, x.output_dir.name) for x in outcome.rounds] == [("measure", REPORT_DIR)]
     assert "warmup_round" not in outcome.rounds[0].output_dir.parts
 
 
@@ -232,6 +246,7 @@ def test_a_rejected_sheet_is_not_a_candidate_failure(rig, tmp_path) -> None:
     assert outcome.returncode == HOSTED_SPEC_REJECTED_RC
     assert outcome.failure_class is None
     assert outcome.stderr.startswith("spec_rejected")
+    assert outcome.stderr.endswith("(the sheet is hyperloom.measurement-spec/v2)"), "an older runner names only its own"
     assert (call.output_dir / "hosted-server.log").read_bytes() == b"partial log\n", "the runner's log is kept"
 
 
@@ -268,6 +283,15 @@ def test_a_result_that_does_not_verify_is_rejected_and_lands_nowhere(rig, tmp_pa
     assert record.extra["verdict"] == "result_rejected" and record.extra["reject"] == reject
     assert "verified" not in record.extra
     assert r.provider.find({}, role="measurement") == []
+
+
+def test_a_failed_round_under_an_outcome_that_says_success_is_rejected_before_anything_is_kept(rig, tmp_path) -> None:
+    r = rig()
+    call, outcome = _run(r, tmp_path, fake_accuracy=0.95, fake_accuracy_returncode=1)
+    assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
+    assert "(manifest_invalid)" in outcome.stderr, outcome.stderr
+    assert not call.output_dir.exists() or not any(call.output_dir.iterdir()), "nothing was written to the output dir"
+    assert not (tmp_path / "archive").exists() or not any((tmp_path / "archive").iterdir()), "nothing was archived"
 
 
 def test_nothing_is_downloaded_from_a_manifest_whose_signature_fails(rig, tmp_path) -> None:
@@ -437,6 +461,33 @@ def test_a_sandbox_that_failed_before_it_ran_is_an_infrastructure_failure_with_t
     assert r.backend.journal.next_attempt("req-1") == 2, "the toolbox's one retry is a new attempt with a new key"
 
 
+@pytest.mark.parametrize(
+    ("reason", "returncode", "label"),
+    [
+        (PENDING_TIMEOUT_MESSAGE, HOSTED_RUNNER_UNAVAILABLE_RC, "runner_start_timeout"),
+        (SAFE_CREATE_FAILED_MESSAGE, HOSTED_INFRA_FAILURE_RC, "sandbox_create_failed"),
+    ],
+    ids=["pending_timeout", "sandbox_create_failed"],
+)
+def test_a_create_whose_replay_finds_its_key_spent_is_labelled_by_the_reason_the_platform_stored(
+    rig, tmp_path, monkeypatch, service: _Service, reason: str, returncode: int, label: str
+) -> None:
+    """The gateway cuts the create and the replay is told the key is spent, with how its sandbox ended: a pending
+    timeout is a runner that did not start in time, as its 503 would have been; a failed create is the platform's."""
+    r = rig(gpus=1)
+    platform = E2BSandboxProvider(
+        {"measurement": KEY_MEASUREMENT}, api_url=service.url, sandbox_url=service.url, retry=FAST
+    )
+    service.reply("POST", "/v2/sandboxes", GATEWAY_CUTS[0], (410, key_spent_body(reason)))
+    monkeypatch.setattr(r.provider, "create", platform.create)
+    _, outcome = _run(r, tmp_path)
+    assert (outcome.returncode, outcome.failure_class.value, outcome.failure_reason) == (returncode, "infra", label)
+    assert reason in outcome.stderr, "the stored reason reaches the outcome"
+    keys = [call.body["metadata"][IDEMPOTENCY_KEY] for call in service.calls("POST", "/v2/sandboxes")]
+    assert keys == ["run-1:req-1:1", "run-1:req-1:1"], "the cut create is replayed once, its key not replaced"
+    assert r.backend._pool.active == 0
+
+
 def test_a_card_count_without_a_runner_template_is_a_refused_sheet(rig, tmp_path) -> None:
     r = rig()
     call = make_call(tmp_path, point=point_yaml(tmp_path, tp=3))
@@ -479,8 +530,37 @@ def test_a_restarted_application_reattaches_instead_of_measuring_twice(rig, tmp_
     assert resumed.sandbox.sandbox_id == submitted.sandbox_id
     record = r.backend.journal.latest("req-1")
     assert (record.state, record.attempt) == (STATE_FINISHED, 1) and record.extra["verified"] is True
-    report = call.output_dir / "benchmark_fake_20000101_000000" / "benchmark_report.json"
-    assert json.loads(report.read_text())["throughput"]["output_throughput"] == 1234.0
+    report = call.output_dir / REPORT_PATH
+    assert json.loads(report.read_text())["fixed"]["output_throughput"] == 1234.0
+
+
+@pytest.mark.parametrize("when", ["before it runs", "while it measures"])
+def test_a_restarted_application_that_withdraws_the_test_a_dead_one_left_ends_its_sandbox(rig, tmp_path, when) -> None:
+    """A session taken up again after its process died withdraws the tests it left: the sandbox still measuring is
+    closed and gives its slot back, whether the withdrawal reaches the test before or after it re-attached."""
+    r = rig()
+    call = make_call(tmp_path, point=point_yaml(tmp_path, fake_mode="hang"))
+    _crash_mid_wait(r, call)
+    left = r.backend.journal.latest("req-1")
+    assert left.sandbox_id in {info.sandbox_id for info in r.provider.find({}, role="measurement")}
+    backend = r.another_backend()
+    result: list = []
+    if when == "before it runs":
+        backend.withdraw("req-1")
+    worker = threading.Thread(target=lambda: result.append(backend.run_test(call)))
+    worker.start()
+    try:
+        if when == "while it measures":
+            deadline = time.monotonic() + 20
+            while backend.pool.active == 0 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert backend.pool.active == 1, "the restarted application re-attached to the sandbox"
+            backend.withdraw("req-1")
+    finally:
+        worker.join(30)
+    assert not worker.is_alive() and result[0].returncode == STOPPED_RETURNCODE
+    assert left.sandbox_id not in {info.sandbox_id for info in r.provider.find({}, role="measurement")}
+    assert backend.pool.active == 0
 
 
 def test_a_restart_that_finds_no_slot_for_its_sandbox_ends_the_attempt_with_the_reason(rig, tmp_path) -> None:
@@ -524,8 +604,8 @@ def test_a_restart_before_the_sheet_was_sent_sends_it_to_the_sandbox_that_waits(
     resumed = r.another_backend().run_test(call)
     assert resumed.returncode == 0 and created == [], "the waiting sandbox was used, not a second one"
     assert [x.state for x in r.backend.journal.records()] == [STATE_SUBMITTED, STATE_SENT, STATE_FINISHED]
-    report = call.output_dir / "benchmark_fake_20000101_000000" / "benchmark_report.json"
-    assert json.loads(report.read_text())["throughput"]["output_throughput"] == 777.0
+    report = call.output_dir / REPORT_PATH
+    assert json.loads(report.read_text())["fixed"]["output_throughput"] == 777.0
 
 
 def test_a_restart_after_the_sandbox_is_gone_measures_again_as_the_next_attempt(rig, tmp_path) -> None:
@@ -548,6 +628,42 @@ def test_a_restart_after_the_sandbox_is_gone_measures_again_as_the_next_attempt(
     ]
     assert r.backend.journal.records()[2].extra["verdict"] == "runner_lost"
     assert r.backend.journal.latest("req-1").sandbox_id == resumed.sandbox.sandbox_id
+
+
+def _as_v1_sheet(raw: bytes) -> bytes:
+    """The journalled sheet as the application wrote it before the switch: Magpie, and no base."""
+    document = json.loads(raw)
+    document["schema"] = "hyperloom.measurement-spec/v1"
+    document["tools"] = {"magpie": {"commit": "a" * 40}, "inferencex": document["tools"]["inferencex"]}
+    del document["procedure"]["base_launch"]
+    document["procedure"]["benchmark_backend"] = "magpie"
+    return json.dumps(document).encode()
+
+
+def test_a_restart_that_finds_a_pre_switch_sheet_journalled_measures_afresh_instead_of_resuming_it(
+    rig, tmp_path
+) -> None:
+    """An unfinished attempt of a v1 sheet is a miss: its sandbox measures through Magpie, which the session no longer
+    asks for, so it is closed and the test starts its next attempt with the session's v2 sheet."""
+    r = rig()
+    call = make_call(tmp_path, point=point_yaml(tmp_path, fake_delay=0.5))
+    _crash_mid_wait(r, call)
+    first = r.backend.journal.latest("req-1")
+    raw = r.backend.journal.load_spec(first.request_id, first.attempt)
+    r.backend.journal.save_spec(first.request_id, first.attempt, _as_v1_sheet(raw))
+
+    resumed = r.another_backend().run_test(call)
+
+    assert resumed.returncode == 0 and resumed.sandbox.sandbox_id != first.sandbox_id
+    ended = [x for x in r.backend.journal.records() if x.attempt == 1 and x.state == STATE_FINISHED]
+    assert [x.extra["verdict"] for x in ended] == [PRE_SWITCH]
+    assert first.sandbox_id not in {info.sandbox_id for info in r.provider.find({}, role="measurement")}
+    latest = r.backend.journal.latest("req-1")
+    assert (
+        latest.attempt == 2
+        and MeasurementSpec.from_bytes(r.backend.journal.load_spec(latest.request_id, latest.attempt)).schema
+        == "hyperloom.measurement-spec/v2"
+    )
 
 
 def test_a_second_call_for_a_finished_request_is_the_next_attempt(rig, tmp_path) -> None:
@@ -609,9 +725,10 @@ def test_the_sheet_carries_the_pods_rccl_channel_count_but_not_its_interface_nam
     assert dict(_spec_of(r, "req-1").platform_env) == {"NCCL_MIN_NCHANNELS": "112"}
 
 
-def test_an_env_override_the_old_flow_refuses_refuses_the_sheet(rig, tmp_path) -> None:
+@pytest.mark.parametrize("name", ["HF_TOKEN", "GITHUBTOKEN", "HF_AUTH"])
+def test_an_env_override_the_old_flow_refuses_refuses_the_sheet(rig, tmp_path, name) -> None:
     r = rig()
-    outcome = r.backend.run_test(make_call(tmp_path, env_overrides={"HF_TOKEN": "x"}))
+    outcome = r.backend.run_test(make_call(tmp_path, env_overrides={name: "x"}))
     assert outcome.returncode == HOSTED_SPEC_REJECTED_RC and outcome.failure_reason == "env_override_refused"
     assert r.backend.journal.records() == []
 

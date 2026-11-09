@@ -20,7 +20,7 @@ VALID_WORKLOAD_KINDS = {"serving", "kernel", "repro", "document"}
 ALLOWED_PACK_DIRS = {"knowledge", "validator", "eval"}
 
 # A pack's results/ is refused unless the user opts in (`arbor run --allow-pack-results`):
-# some packs keep their results there.
+# some contributed packs keep their results there.
 PACK_RESULTS_DIR = "results"
 PACK_RESULTS_FLAG = "--allow-pack-results"
 PACK_RESULTS_CONCERNS = (
@@ -45,7 +45,7 @@ class Pack:
     knowledge_dir: Path
     pack_dir: Path
     # Optional pace-threshold overrides (arbor.state.Policy field names).
-    # Absent from every pack written before it existed, which is why it
+    # Absent from older packs, which is why it
     # defaults rather than being required.
     policy: dict | None = None
     # Skills the campaign agent may use, by name: <arbor_root>/.claude/skills/<name>/.
@@ -53,19 +53,20 @@ class Pack:
     # (agent_skills). Listing "profiler" makes every profile go through that
     # skill (render.py states the precedence); a pack without it profiles its
     # own way. With nothing declared and no default-on skills, the agent runs
-    # as before skills existed.
+    # as it did before packs declared skills.
     skills: list[str] | None = None
     opt_out_skills: list[str] | None = None
-    # Where skills take part (arbor/lifecycle.py): the skill families the pack loads, as
-    # <arbor_root>/plugins/<family>/; each chapter's run and use lists; each event's skills.
-    # None when the pack does not declare them, as every pack before skill families.
-    plugins: list[str] | None = None
+    # The skills the pack loads, {load: [...]}, each placed by its own metadata (arbor/lifecycle.py).
+    # None when the pack does not declare it, as every older pack.
     lifecycle: dict | None = None
+    # v0.9.2's keys, read only to refuse them: families now resolve by a skill's name, and a
+    # trigger skill names its events in its metadata.
+    plugins: list[str] | None = None
     triggers: dict | None = None
     # pack.yaml has a key YAML read as true: an `on:` meant as `triggers:`.
     on_key: bool = False
-    # What changes under a host (component mode): its `lifecycle:` replaces the chapters it
-    # names (arbor/lifecycle.py declared).
+    # What changes under a host (component mode): its `lifecycle.load` replaces the pack's
+    # (arbor/lifecycle.py loaded).
     component: dict | None = None
 
 
@@ -224,41 +225,41 @@ def validate_pack(pack: Pack, default_on: tuple[str, ...] | None = None,
 
 
 def lifecycle_errors(pack: Pack) -> list[str]:
-    """What is wrong with where the pack's skills take part (arbor/lifecycle.py): the sections' shape, families the
-    pack loads that are not there, and skills it names that no flat skill or listed family holds, or that do not
-    declare the way the pack has them take part."""
+    """What is wrong with the skills the pack loads (arbor/lifecycle.py): the section's shape, the keys it replaced,
+    and skills that are not there, are for developing Arbor, or cannot be placed by their metadata. A loaded skill's
+    own errors (arbor/skillcheck.py) count as the pack's."""
     from arbor import lifecycle, skillcheck
 
     errors = []
     if pack.on_key:
-        errors.append("pack.yaml has an `on:` key, which YAML reads as true: list event skills under `triggers:`")
+        errors.append("pack.yaml has an `on:` key, which YAML reads as true; a trigger skill names its events in its "
+                      "own metadata (metadata.arbor.triggers)")
+    if pack.plugins is not None:
+        errors.append("plugins: is gone: load a family's skills by name in lifecycle.load (dossier:discover); "
+                      "Arbor finds their family under .claude/skills/")
+    if pack.triggers is not None:
+        errors.append("triggers: is gone: a trigger skill names its events in its metadata (metadata.arbor.triggers); "
+                      "load it in lifecycle.load")
     if pack.lifecycle is not None and (pack.skills is not None or pack.opt_out_skills is not None):
-        errors.append("a pack gives its agent's skills with skills: (every chapter) or lifecycle: (per chapter), "
-                      "not both")
-    if pack.plugins is not None and not _skill_names_ok(pack.plugins):
-        return [*errors, f"plugins must be a list of family names: {pack.plugins!r}"]
-    shape = lifecycle.errors(pack.lifecycle, pack.triggers) + _component_errors(pack)
-    if shape:
+        errors.append("a pack gives its agent's skills with skills: (every chapter) or lifecycle: (loaded, and placed "
+                      "by their metadata), not both")
+    shape = lifecycle.errors(pack.lifecycle) + _component_errors(pack)
+    if shape or pack.lifecycle is None:
         return [*errors, *shape]
     root = pack.pack_dir.parent.parent  # packs live in <arbor_root>/packs/<name>
-    families = skillcheck.plugins(root)
-    errors += [f"plugin not found: {name} (no plugins/{name}/{skillcheck.PLUGIN_MANIFEST.as_posix()})"
-               for name in pack.plugins or [] if name not in families]
-    develop = skillcheck.develop_families(root)
-    errors += [f"plugin {name} is for developing Arbor, not for a campaign (its skills declare the develop mode)"
-               for name in pack.plugins or [] if name in develop]
     found = skillcheck.find(root)
-    plans = [lifecycle.from_pack(pack.lifecycle, pack.triggers, None)]
+    lists = [pack.lifecycle[lifecycle.LOAD]]
     hosted = (pack.component or {}).get("lifecycle")
     if hosted:
-        plans.append(lifecycle.from_pack({**pack.lifecycle, **hosted}, pack.triggers, None))
-    for name in dict.fromkeys(name for plan in plans for name in plan.named()):
-        family = name.split(":", 1)[0] if ":" in name else None
-        if family is not None and family not in (pack.plugins or []):
-            errors.append(f"skill {name}: its family {family} is not in the pack's plugins")
-        elif name not in found:
-            errors.append(f"skill not found: {name}")
-    return errors + list(dict.fromkeys(error for plan in plans for error in _mode_errors(plan, found)))
+        lists.append(hosted[lifecycle.LOAD])
+    for names in lists:
+        _plan, problems = lifecycle.place(names, found)
+        errors += [f"{problem} (no {skillcheck.resolve(root, problem.split()[-1]).relative_to(root).as_posix()})"
+                   if problem.startswith("skill not found: ") else problem for problem in problems]
+        for name in names:
+            if name in found:
+                errors += skillcheck.skill_problems(found[name])[0]
+    return list(dict.fromkeys(errors))
 
 
 def _component_errors(pack: Pack) -> list[str]:
@@ -274,46 +275,9 @@ def _component_errors(pack: Pack) -> list[str]:
               f"{', '.join(lifecycle.COMPONENT_KEYS)}" for key in section if key not in lifecycle.COMPONENT_KEYS]
     if "lifecycle" in section:
         if pack.lifecycle is None:
-            errors.append("component.lifecycle replaces chapters of lifecycle:, which the pack does not declare")
+            errors.append("component.lifecycle replaces lifecycle.load, which the pack does not declare")
         else:
-            errors += [f"component.{error}" for error in lifecycle.errors(section["lifecycle"], None)]
-    return errors
-
-
-def _order_errors(chapter: str, names: list[str], found: dict) -> list[str]:
-    """Run skills a chapter lists against the order they declare: one listed before a skill it must come ``after``,
-    or after one it must come ``before``."""
-    errors = []
-    for at, name in enumerate(names):
-        meta = found[name].arbor if name in found else {}
-        errors += [f"lifecycle: {chapter}.run lists {name} before {other}, which it must come after"
-                   for other in meta.get("after") or [] if other in names[at + 1:]]
-        errors += [f"lifecycle: {chapter}.run lists {name} after {other}, which it must come before"
-                   for other in meta.get("before") or [] if other in names[:at]]
-    return errors
-
-
-def _mode_errors(declared, found: dict) -> list[str]:
-    """Skills the pack runs in a chapter or triggers on an event that do not declare that they can."""
-    errors = []
-    for chapter, names in declared.run.items():
-        for skill in (found[name] for name in names if name in found):
-            if "run" not in skill.modes:
-                errors.append(f"lifecycle: {chapter}.run lists {skill.name}, which does not declare the run mode")
-            elif skill.arbor.get("chapter") not in (None, chapter):
-                errors.append(f"lifecycle: {chapter}.run lists {skill.name}, whose chapter is "
-                              f"{skill.arbor['chapter']}")
-        errors += _order_errors(chapter, list(names), found)
-    for event, names in declared.triggers.items():
-        for skill in (found[name] for name in names if name in found):
-            if "trigger" not in skill.modes:
-                errors.append(f"triggers: {event} lists {skill.name}, which does not declare the trigger mode")
-            elif skill.arbor.get("triggers") and event not in skill.arbor["triggers"]:
-                errors.append(f"triggers: {event} lists {skill.name}, whose events are "
-                              f"{', '.join(skill.arbor['triggers'])}")
-    for chapter, names in declared.use.items():
-        errors += [f"lifecycle: {chapter}.use lists {name}, which does not declare the use mode"
-                   for name in names if name in found and "use" not in found[name].modes]
+            errors += [f"component.{error}" for error in lifecycle.errors(section["lifecycle"])]
     return errors
 
 

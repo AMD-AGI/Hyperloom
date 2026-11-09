@@ -32,6 +32,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES, is_secret_shaped_env_name, scrub_benchmark_process_env
+from hyperloom.inference_optimizer.session.session_paths import fs_safe_id
 from hyperloom.measure.sandboxes import DEFAULT_RUNNER_START_TIMEOUT_SEC
 from hyperloom.sandbox.card_occupancy import CardReading, read_listed
 from hyperloom.sandbox.gated_pool import CardsHeld
@@ -80,11 +81,13 @@ class CardDrain:
 class BranchLeases:
     """The leases on the cards of one local provider, at most one per holder: a branch, or a tool job (``tool:<job id>``).
 
-    ``area`` is the directory the leases' working directories are made in, ``cards_per_test`` the cards one test of
-    the session needs, ``image_env`` the environment the session's tests start from. All state is guarded by one lock,
-    so a lease and its release may race from any task or thread: a lease's cards go back exactly once. ``on_release`` is
-    called after cards went back (on the thread that released, or on the one that waited for them to be freed), so the
-    toolbox can start the tests they now let run. ``drain`` says how a released lease's cards are waited on.
+    ``area`` is the directory the leases' working directories are made in, each holder's in a directory of its own
+    (:meth:`holder_area`), so a holder's agent may be shown its own leases and no other's; ``cards_per_test`` the
+    cards one test of the session needs, ``image_env`` the environment the session's tests start from. All state is
+    guarded by one lock, so a lease and its release may race from any task or thread: a lease's cards go back exactly
+    once. ``on_release`` is called after cards went back (on the thread that released, or on the one that waited for
+    them to be freed), so the toolbox can start the tests they now let run. ``drain`` says how a released lease's
+    cards are waited on.
     ``ledger`` records each grant and each return of cards in the blackboard; the toolbox gives it its own.
     """
 
@@ -191,6 +194,13 @@ class BranchLeases:
             self._forget(holder, gpu_ids)
             raise
 
+    def holder_area(self, holder: str) -> Path:
+        """The directory, made if it is not there, in which the working directories of ``holder``'s leases that name
+        no root of their own are made."""
+        directory = self._area / fs_safe_id(holder)
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
     def release(self, lease_id: str) -> None:
         """Return a lease's cards to the pool once nothing is listed on them; an unknown or released lease changes
         nothing. Cards that are free go back now; the others are read again on a thread of their own (see the module's
@@ -274,7 +284,7 @@ class BranchLeases:
 
     def _grant(self, holder: str, gpu_ids: tuple[int, ...], root: Path | None) -> BranchLease:
         lease_id = f"lease-{uuid.uuid4().hex[:12]}"
-        directory = self._area / lease_id if root is None else root
+        directory = self.holder_area(holder) / lease_id if root is None else root
         directory.mkdir(parents=True, exist_ok=root is not None)
         env = {**self._env, _VISIBLE_DEVICES: ",".join(map(str, gpu_ids))}
         with self._guard:

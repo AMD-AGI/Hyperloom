@@ -317,7 +317,7 @@ async def test_a_commit_whose_notice_a_stop_cut_off_is_announced_by_the_next_jud
 
 async def test_a_fork_whose_notice_a_stop_cut_off_is_announced_by_the_next_judge(session, tmp_path):
     first = await session.declare(SLOW, session.check_fixes(tmp_path, _Critic()))
-    _CutOff(session, "fixes a defect")
+    _CutOff(session, "goes to a new branch")
     with pytest.raises(asyncio.CancelledError):
         await session.step()
     assert (await session.runtime.record(first)).conclusion is Conclusion.SPLIT_REQUESTED
@@ -325,8 +325,65 @@ async def test_a_fork_whose_notice_a_stop_cut_off_is_announced_by_the_next_judge
     await session.new_judge().reconcile()
     await session.new_judge().reconcile()
 
-    (notice,) = await session.notices()
-    assert f"{first} fixes a defect of {ROOT}: it goes to a new branch cut at that commit" in notice
+    asked, forked = await session.notices()
+    assert f"{first} fixes a defect of {ROOT}; its fork is asked for" in asked
+    assert f"{first} fixes a defect of {ROOT}: it goes to a new branch cut at that commit" in forked
+
+
+async def test_a_gain_whose_moved_on_notice_a_stop_cut_off_is_announced_by_the_next_judge(session):
+    first, second = await session.explore(FAST), await session.explore(FAST_TOO)
+    await session.step()
+    _CutOff(session, "has moved on")
+    with pytest.raises(asyncio.CancelledError):
+        await session.step()
+    assert (await session.runtime.record(second)).conclusion is Conclusion.RECORDED_ONLY
+
+    await session.new_judge().reconcile()
+    await session.new_judge().reconcile()
+
+    assert [notice for notice in await session.notices() if second in notice] == [
+        f"{NOTICE} {second} improved on {ROOT}, but the branch has moved on; submit it again on the head as a new test"
+    ]
+
+
+def _refusing_forks(session: "_Session") -> None:
+    scheduler = RecordingScheduler(AdmissionStatus.REJECTED)
+    session.gate = RuleGate(session.gate_blackboard, session.repo, scheduler, session.verifier)
+
+
+async def test_a_fix_whose_fork_is_refused_tells_its_specialist_once_though_a_stop_follows_the_refusal(
+    session, tmp_path
+):
+    _refusing_forks(session)
+    first = await session.declare(SLOW, session.check_fixes(tmp_path, _Critic()))
+    fork = session.gate.fork
+
+    async def stopped_after(*args, **kwargs):
+        await fork(*args, **kwargs)
+        raise asyncio.CancelledError
+
+    session.gate.fork = stopped_after
+    with pytest.raises(asyncio.CancelledError):
+        await session.step()
+    assert (await session.runtime.record(first)).conclusion is Conclusion.RECORDED_ONLY
+
+    await session.new_judge().reconcile()
+    await session.new_judge().reconcile()
+
+    refused = [notice for notice in await session.notices() if f"{first} fixes a defect" in notice]
+    assert len(refused) == 1 and "refused" in refused[0] and refused[0].endswith("it is recorded only")
+
+
+async def test_a_fix_whose_fork_is_refused_is_recorded_only_and_its_specialist_told_once(session, tmp_path):
+    _refusing_forks(session)
+    first = await session.declare(SLOW, session.check_fixes(tmp_path, _Critic()))
+    await session.step()
+    await session.new_judge().reconcile()
+
+    assert (await session.runtime.record(first)).conclusion is Conclusion.RECORDED_ONLY
+    asked, refused = await session.notices()
+    assert asked.startswith(f"rule gate: {first} fixes a defect of {ROOT}; its fork is asked for")
+    assert f"{first} fixes a defect of {ROOT}: its fork was refused (" in refused
 
 
 async def test_a_gain_the_retest_does_not_repeat_is_recorded_only(tmp_path):
@@ -477,8 +534,10 @@ async def test_a_proven_reachable_fix_that_costs_performance_asks_for_its_fork(s
 
     record = await session.runtime.record(first)
     assert (record.conclusion, await session.repo.head(BRANCH)) == (Conclusion.SPLIT_REQUESTED, ROOT)
-    (notice,) = await session.notices()
-    assert f"{first} fixes a defect of {ROOT}: it goes to a new branch cut at that commit" in notice
+    await session.new_judge().reconcile()
+    asked, forked = await session.notices()
+    assert f"{first} fixes a defect of {ROOT}; its fork is asked for, and if it is refused" in asked
+    assert f"{first} fixes a defect of {ROOT}: it goes to a new branch cut at that commit" in forked
 
 
 @pytest.mark.parametrize(
@@ -545,6 +604,7 @@ async def test_of_two_gains_on_one_parent_the_second_does_not_land(session):
     first, second = await session.explore(FAST), await session.explore(FAST_TOO)
     await session.step()
     await session.step()
+    await session.new_judge().reconcile()
 
     landed, moved = await session.runtime.record(first), await session.runtime.record(second)
     assert landed.conclusion is Conclusion.COMMITTED

@@ -60,20 +60,23 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | Variable                                  | Required             | Default                                                            | Description                                                                                                                                                                          |
 |-------------------------------------------|----------------------|--------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `REPO_ROOT`                               | No (recommended)     | `$(pwd)`                           | This Hyperloom checkout. Used to locate `.env`, skills, scripts. Falls back to the current working directory when unset.                                                                                                                     |
-| `INFERENCEX_PATH`                         | Conditional          | Auto-cloned by `install.sh`                                    | Path to the SemiAnalysisAI/InferenceX repo, used by baseline / target analysis. `install.sh` clones it when unset; only required if that auto-clone fails.                                                                                                                                          |
+| `INFERENCEX_PATH`                         | No                   | Unset                                                              | An InferenceX checkout of your own. The research scout reads reference launch scripts under its `benchmarks/single_node/`, and the session manifest records its commit. Benchmark rounds do not read it: they run the InferenceX client `install.sh` stages under `INFERENCE_SUITE_TOOL_CACHE`. Nothing clones it. |
 | `TRACELENS_ROOT`                          | No (installer auto-clones) | `${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}/Tr`<br>`aceLens@<resolved-sha>` (auto-clone of `AMD-AGI/TraceLens` pinned to a fixed SHA) | `src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh` clones the public repo into the repo-local cache root when unset. Export it to opt into a pre-existing checkout you maintain — that is an explicit operator override and skips both the clone and the SHA pin. |
 | `GEAK_CLAUDE_BIN`                          | No (installer auto-resolves) | `$(command -v claude)` after the installer has put the Claude Code CLI on `PATH`; written to `kernel-agent.env.sh` | Pins the Claude Code binary the GEAK SDK path uses to the same CLI the specialists run, so `claude_agent_sdk` doesn't fall back to its older bundled CLI. Hyperloom's own agents also run it when `HYPERLOOM_CLAUDE_CLI_PATH` is unset. |
 | `HYPERLOOM_`<br>`CLAUDE_CLI_PATH`         | No | Unset | The Claude Code binary Hyperloom's agents run: the in-process backend and subprocess specialists alike. When unset they run `GEAK_CLAUDE_BIN`, then `claude` on `PATH`; the in-process backend leaves the choice to `claude_agent_sdk` only when none is found. |
 | `USER_DATA_PATH`                          | No                   | `/workspace/hyperloom` if `/workspace` is writable, else `<cwd>/session` | Session directory root (logs, runs, mirrors, breakdown). Container images ship a writable `/workspace`; a bare-metal host that has neither falls back to the second form and the CLI logs which root it took.                                                |
 | `HYPERLOOM_`<br>`RUNTIME_DIR`             | No                   | `$USER_DATA_PATH/runtime` (installer)                               | Private writable runtime state. Like `KERNEL_AGENT_ENV` and `HYPERLOOM_ROOT`, it is derived from the shell's `USER_DATA_PATH` when the shell sets one and never read from the checkout's `.env`, which several sessions share; `install.sh` keeps only `USER_DATA_PATH` there. A `.env` written by `hyperloom setup` (it holds `HYPERLOOM_RUN_MODE`) is authoritative instead: `install.sh` and preflight both take the workspace from it and ignore the shell's `USER_DATA_PATH`, `HYPERLOOM_RUNTIME_DIR`, `KERNEL_AGENT_ENV` and `HYPERLOOM_ROOT`, so sessions that each export their own `USER_DATA_PATH` need a `.env` without `HYPERLOOM_RUN_MODE`. Codex SDK turns create a unique mode-`0700` `CODEX_HOME` here and remove it after the SDK client closes. When unset, Codex uses the first safe declared output root, then a run-local working directory; it never falls back to `/tmp` or a source checkout. If launch config points this parent at storage unsuitable for SQLite, set it to a private local directory instead — see [Codex SDK turns stall](troubleshooting.md#codex-sdk-turns-stall-or-tracelens-roofline-times-out). |
+| `KERNEL_`<br>`AGENT_ENV`                | No                   | `${TMPDIR:-/tmp}/hyperloom-<uid>-<first 16 hex of sha256(absolute $HYPERLOOM_RUNTIME_DIR)>/kernel-agent.env.sh` (installer) | The env file `install.sh` writes and every reader finds through this variable: preflight loads it in process, and the documented `source` line asks `runtime_env.sh` for it. It carries the Anthropic credentials and is sourced, so it is kept on the container's own disk, never under `USER_DATA_PATH`, which every pod of the user shares and can write: the default directory is this account's own, mode `0700`, one per runtime dir, and the file is mode `0600`, written beside the old one and renamed over it. The runtime dir is keyed absolute, with a leading `~` expanded and a relative one taken from the working directory, so a relative or `~` `USER_DATA_PATH` names the same file for `install.sh` and preflight. The default name is predictable, so `install.sh`, preflight, the documented `source` line and the slurm job all refuse a directory that is a link, not this account's, or writable by its group or others, and the readers likewise a file that is a link, not a regular file, not this account's, or writable by its group or others: the refusal names the entry and why, never what the file holds, and points at `KERNEL_AGENT_ENV` or a private `TMPDIR`. When the directory or the file does not exist, the documented `source` line and the slurm job print nothing to source and say to run `install.sh` in this container first, so a name another account creates after the check is never sourced. A value naming the file's old place, `$HYPERLOOM_RUNTIME_DIR/kernel-agent.env.sh` or `$USER_DATA_PATH/runtime/kernel-agent.env.sh` (an older install's `.env`, or a shell that sourced its file), is ignored and the path derived again; `install.sh` removes a copy left there, and names one it cannot remove without reading it. The file does not outlive the container: `install.sh` regenerates it, before every launch (IR-2) and on every hosted leg. On a checkout another account can write it is the only place the Anthropic-side credentials are kept, since that checkout's `.env` carries none (see `HYPERLOOM_DOTENV_CREDENTIALS`). |
+| `HYPERLOOM_`<br>`DOTENV_`<br>`CREDENTIALS` | No (written by the installer) | Unset | `kernel-agent-env` in a checkout's `.env` from which `install.sh` kept the Anthropic-side credentials (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`) because another account can write it: the checkout directory (judged where it resolves to; for root, the account that owns it counts as its own) or `.env` is writable by its group or others, belongs to another account, or `.env` is a link, as a source directory bind-mounted from shared storage is. Such a `.env` carries none of them, since that account could read or rewrite them there: `install.sh` writes them into `KERNEL_AGENT_ENV` alone and removes any left in `.env`, with every other line such a `.env` does not lend (comments and blank lines are kept; the rest is renamed over `.env` with its mode, a link to a file is replaced, never written through, and a link to anything else removed). `install.sh` and preflight skip every credential line in such a `.env`, retired spellings included, and take the credentials from the shell, then `KERNEL_AGENT_ENV`. The line, which is no secret, keeps that so after `install.sh` has replaced a `.env` another account could write, in a directory of this account's, with one of this account's own; the next install of that now-private checkout persists the credentials in `.env` as before and removes the line. See [A checkout another account can write](authentication.md#a-checkout-another-account-can-write). |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_CU`<br>`RRENT_S`<br>`ESSION_DIR` | No (set by CLI) | Set at session boot | Absolute path to the active session directory. Written by the CLI when a session starts and inherited by every benchmark subprocess; session-path resolution prefers it over scanning `USER_DATA_PATH`. Do not set by hand. |
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the repo-local cache root (`${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}`), not this path. |
-| `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, Magpie, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
+| `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, GEAK, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
 | `KERNELFORGE`<br>`_PROJECT_`<br>`ROOT`              | No                   | `$USER_DATA_PATH/kernelforge`, else `~/.cache/hyperloom/kernelforge` | Writable root for forge's own state and for resource-tree overrides. Holds the learned knowledge base (`knowledge_base/<backend>/learned/`), the tuning DB, postmortems and `forge_experiments/`. An `examples/` directory placed here overrides the copy packaged inside `kernelforge`, which is the supported way to try a task without editing site-packages. Must be writable: it deliberately never resolves to the installed package directory or to the cwd. **This is the replacement for the removed `FORGE_PATH`**, which nothing reads any more — a stale `FORGE_PATH` is still forwarded (the `FORGE_` prefix is on the dotenv allowlist) and then ignored. |
 | `SKIP_FORGE`<br>`_PROFILING`               | No                   | Unset (the extra is installed) | Set to `1` to make `install.sh` skip `pip install -e "$REPO_ROOT[forge-profiling]"`. That extra is rocprof-compute's own dependency set (~20 wheels, including the exact `kaleido==0.2.1` / `astunparse==1.6.2` pins ROCm 7.2.x requires); without it forge's profiler degrades to the lightweight PMC path instead of System Speed-of-Light + roofline. Installed by default on purpose — the previous gate made this a silent skip on every pod. |
 | `ROCPC_VENV`                               | No                   | `/opt/rocprof-compute-venv` | Private venv that rocprof-compute's analyze mode runs in, created by `install.sh` from the tool's own `requirements.txt` so its exact pins cannot displace the serving image's numpy and pandas. `rocpc_profile.py` derives the same path. Without the venv, analyze degrades and profiling still collects. |
-| `MAGPIE_PATH`                              | No                   | Resolved from installed `Magpie` package unless explicitly set                               | Magpie package root for benchmark wrappers and patch inspection.                                                                                                                                            |
+| `INFERENCE_SUITE_TOOL_CACHE`               | No                   | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}`<br>`/inference-suite-tools`                                               | Tool cache `install.sh` stages the pinned InferenceX client, GSM8K task and AgentX harness into; every benchmark round reads it and fetches nothing. See [Staging and pins](inference-suite.md#staging-and-pins). |
 | `HYPERLOOM_`<br>`RULE_PACK` | No | Unset (the pack shipped with the package) | Path to the rule pack, the YAML file that states the facts about projects outside this repository (aiter, SGLang, vLLM, PyTorch, the HIP runtime, argparse, Transformers, InferenceX log markers and variable names) that `hyperloom.common.outside_facts` binds for its readers. Read once, at the first import of `hyperloom.common.outside_facts` in each process. An empty or blank value raises `RulePackError`; unset it to read the shipped pack. A path that cannot be read, or a pack that fails validation, fails the import of every reader (`visible_devices`, `failure_signature`, ...) with the file and the entry named; nothing falls back to the shipped pack. A relative path resolves against each process's own working directory. Child processes inherit the variable, so a value that is valid on the host but names a file that is missing in a sandbox or container makes every process there fail at import. |
+| `HYPERLOOM_`<br>`IMAGE_CHECK` | No | `warn` | What `run_image_check` (in `hyperloom.common.outside_facts.image_check`), which checks the rule pack's facts against the environment once before a session measures anything, does with a fact that does not hold there: `warn` logs one warning naming each failing fact, its project and why, and goes on; `strict` also raises `ImageCheckFailed`, so the session stops before it spends anything; `off` checks nothing and asks the environment for nothing. Surrounding space and case are ignored; any other value raises `ValueError` naming the accepted ones. `python -m hyperloom.common.outside_facts.image_check` does not read it: the command line always checks, records `strict` in its report and exits 1 when a fact fails. |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_SES`<br>`SION_DIR` | No (multi-node) | Unset | Last-resort session root for multi-node crash-log collection. Point it at one session dir, never at `$USER_DATA_PATH`. |
 
 ---
@@ -106,11 +109,14 @@ when `--gpu-type` is omitted.
   (refused on a scriptable one, which runs no server to sample), and
   `--max-per-gpu-power-w GPU_ID W` (repeatable) adds a limit for one card; the
   per-GPU limits must add up to no more than the total. That power is sampled
-  by Hyperloom over the measured phase into each round's `gpu_power.json`;
+  by Hyperloom over the measured window into each round's `power.json`;
   `HYPERLOOM_GPU_POWER_SAMPLING=0` turns the sampler off (the round then falls
   back to the benchmark report's reading, and either power budget is refused at
   launch, since it could not be measured) and `HYPERLOOM_GPU_POWER_INTERVAL_S`
-  sets its cadence (default 2 s, minimum 0.5 s).
+  sets the cadence of its sysfs reads (default 1 s; below 0.5 s it is raised to
+  0.5 s; above 1.5 s it is refused and the round samples nothing, since a late
+  read can put two samples two intervals apart and a gap over 3 s invalidates the
+  window's energy).
 - **GPU power settings:** `--gpu-power-cap-w`, `--gpu-perf-level`,
   `--gpu-sclk-max-mhz`. By default asserted: set them with `amd-smi set` before
   launch; the session refuses to start or resume if a card it uses differs, and
@@ -179,7 +185,7 @@ throughput-only measurement.
 |----------|---------|-------------|
 | `HYPERLOOM_QUALITY_REF`<br>`HYPERLOOM_QUALITY_REF_WRITE` | Derived under the session dir | The scriptable quality gate's reference artifact: `_WRITE` establishes it on the baseline, the other compares against it on every later candidate. What the artifact holds is the workload's own business — xDiT stores an image, an operator-supplied `custom` workload stores whatever its script compares. Also emitted as `XDIT_QUALITY_REF` / `XDIT_QUALITY_REF_WRITE` for bench scripts written before the rename; either name is read, both are written. |
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_KERNEL`<br>`_ACCURACY` | On | Gates the `KEEP` for a kernel patch integrated by the kernel lane. Set to `0` / `false` / `no` / `off` to fall back to a throughput-only `KEEP`. Disable only when the eval lane is known-broken: this gate is what stops a faster-but-wrong kernel from being kept. |
-| `MAGPIE_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
+| `HYPERLOOM_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
 
 The tolerance is deliberately **not** an env knob: `ACCURACY_THRESHOLD` in
 `src/hyperloom/common/gain_math.py` is a fixed
@@ -189,7 +195,7 @@ baseline accuracy.
 Note that the score is measured once per candidate, not averaged over repeats.
 On a full GSM8K run (1319 problems) the 5-point tolerance sits several standard
 errors away from the baseline, so single-run noise does not trip it. Capping the
-eval with a small `MAGPIE_EVAL_LIMIT` shrinks that margin sharply and can make
+eval with a small `HYPERLOOM_EVAL_LIMIT` shrinks that margin sharply and can make
 the gate noise-sensitive — prefer the full task set whenever a gate decision
 depends on the result.
 
@@ -197,42 +203,39 @@ depends on the result.
 
 InferenceX runs lm-eval with `max_tokens=min(16384, ctx-4096)`, so a sample that
 does not converge spends that entire budget, and 1319 of them can consume the
-whole baseline timeout. Every generation request is therefore capped, and the
-terminators the model declares are supplied with it — lm-eval carries a single
-`eos_string` and its concurrent request path does not send even that one, so a
-model like Qwen3, which declares `eos_token_id` `[151645, 151643]`, would
-otherwise run with no end-of-turn stop condition at all.
+whole baseline timeout. Every generation is therefore given at most
+`HYPERLOOM_EVAL_MAX_TOKENS` tokens, and never more than the served context
+leaves after 4096 tokens of prompt room (half the context when it is no larger);
+a launch whose context is unknown is refused with `eval_context_too_short`. Generation also stops on every
+terminator the model's `generation_config.json` and `tokenizer_config.json`
+declare — lm-eval's concurrent request path sends none, so a model like Qwen3,
+which declares `eos_token_id` `[151645, 151643]`, would otherwise run with no
+end-of-turn stop condition at all. The task's own stop strings keep their place
+ahead of the model's, since its answer extraction depends on them, and the first
+four are sent; stop token ids have no such limit.
 
-Both are applied inside the eval process rather than passed in, which is what
-keeps them equal across the baseline and candidate arms. **That symmetry is the
-whole point**: the gate compares a *difference* of two scores, so a bound or a
-terminator that reaches only one arm biases the verdict instead of merely
-limiting it. Prefer leaving these alone; if you do change one, change it for the
-whole session rather than a single round.
+A truncation probe counts the generations cut at the token limit. Once their
+share reaches the probe's ratio after its minimum samples, every remaining
+generation is answered empty instead of being sent, so a model that does not
+terminate scores near 0 instead of running the eval out. The round's
+`eval/hyperloom_eval_probe.json` records whether it tripped, how many samples it
+saw and the share cut; check it before concluding a score is low for any other
+reason.
 
-Each run reports what it applied, to stderr as `HYPERLOOM_EVAL_BOUNDS_SUMMARY`
-and to `hyperloom_eval_bounds.json` in the result dir, including how many
-generations hit the ceiling. Check `truncated` there before concluding a score
-is low for any other reason.
+All of these are part of the eval's definition, which keeps them equal across the
+baseline and candidate arms. **That symmetry is the whole point**: the gate
+compares a *difference* of two scores, so a bound that reaches only one arm biases
+the verdict instead of merely limiting it. Prefer leaving these alone; if you do
+change one, change it for the whole session rather than a single round. They are
+read from the benchmark point's environment (`--extra-env`); a number that does not
+parse refuses the round.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_EVAL_MAX_TOKENS` | `4096` | Per-request generation ceiling. Never raises a lower ceiling a task already asked for. `0` disables the cap and restores the full upstream budget — a degenerate model then costs the whole timeout again. An unparseable value falls back to the default rather than to "unbounded". |
-| `HYPERLOOM_EVAL_DERIVE_STOP` | On | Whether to read the model's `generation_config.json` / `tokenizer_config.json` for its terminators. Resolution is cache-only and never downloads, so an uncached repo id simply derives nothing. Set to `0` / `false` / `no` / `off` to reproduce an upstream number exactly, or for a server that rejects `stop_token_ids` (vLLM and SGLang both accept it). |
-| `HYPERLOOM_EVAL_STOP_STRINGS` | Unset (derived) | Explicit terminators, separated by ASCII unit separator `0x1f` — commas and newlines are themselves legitimate stop strings. Outranks the derived values; use it when a checkpoint's metadata is absent or wrong. |
-
-Set explicit terminators like this, quoting so the separator is a real `0x1f`
-byte:
-
-```bash
-export HYPERLOOM_EVAL_STOP_STRINGS=$'<|im_end|>\x1f<|endoftext|>'
-```
-
-Upstream keeps at most four stop strings, and the task's own `until` list is what
-its answer extraction depends on, so that list is never displaced: an explicit
-`HYPERLOOM_EVAL_STOP_STRINGS` goes first, the task's list next, and derived
-terminators last. Derived token ids travel separately as `stop_token_ids`, which
-has no such limit, so nothing is lost on a server that supports it.
+| `HYPERLOOM_EVAL_MAX_TOKENS` | `4096` | Per-generation token ceiling, a positive integer. |
+| `HYPERLOOM_EVAL_PROBE` | On | Set to `0` / `false` / `no` / `off` to let every generation run to its ceiling. |
+| `HYPERLOOM_EVAL_PROBE_MIN_SAMPLES` | `128` | Generations the probe counts before it may trip. |
+| `HYPERLOOM_EVAL_PROBE_LENGTH_RATIO` | `0.75` | Share of generations cut at the ceiling that trips the probe. |
 
 ---
 
@@ -266,7 +269,7 @@ does, so under `HYPERLOOM_RSI_WRITE_ONLY=1` it finds none and `HYPERLOOM_RSI_AS_
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_RSI_ARCHIVE` | None; required | The archive directory sessions read and write. A session refuses to start when it is unset or not a writable directory. Operator configuration. |
+| `HYPERLOOM_RSI_ARCHIVE` | None; required | The archive directory sessions read and write. A session refuses to start when it is unset or this account cannot create and remove a file in it (a real write, named with its errno, owner and mode). Operator configuration. |
 | `HYPERLOOM_IMAGE_CHECK` | `warn` | How a session checks the rule pack's facts about the image before PRELUDE: `warn` logs a failing fact, `strict` refuses to start, `off` checks nothing; any other value is a usage error. |
 | `HYPERLOOM_RSI_AS_OF` | Unset (everything) | An ISO time the archive is read as of, for sessions run as repeats or as pairs: lessons and playbooks by when they were written, a search tree by its session's start plus budget, not by when CLOSE wrote it. A tree that ended by then but is written after it is read by a session that loads the archive after the write and missed by one that loads it before. For experiments. |
 | `HYPERLOOM_RSI_WRITE_ONLY` | Unset (read and write) | `1` reads nothing of the archive, for a run beside the archive runs, while CLOSE still writes the session's outcomes into it. For experiments. |
@@ -523,13 +526,22 @@ result, and restores the card's entry mode on the way out.
 
 ```bash
 # what it would do, nothing set
-python3 scripts/partition_mode_sweep.py --benchmark-config bench.yaml --dry-run
+python3 scripts/partition_mode_sweep.py --suite-config round.yaml --dry-run
 
 # sweep every mode the card reports, skipping any that cannot hold the workload
 python3 scripts/partition_mode_sweep.py \
-    --benchmark-config bench.yaml --output-dir /shared/sweep \
+    --suite-config round.yaml --output-dir /shared/sweep \
     --per-stream-gib 20.7 --sudo
 ```
+
+Each partition runs the `--suite-config` inference_suite round (`inference-suite-config/1`)
+into its own run_dir, on that partition's HIP device and on the config's port plus the
+partition index, with GPU telemetry off because `amd-smi` indices are not HIP indices.
+The config must serve on one GPU, own its server, not profile, and not let the server
+inherit a GPU mask; anything else is refused before the card is touched. A
+`--benchmark-command` must leave an inference_suite run_dir at `{run_dir}`: every
+partition is measured from its `report.json`, and a round that is not a valid
+measurement leaves its mode unmeasured.
 
 The fan-out is the point rather than a detail: a benchmark that loads one
 partition and ignores the rest measures a fraction of the card, which makes
@@ -660,13 +672,116 @@ operator may later explicitly use `--resume-from` on the same session.
 Historical stop reasons remain interpretable and are not restart requests.
 
 `PYTHONUNBUFFERED=1` affects Python output only, not shell/native buffering or
-upstream subprocess capture. Active logs do not prove useful progress. The
-Magpie streaming fix is local-only and unpublished; the installed dependency pin
-must not be assumed to include it, and this policy is not evidence of a validated
-end-to-end run.
+upstream subprocess capture. Active logs do not prove useful progress.
 
 Profile, KernelForge, GEAK, LLM-call, and SGLang's own watchdog budgets are separate
 from these benchmark limits and retain their existing contracts.
+
+---
+
+## EXPLORE pre-filters
+
+Three opt-in filters can remove variants from an EXPLORE round before any of
+them is benchmarked. All three are off by default; with every switch below
+unset, a round runs exactly as it did before. They run once, before the first
+variant, in this order: measurement store, screen, projection.
+
+A filter only removes variants. It never adds or reorders one, and none of its
+numbers reaches KEEP/REVERT, `current_best`, the journal or the knowledge base:
+every KEEP comes from a measured decision round. A removed variant is recorded
+in the round's `skipped_dup` with a reason (`measured_revert_before`,
+`screen_decisively_slower`, `projection_decisively_slower` or
+`projection_outranked`). It is not journaled or written to the tested ledger,
+so a later round may propose it again.
+
+No filter ever drops a variant in a stack-revalidation round or a config replay
+(`geak_revalidate`).
+
+Boolean switches below are on for `1`, `true`, `yes` or `on`
+(case-insensitive) and off for anything else. A malformed number falls back to
+its default.
+
+### Measurement store
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_MEASUREMENT_STORE` | unset (off) | Directory that records every decision round that REVERTed on performance, across sessions. A later variant whose exact launch REVERTed before is dropped (`measured_revert_before`) instead of measured again. A KEEP, an accuracy REVERT (`accuracy_drop` / `accuracy_unavailable`) and a failed round are never recorded, so they are always measured. The key covers the model, engine, GPU, workload signature, benchmark block, inherited args, warm or cold decision protocol, grading axis, KEEP threshold, image digest, engine / ROCm / aiter versions, the stack, the variant, the launch envs, and the content of every kernel overlay on `PYTHONPATH`. A launch is never keyed, and so always measured, when the image digest or engine version is unknown, a runtime override is in effect, or an overlay cannot be hashed. Safe to share between sessions; writes are atomic. |
+| `HYPERLOOM_MEASUREMENT_MAX_AGE_DAYS` | `14` | Records older than this many days are ignored. Negative values are treated as `0`, which ignores every record. |
+
+### Screen (reduced-GPU probe)
+
+A real engine probe on fewer GPUs, using Infera's vLLM benchmark script. The
+baseline probe is the round's stack, and each variant is probed on that stack,
+with the server args and envs the round would launch it with. It drops a variant only when the probe resolved the same kernels as the deployment
+did, read from both sides' logs; otherwise it returns the round untouched. A
+variant whose probe fails is kept. It needs at least three variants and
+`HYPERLOOM_INFERASIM_ROOT`. On the one grid it was measured against, the order
+did not transfer to fewer GPUs, so validate it on your deployment before relying
+on it.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_EXPLORE_SCREEN` | off | Turns the screen on. |
+| `HYPERLOOM_EXPLORE_SCREEN_MARGIN_PCT` | `10` | Drop a variant that probes more than this many percent behind the probed stack (`screen_decisively_slower`). Measured on eight replicas, a gap this wide is one every replica reproduces. A non-positive value falls back to the default. |
+| `HYPERLOOM_EXPLORE_SCREEN_GPUS` | `1` | GPUs the probe runs on, capped at the deployment's TP. |
+| `HYPERLOOM_EXPLORE_SCREEN_MODEL` | the config's model | Model the probe loads, for example a smaller checkpoint of the same architecture. |
+| `HYPERLOOM_EXPLORE_SCREEN_LAYERS` | all | Truncate the probed model to this many hidden layers. |
+| `HYPERLOOM_EXPLORE_SCREEN_ATTENTION_BACKEND` | the deployment's | Attention backend pinned onto the probe. By default it is read from the deployment's `--attention-backend`, else from the kernels the session's own benchmark logged. A variant that sets the backend itself still wins. |
+| `HYPERLOOM_EXPLORE_SCREEN_TIMEOUT_SEC` | `1800` | Wall-clock limit for one probe. A probe that times out is kept. |
+
+### Projection (InferaSim)
+
+Projects the stack and each variant with InferaSim and compares the two
+projections, never a projection with a measurement. Only a variant that moves
+levers the projection models (TP / EP / PP, `CONC`, `--max-num-seqs`, ISL / OSL,
+KV-cache dtype) can be dropped. Any other lever (scheduler flags, kernel or env
+levers, `remove_args` / `unset_envs`, overlays) means the variant is benchmarked.
+So does a variant that fails to project, projects identically to the stack, or
+was projected with a different estimator. If the stack itself cannot be
+projected, the whole round is benchmarked. The round result carries a
+`projection` summary listing every variant's route, the mode, and the GPU it was
+priced for.
+
+Infera is an optional dependency: point `HYPERLOOM_INFERASIM_ROOT` at an Infera
+checkout, or install the `inferasim` extra (`pip install 'hyperloom[inferasim]'`),
+which pins `amd-infera[projection]==0.3.3`. The checkout takes precedence when both
+are present. Either way, a projection also needs Origami, InferaSim's GEMM
+simulator, which is not on PyPI and is built against ROCm:
+`pip install 'git+https://github.com/ROCm/rocm-libraries.git#subdirectory=shared/origami/python'`.
+Without it every projection fails, and the round is benchmarked untouched.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_EXPLORE_PROJECTION` | off | Turns the projection on. |
+| `HYPERLOOM_EXPLORE_PROJECTION_MARGIN_PCT` | `15` | Simulate mode: drop a variant projected more than this many percent behind the stack (`projection_decisively_slower`). The default sits above the 9.7% median output-throughput error simulate mode scored on held-out AgentX configurations. A non-positive value falls back to the default. |
+| `HYPERLOOM_EXPLORE_PROJECTION_CALIBRATED_MARGIN_PCT` | `5` | The margin when both the stack and the variant are calibrated against an in-regime anchor (regime distance 0); otherwise the simulate margin applies. The default is a placeholder until the gap error between two calibrated configurations has been measured. |
+| `HYPERLOOM_EXPLORE_PROJECTION_TOP_K` | `5` | Of the variants that are not decisively behind, benchmark only the top K by projected gain; the rest are dropped (`projection_outranked`). `0` turns the cap off. On held-out AgentX stack ladders, the DES top 5 contained the best configuration 94% of the time, against 47% for the single top pick. |
+| `HYPERLOOM_INFERASIM_ROOT` | unset | Path to the Infera checkout; it is put first on `sys.path`. Required by the screen and by harvesting, and by the projection unless Infera is installed. |
+| `HYPERLOOM_INFERASIM_MODE` | `auto` | `auto` projects the round in benchmark (calibrated) mode when the anchor store already holds an in-regime anchor for the stack, and in simulate mode otherwise. It is resolved once, on the stack, and never boots a server. `simulate` never reads an anchor. `benchmark` requires an anchor, harvests one on a miss, and fails closed (the variant is benchmarked) when none can be had. Any other value is an error, and the round is benchmarked untouched. |
+| `HYPERLOOM_INFERASIM_ESTIMATOR` | `des` | `des` replays a closed-loop client at the round's concurrency (10 requests per client, between 64 and 4,000). `analytical` selects the closed form, which ranked held-out configurations far worse. Any other value is an error. |
+| `HYPERLOOM_INFERASIM_MODEL` | inferred | InferaSim model preset to project, for example `gpt_oss_120B`. By default it is inferred from the model path: the most specific match wins, and a distilled checkpoint uses its student. With no match and neither this nor `HYPERLOOM_INFERASIM_WORKLOAD` set, the round is benchmarked. |
+| `HYPERLOOM_INFERASIM_WORKLOAD` | bundled template | Full InferaSim workload YAML; takes precedence over `HYPERLOOM_INFERASIM_MODEL`. |
+| `HYPERLOOM_INFERASIM_GPU_ARCH` | `mi355x` | Part to price when the session's GPU type is unknown. When it is known, the session GPU always wins. |
+| `HYPERLOOM_INFERASIM_HBM_GB` | from the part | Per-GPU HBM capacity in GB. By default the part's entry in the shared hardware table (`roofline_ceiling.HW_SPECS`), e.g. 192 (MI300X / MI308X), 256 (MI325X) or 288 (MI355X). |
+| `HYPERLOOM_INFERASIM_SERVING_MODEL` | `continuous` | InferaSim serving model: `continuous` or `static` batching. |
+
+### InferaSim anchors
+
+Benchmark mode calibrates a projection against the nearest anchor in the
+candidate's regime: the same model, engine and GPU, plus matching attention
+backend, CUDA graph, aiter and dtypes. An anchor is used only if its decode
+curve passes a sanity check, and only if the image, versions and launch envs it
+recorded do not contradict the candidate's.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_INFERASIM_ANCHOR_STORE` | unset | Anchor store directory searched for the nearest in-regime anchor. When set, every successful EXPLORE decision round's TPOT is also recorded in it as a measured, real-weights anchor point under `measured/`. Concurrencies of one launch merge into a ladder. A ladder that is not monotonic is not written, and a launch whose overlays cannot be hashed is not recorded. |
+| `HYPERLOOM_INFERASIM_ANCHOR` | unset | One anchor JSON to calibrate every projection against; it outranks the store. A file that fails the sanity check is not used, and the store is not searched in its place, so the projection has no anchor. |
+| `HYPERLOOM_INFERASIM_ANCHOR_SCALING` | unset | Comma-separated anchor JSONs for TP scaling, passed to InferaSim in benchmark mode. |
+| `HYPERLOOM_INFERASIM_HARVEST` | on | Benchmark mode only: on a miss, boot a reduced-width server with Infera's served-anchor benchmark, measure an anchor for the regime, and index it in the store. `0`, `false`, `no` or `off` turns this off, so a miss fails closed instead. `auto` mode never harvests. |
+| `HYPERLOOM_INFERASIM_HARVEST_PYTHON` | the running interpreter | Interpreter that can launch the engine for a harvest. |
+| `HYPERLOOM_INFERASIM_HARVEST_GPUS` | `4` | GPUs a harvest may use, capped at TP × PP. |
+| `HYPERLOOM_INFERASIM_HARVEST_TIMEOUT_SEC` | `1800` | Wall-clock limit for one harvest. |
 
 ## Reactor budgets
 
@@ -737,9 +852,237 @@ deployments.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
-| `HYPERLOOM_SPECIALIST_USER` | Unset (no change) | Account name to run specialist subprocesses as (the `claude`, `codex` and `dsh` CLIs), so they cannot read the app's files, `/proc/<pid>/environ` or key files. Needs a Hyperloom process that can start a child as another user and later stop it: root, or all of `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL` (`CAP_KILL` is what lets the deadline, stale-heartbeat, done-file and cancel reaps signal the child; without it none of them could be confirmed). The launch fails with a clear error, and no specialist runs, if one of those is missing, the account does not exist, is uid 0, is the app's own user, or belongs to group 0; so does a GPU specialist on the Ray actor path, which cannot be demoted. The child gets that account's `HOME`, `USER` and `LOGNAME`, supplementary groups, and `umask 007` (group full access, others none); the Hyperloom process's own umask is left alone, and each launch re-shares the workspace and worktree, so files the app rebuilt in between become group-writable again. The child starts through `setpriv` (util-linux, required), which clears its inheritable and ambient capabilities and sets `no_new_privs`, so a non-root app that holds `CAP_SETUID` as an ambient capability does not hand it to the child. Each task's workspace and worktree stay owned by the app but get the account's group with group read-write (setgid directories); the app must be root or a member of that group to do so, and the account must be able to traverse every parent directory of the session directory (the app never changes the modes of those parents), read the checkout the worktree is branched from, and execute the agent CLI. The worktree's `.git` file and its admin directory under the repository's `.git/worktrees` are shared read-only (git inside the worktree works for status, diff and log, not for writes), and a copy of the `--mcp-config` file is staged in the workspace. The app reads and writes the paths the child can rewrite (`specialist_done.json`, `patches/`, the harvested patch, the Codex config, `prompt.md`, `process.log` and its redaction copy, the `dsh` home and session logs) without following symlinks. The multi-branch specialist launcher (`LocalAgentRunner`) demotes the same way, sharing the session's working directory as the worktree; there an unusable account fails the launch with `AgentConfigError`. |
+| `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed; a specialist in a bubblewrap sandbox cannot read that config, so where bubblewrap would sandbox it the launch runs unconfined, or is refused where it must be isolated (see [Agent isolation](#agent-isolation)). Unrelated secrets such as GitHub and KB tokens remain blocked. |
+| `HYPERLOOM_SPECIALIST_USER` | Unset (no change) | Account name to run specialist subprocesses as (the `claude`, `codex` and `dsh` CLIs), so they cannot read the app's files, `/proc/<pid>/environ` or key files. Needs a Hyperloom process that can start a child as another user and later stop it: root, or all of `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL` (`CAP_KILL` is what lets the deadline, stale-heartbeat, done-file and cancel reaps signal the child; without it none of them could be confirmed). The launch fails with a clear error, and no specialist runs, if one of those is missing, the account does not exist, is uid 0, is the app's own user, or belongs to group 0, or its uid, its group or a supplementary group is not mapped in the app's user namespace (`/proc/self/uid_map`, `/proc/self/gid_map`: in a container that maps only its root, a switch to any other id fails with `EINVAL`, or under a fakeroot `LD_PRELOAD` appears to succeed while the child stays root); so does a GPU specialist on the Ray actor path, which cannot be demoted, unless bubblewrap isolates it (see [Agent isolation](#agent-isolation)). The child gets that account's `HOME`, `USER` and `LOGNAME`, supplementary groups, and `umask 007` (group full access, others none); the Hyperloom process's own umask is left alone, and each launch re-shares the workspace and worktree, so files the app rebuilt in between become group-writable again. The child starts through `setpriv` (util-linux, required), which clears its inheritable and ambient capabilities and sets `no_new_privs`, so a non-root app that holds `CAP_SETUID` as an ambient capability does not hand it to the child. Each task's workspace and worktree stay owned by the app but get the account's group with group read-write (setgid directories); the app must be root or a member of that group to do so, and the account must be able to traverse every parent directory of the session directory (the app never changes the modes of those parents), read the checkout the worktree is branched from, and execute the agent CLI. The worktree's `.git` file and its admin directory under the repository's `.git/worktrees` are shared read-only (git inside the worktree works for status, diff and log, not for writes), and a copy of the `--mcp-config` file is staged in the workspace. The app reads and writes the paths the child can rewrite (`specialist_done.json`, `patches/`, the harvested patch, the Codex config, `prompt.md`, `process.log` and its redaction copy, the `dsh` home and session logs) without following symlinks. The agent runner (`LocalAgentRunner`, `orchestrator/specialists/agent_runner.py`) demotes the same way, sharing the session's working directory as the worktree; there an unusable account fails the launch with `AgentConfigError`. For the isolation chooser below, setting the variable also makes a specialist's isolation required (see [Agent isolation](#agent-isolation)). |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
+
+### Agent isolation
+
+`hyperloom.common.agent_isolation` decides how an agent is launched; there is no variable that turns it on or off.
+`choose_agent_isolation()` (a specialist) takes the first tier that works:
+
+1. **Account**: `HYPERLOOM_SPECIALIST_USER` names an account that resolves and passes the checks in the table above,
+   and the process holds `CAP_SETUID`, `CAP_SETGID` and `CAP_KILL`. Never on the Ray GPU actor path, and never for an
+   agent sandbox's commands (`choose_sandbox_isolation()`), which run as the app's own account.
+2. **bubblewrap**: the agent runs in a sandbox that starts from an empty root (`hyperloom_common/bwrap.py`): only the
+   paths its confinement binds exist inside, read-only unless they are its work trees, and the root takes no new name;
+   the credential locations inside a bound tree are hidden (the app's home and XDG directories, every path an
+   environment variable with a credential-shaped name points at, Hugging Face's login files, made yet or not, where
+   `huggingface_hub` puts them (`HF_TOKEN_PATH` and `stored_tokens` beside it, else under `HF_HOME`,
+   `XDG_CACHE_HOME` or the home), and the files the app registers): a directory is masked, and a read-only tree that
+   holds a file, or the first missing directory on the way to a login not made yet, is bound entry by entry without
+   it, so a login the app replaces or makes there after the launch is not shown either. A credential file in a
+   work tree refuses the launch, naming it. It has its own
+   user, pid and IPC namespaces, its own `/proc`, no capability and `no_new_privs`, and shares the app's network
+   (loopback MCP). A program's own directory is bound, and its parent only away from those credential locations, so
+   a native install under `~/.local/bin` does not make the rest of `~/.local` readable. Nothing is bound, run or
+   read for the confinement through a tree the agent writes (its work trees and scratch): a symlink it leaves there
+   never becomes a bind of its target at the next launch, and a read-only path inside such a tree refuses the launch.
+   A work path reached through another work tree is not bound on its own (that tree shows it), and where work paths
+   are reached through each other's trees, which takes a link in one of them, none of them is bound, and each still
+   counts as a tree the agent writes. The masks come from the app's own environment and home as well as the child's. Everything under the readable
+   system roots (`/etc`, `/opt`, `/usr`) is readable: an image must not keep a credential there.
+
+Only an agent launched through the chooser is isolated: every specialist (the dispatcher, its Ray GPU actor path and the
+agent runner). Agents started elsewhere run as the app and can read what it can, in a hosted run too:
+
+- the orchestration role (`inference_optimizer/cli/backends.py`, `_build_orchestration_backend`), on whichever agent
+  CLI it runs: on Codex, the backend every non-critic role gets when the only credential is OpenAI's
+  (`orchestrator/roles/codex.py`, `CodexBackend._session_for`), its shell commands run in Codex's own sandbox, which
+  limits writes, not reads, and takes `bwrap` from `PATH`; on the DeepSeek Harness (`orchestrator/roles/deepseek.py`,
+  named only by `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`) the harness's read-only mode likewise limits writes; on Claude it
+  has no shell, but its `Read` (`orchestrator/mcp_tool_names.py`, `ORCHESTRATION_BUILTIN_TOOL_NAMES`) is limited to
+  no tree;
+- the TraceLens skill runner's agent (`orchestrator/trace_analysis/tracelens_skill_runner.py`): Claude with `Bash`
+  (`DEFAULT_ALLOWED_TOOLS`), Codex (`_run_tracelens_skill_codex`) or the DeepSeek Harness;
+- GEAK's agents (`orchestrator/kernel/geak_runner.py`, which starts GEAK's `run_e2e`);
+- kernelforge's agents, each in a `python -m kernelforge.cli` child: `kernel-rewrite-controller`'s forge loops
+  (`orchestrator/kernel/controller_submit.py`), `forge-fuse`'s kernel author (`orchestrator/kernel/forge_fusion.py`)
+  and `gemm-tune`'s generated-tuner author (`orchestrator/kernel/forge_gemm_tuning.py`; `kernelforge/workflows/gemm_tune/tier3`);
+- the quantization agent (`agents/quantization/driver/runner.py`: Claude with `Bash`, or the DeepSeek Harness), which
+  runs only with `--quantize` and `HYPERLOOM_QUANTIZE_ENABLED` set; no hosted spec field sets `--quantize`.
+
+The critic and the one-shot Claude calls start no agent with tools. A hosted run whose spec's `flow` is `multibranch`
+is handed to `hyperloom-multibranch` before the entry's isolation check (below).
+
+**Specialists in a bubblewrap sandbox** (`orchestrator/specialists/launch_env.py`; the dispatcher, its Ray GPU actor
+path and the agent runner) write their workspace and worktree, and a private `/tmp` and `/dev/shm` (directories of
+mode 0700 on the host's `/tmp` and `/dev/shm`; with a bubblewrap older than 0.12, a fresh tmpfs where the workspace
+lies below `/tmp`). `HOME`, and `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CACHE_HOME` and the compiler caches
+(`TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR`, `AITER_JIT_DIR`, `FLYDSL_RUNTIME_CACHE_DIR`) when they name a
+directory elsewhere, point into the workspace, and `TMPDIR` at `/tmp`; `AITER_JIT_DIR` and `FLYDSL_RUNTIME_CACHE_DIR`
+are set into the workspace when unset too, since AITER otherwise builds its JIT modules in its installed tree, which
+is read-only there (a GPU specialist so compiles them afresh). With neither `HF_HOME` nor `HF_HUB_CACHE` set, Hugging
+Face's default directory under the app's home (`$XDG_CACHE_HOME/huggingface`, else `~/.cache/huggingface`) becomes the
+child's `HF_HOME`, read-only and without its login files, so a model downloaded there stays visible once `HOME` has
+moved. They read their toolchain, the git metadata of the worktree's repository (the one whose admin directory the
+repository records for the worktree, never the one the worktree's `.git` file names: the agent can rewrite that file,
+and runs as the app's own uid, so no ownership check tells a directory it made from the app's), the framework source
+roots, the task's model when it is a local path, the programs of the stdio MCP servers they start (each named in one
+WARNING: nothing else such a server reads is bound unless the confinement shows it), and, for an agent runner launch,
+`AgentLaunchSpec.readable` (a multi-branch specialist's: the session's `MB-reference/<name>` directories, the
+directory its workload's model is served from, the files its worktree links and its branch's own dev lease area,
+`branch-sandboxes/<branch>` of a local toolbox or the branch's `dev` directory of a hosted one, so it applies a Forge
+patch from its lease's root and sees no other branch's lease); a GPU task gets `/dev/kfd` and `/dev/dri`. The paths `HYPERLOOM_STATE_DIR`,
+`HYPERLOOM_BUILD_STORE` and `HYPERLOOM_BUILD_TRUST` name are masked wherever a bind would show them (a hosted run's
+entry, which takes `HYPERLOOM_STATE_DIR` out of its environment, registers its state directory so it stays masked). The `claude` CLI
+runs there only with a login in its environment: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
+`CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token` prints one), or `CLAUDE_CODE_USE_BEDROCK=1` with `AWS_ACCESS_KEY_ID`
+and `AWS_SECRET_ACCESS_KEY`, or with `AWS_SHARED_CREDENTIALS_FILE` or `AWS_CONFIG_FILE` naming a file, which is then
+bound read-only. Its own login file is not shown, since that would show it to the agent: without one of those, a launch
+that must be isolated (below) is refused, and any other runs unconfined, as on a host without bubblewrap, with the
+WARNING and the session report's line below naming why (`a claude CLI with no login in its environment runs
+unconfined: ...`). `codex` runs with its
+own sandbox off whatever `HYPERLOOM_CODEX_SANDBOX_MODE` says, since bubblewrap confines it and codex's own sandbox
+cannot map a user namespace inside. bubblewrap ends a sandbox on a SIGTERM of its own without passing it on, so a
+deadline, stale-heartbeat, done-file or cancel kill first TERMs the sandbox's processes that carry the launch's reap
+mark and waits for them, then kills what is left. A sandbox bubblewrap could not set up fails the task with
+bubblewrap's line (`specialist sandbox could not be set up: bwrap: ...`) rather than as the agent's exit, read from
+its `--json-status-fd`; an agent killed by signal `n` exits `128 + n`. A Ray GPU actor's sandbox is built from the
+driver's probe and paths, so it is for a single-node Ray cluster only, and its status goes to a file a shell in the
+actor opens for bubblewrap; the sandbox has `--die-with-parent` there, so it ends when the actor dies (an OOM kill,
+say). The app creates the launch's `process.log` fresh, as for a local launch, and the actor only appends to that
+file: a link or anything else put at the name is refused, never written through.
+
+A specialist's sandbox has a network of its own (`--unshare-net`): nothing that listens on this host or beyond is
+reachable from it, the run's Ray head included (its dashboard Jobs API, client server and workers run what they are
+sent as the app). What it needs is relayed in over Unix sockets in its scratch `/tmp` by the app
+(`orchestrator/specialists/sandbox_network.py`): each loopback endpoint its launch names (an HTTP MCP server, an LLM
+gateway on this host) at the same port on the sandbox's own loopback, and an HTTP proxy, which the sandbox's
+`HTTPS_PROXY` and `HTTP_PROXY` name (loopback exempt), that connects only to the other LLM endpoints and MCP
+servers its launch names: `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` and any other `*_BASE_URL` variable, codex's
+`model_providers.<name>.base_url`, each provider's API host where no base URL names one
+(`api.anthropic.com`, `api.openai.com`; Bedrock's runtime host in `AWS_REGION` with `CLAUDE_CODE_USE_BEDROCK`),
+and the MCP config's HTTP servers. It goes through the app's own `HTTPS_PROXY`/`HTTP_PROXY` (with any login in its
+URL) unless `NO_PROXY` exempts the host; the app's proxy settings are not shown inside. Anything else gets a 403:
+a sandboxed specialist downloads no model or package; what it reads must be on the host already (a Hugging Face
+model in the cache shown to it, say). A loopback endpoint below port 1024 cannot be served inside (a WARNING names
+it). The relay is a `python -I -S` of the app's interpreter that starts ahead of the agent and ends with the
+sandbox.
+
+The app's own git over a specialist's worktree (the commit it starts from and the harvested patch) goes through the
+admin directory the repository recorded when the worktree was made, in every tier; a worktree the repository does not
+record (a directory left at its path, say) is not used, and the specialist runs in its workspace. After the run the
+app collects patches, by git or from `patches/`, only while the worktree's path still names the directory it had when
+the specialist started: a specialist that writes its workspace can leave a link to any directory of the host there,
+which the app's git and patch write would otherwise follow. Otherwise no patch, harvested, scanned or claimed, is
+taken from the run, a link at that path is removed, and the task's error says `worktree_refused: <path> ...`. While
+the specialist runs, its checkpoint in the worktree (`specialist_done.partial.json`) is read only through that same
+directory, and none is read while the path names another; the session's resource record gives no disk use
+(`worktree_disk_bytes: null`) for a worktree path that is a link.
+
+Where neither works, a launch that must be isolated refuses, naming the reasons of both tiers: every launch through the
+chooser in a hosted run (its entry calls `require_agent_isolation()` once at start-up, so a host where neither works refuses before
+anything runs), and a specialist's wherever `HYPERLOOM_SPECIALIST_USER` is set. Any other launch runs unconfined as
+before; `announce_agent_isolation()`, which the optimize command calls at start-up, then logs one WARNING
+(`agents run unconfined on this host, as before: they can read this account's files and credentials (<reasons>)`), and
+the session report (`reports/final.md` and `final.json`'s `agent_isolation`) carries its line (`agent isolation:
+specialists <account|bwrap|none|refused>, sandboxes <...> (bubblewrap X.Y.Z PATH): <reasons>`). A launch that runs
+unconfined although start-up found bubblewrap usable (its probe gave no answer in time on a loaded host, say, or a
+`claude` CLI with no login in its environment) logs that WARNING itself, once per process, and the report adds
+`agent isolation: N agent launches ran unconfined: <reasons>`.
+
+A multi-branch session's local agent sandboxes (autonomous branches, the dossier pass, dev leases) run every command
+of one sandbox in one bubblewrap sandbox whose user and pid namespaces all its commands share, so a server one command
+starts is seen, signalled and stopped by a later one (`pkill`, or its PID file against the sandbox's own `/proc`). They
+share the sandbox's private `/tmp` and full-size `/dev/shm`, each command has its own IPC namespace (System V IPC does
+not outlive a command; POSIX shared memory in `/dev/shm` does), and the network is the app's. A command writes the
+lease's root and, for an agent, its directory and worktree (a dev lease's worktree and what its links point at are
+read-only); the image's installed frameworks are read-only but aiter, which writes its JIT modules and tuning files
+beside itself. Its environment is not the app's: the search paths, locale, models, the image's own settings and the
+LLM gateway with its credentials (`ANTHROPIC_*`, `OPENAI_*`, `CLAUDE_CODE_OAUTH_TOKEN`, the proxies and CA bundle),
+with `HOME`, `CLAUDE_CONFIG_DIR` and `TRITON_CACHE_DIR` of the sandbox's own (an agent's home is `sandbox/home` in its
+branch's session directory, where its Claude CLI's transcripts are read from). A Claude CLI there logs in only through
+those variables, never the app's `~/.claude`. pip installs to `PIP_TARGET`, `site-packages` in that home, which is on
+no interpreter's import path, so no server a command starts imports what was installed, nor the dependencies an install
+brought, ahead of the image's (the image's venv takes no user install and is read-only); Arbor imports from it by
+`ARBOR_SITE`, which MB gives Arbor's own commands only. `AITER_JIT_DIR` and `FLYDSL_RUNTIME_CACHE_DIR` are aiter's
+defaults, its own writable tree, where the image's prebuilt JIT modules and FlyDSL kernels are. A sandbox whose paths
+bubblewrap cannot bind safely (before 0.12, nothing may be bound below the shared `/tmp`, so a session directory under
+`/tmp` cannot be) runs unconfined, as before, with a WARNING; a hosted run refuses it.
+
+A multi-branch session measured on this host's cards runs each test's runner, and the server it starts with the
+branch's patches, in a local sandbox (`hyperloom.sandbox.confined`) under the same rule: where its provider names no
+account for it (`ProcessUsers`), bubblewrap where `choose_test_isolation()` gives it, else as before with one WARNING
+(`tests run unconfined on this host, as before: they can read this account's files and credentials (<reasons>)`); a
+hosted run refuses to build the toolbox instead. Each sandbox writes its own `fs/` (`/in`, `/out`, `/work`), a private
+`/tmp` and a full-size `/dev/shm`, and a sealed one its own `private/`, where the runner reads its signing key and
+removes it; it reads its toolchain, its interpreter, the model and what its entries link to (each link's target
+itself, never the directory it is in; a hub snapshot's repository `blobs`), the Hugging Face hub cache, and the trees
+its template names (the framework snapshot, the staged rule pack, the compiled-code store, the runner cache, the native
+build store and trust file, a local InferenceX repository); the app's credential locations those show are
+masked, and a sandbox one of whose read paths is itself a credential location (a home, a login file) runs as before
+with a WARNING, refused in a hosted run. So does one whose model links to or below a credential location, or into a
+hidden entry of a home (`~/.ssh`, `~/.claude`, `~/.config`, `~/.aws`, `~/.netrc`), where no mask could hide the logins;
+a link to anything else in the home (`~/tokdir`, `~/config.json`), outside it, or into the hub cache binds as before,
+except into a credential location the hub cache holds (one set to the home's parent), whose mask the link would open.
+Nothing else of the host is there: not the session's other files, another sandbox's directory or key, the app's state,
+nor any process of the app's (its own pid namespace; a sandbox that runs several commands shares one holder's, as an
+agent sandbox does). A sandbox with cards gets `/dev/kfd` and `/dev/dri`, `/sys`
+is read-only, the network is the app's (its server listens on loopback for the benchmark client). The sandbox's id
+(`E2B_SANDBOX_ID`) is set inside only, so the reap, the card guard and the tag sweep find its processes and never
+bubblewrap's own, and a reap's SIGTERM reaches them with their grace. Before bubblewrap 0.12 a sealed runner whose
+session directory is below `/tmp` gets a fresh `/tmp` of its own instead of the bound one. A probe that gives no answer
+in time leaves only that launch's test unconfined: the next sandbox is chosen for again. The app opens a sandbox's files
+(the runner's output and logs) by one walk below its `fs/` that follows no link out of it, so a process of the sandbox
+cannot swap a link to the app's files in between a check and the open.
+
+A hosted run uses only its hosting layer's bubblewrap, by the path its entry names, never one found on `PATH` (the
+framework image may carry its own); a local run uses the `bwrap` on `PATH`. `hyperloom hosted run` and
+`hyperloom-multibranch hosted run` name `bin/bwrap` in the directory `HYPERLOOM_HOST_LAYER` names (whitespace around it
+ignored), which the layer's `start.sh` sets to its own; with the variable unset, blank or relative, no launch of the run
+uses bubblewrap. `hyperloom hosted run` checks before its installer or `optimize` runs: where neither tier
+works, the run ends with a final `exit.json` (return code 2) whose `error` names both reasons; a probe that gave no
+answer in time ends the leg without one, so the host starts it again. Where the account is chosen, it probes the layer's
+bubblewrap too: the Ray GPU actor path never starts a specialist as an account, so where that bubblewrap cannot confine
+one, one WARNING says so (`specialists run as the account <name>, but the Ray GPU actor path cannot run the specialist
+as another user and bubblewrap cannot confine one here, so that path refuses its specialists: <reason>`), and the run
+goes on. The probe (`python -I -m
+hyperloom_common.bwrap probe [--bwrap PATH]`) refuses a setuid bubblewrap and one older than 0.5.0, then runs a canary
+sandbox and checks from inside that its masks, read-only binds, pid namespace, capabilities and `no_new_privs` hold. It
+runs once per process for each binary, interpreter, ids, namespaces and user-namespace sysctls; one that gives no
+answer within 10 s is not kept, and refuses a hosted start-up as transient. A failed probe names the step with
+bubblewrap's own line; the usual causes:
+
+| Probe line | Cause |
+|------------|-------|
+| `bwrap: setting up uid map: Permission denied` | The kernel created the user namespace without capabilities: with `kernel.apparmor_restrict_unprivileged_userns=1` it does so for a process without `CAP_SYS_ADMIN`. |
+| `bwrap: Creating new namespace failed: ...` | `user.max_user_namespaces` is 0 or used up, or a seccomp or AppArmor profile denies `unshare`. |
+| `bwrap: Can't mount proc on /newroot/proc: Operation not permitted` | The container's `/proc` has entries mounted over it (masked paths). |
+| `bwrap: Can't bind mount ... Invalid argument` | The root mount is marked unbindable (some container runtimes); the probe retries every launch under `unshare --mount`: the `unshare` on `PATH` for the `bwrap` on `PATH`, and for a `bwrap` named by path (a hosted run's layer's) only an `unshare` beside it, never one from `PATH`. Without one the probe refuses, and the host must make the root mount private first (`mount --make-rprivate /`), as the layer's `start.sh` does. |
+
+A native build's compile (`hyperloom.measure.runner.native.isolated`) has its own two tiers, also without a switch:
+user 65534 through `setpriv` (in a network namespace of its own where `unshare --net` works) when the build service is
+root and its user namespace maps 65534, else bubblewrap with the same probe and the same choice of binary, where it
+also starts a sandbox with a network of its own (the probe's canary keeps the host's network, so a host that allows no
+new network namespace is named here). Under bubblewrap the compile runs as the service's own user and keeps its
+supplementary groups (as root where the user namespace maps only root), so it reads in the bound `/etc` and `/opt`
+whatever that account reads, as an agent's sandbox does; only its work directory is writable, the toolchain, both
+interpreters, the tree the child imports from, the image's packages and the upstream build directory are read-only (an
+aiter module build lays its farm in the work directory, and the image's aiter directories the farm links into are
+read-only), it sees only `/sys/devices/system/cpu` of `/sys`, the base `/dev` nodes and no GPU, it has a network of
+its own (outside addresses give `ENETUNREACH`), and the signing key and trust file (registered as the app's private
+paths) are absent, also where a bound tree holds them (that tree is bound entry by entry without them); its environment
+is only `PATH`, `HOME`, `TMPDIR` and `LC_ALL`. The build record's `isolation` entry is `uid+netns`, `uid` or
+`bwrap+netns`. Where neither tier works, the toolbox refuses at start (`build_preflight`) and each build fails as the
+machine's, naming both reasons as its choice found them; a bubblewrap whose probe gives no answer in time is not
+refused but logged, and each build asks again.
+
+A multi-branch session records in its manifest and `MB-report.json` (`agent_isolation`) how the paths that launch its
+agents and tests start them (`hyperloom_multibranch.scheduling.launch_isolation`): its specialists as the agent runner's
+chooser gives them now (`account`, `bwrap`, else `none` with the reasons, or `refused` where they must be isolated and
+no tier can); its agent and dev sandboxes and its tests on this host as their choosers give them now (`bwrap`, else
+`none` with the reasons, or `refused` in a hosted run whose layer bubblewrap cannot sandbox them), or `hosted` when the
+grant's sandboxes run them. A sandbox whose own paths bubblewrap cannot bind safely runs as before even where the record
+says `bwrap`, which its own WARNING says. `MB-report.md` has the same as one line (`agent isolation: specialists <...>,
+sandboxes <...>, tests <...>: <reasons>`), and the session logs one WARNING at its start naming what runs unconfined. A
+multi-branch `hosted run` starts only when nothing it launches in the app container would run unconfined or be refused:
+with the layer's bubblewrap its specialists, and with `placement.measurement: local` its sandboxes and tests too, run
+under it; a spec measured there ends before anything starts while one of them would not.
+
+The tests that launch real sandboxes (marker `agent_isolation`) skip on a host without bubblewrap or a user namespace
+for it; with `HYPERLOOM_REQUIRE_ISOLATION_TESTS=1`, which CI sets after allowing unprivileged user namespaces, they
+fail instead.
 
 ---
 
@@ -801,7 +1144,7 @@ Primary switch (default **off**) for live Langfuse trace push.
   packager also copies `reports/trace/*.jsonl` and, with the loose mode on by
   default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under the package
   destination `HYPERLOOM_SESSION_PACKAGE_DEST`: `/workspace` for the Claw sync when
-  it is unset, and `<session dir>/archive/` (mode 0700, on the shared storage) in
+  it is unset, and `<session dir>/archive/` (mode 2770, the run's group, on the shared storage) in
   a hosted run, where the entry sets it whatever the host passed. If a session might
   contain customer code or secrets, define an explicit retention + access-control
   policy for both the Langfuse project and the package destination, and consider
@@ -905,8 +1248,8 @@ output tokens per request, so output-only grading optimises about 1% of the
 token budget, and a variant can lift decode tok/s while degrading user-perceived
 latency with no visible cost.
 
-`HYPERLOOM_AGENTX=1` (native YAML generated from Hyperloom flags), or an explicit
-Magpie AgentX YAML passed with `--benchmark-config`, adopts the 2-D grading shape InferenceX uses. Upstream
+`HYPERLOOM_AGENTX=1` (workload YAML generated from Hyperloom flags), or an explicit
+AgentX YAML passed with `--benchmark-config`, adopts the 2-D grading shape InferenceX uses. Upstream
 sweeps a concurrency ladder, keeps TTFT / ITL / TPOT percentiles separately, and
 publishes a **Pareto frontier** with E2E normalised interactivity as the x-axis
 and token throughput per chip as the y-axis. It never collapses the axes into one
@@ -917,17 +1260,19 @@ throughput moves along the frontier rather than violating a rule.
 Hyperloom's local KEEP rule (fixed concurrency, no ladder) approximates the
 per-concurrency arm selection maintainers apply before submitting:
 
-- **KEEP** — E2E normalised interactivity P50 (median) gain ≥ 3%, **and** the P90
-  slow tail and output throughput each no worse than the noise band, **and** the
+- **KEEP** — E2E normalised interactivity P50 (median) gain ≥ 2%, **and** the P90
+  slow tail and total token throughput each no worse than the noise band, **and** the
   pair is comparable: benchmark windows within 5% of each other and no more failed
   requests than the anchor.
 - **REVERT** — anything short of all of that.
 
-The median bar is the fixed `AGENTX_KEEP_P50_THRESHOLD_PCT` (3%), not
-`keep_threshold_pct`: it is a property of the objective rather than of how far
-into the session a round lands, so the decaying session threshold does not apply
-to it. Total token throughput no longer participates in the verdict — on this
-corpus it is almost entirely prefill, so it cannot see an output collapse.
+The median bar is the P50 objective's fixed `bar_pct` in
+`hyperloom.common.agentx_objective` (2%, the same bar and guards
+`hyperloom-multibranch` applies), not `keep_threshold_pct`: it is a property of
+the objective rather than of how far into the session a round lands, so the
+decaying session threshold does not apply to it. Output throughput is recorded
+but guards nothing: it follows the replayed window's output-length mix, not the
+server.
 
 Hyperloom reads `e2e_norm_intvty_p90` from the accepted `current_best` for both
 grading and advisory comparison. This is aiperf's summary **P10** of the
@@ -941,24 +1286,30 @@ TTFT is included in E2EL, unlike per-user `1/ITL`; on a ~114k-prompt replay TTFT
 is most of what a user waits for so grading on `1/ITL` would miss it.
 
 Default-on for AgentX runs, explicit opt-in via `HYPERLOOM_PERF_METRIC=intvty_v1`
-otherwise. Any AgentX signal turns it on: `HYPERLOOM_AGENTX=1`, the bound Magpie YAML, or
+otherwise. Any AgentX signal turns it on: `HYPERLOOM_AGENTX=1`, the bound AgentX YAML, or
 `benchmark_mode=agentx` stamped at seed — so a round in a subprocess that never
 inherited the env var still grades on the agentic axis. Serving frameworks only;
 scriptable frameworks (xDiT, custom) keep output-throughput grading.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` for Magpie AgentX, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and output throughput each held as a guard. Reported in the final summary as `grading mode`. |
-| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or output throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value raises `EnvValueError` naming the variable, rather than grading against a band nobody chose. |
+| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` for AgentX, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and total token throughput each held as a guard. Reported in the final summary as `grading mode`. |
+| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or total token throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value raises `EnvValueError` naming the variable, rather than grading against a band nobody chose. |
+| `HYPERLOOM_AGENTX_EARLY_STOP`  | `enforce`                     | AgentX checkpoint after 1800 s of profiling: the round's median interactivity over the requests finished by then, against the reference's own first 1800 s. The ruling is written to `agentx_checkpoint.json` in the round's slot. `enforce` stops an explore decision round that trails by more than 2% and records it as REVERT; `shadow` only writes the ruling; `off` skips the checkpoint. Any other value raises `EnvValueError`. A reference measured without a checkpoint median is never compared. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Initial server-boot budget written by the persistent-server lifecycle configuration helper. Actual benchmark launches synchronize this field to `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`; this variable is not an additional benchmark deadline or a way to extend one. Non-benchmark lifecycle callers that do not perform that synchronization retain their own boot budget. |
 
 ### MLPerf agentic backend
 
-`HYPERLOOM_AGENTIC_BACKEND=mlperf` (with `HYPERLOOM_AGENTX=1`) keeps Magpie's
-server lifecycle and swaps the AgentX client for the MLCommons
-`inference-endpoint` harness (`utility/run_agentic.sh`), replaying
-`agentic_combined_v6` trajectories instead of aiperf Weka traces. The backend is
-recorded at seed; resuming a session under the other backend is refused.
+`HYPERLOOM_AGENTIC_BACKEND=mlperf` (with `HYPERLOOM_AGENTX=1`) swaps the
+AgentX client for the MLCommons `inference-endpoint` harness
+(`utility/run_agentic.sh`), replaying `agentic_combined_v6` trajectories instead
+of aiperf Weka traces. Each round runs on inference_suite: it serves the
+session's frozen base launch (golden layer included) and runs the harness from
+`MLPERF_ENDPOINTS_DIR` as the round's load, then maps the harness's
+`result_summary.json` and `scores.json` into the run directory's
+`client/inferencex_result.json`. A session that froze no base launch is refused
+at preflight. The backend is recorded at seed; resuming a session under the
+other backend is refused.
 
 The harness publishes no per-request OSL/E2EL series, so MLPerf sessions grade
 on **output throughput** (`HYPERLOOM_PERF_METRIC` is not honoured here) and gate
@@ -975,13 +1326,12 @@ submission is not run by Hyperloom: run `run_agentic.sh full` and upstream
 The AgentX switch pins `PORT=30000`, `MLPERF_AGENTIC_MODEL=kimi-k3` and
 `--served-model-name kimi-k3`, and settles `MLPERF_AGENTIC_FLOW`,
 `AGENTIC_NUM_TRAJECTORIES` and `AGENTIC_CONCURRENCY` (from the round's `CONC`)
-into the recipe. The client refuses to start if port 30000 is already
-answering, checks that the listener belongs to the server it booted, and checks
-`/v1/models` lists `kimi-k3`.
+into the recipe. The round's server serves under `kimi-k3`, the name the
+harness requests, on the round's `PORT`, which the harness is given.
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_AGENTIC_BACKEND` | — | `mlperf` selects the separate MLPerf client together with `HYPERLOOM_AGENTX=1`. Otherwise `HYPERLOOM_AGENTX=1` selects native Magpie AgentX; an explicit Magpie AgentX YAML also selects it. |
+| `HYPERLOOM_AGENTIC_BACKEND` | — | `mlperf` selects the separate MLPerf client together with `HYPERLOOM_AGENTX=1`. Otherwise `HYPERLOOM_AGENTX=1` selects native AgentX; an explicit AgentX YAML also selects it. |
 | `MLPERF_ENDPOINTS_DIR` | `/opt/mlperf-endpoints` | Checkout of `mlcommons/endpoints` holding `utility/run_agentic.sh`. Checked at preflight. |
 | `AGENTIC_DATASET_PATH` | — (required) | Path to `agentic_combined_v6.jsonl`. Checked at preflight; its stem is recorded as the corpus. |
 | `MLPERF_TOKENIZER_DIR` | — (required) | Kimi-K3 fast-tokenizer directory the harness counts tokens with. Checked at preflight. |
@@ -995,15 +1345,15 @@ defaults to `trajectories × 26 s × 2 + 1800 s` (26 s per trajectory measured o
 8×MI355X at concurrency 16, doubled for a cold first round, plus boot), and never
 below the stock 7800 s: about 9600 s for smoke and 33,700 s for `full`.
 
-With `HYPERLOOM_AGENTX=1`, Hyperloom generates and archives the native Magpie YAML
+With `HYPERLOOM_AGENTX=1`, Hyperloom generates and archives the AgentX workload YAML
 from its ordinary workload flags. `--docker-image` supplies an explicit serving
 image identity, required for custom models.
 
 Canonical replay warms up 11 requests per lane plus one probe before it opens its
 fixed profiling window, so its round grows with the concurrency being measured
-while the window does not. That shape is Magpie's, at the ref native AgentX pins
-it to (see [Magpie](../components/magpie.md)); Hyperloom composes only `CONC`, and
-the numbers below have to be re-measured when the pin moves. With
+while the window does not. That shape is fixed by `CANON_WARMUP_PER_LANE` and
+`CANON_PROFILING_WINDOW_SEC` in `hyperloom.common.agentx_workload`; Hyperloom
+composes only `CONC`, and the numbers below have to be re-measured when either moves. With
 `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` unset and a `CONC` pinned, the cap
 defaults to `(11 × CONC + 1) × 20 s + 3640 s + 300 s + 1800 s` (20 s per warmup
 request, sized to the slowest rung of one 8×MI355X sweep -- 18.8 s at `CONC` 20 --
@@ -1020,17 +1370,14 @@ refuses (`HYPERLOOM_AGENTX=maybe`) is recorded as failed with error class
 `benchmark_cap_error` and the sweep carries on with the next rung.
 
 Native AgentX profiling shares TraceLens patch and kernel-shape-tool preparation with
-fixed-sequence profiling. Configure capture steps, count, delay and interval through
-`benchmark.profiler.torch_profiler` (`num_steps`, `num_profiles`, `start_seconds`,
-`interval_seconds`). The diagnostic copy preserves those settings and explicit
-`detailed_annotations`. When profiling is enabled, a missing capture setting becomes
-one capture of 256 steps, starting 300 seconds after measurement, with a 900-second
-interval. A missing `detailed_annotations` becomes true, and false when the TraceLens
-runtime patch was attempted and did not apply: Magpie probes the server whenever the field
-is true and refuses to launch when the server lacks it.
-Hyperloom adds the shape-tool environment through `agentx.launch_overrides` while
-preserving the server's runtime paths. Magpie owns profiling flags, starts after replay
-reaches measurement, and manages capture/flush. Each window remains a separate TraceLens input.
+fixed-sequence profiling. Configure capture steps and delay through
+`benchmark.profiler.torch_profiler` (`num_steps`, `start_seconds`); a missing setting
+becomes one capture of 256 steps, starting 300 seconds after measurement. A profile round
+captures one window, so a YAML whose `num_profiles` is not 1 is refused when the session
+starts. A profile round adds the profiler layer and the shape-tool
+environment to the round's launch, preserving the server's runtime paths, and opens its
+capture window once the replay reaches measurement. InferenceSuite owns the profiler
+flags and the capture and flush; each window remains a separate TraceLens input.
 Profile reports are diagnostic only and cannot supply KEEP evidence.
 See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workload).
 
@@ -1074,8 +1421,12 @@ it checks them once at start-up and names **every** missing or malformed variabl
 values), so a bad input stops the run before it starts. Which variables are required depends on what the run hosts; the run, state
 and input variables are always required except for a session started by hand on a grant handed to it
 (`hyperloom-multibranch run --measurement hosted`), which needs the sandbox URLs and templates, `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`,
-`HYPERLOOM_GRANT_LIMITS`, `HYPERLOOM_RUN_CREATED_AT` and the source pair. A variable that is set is checked even when it is not
-required.
+`HYPERLOOM_GRANT_LIMITS` (all four totals: a multi-branch session refuses a grant that states only some of them),
+`HYPERLOOM_RUN_CREATED_AT` and the source pair. A variable that is set is checked even when it is not
+required. A multi-branch `hosted run` whose spec says `placement.measurement: local` measures on the app container's own cards:
+it needs no sandbox variable, key or source pair, and `HYPERLOOM_GRANT_LIMITS` is optional (its `max_runtime_sec`, when given,
+bounds the session together with the spec's `budget.max_hours`; see
+[Run hosted multi-branch on a new cluster](../how-to/hosted-multibranch-new-cluster.md)).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -1090,10 +1441,10 @@ required.
 | `HYPERLOOM_SANDBOX_TEMPLATES` | When a sandbox is hosted | JSON object of each role's templates by card count (a decimal key; the name is opaque), for example `{"measurement": {"1": "t1", "8": "t8"}, "dev": {"1": "d1", "8": "d8"}}`. `runner` is accepted as the older name of `measurement`. |
 | `E2B_API_URL`<br>`E2B_SANDBOX_URL` | When a sandbox is hosted | Control-plane and data-plane `http(s)` URLs of the sandbox service, without credentials, query or fragment. |
 | `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`<br>`HYPERLOOM_SANDBOX_KEY_SUBRUN`<br>`HYPERLOOM_SANDBOX_KEY_DEV` | Per hosted role | The sandbox API key of each role. Credentials. |
-| `HYPERLOOM_SANDBOX_WORKSPACE` | When a SaFE key reaches the sandbox service directly and its user is in more than one workspace; always for a `system-admin` key | The workspace every sandbox is created in, sent on each create as the metadata `agent-sandbox.io/workspace`; a create whose own metadata names a workspace keeps its own. Without it the service refuses such a key's creates with `workspace_required`, reported as `SandboxDenied` naming this variable. A Claw grant's key names its own workspace, so a Claw host leaves it unset and the creates are unchanged. No whitespace; not a credential. |
+| `HYPERLOOM_SANDBOX_WORKSPACE` | When a SaFE key reaches the sandbox service directly and its user is in more than one workspace; always for a `system-admin` key | The workspace every sandbox is created in, sent on each create as the metadata `agent-sandbox.io/workspace`; a create whose own metadata names a workspace keeps its own. Without it the service refuses such a key's creates with `workspace_required`, reported as `SandboxDenied` naming this variable. A Claw grant's key names its own workspace, so a Claw host leaves it unset and the creates are unchanged. Checked on every hosted run when set: whitespace or a control character refuses the run. Not a credential; removed from the environment once read, like every host-only input here. |
 | `HYPERLOOM_RESULT_ARCHIVE` | No | Unset means results are archived on the shared storage, in a directory the application chooses. Otherwise `s3://<bucket>/<prefix>`; the prefix may be empty and has no empty, `.` or `..` segment. A local path (`/x`, `file://...`) is refused: local means unset. |
 | `AWS_ACCESS_KEY_ID`<br>`AWS_SECRET_ACCESS_KEY` | When `HYPERLOOM_RESULT_ARCHIVE` is `s3://`, and always as a pair | Archive credentials. `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3` (an `http(s)` URL) and `AWS_REGION` (not a credential) are optional. |
-| `HYPERLOOM_GRANT_LIMITS` | No | JSON object of the totals the host granted the run: `max_sandboxes`, `max_gpus`, `max_runtime_sec` (whole numbers) and `gpu_hours` (a number), each at least 0 and each optional; other keys are ignored. The legacy `optimize` flow only logs it. Removed from the environment once read. |
+| `HYPERLOOM_GRANT_LIMITS` | No | JSON object of the totals the host granted the run: `max_sandboxes`, `max_gpus`, `max_runtime_sec` (whole numbers) and `gpu_hours` (a number), each at least 0 and each optional; other keys are ignored. The legacy `optimize` flow only logs it. A multi-branch session needs all four totals or none, and one that lends dev sandboxes or runs autonomous agents needs them. Removed from the environment once read. |
 | `HYPERLOOM_SOURCE_REPO`<br>`HYPERLOOM_SOURCE_SHA` | When the run starts measurement sandboxes (the application bootstrap always needs them) | The repository (`OWNER/NAME` or a git URL, no whitespace) and the full lowercase 40-hex commit id of the version the run executes; the sandbox runners fetch the same version. Checked when set; removed from the environment once read (the bootstrap script has already used them). |
 | `NODE_NAME`<br>`CLAW_SESSION_ID` | No | Physical node name and session id, read when set. |
 
@@ -1107,28 +1458,32 @@ stay, because other code reads them. The sandbox keys, the MCP token and the arc
 `hyperloom hosted run` (`src/hyperloom/hosted/entry.py`) reads the variables above and the campaign spec in
 `HYPERLOOM_INPUT_FILE` (`hyperloom.campaign-spec/v1`, schema `src/hyperloom/contracts/campaign_spec.v1.schema.json`), runs the
 packaged `src/hyperloom/inference_optimizer/assets/install.sh` (no flags; the installer of the legacy launchers, from the same
-wheel as the running code; it provisions TraceLens, GEAK, ray and `runtime/kernel-agent.env.sh`) on every leg, fresh or resumed, into the interpreter that runs the entry (`PYTHON`, `VIRTUAL_ENV` and `INFERENCE_OPTIMIZER_FORCE_PYTHON=1` are set for it, and that interpreter's `bin` directory leads `PATH` for the installer and `optimize`), with its
-output in `$HYPERLOOM_STATE_DIR/install.log`, then runs `optimize` in the same process. An installer that exits non-zero ends the run
-with `{"final": true, "returncode": 2, "error": ...}` naming `install.sh` and the log. The session directory is
+wheel as the running code; it provisions TraceLens, GEAK, ray and the container-local `kernel-agent.env.sh`, see `KERNEL_AGENT_ENV`) on every leg, fresh or resumed, into the interpreter that runs the entry (`PYTHON`, `VIRTUAL_ENV` and `INFERENCE_OPTIMIZER_FORCE_PYTHON=1` are set for it, and that interpreter's `bin` directory leads `PATH` for the installer and `optimize`), with its
+output in `$HYPERLOOM_STATE_DIR/install.log` (a new file of each leg's, mode 0664, renamed over the previous leg's before the script starts: never opened in place), then runs `optimize` in the same process. An installer that exits non-zero ends the run
+with `{"final": true, "returncode": 2, "error": ...}` naming `install.sh` and the log. Before the installer, the entry checks that
+the run's specialists can be isolated, and ends the run the same way, naming why, where they cannot (see [Agent isolation](#agent-isolation)). The session directory is
 `$USER_DATA_PATH/<model directory name>/<HYPERLOOM_RUN_CREATED_AT as YYYYMMDDTHHMMSSZ>-<first 8 hex of sha256(HYPERLOOM_RUN_ID)>`; a
 restart finds the same directory and resumes it when it holds `manifest.json` and `state.json`. The entry writes two files in
-`$HYPERLOOM_STATE_DIR`: `session.json` (`{"session_dir": ...}`, as soon as the directory exists) and `exit.json`
+`$HYPERLOOM_STATE_DIR`, each a new file of mode 0664 renamed over the one before: `session.json` (`{"session_dir": ...}`, as soon as the directory exists) and `exit.json`
 (`{"final": true, "returncode": N, "stop_reason": ...}` when `optimize` ends for any reason, and `{"final": true, "returncode": 2,
 "error": ...}` when the request is refused). A host restarts the run only when `exit.json` is missing or its `final` is false.
 `HYPERLOOM_IMAGE` is set from the spec's `framework.image`, and the entry needs `USER_DATA_PATH` set to an absolute path. The result
-archive directory of the run is `<session dir>/archive/`, mode 0700, owned by the application user; the entry sets `HYPERLOOM_SESSION_PACKAGE_DEST` to it (whatever the host passed), so the session artifact package and its loose copies are written to `archive/hyperloom-session-packages/` on the shared storage, not to the container's `/workspace`.
+archive directory of the run is `<session dir>/archive/`, mode 2770 (the run's accounts share it, no one else can read it); one an earlier leg made is taken as it is, whoever made it, when this account can create a file in it, and refused when it is a link, not a directory, or open in any way to accounts outside its group (any of the others' permission bits). The packager makes the directories below it with its mode and each file new with mode 0660, renamed over the one an earlier leg left. The entry sets `HYPERLOOM_SESSION_PACKAGE_DEST` to it (whatever the host passed), so the session artifact package and its loose copies are written to `archive/hyperloom-session-packages/` on the shared storage, not to the container's `/workspace`.
+
+Each leg of a run may be another host account than the one before it, the accounts of the run sharing one group. Set up `HYPERLOOM_STATE_DIR` and `USER_DATA_PATH` as directories of that group with the setgid bit (`chmod 2775`), so that what is made below them takes the group; the entry warns on stderr, naming each, when one is not setgid. Before anything else, `app_bootstrap.sh` and then the entry check that this account can create and remove a file in each of them, and the entry then in the session directory; one it cannot ends the run with `{"final": true, "returncode": 2, "error": ...}` naming the directory, the errno and the directory's owner and mode, except that a `HYPERLOOM_STATE_DIR` this account cannot write is said on stderr only, since `exit.json` cannot be written there. The session directory, its parent and the directories of its skeleton are made mode 2775 whatever the umask, and an existing one is never chmodded. A hosted leg sets `HYPERLOOM_RUNTIME_DIR`, unless the host sets it, to a new mode-0700 directory below the container's temporary directory: the installer writes files there that later steps source and run, which must not be where another account of the group can replace them.
 
 `src/hyperloom/hosted/app_bootstrap.sh` starts a hosted run in an image without Hyperloom. It installs into the framework Python environment instead of a venv of its own, because a venv made from the image's interpreter cannot see the torch and ROCm stack that `install.sh` requires. The script is baked into the image: a change to it needs a rebuild.
 
 `scripts/hosted_app_image/build.sh --tag <ref> [--base <image>] [--claude-version V] [--push]` builds that image: a framework base image (`--base`), the script as the image's command, the `hl-specialist` account for `HYPERLOOM_SPECIALIST_USER`, and the claude CLI that specialists spawn (`/usr/local/bin/claude` -> `/opt/claude-code`). The CLI's version is `--claude-version`; when it is not passed the build takes `latest`, so two builds of one tag can carry different CLI versions. Pass a version to pin it. The codex CLI is not installed separately: it comes with the wheel (`openai-codex-cli-bin`).
 
-The image is not required. `scripts/hosted_app_image/build_layer.sh --out <dir> [--claude-version V] [--ca-file PEM]` builds a layer directory `<dir>/<short sha>-claude<version>/` (`start.sh`, `app_bootstrap.sh`, `bin/claude`, and `ca.pem` with `--ca-file`), and `scripts/hosted_app_image/Dockerfile.layer` makes it a small image (the directory is its build context; the content is under `/layer`). An application pod copies `/layer` into a volume with an init container (`cp -a /layer/. /opt/hyperloom-host/` into an `emptyDir`), and the main container runs `sh /opt/hyperloom-host/start.sh` on any framework image, unchanged. `start.sh` runs as the container's root and reads only its own directory (the layer may be mounted read-only): it creates `hl-specialist` (uid/gid 2000) when missing, puts `bin/claude` on `PATH`, writes a CA bundle (the image's plus `ca.pem`) to `${TMPDIR:-/tmp}/hyperloom-host/ca-bundle.pem` (directory 0755, file 0644, local to the container; nothing goes to the state dir) for `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `GIT_SSL_CAINFO`, and execs `app_bootstrap.sh`. The image must already have `git`, `setpriv` and `bash`; `start.sh` refuses by name when one is missing and installs nothing. uid 2000 must not belong to another account.
+The image is not required. `scripts/hosted_app_image/build_layer.sh --out <dir> [--claude-version V] [--ca-file PEM]` builds a layer directory `<dir>/<short sha>-claude<version>/` (`start.sh`, `app_bootstrap.sh`, `bin/claude`, and `ca.pem` with `--ca-file`), and `scripts/hosted_app_image/Dockerfile.layer` makes it a small image (the directory is its build context; the content is under `/layer`). The image also carries `/layer/bin/bwrap`, bubblewrap built from a pinned, checksummed source tarball and linked statically (musl), not setuid: it runs on any framework image and needs only unprivileged user namespaces; `build_layer.sh` itself does not put it in the directory. An application pod copies `/layer` into a volume with an init container (`cp -a /layer/. /opt/hyperloom-host/` into an `emptyDir`), and the main container runs `sh /opt/hyperloom-host/start.sh` on any framework image, unchanged. `start.sh` runs as the container's user (root, where it makes the specialist account) and reads only its own directory (the layer may be mounted read-only): it creates `hl-specialist` (uid/gid 2000) when missing where a process there can become that account, and otherwise makes no account and leaves the specialists to the layer's bubblewrap (below), names its own directory in `HYPERLOOM_HOST_LAYER`, puts `bin/claude` on `PATH`, writes a CA bundle (the image's plus `ca.pem`) to `${TMPDIR:-/tmp}/hyperloom-host/ca-bundle.pem` (directory 0755, file 0644, local to the container; nothing goes to the state dir) for `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `GIT_SSL_CAINFO`, makes the container's root mount private once, after the account is decided and right before the bootstrap (`mount --make-rprivate /`, so `bwrap` can bind `/` where the runtime marks the root unbindable; when that fails or the image has no `mount`, one line goes to stderr and the start goes on), and execs `app_bootstrap.sh`. The image must already have `git` and `bash`; `start.sh` refuses by name when one is missing and installs nothing. It makes the account only where it runs as root, the image has `setpriv`, the container's user namespace maps uid and gid 2000 (it reads `/proc/self/uid_map` and `/proc/self/gid_map`, and refuses, naming the map, one it cannot read) and root holds `CAP_KILL`, `CAP_SETGID` and `CAP_SETUID` (the capability bounding set in `/proc/self/status`, which is root's effective set in the application); uid 2000 must then not belong to another account. Where one of those does not hold (a container that maps only its root cannot switch the specialists to any other account), `start.sh` unsets `HYPERLOOM_SPECIALIST_USER`, says why in one line on stderr, and the specialists run under the layer's `bin/bwrap`, which the entry probes before anything runs (see [Agent isolation](#agent-isolation)); where the layer has no `bin/bwrap` either (a `build_layer.sh` directory alone has none), `start.sh` refuses, naming both reasons.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. |
-| `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built once into `$USER_DATA_PATH/.hyperloom/wheels/<sha>/` and only that wheel is installed (`--no-deps --force-reinstall`, so a new commit replaces an old one) into the image's framework Python environment (`/opt/venv` when it exists, else `$PYTHON`, else `python3`, the order `install.sh` uses), which also runs the entry. The runtime dependencies are resolved there by the `install.sh` the entry runs before `optimize`, as in the legacy flow. The environment records the installed commit in `.hyperloom-install`; a container that already holds it installs nothing. |
+| `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. A path or `file://` URL may name a mirror another account owns (in a container that maps one id, the host root's mirror shows as 65534): the fetch from it, and only that fetch, runs with a global git config in `${TMPDIR:-/tmp}` whose `safe.directory` names the mirror's resolved path and its `.git`, nothing else, so no system-wide `safe.directory` is needed. |
+| `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built in a new mode-0700 directory below the container's temporary directory, never on the shared storage, where another account of the group could put a wheel of its own in its place, and only that wheel is installed (`--no-deps --force-reinstall`, so a new commit replaces an old one) into the image's framework Python environment (`/opt/venv` when it exists, else `$PYTHON`, else `python3`, the order `install.sh` uses), which also runs the entry. The runtime dependencies are resolved there by the `install.sh` the entry runs before `optimize`, as in the legacy flow. The environment records the installed commit in `.hyperloom-install`; a container that already holds it installs nothing, and a new container builds the wheel again (a depth-1 fetch of the commit and a `pip wheel` of it). |
 | `HYPERLOOM_CODE_REVISION` | Set by the script | The commit id, exported before the entry starts: a wheel has no `.git` to read it from. |
+| `HYPERLOOM_HOST_LAYER` | Set by `start.sh` | The layer's own directory. The entry launches agents under bubblewrap only with its `bin/bwrap`, never one on `PATH`; whitespace around the value is ignored, and unset, blank or relative, no launch of the run uses bubblewrap (see [Agent isolation](#agent-isolation)). |
 
 ### The host's guarantee about containers, and the resume that relies on it
 
@@ -1153,7 +1508,10 @@ current one would pass 4 MiB. The directory and the run id (`source` is `hyperlo
 environment, so a child process started by the run has no events directory and never emits.
 
 * `id` is a decimal string that strictly increases within the run. After a restart it continues from the last complete line of the
-  last segment; a half-written last line is cut off first.
+  last segment; a half-written last line is cut off first, by replacing the segment with a copy of its complete lines.
+* Each start of the writer (each leg of a run) begins a new segment, numbered after the last one, made new with mode 0664: the next
+  leg may be another account of the directory's group, which reads the earlier segments and never writes into one. Set up
+  `HYPERLOOM_EVENTS_DIR`, when the host names one outside `$HYPERLOOM_STATE_DIR`, like that directory (the run's group, setgid).
 * Every line ends with a newline and is written whole, so a line without one is an unfinished write, not an event. A reader that
   tails by byte offset takes only complete lines.
 * One event is at most 16 KiB; a larger one is sent with `data` replaced by `{"oversized": true, "bytes": N, "keys": [...]}` and a

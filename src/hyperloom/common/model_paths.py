@@ -1,20 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared model-path resolution: a ``--model`` value -> a local model directory."""
+"""Shared model-path resolution: a ``--model`` value -> a local model directory, or the HF repo id it names."""
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
+
+#: The directory prefix the Hugging Face cache gives a repo: ``models--org--repo``.
+_HF_CACHE_PREFIX = "models--"
 
 
 def _identity_leaf(seg: str) -> str:
     """Reduce one identity segment to its ``org/repo`` (or bare ``repo``) form."""
     s = seg.strip().strip("/").split("/")[-1]
-    if s.startswith("models--"):
-        s = s[len("models--") :]
+    if s.startswith(_HF_CACHE_PREFIX):
+        s = s[len(_HF_CACHE_PREFIX) :]
     return s.replace("--", "/")
 
 
@@ -31,6 +35,33 @@ def _is_hf_repo_id(raw: str) -> bool:
     return all(p and not p.startswith(".") for p in parts)
 
 
+def _config_repo_id(model_dir: Path) -> str | None:
+    try:
+        config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    name = config.get("_name_or_path") if isinstance(config, dict) else None
+    return name if isinstance(name, str) and _is_hf_repo_id(name) and not Path(name).exists() else None
+
+
+def hf_repo_id(model: str | Path | None) -> str | None:
+    """The Hugging Face ``org/repo`` id ``model`` names, spelled as it is given; ``None`` when it names none.
+
+    A value that is no local directory names the id itself; a local checkpoint names it in its HF cache path or in
+    its ``config.json``'s ``_name_or_path``.
+    """
+    raw = ("" if model is None else str(model)).strip().rstrip("/")
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_dir():
+        return raw if _is_hf_repo_id(raw) and not raw.startswith("~") else None
+    cached = next((_identity_leaf(part) for part in path.parts if part.startswith(_HF_CACHE_PREFIX)), None)
+    if cached is not None:
+        return cached if _is_hf_repo_id(cached) else None
+    return _config_repo_id(path)
+
+
 def model_identity_candidates(model: str | Path | None) -> tuple[set[str], set[str]]:
     """Return ``(full, bare)`` casefolded identity candidate sets."""
     raw = ("" if model is None else str(model)).strip()
@@ -43,7 +74,7 @@ def model_identity_candidates(model: str | Path | None) -> tuple[set[str], set[s
         bare = {_identity_bare(raw)}
         return {f.casefold() for f in full}, {b.casefold() for b in bare}
 
-    cache_segs = [part for part in p.parts if part.startswith("models--")]
+    cache_segs = [part for part in p.parts if part.startswith(_HF_CACHE_PREFIX)]
     segments: list[str] = cache_segs if cache_segs else [p.name]
 
     full = {_identity_leaf(s) for s in segments if s}

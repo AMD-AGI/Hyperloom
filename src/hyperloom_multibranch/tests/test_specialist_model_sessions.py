@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import shlex
 from dataclasses import replace
 from pathlib import Path
@@ -8,10 +9,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.agent_isolation import BwrapIsolation
 from hyperloom.measure.compile import PackageBase
+from hyperloom_common.bwrap import BwrapProbe
 from hyperloom.sandbox import SandboxGone
 from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.specialist import agent_sessions
+from hyperloom_multibranch.specialist.agent_sandbox import UNCONFINED
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.arbor_adapter import MAPPED
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierSetup, DossierStart
@@ -22,10 +26,10 @@ from hyperloom_multibranch.specialist.agent_sessions import (
     with_agents,
 )
 from hyperloom_multibranch.specialist.autonomous_session import AutonomousSession
-from hyperloom_multibranch.specialist.gate_client import GateClient
+from hyperloom_multibranch.specialist.gate_client import read_gate_client
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, AgentSetup, BranchPlace
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions, model_sessions
-from hyperloom_multibranch.specialist.prompts import role_prompt
+from hyperloom_multibranch.specialist.prompts import RoleWorkload, role_prompt
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.specialist.runtime import SessionStart
 from hyperloom_multibranch.specialist import worktree as worktree_module
@@ -39,7 +43,7 @@ def test_a_branch_s_sessions_and_its_worktree_tools_share_one_worktree_on_one_so
     (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
     installed = PackageBase("vllm", package, None, None)
     monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
-    role = role_prompt("qwen3-8b on vllm, TP 1, concurrency 64")
+    role = role_prompt(RoleWorkload("qwen3-8b on vllm, TP 1, concurrency 64"))
     command = AgentCommand("claude", "claude", model="claude-opus-5-5")
     setup = AgentSetup(command, role, {}, object(), object(), object(), object())
 
@@ -64,7 +68,9 @@ def test_a_branch_s_sessions_and_its_worktree_tools_share_one_worktree_on_one_so
 def _agent_sessions() -> AgentSessions:
     spec = AgentSpec("/models/m", "vllm", 1, "bf16", "mi355x", {}, "output_throughput", "", {}, "", (), 3600.0, 31100)
     command = AgentCommand("claude", "claude", model="claude-opus-5-5")
-    return AgentSessions(spec, command, {}, object(), object(), LocalAgentSandboxes(object()))
+    return AgentSessions(
+        spec, command, {}, object(), object(), LocalAgentSandboxes(object(), choose=lambda: UNCONFINED)
+    )
 
 
 def test_an_agent_branch_waits_for_cards_while_it_would_still_run_the_session_s_least(tmp_path):
@@ -74,6 +80,14 @@ def test_an_agent_branch_waits_for_cards_while_it_would_still_run_the_session_s_
     session = agents.session(SessionStart("a1", "c0", 1, BranchTask(agent="arbor")), place)
 
     assert session._setup.least_run_seconds == 3780.0
+
+
+def test_a_session_that_runs_no_agent_has_no_sandboxes_and_refuses_an_agent_branch_by_name(tmp_path):
+    agents = replace(_agent_sessions(), sandboxes=None)
+    place = BranchPlace(SimpleNamespace(path=tmp_path / "worktree"), object(), tmp_path / "session")
+
+    with pytest.raises(ValueError, match="a1 runs an agent, and the session has no sandboxes"):
+        agents.session(SessionStart("a1", "c0", 1, BranchTask(agent="arbor")), place)
 
 
 def test_a_branch_whose_task_names_an_agent_runs_it_on_ports_of_its_own_in_the_sandbox_it_leases(tmp_path, monkeypatch):
@@ -127,7 +141,7 @@ benchmark:
     NUM_PROMPTS: 320
     NUM_WARMUPS: 8
     RUN_EVAL: 'true'
-    MAGPIE_TRUST_REMOTE_CODE: '1'
+    BENCH_TRUST_REMOTE_CODE: '1'
   benchmark_script: sglang_mi355x.sh
   inferencex_path: /cache/InferenceX
 """
@@ -179,10 +193,24 @@ def test_a_run_given_a_reviewed_dossier_gives_it_to_every_agent_branch(tmp_path)
     assert [spec.dossier for spec in specs] == ["/reviewed/dossier/qwen3-8b"] * 2
 
 
+def _flags(argv: list[str]) -> dict[str | None, object]:
+    """One pass of the gate's client: its interpreter and module under ``None``, then each flag's value (``True`` for a
+    switch); the ``NAME=value`` environment prefix is left out."""
+
+    argv = [token for token in argv if "=" not in token or token.startswith("-")]
+    flags: dict[str | None, object] = {None: argv[:3]}
+    rest = argv[3:]
+    for index, token in enumerate(rest):
+        if token.startswith("--"):
+            following = rest[index + 1] if index + 1 < len(rest) else "--"
+            flags[token] = True if following.startswith("--") else following
+    return flags
+
+
 def test_each_agent_is_given_the_client_the_gate_measures_with_on_its_own_port(tmp_path):
     canonical = tmp_path / "canonical.yaml"
     canonical.write_text(CANONICAL, encoding="utf-8")
-    agents = replace(_agent_sessions(), client=GateClient.read(canonical))
+    agents = replace(_agent_sessions(), client=read_gate_client(canonical, tmp_path, 0))
     places = [
         BranchPlace(SimpleNamespace(path=tmp_path / branch / "worktree"), object(), tmp_path / branch / "session")
         for branch in ("a1", "a2")
@@ -193,28 +221,48 @@ def test_each_agent_is_given_the_client_the_gate_measures_with_on_its_own_port(t
         for branch, place in zip(("a1", "a2"), places)
     )
 
-    command = shlex.split(second._setup.spec.client)
-    assert command[:2] == ["python3", "/cache/InferenceX/utils/bench_serving/benchmark_serving.py"]
-    flags = dict(zip(command[2::2], command[3::2]))
-    assert {key: flags[key] for key in ("--model", "--backend", "--base-url", "--dataset-name")} == {
+    warmup, measured = (_flags(shlex.split(part)) for part in second._setup.spec.client.split(" && "))
+    assert measured[None] == ["python3", "-m", "infx.bench_serving.benchmark_serving"]
+    assert {key: measured[key] for key in ("--model", "--backend", "--base-url", "--dataset-name")} == {
         "--model": "/models/Qwen3-Next-80B-A3B-Instruct-FP8",
         "--backend": "vllm",
         "--base-url": "http://0.0.0.0:31110",
         "--dataset-name": "random",
     }
-    assert [flags[key] for key in ("--random-input-len", "--random-output-len", "--max-concurrency")] == [
+    assert [measured[key] for key in ("--random-input-len", "--random-output-len", "--max-concurrency")] == [
         "1024", "1024", "64",
     ]  # fmt: skip
-    assert (flags["--num-prompts"], flags["--num-warmups"], float(flags["--random-range-ratio"])) == ("320", "128", 1)
-    assert "--ignore-eos" in command and "--trust-remote-code" in command
+    assert (measured["--num-prompts"], warmup["--num-prompts"]) == ("320", "8")
+    assert float(measured["--random-range-ratio"]) == 1
+    assert "--ignore-eos" in measured and "--trust-remote-code" in measured
     assert "http://0.0.0.0:31100" in first._setup.spec.client
 
 
-def test_an_agentx_canonical_has_no_client_to_give(tmp_path):
-    canonical = tmp_path / "canonical.yaml"
-    canonical.write_text("benchmark:\n  model: /models/m\n  envs:\n    CONC: '8'\n", encoding="utf-8")
+def test_each_agentx_agent_is_given_the_gate_s_replay_on_its_own_port_bounded_as_the_gate_s_round(
+    tmp_path, monkeypatch
+):
+    from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
+    from hyperloom_multibranch.tests.test_specialist_gate_client import _agentx_session
+    from inference_suite.cli import read_config
 
-    assert GateClient.read(canonical) is None
+    monkeypatch.setenv(TOOL_CACHE_ENV, str(tmp_path / "tools"))
+    canonical, _ = _agentx_session(tmp_path, tmp_path / "tools")
+    agents = replace(_agent_sessions(), client=read_gate_client(canonical, canonical.parent.parent, 4800))
+    places = [
+        BranchPlace(SimpleNamespace(path=tmp_path / branch / "worktree"), object(), tmp_path / branch / "session")
+        for branch in ("a1", "a2")
+    ]
+
+    specs = [
+        agents.session(SessionStart(branch, "c0", 1, BranchTask(agent="agent")), place)._setup.spec
+        for branch, place in zip(("a1", "a2"), places)
+    ]
+
+    for spec in specs:
+        words = shlex.split(spec.client)
+        config = read_config(Path(words[words.index("--config") + 1]), tmp_path / "out")
+        assert (config.server.port, spec.client_seconds) == (spec.port, 4800)
+    assert [spec.port for spec in specs] == [31100, 31110]
 
 
 def test_a_hosted_agent_runs_in_its_lease_s_sandbox_found_again_by_the_lease_alone(tmp_path):
@@ -233,3 +281,34 @@ def test_a_hosted_agent_runs_in_its_lease_s_sandbox_found_again_by_the_lease_alo
     assert sandboxes.claude_config(place) == place.workspace / "sandbox" / "home" / ".claude"
     with pytest.raises(SandboxGone):
         sandboxes.sandbox("a1", place, tmp_path / "src", BranchLease("lease-2", "a1", (0,), tmp_path, {}, 6))
+
+
+def test_where_bubblewrap_sandboxes_an_agent_its_sandbox_writes_its_branch_s_trees_and_keeps_its_own_claude_dir(
+    tmp_path: Path,
+) -> None:
+    asked: list[object] = []
+    isolation = BwrapIsolation(BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ()))
+
+    def choose() -> BwrapIsolation:
+        asked.append(isolation)
+        return isolation
+
+    worktree = SimpleNamespace(path=tmp_path / "worktree", linked=(tmp_path / "base" / "3rdparty",))
+    for path in (worktree.path, *worktree.linked, tmp_path / "branch" / "session"):
+        path.mkdir(parents=True)
+    place = BranchPlace(worktree, object(), tmp_path / "branch" / "session")
+    sandboxes = LocalAgentSandboxes(object(), choose=choose)
+    lease = BranchLease("lease-1", "a1", (6,), tmp_path / "lease-1", {}, 1)
+
+    sandbox = sandboxes.sandbox("a1", place, worktree.path / "python", lease)
+    try:
+        home = place.workspace / "sandbox" / "home"
+        assert sandbox.isolation is isolation and sandbox.paths.home == home
+        assert sandbox.paths.writable == (place.workspace, worktree.path)
+        assert sandbox.paths.readable == worktree.linked
+        assert sandboxes.claude_config(place) == home / ".claude" == Path(sandbox.env({})["CLAUDE_CONFIG_DIR"])
+    finally:
+        asyncio.run(sandbox.stop())
+    assert len(asked) == 1, "the session asks once how its sandboxes run"
+    unconfined = LocalAgentSandboxes(object(), choose=lambda: UNCONFINED)
+    assert unconfined.claude_config(place) != home / ".claude"

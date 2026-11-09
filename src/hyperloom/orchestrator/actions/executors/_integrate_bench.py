@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.coerce import to_str_list
+from hyperloom_common.coerce import to_float, to_str_list
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import constraint_fields
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
@@ -21,6 +21,7 @@ from ...bringup import write_boot_observation
 from ...delivery import file_digest
 from ...delivery.ledger import append_record, load_records, mark_prepared
 from ._accuracy_gate import (
+    AccuracyReference,
     framework_run_eval_envs,
     grade_accuracy,
     is_eval_origin,
@@ -33,19 +34,22 @@ from ._grid_runner import (
     GridStop,
     GridVariant,
     VariantResult,
-    _num_gpus_for_config,
+    lease_cards,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
 )
+from ._grid_base import variant_config_of
 from ._grid_variant_filter import (
     apply_aiter_moe_pin_filter,
     apply_multi_node_invalid_variants,
     apply_user_skip_list,
     resolve_skip_spec,
 )
+from ._integrate_attempt import IntegrateAttempt
 from ._integrate_results import _PatchBench
 from ._patch_artifacts import _ArtifactSpec
+from .benchmark_run.accuracy import record_accuracy_round, run_candidate_accuracy_round
 from ._workload_envs import BenchmarkTarget, LaunchLayer, MaterializeOptions, default_baseline_config
 
 
@@ -145,13 +149,14 @@ class BenchStageMixin:
         unset_envs: "list[str] | None" = None,
         variant_suffix: str = "",
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Run a 1-variant Magpie bench under the patched server + accuracy gate.
+        """Run a 1-variant bench under the patched server + accuracy gate.
 
         Args:
             bench_leg: The task params (config / model / bench knobs), the
                 per-task workspace root, the originating specialist task id
                 (names the variant), ``SharedState.model_path`` (the last rung
-                of the model-path precedence) and the session bounds. The
+                of the model-path precedence), the round's own launch controls
+                and the session bounds. The
                 caller owns the session context, so it resolves the bounds:
                 ``session_deadline_sec`` is the monotonic-clock session budget
                 deadline, or ``None`` when unbounded, and
@@ -202,7 +207,7 @@ class BenchStageMixin:
         # patch benchmark serializes against other serving instead of colliding
         # with a concurrent GPU specialist server on the same card. ``None`` keeps
         # the local path (multi-node / RAY_EXEC off / pytest default).
-        serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
+        serving_lease = maybe_serving_lease(num_gpus=lease_cards(config_path, self.session_dir))
         try:
             base = LaunchLayer(
                 extra_server_args=base_extra_args,
@@ -216,7 +221,6 @@ class BenchStageMixin:
                 output_root=bench_leg.output_root,
                 recipe=GridRecipe(base_yaml_path=config_path, base=base, target=target),
                 launch=GridLaunch(
-                    magpie_python=params.get("magpie_python") or None,
                     result_dir=result_dir,
                     serving_lease=serving_lease,
                 ),
@@ -237,6 +241,21 @@ class BenchStageMixin:
         bench["boot_observation_path"] = await asyncio.to_thread(self._observe_bench_boot, bench, bench_leg.output_root)
         _grade_bench_accuracy(bench, bench_leg, result_dir, gate_evidence)
         return bench, gate_evidence
+
+    async def _run_patch_accuracy_round(
+        self, attempt: IntegrateAttempt, params: dict[str, Any], bench: dict[str, Any], gate_evidence: dict[str, Any]
+    ) -> None:
+        """Run the accuracy round of a bench whose throughput cleared the KEEP threshold, then grade its accuracy again.
+
+        The round writes into the slot the accuracy gate reads, so the grade it is weighed on follows the round.
+        """
+        bench_leg = _PatchBench.for_attempt(attempt, params)
+        result_dir = sanitize_result_dir(params.get("result_dir"))
+        slot = Path(_eval_search_root(bench, result_dir))
+        launch = variant_config_of(bench["workspace"])
+        outcome = await run_candidate_accuracy_round(slot, launch, attempt.shared_state, session=self.session_dir)
+        record_accuracy_round(bench, outcome)
+        _grade_bench_accuracy(bench, bench_leg, result_dir, gate_evidence)
 
     def _observe_bench_boot(self, bench: dict[str, Any], output_root: Path) -> str:
         """Classify the server this bench ran against and persist the observation.
@@ -321,8 +340,8 @@ def _integrate_variant(
     unset_envs: list[str] | None,
     variant_suffix: str,
 ) -> GridVariant:
-    """The one grid variant a bench leg runs: the applied server args and envs over the task's overlays."""
-    params = bench_leg.params
+    """The one grid variant a bench leg runs: the applied server args, envs and removals over the task's overlays."""
+    params, controls = bench_leg.params, bench_leg.launch_controls
     envs = dict(extra_envs_applied)
     # Eval-origin enablement needs a raw accuracy for its runnable gate, so
     # RUN_EVAL=true must survive any variant overlay.
@@ -332,7 +351,9 @@ def _integrate_variant(
         name=f"integrate-patch-{bench_leg.specialist_task_id[:8]}{variant_suffix}",
         extra_server_args=extra_server_args_applied,
         extra_envs=envs,
-        unset_envs=to_str_list(unset_envs),
+        remove_args=controls.get("remove_args"),
+        unset_envs=to_str_list(controls.get("unset_envs")) + to_str_list(unset_envs),
+        args_mode=controls.get("args_mode", "append"),
         note=f"integrate_patch:{bench_leg.specialist_task_id}{variant_suffix}",
     )
     variant.overlay_pythonpath = params.get("overlay_pythonpath", "")
@@ -370,7 +391,8 @@ def _bench_row(result: VariantResult, variant: GridVariant, base: LaunchLayer, c
     """The bench result dict for the variant's grid result, with the stack it launched with."""
     effective_unset = list(dict.fromkeys(to_str_list(base.unset_envs) + list(variant.unset_envs)))
     base_envs = dict(base.extra_envs or {})
-    base_remove = to_str_list(base.remove_args)
+    effective_remove = list(dict.fromkeys(to_str_list(base.remove_args) + list(variant.remove_args)))
+    args_mode = variant.args_mode if variant.args_mode == "replace" else base.args_mode
     return {
         **result.to_dict(),
         "status": result.status,
@@ -407,14 +429,22 @@ def _bench_row(result: VariantResult, variant: GridVariant, base: LaunchLayer, c
                 inherited_args="",
                 base_extra_args=base.extra_server_args,
                 variant_extra_args=variant.extra_server_args,
-                remove_args=base_remove,
-                args_mode=base.args_mode,
+                remove_args=effective_remove,
+                args_mode=args_mode,
             ),
-            "remove_args": base_remove,
+            "remove_args": effective_remove,
             "unset_envs": list(effective_unset),
-            "args_mode": base.args_mode,
+            "args_mode": args_mode,
         },
     }
+
+
+def _eval_search_root(bench: dict[str, Any], result_dir: str | None) -> str:
+    """Where a bench's accuracy is graded from: its ``result_dir`` override, else the grid slot of its workspace.
+
+    lm-eval writes to ``$EVAL_RESULT_DIR`` under the grid slot, not inside the ``benchmark_*`` workspace.
+    """
+    return result_dir or (str(Path(bench["workspace"]).parent) if bench.get("workspace") else "")
 
 
 def _grade_bench_accuracy(
@@ -422,11 +452,7 @@ def _grade_bench_accuracy(
 ) -> None:
     """Fill ``gate_evidence`` with the eval probe and, for a succeeded bench, the accuracy verdict."""
     params = bench_leg.params
-    # lm-eval writes to ``$EVAL_RESULT_DIR`` under the grid slot, not inside
-    # the ``benchmark_*`` workspace. Grade from the slot so the recursive
-    # search finds eval output while honoring an explicit ``result_dir``
-    # override the same way the grid subprocess does.
-    eval_search_root = result_dir or (str(Path(bench["workspace"]).parent) if bench.get("workspace") else "")
+    eval_search_root = _eval_search_root(bench, result_dir)
     # Guarded: an empty root would send the recursive scan over the cwd.
     if eval_search_root:
         gate_evidence["eval_probe"] = read_eval_probe(eval_search_root)
@@ -439,7 +465,7 @@ def _grade_bench_accuracy(
     measured = float(accuracy) if isinstance(accuracy, (int, float)) else None
     gate_evidence["accuracy_pass"] = grade_accuracy(
         eval_search_root,
-        params.get("accuracy_baseline"),
+        AccuracyReference(to_float(params.get("accuracy_baseline"), 0.0), bench_leg.accuracy_definition_digest),
         framework=framework,
         benchmark_mode=bench_leg.benchmark_mode,
     )

@@ -10,24 +10,26 @@ it; what is asserted is what a built toolbox does with a request that forces the
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from hyperloom.contracts.measurement import Purpose
 from hyperloom.measure.long_context.build import build_entry
-from hyperloom.measure.long_context.plan import LongContextPlan
+from hyperloom.measure.long_context.plan import LENGTH_BOUND, LongContextPlan
 from hyperloom.measure.long_context.tests.support import LENGTH, encode, staged_plan
 from hyperloom.measure.short_prompts.staging import CACHE_ENV
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox import long_context as long_context_module
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.long_context import LONG_CONTEXT_ENV, LongContextNotStaged, LongContextSetup
 from hyperloom_multibranch.toolbox.short_prompts import MODEL_PATH_ENV, SHORT_PROMPTS_ENV
 from hyperloom_multibranch.toolbox.tests.helpers import req
 from hyperloom_multibranch.toolbox.tests.test_long_context_triggers import _model
+from hyperloom_multibranch.toolbox.tests.test_short_prompts_option import _built as _built_agentx
 from hyperloom_multibranch.toolbox.tests.test_short_prompts_option import (
     _acceptance,
-    _built,
     _hosted,
     _local,
     _runner_env,
@@ -47,6 +49,12 @@ def _setup(cache: Path) -> LongContextSetup:
     return LongContextSetup(plan.prompt_set, plan.prompts_sha256, plan.length)
 
 
+async def _built(tmp_path: Path, **options: object) -> tuple[LocalHostedToolbox, dict[str, str]]:
+    """A toolbox of an InferenceX campaign (an AgentX one runs no long-context check) built with ``options``."""
+    inferencex = replace(_acceptance(tmp_path), workload_kind=WorkloadKind.INFERENCEX)
+    return await _built_agentx(tmp_path, inferencex, **options)
+
+
 async def _planned(toolbox: LocalHostedToolbox, **request: object) -> LongContextPlan | None:
     """The plan acceptance hands the executor for a test with ``request``'s fields, if any."""
     prepared = await toolbox._acceptance.prepare(req(**request))  # type: ignore[arg-type]
@@ -59,7 +67,7 @@ async def test_a_toolbox_built_without_a_set_runs_no_check_even_for_a_request_th
     toolbox, branch_env = await _built(tmp_path)
 
     assert toolbox._acceptance._long_context is None
-    assert CACHE_ENV not in _runner_env(toolbox) and CACHE_ENV not in branch_env
+    assert CACHE_ENV not in branch_env
     assert await _planned(toolbox, long_context_check=True) is None
 
 
@@ -75,7 +83,9 @@ async def test_a_set_in_the_options_is_carried_by_acceptance_and_the_runner_is_t
     assert _runner_env(toolbox)[CACHE_ENV] == str((tmp_path / "cache").resolve())
     assert CACHE_ENV not in branch_env, "the agent's own sandboxes are not told where the prompt set is"
     plan = await _planned(toolbox, long_context_check=True)
-    assert plan is not None and (plan.prompt_set, plan.prompts_sha256, plan.length) == (*vars(setup).values(),)
+    assert plan is not None and (plan.prompt_set, plan.prompts_sha256, plan.length, plan.bound) == (
+        *vars(setup).values(),
+    )
     assert plan.trigger == ("request long_context_check",)
     assert await _planned(toolbox) is None and await _planned(toolbox, long_context_check=False) is None
     assert toolbox._acceptance._short_prompts is None, "the other check stays off"
@@ -146,7 +156,7 @@ def _models_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LongContextS
     monkeypatch.setenv(CACHE_ENV, str(cache))
     monkeypatch.setenv(MODEL_PATH_ENV, str(model))
     entry = build_entry(model, cache, length=LENGTH, encode=encode)
-    return LongContextSetup(entry.key, entry.prompts_sha256, LENGTH)
+    return LongContextSetup(entry.key, entry.prompts_sha256, LENGTH, LENGTH_BOUND)
 
 
 async def test_nothing_named_runs_the_check_with_the_models_own_set_under_the_rules_triggers_only(

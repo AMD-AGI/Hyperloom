@@ -18,7 +18,7 @@ repair branch for its protected period, unless its specialist gave up or its jud
 candidate waiting for its confirm, unless its judging failed. In a session that plays a scheduling playbook, the judge
 reads :data:`~hyperloom_multibranch.scheduling.judge_prompt.PLAYBOOK_JUDGE_PROMPT`, where the stall evidence is the one
 stop rule for a stall, and the playbook's safety envelope refuses the stop, though not a lower K, of a branch with a
-near-bar or a stranded lead and of one drawn for probation (:func:`envelope_holds`). The scheduler finds the held branches again as it applies the decision, since a
+stranded lead and of one drawn for probation (:func:`envelope_holds`). The scheduler finds the held branches again as it applies the decision, since a
 candidate can start waiting while the judge answers, and :func:`hold_decision` refuses their orders and names them in
 the decision.
 """
@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
 
-from hyperloom_common.io import append_jsonl
+from hyperloom_common.io import append_shared_jsonl
 from hyperloom_common.jsonio import extract_last_json_with_key
 from hyperloom.contracts.measurement import Purpose, Validity
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
@@ -41,7 +41,6 @@ from hyperloom_multibranch.contracts.intent import Intent
 from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, PendingCandidate, TestRecord
 from hyperloom_multibranch.contracts.toolbox import BuildStatus
 from hyperloom_multibranch.blackboard.rsi.frontier import (
-    NEAR_BAR_HOLD,
     PROBATION_HOLD,
     SETTLED_TESTS,
     STRANDED_HOLD,
@@ -85,22 +84,21 @@ _USD_DIGITS = 2
 class HoldReason(str, Enum):
     """Why the judge may neither stop a branch nor lower its K: a specialist branch in its grace, a repair branch in
     its protected period, a branch with a candidate waiting for its confirm, or a branch no judge steers, whose K the
-    judge may not raise either. In a session that plays a playbook its safety envelope holds three more
+    judge may not raise either. In a session that plays a playbook its safety envelope holds two more
     (:func:`envelope_holds`), named as :func:`~hyperloom_multibranch.blackboard.rsi.frontier.envelope_hold` names them: a
-    probation draw, a near-bar lead and a stranded lead, whose stop the judge may not order but whose K it may lower
+    probation draw and a stranded lead, whose stop the judge may not order but whose K it may lower
     (:data:`ENVELOPE_HOLDS`)."""
 
     GRACE = "grace"
     REPAIR = "repair"
     PENDING_CONFIRM = "pending_confirm"
     UNSTEERED = "unsteered"
-    NEAR_BAR = NEAR_BAR_HOLD
     STRANDED = STRANDED_HOLD
     PROBATION = PROBATION_HOLD
 
 
 #: The holds of the safety envelope: a stop of such a branch is refused, a lower K is not.
-ENVELOPE_HOLDS = frozenset({HoldReason.NEAR_BAR, HoldReason.STRANDED, HoldReason.PROBATION})
+ENVELOPE_HOLDS = frozenset({HoldReason.STRANDED, HoldReason.PROBATION})
 
 
 @dataclass(frozen=True)
@@ -271,7 +269,7 @@ def envelope_holds(
     scored: Iterable[BranchProgress], specialists: Mapping[str, SpecialistStatus]
 ) -> dict[str, HoldReason]:
     """The running branches the safety envelope holds, as the blackboard's :func:`envelope_hold` reads the stall evidence
-    of the frontier ``scored`` rows: drawn for probation, or holding a near-bar or a stranded lead. A branch whose
+    of the frontier ``scored`` rows: drawn for probation, or holding a stranded lead. A branch whose
     specialist gave up, or was stopped for a failed judging, has nobody to follow its lead and is held by none of
     them."""
 
@@ -631,11 +629,7 @@ class Judge:
         else:
             decision = parse_decision(reply)
             error = "" if decision is not None else "the reply holds no well-formed decision object"
-        append_jsonl(
-            self.transcript,
-            {"at": self.clock.now(), "prompt": prompt, "reply": reply, "error": error},
-            make_parents=True,
-        )
+        append_shared_jsonl(self.transcript, {"at": self.clock.now(), "prompt": prompt, "reply": reply, "error": error})
         return cap_decision(decision, view) if decision is not None else None
 
 

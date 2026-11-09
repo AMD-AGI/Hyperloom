@@ -14,7 +14,11 @@ from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.actions.executors import PatchedServer, _server_patcher
 from hyperloom.orchestrator.actions.executors._profile_setup import prepare_profile, speculative_tokens_per_step
 from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer, materialize_config_with_envs
-from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime, enable_profile, load_benchmark
+from hyperloom.orchestrator.actions.executors.agentx_point import apply_native_runtime, enable_profile
+
+
+def load_benchmark(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]
 
 
 #: A patch laid where this host's server needs no copy of its framework, so the launch's ``PYTHONPATH`` is the one under
@@ -24,7 +28,6 @@ _PATCHED = PatchedServer(None)
 
 @pytest.fixture(autouse=True)
 def profile_environment(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "patched")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
     for name in (
@@ -284,13 +287,26 @@ def test_fixed_shape_setup_preserves_request_options_and_capture_window(tmp_path
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
 def test_native_profile_drops_annotations_when_the_patch_did_not_apply(tmp_path, monkeypatch, framework):
-    """Magpie raises rather than degrading when the server lacks the fields, so an unreached patch means false."""
+    """A server that lacks the annotation fields fails rather than degrading, so an unreached patch means false."""
     monkeypatch.setattr(_server_patcher, f"ensure_{framework}_patched_for_tracelens", lambda *checkout: None)
     path = _native_config(tmp_path, framework)
     enable_profile(path)
     native = load_benchmark(path)
     assert native["envs"]["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
     assert native["profiler"]["torch_profiler"]["detailed_annotations"] is False
+
+
+@pytest.mark.parametrize(("laid", "detailed"), [(None, False), (_PATCHED, True)])
+def test_native_sitecustomize_profile_annotates_only_with_the_graph_capture_patch(
+    tmp_path, monkeypatch, laid, detailed
+):
+    """Without the graph-capture patch, an annotated decode capture breaks on multi-variant (DSA) models."""
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "sitecustomize")
+    monkeypatch.setattr(_server_patcher, "kernel_shape_tool_dir", lambda: None)
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: laid)
+    path = _native_config(tmp_path, "sglang")
+    enable_profile(path)
+    assert load_benchmark(path)["profiler"]["torch_profiler"]["detailed_annotations"] is detailed
 
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])

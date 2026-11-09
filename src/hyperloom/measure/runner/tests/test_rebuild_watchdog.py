@@ -18,7 +18,7 @@ import pytest
 import yaml
 
 from hyperloom.measure.framework.tests.test_table_modules import BPRESHUFFLE, CONFIG, _package, _table
-from hyperloom.measure.jit.modules import MODULE_BUILD_LIMIT_SEC
+from hyperloom.measure.jit.modules import CKTILE_MODULE_BUILD_LIMIT_SEC, MODULE_BUILD_LIMIT_SEC
 from hyperloom.measure.runner import rebuild_watchdog, run
 from hyperloom.measure.runner.rebuild_watchdog import raise_rebuild_watchdog, rebuild_watchdog_sec
 from hyperloom.measure.socket import TestCall
@@ -49,7 +49,7 @@ def _point(
 
 
 def _call(tmp_path: Path, *points: Path) -> TestCall:
-    return TestCall(points=points, output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), magpie_python="", task_id="t")
+    return TestCall(points=points, output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), task_id="t")
 
 
 def _bench(point: Path) -> dict:
@@ -78,18 +78,14 @@ def test_the_estimate_is_the_builds_plus_the_margin() -> None:
     assert rebuild_watchdog_sec(["m"]) > 300, "longer than sglang's default watchdog"
 
 
-#: How long the two builds can take when several tests build at once: module_gemm_a8w8_bpreshuffle_cktile up to 1347 s,
-#: module_gemm_a8w8_bpreshuffle typically up to 181 s.
-_LONGEST_CKTILE_SEC, _CK_MEDIAN_SEC = 1347, 181
-
-
-def test_a_cktile_module_is_given_the_time_its_longest_build_takes_with_room_to_spare() -> None:
-    """600 s each would give the cktile module and the CK one 1500 s, which their longest builds overrun."""
+def test_a_cktile_module_is_given_the_cktile_build_limit_and_a_module_of_any_other_kind_the_common_one() -> None:
+    """A CK-tile build is slowest when several tests build at once: 600 s each would give the cktile module and the CK
+    one 1500 s with the margin, which the CK-tile build can overrun."""
     cktile, ck = "module_gemm_a8w8_bpreshuffle_cktile", "module_gemm_a8w8_bpreshuffle"
-    worst = _LONGEST_CKTILE_SEC + 2 * _CK_MEDIAN_SEC + rebuild_watchdog.WATCHDOG_MARGIN_SEC
+    margin = rebuild_watchdog.WATCHDOG_MARGIN_SEC
 
-    assert rebuild_watchdog_sec([cktile, ck]) > worst > 1500
-    assert rebuild_watchdog_sec([cktile]) > _LONGEST_CKTILE_SEC + rebuild_watchdog.WATCHDOG_MARGIN_SEC
+    assert rebuild_watchdog_sec([cktile, ck]) == CKTILE_MODULE_BUILD_LIMIT_SEC + MODULE_BUILD_LIMIT_SEC + margin > 1500
+    assert rebuild_watchdog_sec([cktile]) == CKTILE_MODULE_BUILD_LIMIT_SEC + margin > rebuild_watchdog_sec([ck])
     assert rebuild_watchdog_sec([ck]) == 900, "a module of any other kind keeps 600 s, so a hang there ends as soon"
     assert rebuild_watchdog_sec(["module_moe_cktile2stages_b16_silu"]) == rebuild_watchdog_sec([cktile]), (
         "a name aiter makes at run time from a CK-tile entry is one"
@@ -119,6 +115,16 @@ def test_a_module_the_patch_touches_that_the_server_builds_raises_the_watchdog_t
 
     assert _watchdog(point, False) == f"--tp 1 {_FLAG} 3000"
     assert note is not None and "module_gemm_a8w8_bpreshuffle_cktile" in note
+
+
+def test_an_agentx_point_with_null_launch_overrides_is_given_the_watchdog(image, tmp_path: Path) -> None:
+    point = tmp_path / "point.yaml"
+    bench = {"framework": "sglang", "agentx": {"enabled": True, "launch_overrides": None}}
+    point.write_text(yaml.safe_dump({"benchmark": bench}), encoding=_UTF8)
+
+    raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path, {"module_gemm_a8w8_bpreshuffle_cktile"})
+
+    assert _watchdog(point, True) == f"{_FLAG} 3000"
 
 
 #: A module entry shaped like the image aiter's (e7d2453f) CK-tile GEMM, which reads its compiler from the environment.

@@ -322,7 +322,7 @@ def test_a_wheel_the_source_distribution_the_lock_lists_does_not_build_again_is_
         ensure_runner_cache(rig.repo, cache.sha, cache.root, _NO_WHEELS)
     assert difference in str(refused.value)
     assert (tree_digest(entry), _digest(entry / MANIFEST_NAME)) == before
-    assert {path.name for path in cache.root.iterdir()} == {cache.sha, f".{cache.sha}.lock"}
+    assert {path.name for path in cache.root.iterdir()} == {cache.sha, f".{cache.sha}.flock"}
     if "cannot be read as a wheel" in difference:
         # A cached wheel that is not read as pip reads it is refused before its source distribution is built.
         assert rebuilt_from == []
@@ -348,7 +348,7 @@ def test_an_entry_with_a_wheel_built_from_a_source_distribution_is_reused_after_
     assert [path.name for path in rebuilt_from] == [_SDIST]
     assert not rebuilt_from[0].is_relative_to(cache.root)
     assert tree_digest(entry) == before
-    assert {path.name for path in cache.root.iterdir()} == {cache.sha, f".{cache.sha}.lock"}
+    assert {path.name for path in cache.root.iterdir()} == {cache.sha, f".{cache.sha}.flock"}
 
 
 def test_a_built_wheel_written_again_with_other_timestamps_and_member_order_is_reused(

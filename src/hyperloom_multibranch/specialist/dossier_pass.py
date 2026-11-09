@@ -19,7 +19,7 @@ why (:class:`DossierOutcome`), and the session falls back to the generic map.
 from __future__ import annotations
 
 import asyncio
-import json
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -48,16 +48,19 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     EXIT_REFUSED,
     MAP_FILE,
     MAPPED,
+    exit_reason,
     mapped,
     pass_dossier,
     refused_reasons,
 )
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
 from hyperloom_multibranch.specialist.tools import sync_to_commit
-from hyperloom_multibranch.specialist.worktree import BranchWorktree, WorktreeError
+from hyperloom_multibranch.specialist.worktree import BranchWorktree, WorktreeError, source_unkept
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
+
+log = logging.getLogger(__name__)
 
 #: The holder of the pass's lease, and the name of its worktree and directory beside the branches': it is no branch.
 DOSSIER_HOLDER = "dossier"
@@ -99,8 +102,7 @@ DossierPass = Callable[[DossierStart], Awaitable[DossierOutcome]]
 class DossierSetup:
     """What the pass runs on: ``spec``, the session's agent spec with the pass's port and client; ``repo`` and
     ``toolbox``; ``sandbox``, the sandbox of a lease; ``worktree``, the pass's own; and ``agent_dir``, where its Arbor
-    is fetched. ``start_seconds`` is how long its start may take (:class:`OnboardingSetup`), ``exit_grace_seconds`` how
-    long past its deadline it has to end of itself. ``holder`` holds its lease, charged as ``charge`` says."""
+    is fetched. ``holder`` holds its lease, charged as ``charge`` says."""
 
     spec: AgentSpec
     repo: ExperimentRepo
@@ -110,9 +112,6 @@ class DossierSetup:
     agent_dir: Path
     clock: Callable[[], float] = time.time
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
-    poll_seconds: float = POLL_SECONDS
-    start_seconds: float = START_SECONDS
-    exit_grace_seconds: float = EXIT_GRACE_SECONDS
     holder: str = DOSSIER_HOLDER
     charge: LeaseCharge = DOSSIER_CHARGE
 
@@ -128,6 +127,7 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
     try:
         await sync_to_commit(setup.repo, start.start_commit, worktree)
         recipe = await setup.repo.read_recipe(start.start_commit)
+        unkept = await asyncio.to_thread(source_unkept, setup.spec.framework, recipe)
     except (WorktreeError, OSError) as error:
         return DossierOutcome(None, None, f"its worktree could not be laid out: {error}")
     seconds = start.deadline - setup.clock()
@@ -145,10 +145,11 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
         root_shares=start.shares,
         root_shares_source=start.shares_source,
         plan=None,
+        source_unkept=unkept,
     )
     try:
         lease = await setup.toolbox.lease_branch_sandbox(
-            setup.holder, spec.tp, charge=setup.charge, lifetime_sec=seconds + setup.exit_grace_seconds
+            setup.holder, spec.tp, charge=setup.charge, lifetime_sec=seconds + EXIT_GRACE_SECONDS
         )
     except (RequestRejected, SandboxUnavailable) as error:
         return DossierOutcome(None, None, f"no cards were leased for it: {error}")
@@ -158,8 +159,8 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
             setup.sandbox(lease),
             _arbor_only,
             run=DOSSIER_PASS,
-            start_seconds=setup.start_seconds,
-            poll_seconds=setup.poll_seconds,
+            start_seconds=START_SECONDS,
+            poll_seconds=POLL_SECONDS,
             sleep=setup.sleep,
         )
         try:
@@ -168,18 +169,22 @@ async def run_dossier_pass(start: DossierStart, setup: DossierSetup) -> DossierO
             return DossierOutcome(None, None, f"it did not start: {'; '.join(failed.reasons)}")
         return await _ended(ready, start, setup)
     finally:
-        # Always: Arbor's top process may have exited with a server it started still on the cards.
-        if ready is not None:
-            await ready.process.kill()
-        await asyncio.shield(setup.toolbox.release_branch_sandbox(lease.lease_id))
+        try:
+            # Always: Arbor's top process may have exited with a server it started still on the cards.
+            if ready is not None:
+                await ready.process.kill()
+        except SandboxUnavailable as error:
+            log.warning("the dossier pass of %s could not be killed: %s", setup.holder, error)
+        finally:
+            await asyncio.shield(setup.toolbox.release_branch_sandbox(lease.lease_id))
 
 
 async def _ended(ready: ReadyAgent, start: DossierStart, setup: DossierSetup) -> DossierOutcome:
     """Wait for the pass to end, until a little past its deadline, and read how it did."""
 
     process, checkout = ready.process, ready.source_dir
-    while process.returncode is None and setup.clock() < start.deadline + setup.exit_grace_seconds:
-        await setup.sleep(setup.poll_seconds)
+    while process.returncode is None and setup.clock() < start.deadline + EXIT_GRACE_SECONDS:
+        await setup.sleep(POLL_SECONDS)
     session = checkout / DOSSIER_PASS.session_dir
     dossier = pass_dossier(checkout, session)
     if process.returncode is None:
@@ -190,18 +195,9 @@ async def _ended(ready: ReadyAgent, start: DossierStart, setup: DossierSetup) ->
         why = refused_reasons(checkout / ready.manifest.snapshots_refused) or tail(await process.output())
         return DossierOutcome(None, None, f"it refused its config: {why}")
     if process.returncode == 0:
-        said = _exit_reason(checkout / ready.manifest.snapshots_exit)
+        said = exit_reason(checkout / ready.manifest.snapshots_exit)
         return DossierOutcome(None, dossier, f"it ended without a map: {said}")
     return DossierOutcome(None, dossier, f"it exited {process.returncode}: {tail(await process.output())}")
-
-
-def _exit_reason(path: Path) -> str:
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return "it wrote no exit reason"
-    reason = document.get("reason") if isinstance(document, dict) else None
-    return reason if isinstance(reason, str) and reason else "its exit file names no reason"
 
 
 __all__ = [

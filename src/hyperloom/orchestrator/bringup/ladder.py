@@ -22,6 +22,7 @@ from hyperloom.common.bringup import (
     render_excerpt,
 )
 from hyperloom.orchestrator.bringup.trees import TreeIdentity, tree_roots
+from inference_suite.server_log import READY_MARKERS
 
 #: Identifies observations produced here in downstream artifacts.
 PRODUCER = "bringup.ladder"
@@ -51,9 +52,7 @@ _PROGRESS_MARKERS: tuple[tuple[LadderStage, str], ...] = (
     (LadderStage.ENGINE_INIT, "gpu blocks:"),
     (LadderStage.GRAPH_CAPTURE, "capture cuda graph"),
     (LadderStage.GRAPH_CAPTURE, "graph capturing finished"),
-    (LadderStage.HTTP_READY, "application startup complete"),
-    (LadderStage.HTTP_READY, "uvicorn running on"),
-    (LadderStage.HTTP_READY, "the server is fired up and ready to roll"),
+    *((LadderStage.HTTP_READY, marker.lower()) for marker in READY_MARKERS),
 )
 
 #: Where each enablement failure kind sits on the ladder. Kinds absent here
