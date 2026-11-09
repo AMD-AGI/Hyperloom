@@ -23,7 +23,8 @@ from hyperloom.contracts.long_context import (
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR, OUTPUTS_FILE
 from hyperloom.measure.long_context.rounds import run_long_context
-from hyperloom.measure.long_context.tests.support import LENGTH, FakeServer, prompt_set, staged_plan
+from hyperloom.measure.long_context.prompts import PER_TASK
+from hyperloom.measure.long_context.tests.support import LENGTH, PROMPTS, FakeServer, prompt_set, staged_plan
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.short_prompts.rounds import Serving
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup
@@ -88,7 +89,9 @@ def _decided(request, setup: LongContextSetup | None = SETUP):  # type: ignore[n
 def test_a_request_that_forces_the_check_gets_the_plan_the_setup_names_and_says_why() -> None:
     plan = _decided(req(long_context_check=True))
 
-    assert plan is not None and (plan.prompt_set, plan.prompts_sha256, plan.length) == (*SETUP.__dict__.values(),)
+    assert plan is not None and (plan.prompt_set, plan.prompts_sha256, plan.length, plan.bound) == (
+        *vars(SETUP).values(),
+    )
     assert (plan.max_new_tokens, plan.concurrency, plan.trigger) == (128, 4, ("request long_context_check",))
 
 
@@ -183,16 +186,16 @@ def test_a_server_that_retrieves_everything_gives_a_complete_check_with_every_ta
     check = long_context_of(plan, directory)  # type: ignore[arg-type]
 
     assert (check.status, check.reason) == (LONG_CONTEXT_COMPLETE, "")
-    assert (check.n, check.passed, check.score) == (64, 64, 1.0)
+    assert (check.n, check.passed, check.score) == (PROMPTS, PROMPTS, 1.0)
     assert [(t.task, t.n, t.score) for t in check.tasks] == [
-        ("niah_single", 16, 1.0),
-        ("niah_multikey", 16, 1.0),
-        ("variable_tracking", 16, 1.0),
-        ("common_words", 16, 1.0),
+        ("niah_single", PER_TASK, 1.0),
+        ("niah_multikey", PER_TASK, 1.0),
+        ("variable_tracking", PER_TASK, 1.0),
+        ("common_words", PER_TASK, 1.0),
     ]
     assert check.length == LENGTH and check.served_context == 4096 and check.trigger == plan.trigger  # type: ignore[attr-defined]
     assert all(p.passed and p.status == PROMPT_OK for p in check.prompts)
-    assert check.prefill_tokens == sum(p.prompt_tokens for p in check.prompts) > 64 * LENGTH * 0.99
+    assert check.prefill_tokens == sum(p.prompt_tokens for p in check.prompts) > PROMPTS * LENGTH * 0.99
     assert check.seconds >= 0 and check.outputs == f"{LONG_CONTEXT_DIR}/{OUTPUTS_FILE}"
 
 
@@ -211,8 +214,8 @@ def test_a_server_that_loses_one_family_scores_zero_on_exactly_its_tasks_and_sta
     assert {t.task: t.score for t in check.tasks} == {
         t: 0.0 if t in lost else 1.0 for t in {p.task for p in check.prompts}
     }
-    assert check.passed == 64 - 16 * len(lost) and check.score == check.passed / 64
-    assert sum(not p.passed for p in check.prompts) == 16 * len(lost)
+    assert check.passed == PROMPTS - PER_TASK * len(lost) and check.score == check.passed / PROMPTS
+    assert sum(not p.passed for p in check.prompts) == PER_TASK * len(lost)
 
 
 def test_a_launch_that_serves_too_little_is_incomplete_with_the_reason_and_scores_nothing(tmp_path) -> None:
@@ -221,7 +224,7 @@ def test_a_launch_that_serves_too_little_is_incomplete_with_the_reason_and_score
     check = long_context_of(plan, directory)  # type: ignore[arg-type]
 
     assert check.status == LONG_CONTEXT_INCOMPLETE and check.reason.startswith("served context too short")
-    assert (check.n, check.passed, check.served_context, check.prefill_tokens) == (64, 0, LENGTH, 0)
+    assert (check.n, check.passed, check.served_context, check.prefill_tokens) == (PROMPTS, 0, LENGTH, 0)
     assert {p.status for p in check.prompts} == {PROMPT_NOT_RUN} and not any(p.passed for p in check.prompts)
 
 
@@ -231,8 +234,10 @@ def test_a_prompt_that_errored_makes_the_check_incomplete_and_counts_against_the
     check = long_context_of(plan, directory)  # type: ignore[arg-type]
 
     assert check.status == LONG_CONTEXT_INCOMPLETE
-    assert check.reason.startswith("16 of 64 prompts were not answered (common_words-00: the server answered HTTP 500")
-    assert (check.n, check.passed, check.score) == (64, 48, 0.75)
+    assert check.reason.startswith(
+        f"{PER_TASK} of {PROMPTS} prompts were not answered (common_words-00: the server answered HTTP 500"
+    )
+    assert (check.n, check.passed, check.score) == (PROMPTS, PROMPTS - PER_TASK, 0.75)
     assert {p.status for p in check.prompts if p.task == "common_words"} == {PROMPT_ERROR}
 
 
@@ -279,7 +284,7 @@ def test_a_recorded_score_the_bundles_answers_do_not_support_is_named(tmp_path) 
     recorded = long_context_of(plan, directory)  # type: ignore[arg-type]
     inflated = replace(
         recorded,
-        passed=64,
+        passed=PROMPTS,
         score=1.0,
         tasks=tuple(replace(t, passed=t.n, score=1.0) for t in recorded.tasks),
         prompts=tuple(replace(p, passed=True) for p in recorded.prompts),
@@ -287,7 +292,7 @@ def test_a_recorded_score_the_bundles_answers_do_not_support_is_named(tmp_path) 
 
     message = first_difference(inflated, rederive(recorded, directory))
 
-    assert message == "long_context.passed: recorded 64, the bundle's outputs give 48"
+    assert message == f"long_context.passed: recorded {PROMPTS}, the bundle's outputs give {PROMPTS - PER_TASK}"
 
 
 def test_an_answer_changed_in_the_bundle_after_the_record_was_made_is_found(tmp_path) -> None:
@@ -299,4 +304,4 @@ def test_an_answer_changed_in_the_bundle_after_the_record_was_made_is_found(tmp_
 
     message = first_difference(recorded, rederive(recorded, directory))
 
-    assert message == "long_context.passed: recorded 64, the bundle's outputs give 63"
+    assert message == f"long_context.passed: recorded {PROMPTS}, the bundle's outputs give {PROMPTS - 1}"
