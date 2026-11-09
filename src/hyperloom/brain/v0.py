@@ -20,6 +20,7 @@ from hyperloom.brain_api import (
     ReviewAsk,
     SearchState,
     Verdict,
+    eval_point,
 )
 
 
@@ -32,10 +33,12 @@ class BrainV0:
     def __init__(self, config: Mapping[str, Any]) -> None:
         self.config = dict(config)
 
+    @eval_point("main.propose")
     async def propose(self, state: SearchState, ask: ProposeAsk, ports: Ports) -> Proposal:
         """No specialist has moved yet."""
         return Proposal(summary="v0 does not propose yet")
 
+    @eval_point("main.review")
     async def review(self, state: SearchState, ask: ReviewAsk, ports: Ports) -> Review:
         """The Critic has not moved yet."""
         return Review(tuple(Verdict(c.name, Decision.DEFER, reason="v0 does not review yet") for c in ask.candidates))

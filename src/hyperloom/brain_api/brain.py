@@ -24,7 +24,9 @@ class BrainContractError(RuntimeError):
 @runtime_checkable
 class Brain(Protocol):
     """Proposes candidates and reviews them. Each call reads one :class:`SearchState` and keeps nothing between
-    calls, so any call can be replayed on its own."""
+    calls, so any call can be replayed on its own. ``propose`` and ``review`` are marked as the eval points
+    ``main.propose`` and ``main.review`` (``hyperloom.brain_api.points``); ``load_brain`` refuses a brain without
+    them."""
 
     name: str
     contract_version: str
