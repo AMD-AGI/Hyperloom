@@ -30,6 +30,7 @@ from hyperloom_common.llm.llm_config import (
     preferred_agent_backend,
     with_synthesized_anthropic_keys,
 )
+from hyperloom_common.env import forge_explicitly_enabled
 from hyperloom_common.fs_utils import is_network_fs
 from hyperloom_common.llm.llm_headers import expand_env_refs
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
@@ -55,6 +56,7 @@ from .framework_probe import (
     _resolve_framework_build,
     _setup_install_command,
 )
+from .geak_binaries import check_geak_binaries
 from .ir3_probe import run_ir3_probe_script
 from .preflight_env import (
     _ANTHROPIC_FALLBACK_KEYS,
@@ -72,7 +74,7 @@ from .credentials import (
     _is_stale_proxy_url,
     _resolve_llm_endpoints,
     _reset_claude_config_to_upstream,
-    _sync_geak_config_base_url,
+    _sync_geak_config_endpoint,
     _validate_credentials,
 )
 from ..session.paths import (
@@ -805,7 +807,6 @@ def _check_tracelens_cli() -> dict[str, Any]:
             "target": "TraceLens",
             "message": None,
         }
-    session_dir = str(_workspace_root_resolve())
     print(
         f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
         f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
@@ -814,8 +815,7 @@ def _check_tracelens_cli() -> dict[str, Any]:
         f"before every launch (carve-out applies only to --resume-from in "
         f"the same shell that earlier ran install.sh). Re-run:\n"
         f"  bash $REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh\n"
-        f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
-        f"then retry `python -m hyperloom optimize`. Refusing to start.",
+        f"then retry `python -m hyperloom optimize` in the same container. Refusing to start.",
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -1226,14 +1226,6 @@ def _export_gateway_alias(gateway_url: str) -> None:
             print(f"Preflight: {alias} {prev or '<unset>'} -> {gateway_url} (direct to gateway)")
 
 
-def _sync_geak_config_endpoint() -> None:
-    """A supplied GEAK_CONFIG yaml may carry its own endpoint; sync it so an override reaches GEAK."""
-    geak_cfg = os.environ.get("GEAK_CONFIG", "").strip()
-    geak_url = os.environ.get("GEAK_BASE_URL", "").strip()
-    if geak_cfg and geak_url and _sync_geak_config_base_url(geak_cfg, geak_url):
-        print(f"Preflight: synced GEAK config base_url -> {geak_url} ({geak_cfg})")
-
-
 def _ensure_magpie(
     install_event: Any,
     *,
@@ -1448,6 +1440,10 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
             category="check",
             action=_check_kernel_tuning_clis,
         )
+        if not forge_explicitly_enabled():
+            _run_install_step(
+                install_event, step_id="check_geak_binaries", category="check", action=check_geak_binaries
+            )
     if _tracelens_required_at_preflight(no_kernel, enable_roofline):
         _run_install_step(install_event, step_id="check_tracelens_cli", category="check", action=_check_tracelens_cli)
         _run_install_step(

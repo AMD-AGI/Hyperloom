@@ -209,7 +209,11 @@ Hyperloom changes serving arguments and environment through
 Magpie's public report. Missing, invalid, non-publishable, or diagnostic reports
 cannot supply KEEP evidence. Baseline and candidate must have the same workload
 identity. GEAK's search measurements are provisional until the candidate passes
-the same canonical Magpie workload and Hyperloom's KEEP gate.
+the same canonical Magpie workload and Hyperloom's KEEP gate. GEAK searches on
+the trace the accepted Magpie round replayed: the handoff's `workload_spec`
+declares that round's corpus, entry count, concurrency and mean request shape,
+and `AIPERF_BIN` points at the aiperf the round replayed with unless the
+environment already sets it.
 
 The profile phase prepares the TraceLens runtime patch and SGLang kernel-shape tool
 using the same helpers as fixed-sequence profiling, on a separate copy of the YAML.

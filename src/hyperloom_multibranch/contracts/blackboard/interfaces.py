@@ -13,7 +13,7 @@ A write checks the role of the caller's :class:`~hyperloom_multibranch.contracts
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Protocol, runtime_checkable
 
 from hyperloom.contracts.recipe import RecipeDelta
@@ -46,6 +46,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     LlmUsage,
     LlmUsageRecord,
     ManifestFingerprint,
+    MapDirection,
     MergeAttempt,
     BlackboardSnapshot,
     OpShares,
@@ -329,7 +330,8 @@ class DirectionNotes(Protocol):
 
 
 class SessionRecords(Protocol):
-    """What the session is and what it ran with; the scheduler writes both, the profile once at PRELUDE."""
+    """What the session is, what it ran with and Arbor's map of its directions; the scheduler writes all three, the
+    profile once at PRELUDE."""
 
     async def write_session_profile(self, profile: SessionProfile) -> None: ...
 
@@ -339,6 +341,10 @@ class SessionRecords(Protocol):
     async def write_manifest_fingerprint(self, fingerprint: ManifestFingerprint) -> None: ...
 
     async def manifest_fingerprints(self) -> tuple[ManifestFingerprint, ...]: ...
+
+    async def write_agent_map(self, directions: Sequence[MapDirection]) -> None:
+        """Keep Arbor's map, its ``directions`` in the map's order; the latest map written is in force. Raises
+        ``ValueError`` for a direction without an id or with the id of another."""
 
 
 class SnapshotQuery(Protocol):

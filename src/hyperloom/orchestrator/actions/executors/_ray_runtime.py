@@ -635,12 +635,12 @@ def safe_runtime_env() -> dict:
 def _sigterm_disposition_kept() -> Iterator[None]:
     """Put the process's SIGTERM disposition back as it was before the body, from any thread.
 
-    The Ray driver core installs a crash handler on SIGTERM whose watchdog alarm aborts the process 3s after the
-    signal, before the coordinator can stop the round in flight; ``signal.signal`` cannot undo it off the main thread.
+    The Ray driver core installs a crash handler on SIGTERM whose watchdog aborts the process 3s after the signal;
+    ``signal.signal`` cannot undo it off the main thread, so libc ``sigaction`` saves and restores it.
     """
-    libc = ctypes.CDLL(None, use_errno=True) if os.name == "posix" else None
+    libc = ctypes.CDLL(None, use_errno=True)
     saved = ctypes.create_string_buffer(_SIGACTION_BUFFER_BYTES)
-    kept = libc is not None and libc.sigaction(signal.SIGTERM, None, saved) == 0
+    kept = libc.sigaction(signal.SIGTERM, None, saved) == 0
     try:
         yield
     finally:

@@ -257,10 +257,9 @@ def _explain_integrate_decision(result: HandlerResult, verdict: _IntegrateVerdic
     source_import = verdict.source_import
     result["refused_by"] = graded.refused_by
     result["veto_reason"] = graded.veto_reason
-    if graded.veto_reason or graded.refused_by:
-        result["decision_reason"] = graded.veto_reason or graded.refused_by
-    elif graded.graded_on_intvty and graded.verdict == "REVERT":
-        result["decision_reason"] = "intvty_regression"
+    refusal = graded.veto_reason or graded.refused_by
+    if refusal:
+        result["decision_reason"] = refusal
     keep_threshold_pct = float(verdict.payload.get("keep_threshold_pct", 1.0))
     if performance.stack_positive_keep and performance.gain_pct <= keep_threshold_pct:
         result["decision_reason"] = "stack_positive_increment"

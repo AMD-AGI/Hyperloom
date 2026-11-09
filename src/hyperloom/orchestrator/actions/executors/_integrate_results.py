@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import functools
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
+from hyperloom_common.coerce import to_str_list
 from hyperloom_common.timeutil import now_iso
 
 from ...delivery.deliverable import declared_launch
@@ -23,6 +24,9 @@ from ._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import _FIX_ACCURACY_UNAVAILABLE, _derive_lane, _preflight_missing_targets
 from ._patch_artifacts import _ArtifactSpec, _resolve_artifact_specs, _validate_aiter_gemm_artifacts
 from ._patch_sources import _read_patch_texts, _resolve_patch_paths, resolved_explicit_root
+from ._launch_restatement import handed_server_args
+from ._proposal_identity import controls_of, keeps_effective_args, normalize_proposal
+from .magpie_agentx import load_benchmark
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +55,8 @@ class _PatchBench:
     session_deadline_sec: float | None = None
     variant_expected_sec: float | None = None
     benchmark_mode: str = ""
+    #: The round's non-default ``remove_args`` / ``unset_envs`` / ``args_mode``; the parity leg runs without them.
+    launch_controls: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def for_attempt(cls, attempt: IntegrateAttempt, params: dict[str, Any]) -> _PatchBench:
@@ -81,26 +87,23 @@ class _PatchMeasurement:
     acc_delta_pct: float | None
     cfg_fingerprint: str
     measured_against: dict[str, Any]
-    #: The change on the graded objective, reported even where the gate leaves ``delta_pct`` empty.
-    graded_delta_pct: float | None = None
-
-    def _measured_pct(self) -> float | None:
-        return self.delta_pct if self.delta_pct is not None else self.graded_delta_pct
+    #: The graded verdict as the gate row an attempt records; empty when the bench produced no measurement.
+    gates: tuple[dict[str, Any], ...] = ()
 
     def lesson(self, outcome: str) -> _KbLesson:
         """The KB record of this measurement under ``outcome``."""
-        return _KbLesson(outcome, float(self._measured_pct() or 0.0), self.acc_delta_pct, self.cfg_fingerprint)
+        return _KbLesson(outcome, float(self.delta_pct or 0.0), self.acc_delta_pct, self.cfg_fingerprint)
 
     def envelope(self) -> dict[str, Any]:
         """How every perf verdict reports the measurement behind it."""
         return {
             "output_throughput": self.new_tput,
             "delta_pct": self.delta_pct,
-            "graded_delta_pct": self.graded_delta_pct,
             "accuracy_pass": self.accuracy_pass,
             "base_tput": self.base_tput,
             "measured_against": self.measured_against,
             "keep_threshold_pct": self.keep_threshold_pct,
+            "gates": list(self.gates),
             "bench_result": self.bench_result,
         }
 
@@ -113,6 +116,8 @@ class _Deliverable:
     config_changes: dict[str, str]
     extra_server_args: str
     extra_envs: dict[str, str]
+    #: The round's non-default ``remove_args`` / ``unset_envs`` / ``args_mode``.
+    launch_controls: dict[str, Any]
     dropped_env_overrides: list[str]
     switch_manifest: list[dict[str, Any]]
     artifact_specs: list[_ArtifactSpec]
@@ -166,6 +171,7 @@ class _Deliverable:
             config_changes=config_changes,
             extra_server_args=(raw_args if isinstance(raw_args, str) and raw_args.strip() else declared_server_args),
             extra_envs=extra_envs,
+            launch_controls=controls_of(normalize_proposal(params)),
             dropped_env_overrides=dropped,
             switch_manifest=switch_manifest,
             artifact_specs=artifact_specs,
@@ -176,14 +182,13 @@ class _Deliverable:
 
 def _inert_keep_reason(
     delta_pct: float | None,
-    keep_threshold_pct: float,
     patch_count: int,
     switch_manifest: list[dict[str, Any]],
     enablers: list[str],
 ) -> str:
     """Why a bundle was kept inert rather than kept or reverted."""
     bits = [
-        f"bundle throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%"
+        f"bundle delta {delta_pct:+.2f}% did not clear the KEEP gate"
         if delta_pct is not None
         else "bundle throughput not measurable",
         f"code kept inert ({patch_count} patch(es), all switches default-off) and "
@@ -324,15 +329,14 @@ def _pending_sentinel(
 
 
 def _revert_status(
-    measured: _PatchMeasurement,
     *,
+    perf_kept: bool,
     accuracy_blocks: bool,
     accuracy_verdict: bool | None,
     fix_refusals: list[str],
 ) -> str:
     """Whether the patch was rejected on its merits or only because its accuracy could not be read."""
-    tput_ok = measured.delta_pct is not None and measured.delta_pct >= measured.keep_threshold_pct
-    unreadable = accuracy_blocks and accuracy_verdict is None and tput_ok
+    unreadable = accuracy_blocks and accuracy_verdict is None and perf_kept
     return "accuracy_unavailable_reject" if unreadable or fix_refusals == [_FIX_ACCURACY_UNAVAILABLE] else "reverted"
 
 
@@ -356,6 +360,27 @@ def _perf_revert(
         "workspace": str(attempt.output_root),
         **fields,
     }
+
+
+def _kept_launch(controls: dict[str, Any], bench_result: dict[str, Any]) -> dict[str, Any]:
+    """The round's own launch controls, and the args its bench handed the launcher where the KEEP persists them.
+
+    Those are Hyperloom's own composition, the recipe's inherited args included, as an explore KEEP records it; a
+    native launch's resolved argv is not, since it spells the options Magpie protects.
+    """
+    if not controls:
+        return {}
+    persists = keeps_effective_args(
+        load_benchmark(Path(bench_result["materialized_config"])),
+        bench_result["effective_config"]["args_mode"],
+        str(controls.get("args_mode") or "append"),
+        to_str_list(controls.get("remove_args")),
+        to_str_list(controls.get("unset_envs")),
+    )
+    if not persists:
+        return dict(controls)
+    launched = handed_server_args(Path(bench_result["launch_evidence"]["materialized_config_path"]))
+    return {**controls, "args_mode": "replace", "effective_extra_server_args": launched}
 
 
 def _kept_patch(
@@ -382,6 +407,7 @@ def _kept_patch(
         "artifacts_applied": attempt.applied_artifacts,
         "extra_server_args_applied": attempt.extra_server_args_applied,
         "extra_envs_applied": attempt.extra_envs_applied,
+        **_kept_launch(attempt.launch_controls, measured.bench_result),
         **measured.envelope(),
         "workspace": str(attempt.output_root),
         "framework_root": str(attempt.framework_root or ""),

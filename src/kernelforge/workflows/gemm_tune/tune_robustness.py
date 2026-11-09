@@ -48,6 +48,9 @@ DEFAULT_TASK_TIMEOUT_S = int(os.environ.get("FORGE_TUNE_TASK_TIMEOUT", "7200") o
 #: Opt-in switch for per-shape process isolation + blocklist.
 ISOLATE_ENV = "FORGE_ISOLATE_SHAPES"
 
+#: ``run_subprocess``'s exit code for a run it killed at its timeout.
+_TIMED_OUT = 124
+
 #: Default blocklist location (provenance-keyed JSON), overridable via env.
 #: The directory name predates this package moving under ``kernelforge`` and is
 #: deliberately left alone: it is a user-home cache, so renaming it would orphan
@@ -83,7 +86,7 @@ def with_task_timeout(cmd: list[str], task_timeout_s: int = DEFAULT_TASK_TIMEOUT
 
 def classify_fault(rc: int, stdout: str, stderr: str) -> str | None:
     """Classify a per-shape tuner run outcome."""
-    if rc == 124:
+    if rc == _TIMED_OUT:
         return "outer_timeout"
     blob = f"{stdout}\n{stderr}"
     # Only a NON-ZERO exit means the run itself failed on a hard fault.
@@ -205,7 +208,7 @@ class _MergedCsv:
 
 def _rows_to_tune(
     input_csv: str | Path,
-    blocklist: FaultBlocklist,
+    blocklist: FaultBlocklist | None,
 ) -> tuple[str, list[str], tuple[int, str] | None]:
     """The header and shape rows to tune, or the exit code and message that says there are none.
 
@@ -215,7 +218,7 @@ def _rows_to_tune(
     header, rows = read_untuned_csv(input_csv)
     if not rows:
         return header, [], (1, f"no data rows in {input_csv}")
-    rows, skipped = blocklist.filter_rows(rows)
+    rows, skipped = blocklist.filter_rows(rows) if blocklist is not None else (rows, [])
     if skipped:
         log.warning("skipping %d blocklisted shape(s) on this regime", len(skipped))
     if not rows:
@@ -247,14 +250,45 @@ class IsolationGuard:
 
     outer_timeout_s: int
     gpu_ids: str
-    blocklist: FaultBlocklist
+    # None outside isolation mode: a faulting shape is then dropped from this run without being persisted.
+    blocklist: FaultBlocklist | None
+    # Absolute end shared by every shape, 0 for none: each shape then gets what is left of it, and a shape
+    # killed by it is out of time, not faulted.
+    deadline_unix: float = 0.0
+
+    def shape_timeout(self) -> int:
+        """Seconds the next shape may run: the per-shape cap, or what the deadline leaves; 0 once it has passed."""
+        if self.deadline_unix <= 0:
+            return self.outer_timeout_s
+        return max(0, min(self.outer_timeout_s, int(self.deadline_unix - time.time())))
+
+    def record_fault(self, row: str, fault: str) -> None:
+        """Note ``row``'s fault in the blocklist, when this run keeps one."""
+        if self.blocklist is not None:
+            self.blocklist.record(shape_signature(row), fault, row)
+
+    def save_blocklist(self) -> None:
+        """Persist the blocklist, when this run keeps one."""
+        if self.blocklist is not None:
+            self.blocklist.save()
+
+
+def _shape_invocation(invocation: TunerInvocation, idx: int, header: str, row: str) -> TunerInvocation:
+    """One shape's run over its own one-row input, with its own tuned output and ``-o2`` profile."""
+    prefix = f"_iso_{invocation.tuned_csv.stem}_{idx}"
+    shape_csv = invocation.work_dir / f"{prefix}.csv"
+    shape_csv.write_text(f"{header}\n{row}\n", encoding="utf-8")
+    # Per-shape profile so shapes don't overwrite each other's -o2 output.
+    shape_args = list(invocation.base_args)
+    if "-o2" in shape_args[:-1]:
+        shape_args[shape_args.index("-o2") + 1] = str(invocation.work_dir / f"{prefix}_profile.csv")
+    shape_out = invocation.work_dir / f"{prefix}_tuned.csv"
+    return dataclasses.replace(invocation, base_args=shape_args, input_csv=shape_csv, tuned_csv=shape_out)
 
 
 def run_isolated(invocation: TunerInvocation, guard: IsolationGuard) -> tuple[int, str, str, Path | None]:
-    """Run the aiter tuner once per shape (process isolation), merge results."""
+    """Run the aiter tuner once per shape (process isolation), merge results; 124 when the deadline left none tuned."""
     base_args = invocation.base_args
-    work_dir = invocation.work_dir
-    tuned_stem = invocation.tuned_csv.stem
     header, rows, nothing_to_tune = _rows_to_tune(invocation.input_csv, guard.blocklist)
     if nothing_to_tune is not None:
         return nothing_to_tune[0], "", nothing_to_tune[1], None
@@ -264,29 +298,25 @@ def run_isolated(invocation: TunerInvocation, guard: IsolationGuard) -> tuple[in
     candidates = _MergedCsv()
     n_ok = 0
     env_override = compare_temp_env()
-    compare_dir = Path(env_override["TMPDIR"]) / "aiter_compare"
 
     # ``base_args`` carries a single shared ``-o2`` profile path.
     profile_idx = base_args.index("-o2") if "-o2" in base_args[:-1] else -1
     profiles = _MergedCsv()
+    out_of_time = False
 
     for idx, row in enumerate(rows):
-        shape_csv = work_dir / f"_iso_{tuned_stem}_{idx}.csv"
-        shape_out = work_dir / f"_iso_{tuned_stem}_{idx}_tuned.csv"
-        shape_csv.write_text(f"{header}\n{row}\n", encoding="utf-8")
-
-        # Per-shape profile so shapes don't overwrite each other's -o2 output.
-        shape_args = list(base_args)
-        shape_profile = work_dir / f"_iso_{tuned_stem}_{idx}_profile.csv"
-        if profile_idx >= 0:
-            shape_args[profile_idx + 1] = str(shape_profile)
-        shape = dataclasses.replace(invocation, base_args=shape_args, input_csv=shape_csv, tuned_csv=shape_out)
+        timeout_s = guard.shape_timeout()
+        if timeout_s <= 0:
+            log.warning("deadline reached; %d of %d shape(s) left untuned", len(rows) - idx, len(rows))
+            out_of_time = True
+            break
+        shape = _shape_invocation(invocation, idx, header, row)
         start = time.time()
         rc, out, err = run_subprocess(
             shape.command(),
             cwd=invocation.aiter_root,
-            timeout_s=guard.outer_timeout_s,
-            log_file=work_dir / f"_iso_{tuned_stem}_{idx}.log",
+            timeout_s=timeout_s,
+            log_file=shape.input_csv.with_suffix(".log"),
             env_override=env_override,
         )
         merged_out.append(out)
@@ -295,12 +325,16 @@ def run_isolated(invocation: TunerInvocation, guard: IsolationGuard) -> tuple[in
         # Accumulate this shape's profile candidates (best-effort) so the merged profile downstream carries every
         # shape, not just the last.
         if profile_idx >= 0:
-            profiles.absorb([line for line in _read_csv_lines(shape_profile) if line.strip()])
+            profiles.absorb([line for line in _read_csv_lines(Path(shape.base_args[profile_idx + 1])) if line.strip()])
 
+        if rc == _TIMED_OUT and timeout_s < guard.outer_timeout_s:
+            log.warning("shape %d/%d ran out the shared deadline; dropping it", idx + 1, len(rows))
+            out_of_time = True
+            continue
         fault = classify_fault(rc, out, err)
         if fault is not None:
-            log.warning("shape %d/%d faulted (%s); recording to blocklist", idx + 1, len(rows), fault)
-            guard.blocklist.record(shape_signature(row), fault, row)
+            log.warning("shape %d/%d faulted (%s); dropping it", idx + 1, len(rows), fault)
+            guard.record_fault(row, fault)
             if not gpu_healthy(guard.gpu_ids):
                 log.error("GPU unhealthy after fault; aborting remaining shapes")
                 merged_err.append("gpu_unhealthy_abort")
@@ -314,22 +348,23 @@ def run_isolated(invocation: TunerInvocation, guard: IsolationGuard) -> tuple[in
         n_ok += 1
         if soft := count_soft_faults(out, err):
             log.info("shape %d/%d tuned with %d recovered candidate fault(s)", idx + 1, len(rows), soft)
-        # aiter writes this shape's compare candidate under compare_dir.
-        cand = _latest_candidate(compare_dir, shape_out.stem, start)
+        # aiter writes this shape's compare candidate under the child's TMPDIR.
+        cand = _latest_candidate(Path(env_override["TMPDIR"]) / "aiter_compare", shape.tuned_csv.stem, start)
         if cand is not None:
             candidates.absorb(_read_csv_lines(cand))
 
-    guard.blocklist.save()
+    guard.save_blocklist()
 
     # Merge every shape's profile back into the shared -o2 path so the serve-safe split-K cap sees candidates for ALL
     # shapes, not just the last.
     if profile_idx >= 0:
         with contextlib.suppress(OSError):
             profiles.write(Path(base_args[profile_idx + 1]))
-    merged_candidate_path = candidates.write(work_dir / f"candidate_{tuned_stem}.merged.csv")
+    merged_candidate_path = candidates.write(invocation.work_dir / f"candidate_{invocation.tuned_csv.stem}.merged.csv")
 
-    # rc: 0 if at least one shape tuned; 1 only if all faulted/failed.
-    return (0 if n_ok > 0 else 1), "\n".join(merged_out), "\n".join(merged_err), merged_candidate_path
+    # rc: 0 if at least one shape tuned; 124 if the deadline left none tuned; 1 if all faulted/failed.
+    rc = 0 if n_ok > 0 else _TIMED_OUT if out_of_time else 1
+    return rc, "\n".join(merged_out), "\n".join(merged_err), merged_candidate_path
 
 
 def _latest_candidate(compare_dir: Path, tuned_stem: str, start: float) -> Path | None:

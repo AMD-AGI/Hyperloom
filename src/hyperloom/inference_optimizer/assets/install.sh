@@ -19,11 +19,9 @@
 #       upstream, so no benchmarker.py rewrite is applied here.
 #   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
 #      (a commit SHA), sets INFERENCEX_PATH for runtime
-#   4. Kernel-agent tools: ray + ray-head bring-up, TraceLens, GEAK and the
-#      Claude gateway env (credentials and model, not the CLI binary), from
-#      the steps in the sibling install_kernel_tools.sh (sourced, not run on
-#      its own). node/npm and the claude and codex CLIs come from the
-#      container image; this script does not install them.
+#   4. Kernel-agent tools: ray + ray-head bring-up, TraceLens, GEAK, the
+#      Claude CLI and the LLM gateway env, from the steps in the sibling
+#      install_kernel_tools.sh (sourced, not run on its own).
 
 set -euo pipefail
 
@@ -48,8 +46,9 @@ done
 
 # Single artefact root: everything writable defaults to $USER_DATA_PATH so
 # operators can monitor a run end-to-end by tailing one directory. Magpie
-# clone, source mirrors, and generated env / GEAK config all derive from
-# $HYPERLOOM_RUNTIME_DIR.
+# clone, source mirrors and GEAK config derive from $HYPERLOOM_RUNTIME_DIR;
+# the kernel-agent env file, which carries credentials, does not (see
+# runtime_env_derive_runtime_paths).
 # Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -812,11 +811,7 @@ try:
     out["hip"] = getattr(torch.version, "hip", None)
     out["cuda_str"] = getattr(torch.version, "cuda", None)
 except BaseException as exc:
-    # Not ``Exception``: a module ``import torch`` pulls in can call
-    # ``sys.exit`` rather than raise, and amd_smi does exactly that when its
-    # shared object is not on the loader path. Caught as ``Exception`` the
-    # SystemExit escaped, the verdict line below never ran, and the gate read
-    # the resulting silence as a CUDA build.
+    # A module ``import torch`` loads may call ``sys.exit`` instead of raising.
     out["rc"] = 2
     out["error"] = type(exc).__name__ + ": " + str(exc)[:200]
 print(json.dumps(out))
@@ -834,20 +829,17 @@ PY
     warn "torch probe produced no output (PYTHON=${PYTHON})"
     return 0
   fi
-  # The verdict is the probe's last line: a module that prints before dying puts
-  # its noise on the same stream, and read whole, that noise parsed as nothing
-  # and every field below defaulted to empty.
+  # The verdict is the last line; modules imported by torch may print before it.
   local probe_json; probe_json="$(printf '%s\n' "$probe" | tail -1)"
   local rc; rc="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('rc',0))" "$probe_json" 2>/dev/null || echo unreadable)"
   if [ "$rc" = "unreadable" ]; then
-    # Undetermined is not the same as CUDA-built, and saying the latter sent an
-    # operator to replace a torch that was already the right one.
     warn "torch probe did not return readable JSON (PYTHON=${PYTHON}); leaving the torch/GPU match undetermined"
     warn "last probe line: ${probe_json}"
     return 0
   fi
   if [ "$rc" = "2" ]; then
-    warn "torch is NOT importable from PYTHON=${PYTHON}"
+    local probe_error; probe_error="$("$PYTHON" -c "import json,sys; print(json.loads(sys.argv[1]).get('error') or '')" "$probe_json" 2>/dev/null || echo "")"
+    warn "torch is NOT importable from PYTHON=${PYTHON}: ${probe_error}"
     warn "this pod has ROCm GPUs (rocm-smi works) -- letting pip install proceed"
     warn "would pull plain 'torch' from PyPI (= NVIDIA CUDA wheel) and break"
     warn "downstream RAG / baseline / kernel steps with 'Found no NVIDIA driver'."
@@ -893,8 +885,7 @@ log "INFERENCEX_DEFAULT_DIR=${INFERENCEX_DEFAULT_DIR}"
 export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
 # Pre-create the writable runtime root so ensure_magpie / install_kernel_agent_tools
 # never race on missing parents (Magpie's pip install -e writes egg-info
-# under MAGPIE_PATH; the kernel-agent steps write kernel-agent.env.sh into
-# HYPERLOOM_RUNTIME_DIR).
+# under MAGPIE_PATH).
 if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
   mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
 fi
@@ -1008,6 +999,86 @@ _check_kernelforge_ready() {
   else
     warn "openai_codex not importable; an OpenAI-only deployment cannot construct the forge codex provider"
   fi
+}
+
+# Print, one per line, the requirements the installed hyperloom-inference_optimizer
+# declares for the extra $1 (its Requires-Dist entries under `extra == "$1"`), read
+# off the distribution's own metadata so pyproject.toml stays the one place they are
+# pinned. With --unsatisfied, only those no installed distribution satisfies yet.
+# Fails when the metadata cannot be read or declares nothing for the extra.
+# REPO_ROOT is prepended to PYTHONPATH for the reason ensure_inference_optimizer
+# gives: a `pip install --target` root is not on the default sys.path.
+_installed_extra_requirements() {
+  env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON" - "$@" <<'PY'
+import sys
+from importlib.metadata import PackageNotFoundError, requires, version
+
+try:
+    from packaging.requirements import Requirement
+except ImportError:
+    from pip._vendor.packaging.requirements import Requirement
+
+extra, unsatisfied_only = sys.argv[1], "--unsatisfied" in sys.argv[2:]
+try:
+    specs = requires("hyperloom-inference_optimizer") or []
+except PackageNotFoundError:
+    raise SystemExit(1)
+
+
+def satisfied(req):
+    try:
+        installed = version(req.name)
+    except PackageNotFoundError:
+        return False
+    return not req.extras and req.specifier.contains(installed, prereleases=True)
+
+
+declared = []
+for spec in specs:
+    req = Requirement(spec)
+    if req.marker and req.marker.evaluate({"extra": extra}):
+        req.marker = None
+        declared.append(req)
+if not declared:
+    raise SystemExit(1)
+for req in declared:
+    if not (unsatisfied_only and satisfied(req)):
+        print(req)
+PY
+}
+
+# --- 1a. the `hosted` extra, on a hosted run of a packaged install ---
+# A hosted image installs the wheel with --no-deps and then runs this script, and
+# the packaged branch above installs only [llm,forge]: without this step a hosted
+# run lacks what the `hosted` extra declares (the sandbox SDK among it). The
+# trigger is HYPERLOOM_STATE_DIR, which the hosted entry
+# requires on every run and nothing else sets. A source checkout already has the
+# extra through [test], and a local packaged install never uses it, so neither
+# changes. Requirements an installed distribution already satisfies are not asked
+# for: an image that ships them (or an offline one) runs no pip at all.
+ensure_hosted_extra() {
+  if [ "$HYPERLOOM_PACKAGED_INSTALL" -ne 1 ] || [ -z "${HYPERLOOM_STATE_DIR:-}" ]; then
+    return 0
+  fi
+  local reqs
+  reqs="$(_installed_extra_requirements hosted --unsatisfied)" \
+    || die "hosted extra: could not read its requirements from the installed hyperloom-inference_optimizer metadata"
+  if [ -z "$reqs" ]; then
+    log "hosted extra: every requirement is already installed"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "hosted extra: not installed: ${reqs//$'\n'/ }"
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would run: ${PYTHON} -m pip install ${reqs//$'\n'/ }"
+    return 0
+  fi
+  log "hosted extra: installing ${reqs//$'\n'/ }"
+  # shellcheck disable=SC2086 -- one requirement per line, split intended
+  "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" $reqs \
+    || die "hosted extra: pip install failed; hosted measurement cannot sign, create sandboxes or archive results"
 }
 
 # --- 1b. forge GEMM tuning (`kernelforge gemm-tune`) ---
@@ -1345,19 +1416,7 @@ ensure_rocprof_compute() {
     # Reading Requires-Dist off the installed metadata asks for exactly the
     # profiling dependencies and can touch nothing else.
     local reqs
-    reqs="$("$PYTHON" -c '
-from importlib.metadata import PackageNotFoundError, requires
-from packaging.requirements import Requirement
-try:
-    specs = requires("hyperloom-inference_optimizer") or []
-except PackageNotFoundError:
-    raise SystemExit(1)
-for spec in specs:
-    req = Requirement(spec)
-    if req.marker and req.marker.evaluate({"extra": "forge-profiling"}):
-        req.marker = None
-        print(str(req))
-' 2>/dev/null)" || reqs=""
+    reqs="$(_installed_extra_requirements forge-profiling 2>/dev/null)" || reqs=""
     if [ -n "$reqs" ]; then
       # shellcheck disable=SC2086 -- one requirement per line, split intended
       "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" $reqs \
@@ -1890,6 +1949,7 @@ install_kernel_agent_tools() {
 
 
 ensure_inference_optimizer
+ensure_hosted_extra
 ensure_forge_gemm_tune
 ensure_langfuse_when_enabled
 # Hold the install lock for the whole mirror-mutating region (Magpie /
@@ -1940,7 +2000,7 @@ _write_specialist_secret_env_opt_in() {
     log "would append HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1 to ${KERNEL_AGENT_ENV}"
     return 0
   fi
-  mkdir -p "$(dirname "$KERNEL_AGENT_ENV")"
+  runtime_env_private_kernel_agent_env "$KERNEL_AGENT_ENV" write || die "kernel-agent env file not updated"
   if [ -f "$KERNEL_AGENT_ENV" ] && grep -q '^export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=' "$KERNEL_AGENT_ENV" 2>/dev/null; then
     sed -i 's|^export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=.*|export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1|' "$KERNEL_AGENT_ENV"
   else
@@ -2034,7 +2094,7 @@ PY
     log "would append INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=$roots to ${KERNEL_AGENT_ENV}"
     return 0
   fi
-  mkdir -p "$(dirname "$KERNEL_AGENT_ENV")"
+  runtime_env_private_kernel_agent_env "$KERNEL_AGENT_ENV" write || die "kernel-agent env file not updated"
   if [ -f "$KERNEL_AGENT_ENV" ] && grep -q '^export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=' "$KERNEL_AGENT_ENV" 2>/dev/null; then
     sed -i "s|^export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=.*|export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=${roots}|" "$KERNEL_AGENT_ENV"
   else
@@ -2057,6 +2117,6 @@ fi
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"
 log ""
-log "next step: launch python3 -m hyperloom optimize. Its preflight loads"
-log "  \$KERNEL_AGENT_ENV (or \$USER_DATA_PATH/runtime/kernel-agent.env.sh)"
-log "  and stops before the optimisation loop if that file is missing or stale."
+log "next step: launch python3 -m hyperloom optimize in this container. Its preflight"
+log "  loads \$KERNEL_AGENT_ENV (the file above) and stops before the optimisation loop"
+log "  if that file is missing or stale."

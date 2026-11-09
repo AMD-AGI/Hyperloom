@@ -153,6 +153,25 @@ def test_lifecycle_magpie_default_unchanged(tmp_path, monkeypatch):
     assert info["eligible"] is True  # magpie built-in script -> eligible
 
 
+def test_lifecycle_port_is_below_the_ephemeral_range(tmp_path, monkeypatch):
+    """The persistent server binds minutes after its port is picked; an ephemeral one is taken by then."""
+    import yaml
+    from pathlib import Path
+
+    from hyperloom.common.ports import DEV_SANDBOX_PORTS, RAY_WORKER_PORTS
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+
+    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
+    cfg = {"benchmark": {"framework": "vllm", "benchmark_script": "vllm_mi300x.sh", "envs": {"PORT": 8888}}}
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    ephemeral_start = int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text(encoding="utf-8").split()[0])
+
+    port = sl.resolve_lifecycle_params(cfg_path)["port"]
+
+    assert port < ephemeral_start and port not in DEV_SANDBOX_PORTS and port not in RAY_WORKER_PORTS
+
+
 def test_lifecycle_magpie_gfx12_eligible(tmp_path, monkeypatch):
     """magpie backend: the R9700 script vllm_gfx12.sh is lifecycle-eligible like the MI scripts."""
     import yaml

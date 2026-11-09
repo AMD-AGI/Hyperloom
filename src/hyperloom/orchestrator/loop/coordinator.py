@@ -589,7 +589,7 @@ class Coordinator:
             await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
         finally:
             await self.dispatcher.close_db_after_executions()
-            if self._signals is not None:  # Closed after teardown: an earlier SIGTERM must not kill the process.
+            if self._signals is not None:  # Closed after teardown: a later SIGTERM must not kill the process mid-stop.
                 self._signals.close()
 
     def _bind_session_deadline(

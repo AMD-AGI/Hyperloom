@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A repository git cannot read says nothing about the patch it was asked to check."""
+"""A repository git cannot open says nothing about the patch; a patch git rejects is still stale."""
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,9 @@ _PATCH = (
     "-{old}\n"
     "+changed\n"
 )
+
+# The hunk header promises three lines the body does not carry: ``git apply`` exits 128 on it.
+_CORRUPT_PATCH = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n-original\n+changed\n"
 
 
 def _git(*args: str, cwd: Path) -> None:
@@ -45,27 +49,33 @@ def _ground(patch_text: str, base: Path) -> str:
 def test_a_patch_that_does_not_apply_is_stale(tmp_path):
     root = _repo(tmp_path)
 
-    result = _ground(_PATCH.format(old="SOMETHING-ELSE"), root)
-
-    assert result == ps.GROUND_STALE
+    assert _ground(_PATCH.format(old="SOMETHING-ELSE"), root) == ps.GROUND_STALE
 
 
 def test_a_patch_that_applies_is_grounded(tmp_path):
     root = _repo(tmp_path)
 
-    result = _ground(_PATCH.format(old="original"), root)
-
-    assert result == ps.GROUND_APPLIES
+    assert _ground(_PATCH.format(old="original"), root) == ps.GROUND_APPLIES
 
 
 def test_a_worktree_whose_parent_is_gone_is_unchecked_not_stale(tmp_path):
-    """The specialist worktrees are git worktrees of a checkout inside the pod."""
     root = _repo(tmp_path)
     worktree = tmp_path / "wt"
     _git("worktree", "add", "-q", str(worktree), "-b", "wtb", cwd=root)
-    # What preemption leaves behind: the worktree's files, and no parent to resolve.
-    subprocess.run(["rm", "-rf", str(root / ".git" / "worktrees")], check=True)
+    shutil.rmtree(root / ".git" / "worktrees")
 
-    result = _ground(_PATCH.format(old="original"), worktree)
+    assert _ground(_PATCH.format(old="SOMETHING-ELSE"), worktree) == ps.GROUND_UNCHECKED
 
-    assert result == ps.GROUND_UNCHECKED
+
+def test_a_corrupt_patch_on_a_usable_repo_is_stale(tmp_path):
+    root = _repo(tmp_path)
+
+    assert _ground(_CORRUPT_PATCH, root) == ps.GROUND_STALE
+
+
+def test_a_patch_that_does_not_apply_to_a_plain_tree_is_stale(tmp_path):
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "f.txt").write_text("original\n", encoding="utf-8")
+
+    assert _ground(_PATCH.format(old="SOMETHING-ELSE"), tree) == ps.GROUND_STALE

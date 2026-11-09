@@ -93,16 +93,31 @@ def _restore_kept_kernel_files_on_pods(state: Any, session_dir: Path, report: di
     return None
 
 
+def layers_in_commit_order(state: Any) -> list[dict[str, Any]]:
+    """The stack entries and the dormant layers of the registered levers, in the order they reached the tree.
+
+    The stack only grows, so a dormant layer's ``stack_position`` (the stack length when it was committed) places it
+    after every entry committed before it and before every one committed after; levers sharing a layer list it once.
+    """
+    dormant: dict[str, dict[str, Any]] = {}
+    for row in state.authored_framework_levers or []:
+        layer = row.get("source_layer") if isinstance(row, dict) else None
+        if layer:
+            dormant.setdefault(str(layer["source_snapshot"]), layer)
+    ordered = [(index, 1, entry) for index, entry in enumerate(state.optimization_stack or [])]
+    ordered += [(int(layer["stack_position"]), 0, layer) for layer in dormant.values()]
+    return [entry for _, _, entry in sorted(ordered, key=lambda item: item[:2])]
+
+
 def install_kept_source_layers(state: Any, session_dir: Path, report: dict[str, Any]) -> str | None:
     """Put the kept source patches back where the resume measures; return why the resume must halt, if it must.
 
     The patches live on the framework tree and the session records them in durable snapshots, so a resume onto a
-    fresh tree would otherwise bench every candidate against the stock source. Multi-node pods start from the image's
-    sources, so they get the kept kernel files from this tree once it holds them.
+    fresh tree would otherwise bench every candidate against the stock source. Dormant patches are on that tree too,
+    behind switches the levers turn on. Multi-node pods start from the image's sources, so they get the kept kernel
+    files from this tree once it holds them.
     """
-    # Snapshots hold whole files, so a later patch's snapshot of a shared file must be written last.
-    layers = sorted([*state.optimization_stack, *state.dormant_source_layers()], key=lambda e: str(e.get("ts")))
-    result = install_source_layers(layers, superseded=_committed_past)
+    result = install_source_layers(layers_in_commit_order(state), superseded=_committed_past)
     report["warnings"].extend(
         {"kind": "source_layer_not_reproducible", "variant": variant} for variant in result.unreproducible
     )

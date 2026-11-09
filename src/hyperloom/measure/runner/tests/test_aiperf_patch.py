@@ -6,7 +6,8 @@
 What is pinned: both files of the client's source change and nothing else; the change applies twice without a second
 effect; a client that is not the pinned one is changed in neither file and the refusal says which; a checkout that
 declares the client as a submodule gets it fetched first; and, when a checkout of the real client is given, the real
-parser exports the count the server reported and the success line and every other failure are untouched.
+parser exports the count the server reported, the success line and every other failure are untouched, and the reader
+of ``measure.agentx_requests`` counts empty and short exactly from the export it wrote.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.contracts.measurement import RequestClasses
+from hyperloom.measure.agentx_requests import read_request_classes
 from hyperloom.measure.runner import aiperf_patch
 from hyperloom.measure.runner.aiperf_patch import ReplayClientPatchError, patch_replay_client
 from hyperloom.measure.runner.tests import aiperf_source as source
@@ -178,6 +181,16 @@ def _drive(python: str, client: Path, artifacts: Path) -> dict[str, dict]:
     return {name: json.loads(raw) for name, raw in lines.items()}
 
 
+def _classes(written: Path, keep: set[str]) -> RequestClasses:
+    """What the reader counts from the lines of the export in ``written`` made for the scenarios in ``keep``."""
+    lines = (written / ARTIFACTS / "profile_export.jsonl").read_text(encoding="utf-8").splitlines()
+    chosen = [line for line in lines if json.loads(line)["metadata"]["x_request_id"] in keep]
+    subset = written / f"subset-{len(keep)}"
+    (subset / ARTIFACTS).mkdir(parents=True)
+    (subset / ARTIFACTS / "profile_export.jsonl").write_text("\n".join(chosen) + "\n", encoding="utf-8")
+    return read_request_classes(subset, subset, 0, 8)
+
+
 needs_client = pytest.mark.skipif(
     not (os.environ.get(SOURCE_ENV) and os.environ.get(PYTHON_ENV)),
     reason=f"needs {SOURCE_ENV} (aiperf at the pinned commit) and {PYTHON_ENV} (an interpreter with its dependencies)",
@@ -203,3 +216,29 @@ def test_the_real_client_exports_the_count_the_server_reported_and_changes_nothi
     for name, line in after.items():
         line["metrics"].pop("error_osl", None)
         assert line == before[name], f"{name}: the line is what it was, the added field aside"
+
+
+@needs_client
+def test_the_reader_counts_empty_and_short_exactly_from_the_patched_clients_export_and_not_from_the_released_ones(
+    tmp_path: Path,
+) -> None:
+    client = tmp_path / "ix" / "utils" / "aiperf"
+    shutil.copytree(os.environ[SOURCE_ENV], client, ignore=shutil.ignore_patterns(".git"))
+    python = os.environ[PYTHON_ENV]
+    counted = {"success_with_text", "no_content_usage_zero", "no_content_usage_three", "http_error", "unreachable"}
+
+    _drive(python, client, tmp_path / "before" / ARTIFACTS)
+    patch_replay_client(tmp_path / "ix")
+    _drive(python, client, tmp_path / "after" / ARTIFACTS)
+
+    released = _classes(tmp_path / "before", counted)
+    patched = _classes(tmp_path / "after", counted)
+    assert (released.requests_total, released.failed_transport, released.failed_no_content) == (5, 2, 2)
+    assert (released.failed_empty, released.failed_short) == (None, None), (
+        "no count in the export of the released client"
+    )
+    assert (patched.requests_total, patched.failed_transport, patched.failed_no_content) == (5, 2, 2)
+    assert (patched.failed_empty, patched.failed_short, patched.reason) == (1, 1, "")
+    unsplit = _classes(tmp_path / "after", counted | {"no_content_no_usage", "no_responses_at_all"})
+    assert (unsplit.failed_no_content, unsplit.failed_empty, unsplit.failed_short) == (4, None, None)
+    assert "2 of the 4" in unsplit.reason, "a reply that gave no count keeps the split unknown"

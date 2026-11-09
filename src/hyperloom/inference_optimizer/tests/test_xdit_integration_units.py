@@ -481,7 +481,7 @@ class TestRooflineSnapshotUnits:
 
 
 class TestHyperloomArchSpec:
-    """TraceLens arch spec derived from hyperloom's HW_SPECS_ACHIEVABLE."""
+    """TraceLens arch spec derived from the board's vendor peaks."""
 
     def _tab(self):
         from hyperloom.orchestrator.trace_analysis import tracelens_arch_benchmark as tab
@@ -507,11 +507,11 @@ class TestHyperloomArchSpec:
 
     def test_write_spec_roundtrip(self, tmp_path):
         tab = self._tab()
-        out = tab.write_hyperloom_arch_spec(tmp_path, "MI300X", lambda _m: None)
-        assert out is not None and out.is_file()
+        out = tmp_path / "MI300X.json"
+        assert tab.write_vendor_peak_arch_spec(out, "MI300X", lambda _m: None)
 
         data = json.loads(out.read_text())
-        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(708.0)
+        assert data["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(1307.4)
 
 
 class TestValidateTraceStructureScriptable:

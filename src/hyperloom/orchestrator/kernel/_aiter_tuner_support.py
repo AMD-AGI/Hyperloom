@@ -161,19 +161,26 @@ def _write_fmoe_untuned_csv_from_log(
     server_log: str,
     workspace: Path,
 ) -> tuple[str, dict[str, Any]]:
-    """Turn the MoE problems observed in ``server_log`` into a tuning input CSV.
+    """Turn the MoE lookups ``server_log`` shows missing into a tuning input CSV.
 
     Returns ``(csv_path, report)``; ``csv_path`` is "" when nothing tunable was
-    observed. The observed tuple is written verbatim: the quantisation pair, the
-    per-partition ``inter_dim`` and the EP-inflated expert/topk counts are what
-    the serving framework chose, not what the model config implies. Each problem
-    is tuned at the token counts its lookups missed, as aiter logged them, since
-    aiter pads a batch's token count before the lookup.
+    missed. Writing the observed tuple verbatim is the whole point: the
+    quantisation pair, the per-partition ``inter_dim`` and the EP-inflated
+    expert/topk counts are all properties of what the serving framework chose,
+    and every attempt to re-derive them from the model config is a guess that has
+    already produced tables no runtime lookup could reach. Each problem is tuned
+    at the tokens its own lookups missed; a token it hit is already served.
 
     Problems whose dtype pair aiter's codegen rejects are dropped rather than
     passed through, because one unsupported row aborts the whole tuner run.
     """
-    from kernelforge.workflows.gemm_tune import MOE_SHAPE_FIELDS, moe_untuned_csv_text
+    from kernelforge.workflows.gemm_tune import (
+        MOE_SHAPE_FIELDS,
+        moe_ck_missed_keys,
+        moe_dispatch_keys,
+        moe_untuned_csv_text,
+        parse_log_file,
+    )
 
     report: dict[str, Any] = {
         "observed": 0,
@@ -181,8 +188,11 @@ def _write_fmoe_untuned_csv_from_log(
         "dropped_unsupported": [],
         "keys": [],
     }
-    keys = _aiter_fused_moe_dispatch_keys(server_log)
-    report["observed"] = len(keys)
+    if not server_log:
+        return "", report
+    parsed = parse_log_file(server_log)
+    report["observed"] = len(moe_dispatch_keys(parsed))
+    keys = moe_ck_missed_keys(parsed)
     if not keys:
         return "", report
 
@@ -214,7 +224,7 @@ def _write_fmoe_untuned_csv_from_log(
         log.warning("Forge GEMM shapes: cannot write %s: %s", csv_path, exc)
         return "", report
     log.info(
-        "Forge GEMM shapes: derived %d MoE problem(s), %d row(s) at their missed token counts, from %s%s",
+        "Forge GEMM shapes: derived %d MoE problem(s), %d missed token row(s) from %s%s",
         len(tunable),
         len(lines) - 1,
         server_log,

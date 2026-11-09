@@ -6,12 +6,19 @@
 #
 # The host runs this script as the application's command. It
 #   1. reads the version to run from HYPERLOOM_SOURCE_REPO and HYPERLOOM_SOURCE_SHA (a full commit id),
-#   2. builds the wheel for that commit once, into $USER_DATA_PATH/.hyperloom/wheels/<sha>/, and reuses it after,
-#   3. installs that wheel, and nothing else, into the framework's own Python environment (the one the legacy flow's
+#   2. checks that this account can write the state directory and USER_DATA_PATH: the legs of a run may be different
+#      accounts of one group on the shared storage, and a directory an earlier leg left without group write ends the
+#      run here, naming it, instead of at its first write,
+#   3. builds the wheel for that commit in a directory of its own on the container's disk (never on the shared storage,
+#      where another account of the group could put a wheel of its own in its place before the install) and installs
+#      that wheel, and nothing else, into the framework's own Python environment (the one the legacy flow's
 #      install.sh installs into, with the image's torch and ROCm stack), not into a venv of its own: a venv made from
 #      it cannot see that stack. The runtime dependencies are not installed here: the entry runs the wheel's install.sh
 #      before optimize, which resolves them in that environment as the legacy launchers do,
 #   4. sets HYPERLOOM_CODE_REVISION=<sha> and runs `python -m hyperloom hosted run` with that Python.
+#
+# The environment records the installed commit, so a restart in the same container installs nothing; a new container
+# builds the wheel again.
 #
 # Nothing of the checkout stays behind: the wheel carries no .git, so a restart sees the same code version. An input the
 # script cannot work with (no commit, a bad one) ends the run with a final exit.json; a failure that may be
@@ -21,14 +28,36 @@ set -euo pipefail
 
 state_dir="${HYPERLOOM_STATE_DIR:-}"
 
-# A message here is a constant: it is written into JSON as it stands.
+# $1 as the inside of a JSON string.
+json_text() {
+  local text="${1//\\/\\\\}"
+  text="${text//\"/\\\"}"
+  printf '%s' "${text//[[:cntrl:]]/?}"
+}
+
+# exit.json is written beside its place, made new (set -C) under a name of this process's own that no one can guess
+# (mktemp -u) with mode 0664 (umask 002, as the entry writes it), and renamed over it (mv -T, never into a directory
+# of that name): a file another leg's account left there can be replaced, never rewritten. When the directory takes no
+# file, stderr is all there is.
 fail_final() {
+  local written=""
   echo "hosted bootstrap: $1" >&2
   if [[ -n "$state_dir" && -d "$state_dir" ]]; then
-    printf '{"final": true, "returncode": 2, "error": "%s"}\n' "$1" >"$state_dir/.exit.json.tmp"
-    mv -f "$state_dir/.exit.json.tmp" "$state_dir/exit.json"
+    { written="$(mktemp -u "$state_dir/.exit.json.XXXXXXXXXX")" &&
+      (umask 002 && set -C && printf '{"final": true, "returncode": 2, "error": "%s"}\n' "$(json_text "$1")" >"$written") &&
+      mv -fT -- "$written" "$state_dir/exit.json"; } 2>/dev/null || {
+      [[ -z "$written" ]] || rm -f -- "$written"
+      echo "hosted bootstrap: cannot write $state_dir/exit.json" >&2
+    }
   fi
   exit 2
+}
+
+# Whether this account can create and remove a file in the directory $2 (named $1); the run ends, naming it, if not.
+require_writable() {
+  local probe="$2/.hl-writable-$$.$RANDOM"
+  { (set -C && : >"$probe") && rm -f -- "$probe"; } 2>/dev/null ||
+    fail_final "$1 $2 cannot be written by this account (uid $EUID)"
 }
 
 fail() {
@@ -66,8 +95,10 @@ else
   fail_final "no framework Python was found (no /opt/venv/bin/python, PYTHON or python3)"
 fi
 
-cache_root="$USER_DATA_PATH/.hyperloom"
-wheel_dir="$cache_root/wheels/$sha"
+require_writable HYPERLOOM_STATE_DIR "$state_dir"
+(umask 002 && mkdir -p -- "$USER_DATA_PATH") 2>/dev/null || true # one that cannot be made is named next
+require_writable USER_DATA_PATH "$USER_DATA_PATH"
+
 # What the install of this environment holds, kept in the environment: a new container starts without it.
 env_prefix="$("$framework_py" -c 'import sys; print(sys.prefix)')"
 in_venv="$("$framework_py" -c 'import sys; print(int(sys.prefix != sys.base_prefix))')"
@@ -85,10 +116,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The wheel of the commit, built in a new directory of this account's (mode 0700) on the container's own disk.
 build_wheel() {
   local src
-  mkdir -p "$cache_root/wheels"
-  work="$(mktemp -d "$cache_root/build.XXXXXX")"
+  work="$(mktemp -d "${TMPDIR:-/tmp}/hyperloom-wheel.XXXXXX")" || fail "cannot make a build directory"
   src="$work/src"
   git init -q "$src"
   git -C "$src" fetch -q --depth 1 "$url" "$sha" || git -C "$src" fetch -q "$url" || fail "cannot fetch the source commit"
@@ -96,19 +127,16 @@ build_wheel() {
   git -C "$src" checkout -q --detach "$sha" || fail_final "the source repository has no such commit"
   mkdir "$work/out"
   "${pip[@]}" wheel -q --no-deps -w "$work/out" "$src"
-  : >"$work/out/.complete"
-  # The directory appears whole or not at all; a concurrent build of the same commit that won is as good as ours.
-  mv -T "$work/out" "$wheel_dir" 2>/dev/null || [[ -f "$wheel_dir/.complete" ]] || fail "cannot store the wheel"
-  cleanup
 }
 
 install_into_framework() {
-  [[ -f "$wheel_dir/.complete" ]] || build_wheel
-  local wheels=("$wheel_dir"/*.whl)
-  [[ ${#wheels[@]} -eq 1 && -f "${wheels[0]}" ]] || fail "expected exactly one wheel in $wheel_dir"
+  build_wheel
+  local wheels=("$work/out"/*.whl)
+  [[ ${#wheels[@]} -eq 1 && -f "${wheels[0]}" ]] || fail "expected exactly one wheel in $work/out"
   # Reinstall: another commit's wheel has the same version and pip would keep it.
   "${pip[@]}" install -q --force-reinstall --no-deps --no-index "${wheels[0]}"
   printf '%s\n' "$sha" >"$stamp"
+  cleanup
 }
 
 if [[ "$(cat "$stamp" 2>/dev/null || true)" != "$sha" ]]; then

@@ -351,7 +351,7 @@ _PADDED_M_GL1_OBSERVED: tuple[tuple[int, int, int], ...] = (
     (8192, 8704, 8192),
     (8193, 8704, 8192),
     (8193, 2048, 16384),
-    # GLM-5.3's prefill GEMMs, read off aiter on gfx950 on 2026-10-26.
+    # Prefill GEMMs read off aiter on gfx950.
     (16639, 2624, 32768),
     (32400, 7168, 8192),
 )

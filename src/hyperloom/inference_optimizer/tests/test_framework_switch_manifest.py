@@ -96,42 +96,23 @@ def test_a_token_cache_switch_set_to_a_flag_or_a_count_is_kept():
     switches, problems = manifest.parse_manifest(
         [
             _entry("SGLANG_CHAT_SEGMENT_TOKEN_CACHE"),
-            _entry("SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS", value="65536"),
+            _entry("SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS", value=65536),
+            _entry("SGLANG_TOKEN_REUSE", value="off"),
         ]
     )
     assert [(s["switch"], s["value"]) for s in switches] == [
         ("SGLANG_CHAT_SEGMENT_TOKEN_CACHE", "1"),
         ("SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS", "65536"),
+        ("SGLANG_TOKEN_REUSE", "off"),
     ]
     assert problems == []
 
 
-_NUMERIC_SWITCH_PATCH = """\
-+++ b/python/sglang/srt/environ.py
-+    SGLANG_AITER_FUSED_AR_1STAGE_MAX_KB = EnvInt(None)
-+    SGLANG_FUSED_AR = EnvBool(False)
-+++ b/python/sglang/srt/entrypoints/openai/serving_chat.py
-+        workers = int(os.environ.get("SGLANG_CHAT_RENDER_THREADS", "1"))
-"""
-
-
-def test_a_switch_the_patch_reads_as_a_number_needs_an_explicit_value():
-    """A switch the patch reads as a number is not defaulted to "1"."""
-    switches, problems = manifest.parse_manifest(
-        [
-            _entry("SGLANG_AITER_FUSED_AR_1STAGE_MAX_KB"),
-            _entry("SGLANG_FUSED_AR"),
-            _entry("SGLANG_CHAT_RENDER_THREADS", value="4"),
-        ],
-        patch_text=_NUMERIC_SWITCH_PATCH,
-    )
-    assert [(s["switch"], s["value"]) for s in switches] == [
-        ("SGLANG_FUSED_AR", "1"),
-        ("SGLANG_CHAT_RENDER_THREADS", "4"),
-    ]
-    assert problems == [
-        "dropped 'SGLANG_AITER_FUSED_AR_1STAGE_MAX_KB': the patch reads it as a number, so it needs an explicit value"
-    ]
+def test_a_zero_value_is_kept_as_zero():
+    """An integer 0 is a declared value, not a missing one."""
+    switches, problems = manifest.parse_manifest([_entry("HL_SPLIT_K", value=0)])
+    assert problems == []
+    assert switches[0]["value"] == "0"
 
 
 def test_a_switch_colliding_with_benchmark_config_is_dropped():
@@ -629,6 +610,55 @@ def test_already_attributed_levers_are_not_re_benched():
     assert framework_lever_grid(state) == []
 
 
+def test_an_attributed_enabler_still_turns_on_for_its_dependents():
+    """Attribution decides which arms are left to run, never which envs a bundle sets."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    switches, _ = manifest.parse_manifest([_entry("HL_X", enables=["HL_Y"]), _entry("HL_Y")])
+    state = _state()
+    state.record_authored_framework_levers(switches, default_on=False)
+    state.record_framework_lever_attribution("HL_X", gain_pct=0.3)
+
+    payload = framework_lever_grid(state)
+
+    assert [(v["name"], v["framework_lever_bundle"], v["extra_envs"]) for v in payload] == [
+        ("fwlever_hl_y", ["HL_X", "HL_Y"], {"HL_X": "1", "HL_Y": "1"})
+    ]
+
+
+def test_a_patch_with_one_attributed_lever_still_splits_out_the_other():
+    """Attribution of one lever leaves the patch decomposable, so its pending lever is benched alone."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    switches, _ = manifest.parse_manifest([_entry("HL_A"), _entry("HL_B")])
+    state = _state()
+    state.record_authored_framework_levers(switches, default_on=False)
+    state.record_framework_lever_attribution("HL_A", gain_pct=0.3)
+
+    payload = framework_lever_grid(state)
+
+    assert [(v["name"], v["extra_envs"]) for v in payload] == [("fwlever_hl_b", {"HL_B": "1"})]
+    state.record_framework_lever_attribution("HL_B", gain_pct=0.1)
+    assert framework_lever_grid(state) == []
+
+
+def test_an_attributed_lever_still_counts_toward_the_stack_a_drop_leaves():
+    """Dropping X and the Y it enables still leaves Z on, so the arm attributes X rather than restating the base."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    switches, _ = manifest.parse_manifest([_entry("HL_X", enables=["HL_Y"]), _entry("HL_Y"), _entry("HL_Z")])
+    state = _state()
+    state.record_authored_framework_levers(switches, default_on=True)
+    state.record_framework_lever_attribution("HL_Y", gain_pct=1.0)
+
+    payload = framework_lever_grid(state)
+
+    assert [(v["framework_lever"], v["unset_envs"]) for v in payload] == [
+        ("HL_Z", ["HL_Z"]),
+        ("HL_X", ["HL_X", "HL_Y"]),
+    ]
+
+
 def test_no_levers_means_no_seeding():
     """The seeder is inert for every framework that has no authored rewrites."""
     from hyperloom.orchestrator.actions.executors._framework_switch_manifest import framework_lever_grid
@@ -867,21 +897,21 @@ async def test_a_rewrite_patch_is_benched_with_its_switches_on(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_a_numeric_switch_without_a_value_is_not_benched_as_one(tmp_path, monkeypatch):
-    """A count or size switched to "1" benches a value the patch never meant."""
+async def test_an_int_cast_flag_without_a_value_is_benched_on(tmp_path, monkeypatch):
+    """``bool(int(os.getenv(X, "0")))`` is the usual on/off idiom, so a cast says nothing about needing a value."""
     patch = _REWRITE_PATCH.replace(
-        "+    return 2\n",
-        '+    max_kb = int(os.environ.get("HL_MAX_KB", "128"))\n+    return 2\n',
+        "+    return 2\n", '+    fused = bool(int(os.getenv("HL_FUSED", "0")))\n+    return 2\n'
     ).replace("@@ -1,2 +1,2 @@", "@@ -1,2 +1,3 @@")
     result, _, benched_envs, _ = await _run_rewrite_integrate(
         tmp_path,
         monkeypatch,
         delta_pct=8.0,
         patch_body=patch,
-        switches=[{"switch": "HL_HOIST"}, {"switch": "HL_MAX_KB"}],
+        switches=[{"switch": "HL_HOIST"}, {"switch": "HL_FUSED"}],
     )
-    assert benched_envs == {"HL_HOIST": "1"}
-    assert [row["switch"] for row in result["framework_levers"]] == ["HL_HOIST"]
+    assert result["status"] == "kept"
+    assert benched_envs == {"HL_HOIST": "1", "HL_FUSED": "1"}
+    assert [row["switch"] for row in result["framework_levers"]] == ["HL_HOIST", "HL_FUSED"]
 
 
 @pytest.mark.asyncio
@@ -1003,6 +1033,7 @@ async def test_a_dormant_patch_is_reinstalled_on_a_fresh_tree_at_resume(tmp_path
     from .conftest import make_coordinator
 
     result, repo, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
+    assert result["status"] == "kept_inert"
     state = _state()
     state.baseline_tput = 100.0
     state.save(tmp_path)
@@ -1015,6 +1046,30 @@ async def test_a_dormant_patch_is_reinstalled_on_a_fresh_tree_at_resume(tmp_path
     assert install_kept_source_layers(coord.shared_state, tmp_path, report) is None
 
     assert (repo / "src.py").read_text() == "def f():\n    return 2\n"
+
+
+def test_dormant_layers_install_where_they_were_committed_among_the_kept_ones():
+    """A dormant layer goes after the stack entries that preceded its commit and before the ones that followed."""
+    from hyperloom.orchestrator.loop.resume_source_layers import layers_in_commit_order
+
+    state = _state()
+    state.optimization_stack = [{"name": "keep-0"}, {"name": "keep-1"}]
+    state.authored_framework_levers = [
+        {"switch": "HL_LATE", "source_layer": {"name": "dormant-late", "stack_position": 2, "source_snapshot": "b"}},
+        {"switch": "HL_EARLY", "source_layer": {"name": "dormant-early", "stack_position": 1, "source_snapshot": "a"}},
+        {
+            "switch": "HL_EARLY_2",
+            "source_layer": {"name": "dormant-early", "stack_position": 1, "source_snapshot": "a"},
+        },
+        {"switch": "HL_NONE"},
+    ]
+
+    assert [layer["name"] for layer in layers_in_commit_order(state)] == [
+        "keep-0",
+        "dormant-early",
+        "keep-1",
+        "dormant-late",
+    ]
 
 
 # switch-off parity
@@ -1301,37 +1356,6 @@ async def test_parity_can_be_switched_off_explicitly(tmp_path):
     )
     assert verdict["ran"] is False
     assert verdict["ok"] is True
-
-
-def _interactivity_revert(candidate: float, reference: float):
-    """A pair graded on the AgentX P50 objective that missed KEEP, as an inert-keep round reads it."""
-    from hyperloom.common.perf_metric import GRADED_INTVTY_P50, VERDICT_REVERT, GradedComparison
-
-    return GradedComparison(
-        objective=GRADED_INTVTY_P50,
-        candidate=candidate,
-        reference=reference,
-        verdict=VERDICT_REVERT,
-        tput_candidate=301.4,
-        tput_reference=321.1,
-        refused_by="intvty_p50",
-    )
-
-
-@pytest.mark.asyncio
-async def test_an_interactivity_graded_inert_keep_reports_the_change_it_measured(tmp_path, monkeypatch):
-    """Off KEEP the gate leaves ``delta_pct`` empty; the measured P50 change still travels with the result."""
-    from hyperloom.common.gain_math import gain_pct
-    from hyperloom.orchestrator.actions.executors import _integrate_perf_gate as gate
-
-    graded = _interactivity_revert(106.65, 108.97)
-    monkeypatch.setattr(gate, "resolve_graded_comparison", lambda *_a, **_k: graded)
-
-    result, _, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
-
-    assert result["status"] == "kept_inert"
-    assert result["delta_pct"] is None
-    assert result["graded_delta_pct"] == gain_pct(106.65, 108.97)
 
 
 @pytest.mark.asyncio

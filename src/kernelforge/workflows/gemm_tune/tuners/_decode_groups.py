@@ -8,20 +8,21 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, NamedTuple
 
+from hyperloom_common.coerce import to_int
+
+from ..evidence import padded_m
+
 __all__ = ["DispatchGroups", "decode_served_groups", "dispatch_groups"]
 
 
 def decode_served_groups(entry: dict[str, Any], decode_m: Sequence[int]) -> frozenset[tuple[int, int]]:
     """(N, K) groups that logged no decode-band miss while another group did, so their decode lookups hit."""
-    from ..evidence import padded_m
-
     top = max(decode_m)
     groups: set[tuple[int, int]] = set()
     missed: set[tuple[int, int]] = set()
     for key in entry.get("keys") or []:
-        try:
-            m, n, k = int(key["M"]), int(key["N"]), int(key["K"])
-        except (KeyError, TypeError, ValueError):
+        m, n, k = to_int(key.get("M")), to_int(key.get("N")), to_int(key.get("K"))
+        if m is None or n is None or k is None:
             continue
         groups.add((n, k))
         if padded_m(m, n) <= top:

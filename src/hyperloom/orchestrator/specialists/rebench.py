@@ -12,13 +12,13 @@ import asyncio
 import json
 import logging
 import os
-import socket
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.perf_metric import constraint_fields
+from hyperloom.common.ports import pick_server_port
 from ..actions.executors._grid_runner import GridLaunch, GridRecipe, GridStop, GridVariant, VariantResult, run_grid
 from ..actions.executors._workload_envs import (
     BenchmarkTarget,
@@ -31,12 +31,10 @@ log = logging.getLogger(__name__)
 
 
 def _resolve_port(port: int | None) -> int:
-    """Resolve the requested port, using an OS-assigned port for ``None`` or ``0``."""
+    """Resolve the requested port, picking a server port for ``None`` or ``0``."""
     if port not in (None, 0):
         return int(port)
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    return pick_server_port()
 
 
 def _current_leased_cards() -> str:

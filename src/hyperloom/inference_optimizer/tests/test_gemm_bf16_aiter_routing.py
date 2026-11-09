@@ -229,13 +229,15 @@ class TestDtypePairSupport:
         assert not aiter_tuner_support._aiter_moe_dtype_pair_supported("torch.int8", "torch.float4_e2m1fn_x2")
 
 
+def _missed(dispatch: str) -> str:
+    """``dispatch`` followed by aiter's miss line for the same problem and token."""
+    return dispatch + "\n" + dispatch.replace("using 2stage default for", "no tuned FlyDSL config for")
+
+
 class TestWriteFmoeUntunedCsvFromLog:
     def test_writes_one_row_per_problem_and_missed_token(self, tmp_path):
-        """aiter pads a batch's token count before the lookup and logs the padded count: that is the row's key."""
-        missed = [REAL_NO_TUNED_FLYDSL.replace("256, 256, 4096", f"256, {token}, 4096") for token in (4, 512)]
-        tuned = REAL_2STAGE_DEFAULT.replace("256, 256, 4096", "256, 1024, 4096")
         path, report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(
-            _log(tmp_path, "\n".join([*missed, tuned])), tmp_path / "ws"
+            _log(tmp_path, REAL_2STAGE_DEFAULT + "\n" + REAL_NO_TUNED_FLYDSL), tmp_path / "ws"
         )
         rows = [line for line in open(path, encoding="utf-8").read().splitlines() if line]
         assert rows[0].split(",") == [
@@ -252,22 +254,44 @@ class TestWriteFmoeUntunedCsvFromLog:
             "use_g1u1",
             "doweight_stage1",
         ]
-        assert [row.split(",")[0] for row in rows[1:]] == ["4", "512"]
+        assert len(rows) == 2  # header + the one missed token
         assert rows[1] == (
-            "4,4096,512,256,6,ActivationType.Silu,torch.bfloat16,"
+            "256,4096,512,256,6,ActivationType.Silu,torch.bfloat16,"
             "torch.float8_e4m3fn,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0"
         )
         assert report["observed"] == 1
         assert report["tunable"] == 1
         assert report["dropped_unsupported"] == []
 
+    def test_a_problem_whose_lookups_all_hit_yields_no_csv(self, tmp_path):
+        """Every dispatch named its tuned kernels; the dense M sweep is not its demand."""
+        path, report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(
+            _log(tmp_path, REAL_2STAGE_WITH_KERNEL_NAMES), tmp_path / "ws"
+        )
+
+        assert path == ""
+        assert report["observed"] == 1
+        assert report["tunable"] == 0
+
+    def test_a_ck_problem_logged_only_as_default_dispatches_is_tuned_at_those_tokens(self, tmp_path):
+        """aiter prints ``default`` exactly when the lookup found no tuned row; no FlyDSL line need follow."""
+        dispatches = [REAL_2STAGE_DEFAULT.replace(", 256, 256, ", f", 256, {token}, ") for token in (1, 8, 64, 512)]
+        path, report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(
+            _log(tmp_path, "\n".join(dispatches)), tmp_path / "ws"
+        )
+
+        with open(path, encoding="utf-8") as handle:
+            rows = [line for line in handle.read().splitlines() if line][1:]
+        assert sorted(int(row.split(",")[0]) for row in rows) == [1, 8, 64, 512]
+        assert report["tunable"] == 1
+
     def test_drops_pairs_the_tuner_would_reject(self, tmp_path):
         """One unsupported row aborts the whole aiter tuner run, so filter first."""
         log = _log(
             tmp_path,
-            _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2")
+            _missed(_moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2"))
             + "\n"
-            + _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2", expert=129),
+            + _missed(_moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2", expert=129)),
         )
         path, report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(log, tmp_path / "ws")
 
@@ -278,7 +302,7 @@ class TestWriteFmoeUntunedCsvFromLog:
         assert report["dropped_unsupported"] == ["torch.bfloat16/torch.float4_e2m1fn_x2"]
 
     def test_no_tunable_problem_yields_no_csv(self, tmp_path):
-        log = _log(tmp_path, _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2"))
+        log = _log(tmp_path, _missed(_moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2")))
         path, report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(log, tmp_path / "ws")
 
         assert path == ""
@@ -287,7 +311,7 @@ class TestWriteFmoeUntunedCsvFromLog:
 
     def test_unwritable_workspace_costs_only_the_moe_input(self, tmp_path, monkeypatch):
         """A full disk must not take the dense tuners down with the MoE one."""
-        log = _log(tmp_path, _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2"))
+        log = _log(tmp_path, _missed(_moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2")))
 
         def _boom(*_args, **_kwargs):
             raise OSError(28, "No space left on device")

@@ -21,7 +21,8 @@ class SpecialistStatus:
     nothing to test, ``judge_failed`` that it was stopped because judging the branch failed; the branch keeps its slot
     either way. ``unready`` says why its specialist could not be started (its session not built, or its preflight
     failed), empty when it was. ``finished`` says why a third-party agent's run ended of itself (its exit, such as its
-    deadline), the other way such a specialist is not restarted; empty when it did not.
+    deadline), the other way such a specialist is not restarted; empty when it did not. ``exhausted`` is the summary of
+    the last exhausted record of a specialist that gave up finding nothing to test, empty without one.
     """
 
     running: bool
@@ -31,6 +32,7 @@ class SpecialistStatus:
     judge_failed: bool
     unready: str = ""
     finished: str = ""
+    exhausted: str = ""
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,7 @@ class BranchTask:
     direction: str = ""
     agent: str = ""
     deadline: float = 0.0
+    focus: str = ""
     #: The file of an agent branch's share of the session's directions, ``""`` for none.
     plan: str = ""
     #: For a mapping branch, the Arbor agents its map is split among: it runs the first one's dossier pass, and each
@@ -57,9 +60,10 @@ class SpecialistLifecycle(Protocol):
     the specialist's first prompt and every restart prompt. Its ``repair`` is the request an admitted repair branch was
     opened for, started at its intent's parent commit; every prompt of the branch's specialist shows it as the
     branch's task, whatever brief a launch is rebuilt with. Its ``direction`` is the text a user wrote for the branch;
-    every launch and restart prompt shows it as the branch's task, the way ``repair`` is shown. Its ``agent`` names the
-    third-party agent an autonomous branch runs, a git URL (``URL@ref`` for a ref) or a local path, and is empty for a
-    specialist branch. Its ``deadline`` is the clock time (``time.time``) EXPLORE ends at, 0 when the branch has none:
+    every launch and restart prompt shows it as the branch's task, the way ``repair`` is shown. Its ``focus`` is the
+    bottleneck the scheduler opened the branch on, which the brief names, and the branch's task in place of a direction
+    the runtime would deal it. Its ``agent`` names the third-party agent an autonomous branch runs, a git URL
+    (``URL@ref`` for a ref) or a local path, and is empty for a specialist branch. Its ``deadline`` is the clock time (``time.time``) EXPLORE ends at, 0 when the branch has none:
     an agent that signals no keep has its workspace collected ahead of it. A started branch may
     have one test running until ``set_k`` says otherwise, and shrinking a branch to nothing is ``stop``, not
     ``set_k(branch, 0)``. Every process the runtime starts goes through the session's process registry, so the session

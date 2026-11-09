@@ -1035,3 +1035,48 @@ async def test_a_failed_baseline_arm_does_not_block_a_current_best_that_moved_of
     await _fail_prelude_roofline(coord, _PROFILED, _SPLIT_FAILED)
 
     assert await coord.phase_prelude.enqueue_internal_analysis_task(reason="cycle_start") is not None
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_initial_analysis_is_asked_for_again_until_its_keys_run_out(session_dir):
+    """An initial analysis cancelled from outside the run never ran, so PRELUDE waits on a fresh one, a bounded number of times."""
+    from datetime import datetime, timedelta, timezone
+
+    from hyperloom.orchestrator.phases import machine_state as ps
+    from hyperloom.orchestrator.state import task_registry
+    from hyperloom.orchestrator.state.task_registry import TaskSpec
+
+    from .conftest import make_mock_critic_coordinator
+
+    c = make_mock_critic_coordinator(session_dir)
+    state = c.shared_state
+    now = datetime.now(timezone.utc)
+    state.phase = ps.PHASE_PRELUDE
+    state.phase_started_unix = (now - timedelta(minutes=1)).timestamp()
+    state.start_ts = (now - timedelta(minutes=2)).isoformat()
+    state.max_minutes = 96 * 60
+    state.baseline_tput = 100.0
+    try:
+        kind = c.phase_prelude.internal_analysis_kind()
+        cancelled, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind=kind, params={}, idempotency_key="internal-analysis-prelude_initial")
+        )
+        requested = [cancelled.task_id]
+        while state.auto_roofline_pending_task_id or len(requested) == 1:
+            await c.tasks.transition(requested[-1], "cancelled")
+            state.auto_roofline_pending_task_id = requested[-1]
+            await c.phase_machine._release_holds_no_task_will_settle()
+            if not state.auto_roofline_pending_task_id:
+                break
+            assert state.auto_roofline_pending_task_id not in requested
+            assert (await c.tasks.get(state.auto_roofline_pending_task_id)).state == "queued"
+            assert ps.compute_next_phase(state) is None
+            requested.append(state.auto_roofline_pending_task_id)
+            assert len(requested) <= task_registry.RETRY_KEY_ATTEMPTS
+
+        assert len(requested) > 1, "the cancelled initial analysis was not asked for again"
+        assert len(requested) == task_registry.RETRY_KEY_ATTEMPTS
+        assert [t for t in await c.tasks.queued() if t.kind == kind] == []
+        assert ps.compute_next_phase(state) is not None
+    finally:
+        await c.stop()

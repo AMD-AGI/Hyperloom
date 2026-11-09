@@ -42,6 +42,10 @@ FUSION_PRODUCER = "fusion"
 # Per-recipe wall clock.
 DEFAULT_MAX_HOURS = 2.0
 
+#: Held back from a run's deadline for what follows its last campaign: the tree reset (two git
+#: commands bounded at 120 s each in ``shadow_repo``), the keeper's export and the manifest.
+CLOSING_RESERVE_SEC = 300.0
+
 # The loop's campaign config and run state.
 LOOP_CAMPAIGN_STATE = "forge_experiments"
 
@@ -214,6 +218,13 @@ def _safe_artifact_id(value: str, max_length: int = 80) -> str:
     return f"{safe[:prefix_length].rstrip('._-')}_{digest}"
 
 
+def recipe_deadline_unix(run_deadline_unix: float, recipes_left: int, now: float) -> float:
+    """One recipe's even share of what the run has left once the closing reserve is set aside; 0 for no deadline."""
+    if run_deadline_unix <= 0:
+        return 0.0
+    return now + max(0.0, run_deadline_unix - CLOSING_RESERVE_SEC - now) / max(1, recipes_left)
+
+
 @dataclass(frozen=True)
 class CampaignRuntime:
     """The device a campaign runs on, the arch it writes for, the agent runtime its loop uses, and when it must end."""
@@ -223,8 +234,7 @@ class CampaignRuntime:
     model: str = ""
     agent_backend: str = ""
     agent_sandbox_mode: str = ""
-    # The caller's own deadline, 0 for none. A loop sized on DEFAULT_MAX_HOURS alone outlives a caller whose budget is
-    # shorter and is killed before it exports its keeper.
+    # Absolute end of this campaign, 0 for none; the loop otherwise runs for DEFAULT_MAX_HOURS.
     deadline_unix: float = 0.0
 
 

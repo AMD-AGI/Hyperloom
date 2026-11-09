@@ -21,7 +21,7 @@ KEEP_STATUSES: frozenset[str] = frozenset({"kept", "advanced", "kept_inert"})
 #: that attempt reached the bench, and no result an earlier stage returned did.
 RESULT_BENCHED = "benched"
 
-#: Error class of a bench that produced no measurement through no fault of the patch.
+#: Error class of a bench the environment kept from measuring: no verdict on the patch.
 BENCH_UNMEASURED_CLASS = "bench_unmeasured"
 
 #: Task param naming the screen a switched patch goes through instead of a replay of its own; carried on the result.

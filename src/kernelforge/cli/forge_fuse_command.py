@@ -178,7 +178,7 @@ from kernelforge.workflows.forge_fusion.request import (
         "--deadline-unix",
         default=0.0,
         type=float,
-        help="Absolute time every recipe's forge-loop must finish by. 0 leaves each loop its own default budget.",
+        help="Absolute time the run must finish by; each recipe's forge-loop gets its share. 0 leaves each its default.",
     ),
     option_group(
         "smoke",

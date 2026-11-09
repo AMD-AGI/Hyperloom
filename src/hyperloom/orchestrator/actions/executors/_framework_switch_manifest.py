@@ -26,15 +26,8 @@ log = logging.getLogger(__name__)
 # Manifest key on the specialist's done payload / the integrate_patch params.
 MANIFEST_KEY = "framework_switches"
 
-# Default value assigned to a boolean switch whose manifest entry omits one.
+# Value of a switch whose manifest entry omits one: "on" for a flag; a size, count or threshold declares its own.
 DEFAULT_SWITCH_VALUE = "1"
-
-# An env read as a number in an added patch line: sglang ``EnvInt``/``EnvFloat``, ``get_int_env_var``, or a cast.
-_NUMERIC_ENV_READ = re.compile(
-    r"\b([A-Za-z_]\w*)\s*[:=]\s*Env(?:Int|Float)\("
-    r"|\bget_(?:int|float)_env_var\(\s*['\"](\w+)['\"]"
-    r"|\b(?:int|float)\(\s*os\.(?:environ\.get\(|getenv\(|environ\[)\s*['\"](\w+)['\"]"
-)
 
 # Recognised rewrite categories, mirroring ``_framework_rewrite_evidence`` plus the two that are not host-observable
 # and therefore never appear in evidence.
@@ -79,26 +72,17 @@ class _AcceptedSwitches(NamedTuple):
     problems: list[str]
 
 
-#: A value no credential can be: a flag or a count. A token-cache switch reads credential-shaped by name alone.
+# A value no credential can be: a flag or a count. A token-cache switch reads credential-shaped by name alone.
 _LITERAL_VALUE = re.compile(r"(?i)true|false|on|off|yes|no|-?\d{1,9}")
 
 
 def _declared_value(entry: dict[str, Any]) -> str:
+    """The entry's value as an env string, defaulting only when it gives none."""
     value = entry.get("value")
     return str(value).strip() if value not in (None, "") else DEFAULT_SWITCH_VALUE
 
 
-def _numeric_switches(patch_text: str) -> set[str]:
-    """Upper-case env names the patch's added lines read as a number."""
-    return {
-        next(name for name in match.groups() if name).upper()
-        for line in patch_text.splitlines()
-        if line.startswith("+")
-        for match in _NUMERIC_ENV_READ.finditer(line)
-    }
-
-
-def _accept_switches(entries: list[dict[str, Any]], reserved: set[str], numeric: set[str]) -> _AcceptedSwitches:
+def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _AcceptedSwitches:
     """Keep the entries that name a usable rewrite switch, reporting why the rest were dropped."""
     problems: list[str] = []
     accepted: dict[str, dict[str, Any]] = {}
@@ -116,11 +100,9 @@ def _accept_switches(entries: list[dict[str, Any]], reserved: set[str], numeric:
         if upper in BLOCKED_EXTERNAL_ENV_NAMES:
             problems.append(f"dropped {name!r}: reserved benchmark variable, not a rewrite switch")
             continue
-        if is_secret_shaped_env_name(upper) and not _LITERAL_VALUE.fullmatch(_declared_value(entry)):
+        value = _declared_value(entry)
+        if is_secret_shaped_env_name(upper) and not _LITERAL_VALUE.fullmatch(value):
             problems.append(f"dropped {name!r}: credential-shaped name, not a rewrite switch")
-            continue
-        if upper in numeric and entry.get("value") in (None, ""):
-            problems.append(f"dropped {name!r}: the patch reads it as a number, so it needs an explicit value")
             continue
         if upper in reserved:
             problems.append(
@@ -136,7 +118,7 @@ def _accept_switches(entries: list[dict[str, Any]], reserved: set[str], numeric:
             problems.append(f"{name}: unrecognised category {category!r}; recorded as-is")
         accepted[upper] = {
             "switch": upper,
-            "value": str(entry.get("value") or DEFAULT_SWITCH_VALUE),
+            "value": value,
             "category": category,
             "target": str(entry.get("target") or "").strip(),
             "evidence": str(entry.get("evidence") or "").strip(),
@@ -181,7 +163,6 @@ def parse_manifest(
     raw: Any,
     *,
     reserved_env: "frozenset[str] | set[str] | None" = None,
-    patch_text: str = "",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Parse and validate a switch manifest."""
     entries = _manifest_entries(raw)
@@ -196,7 +177,7 @@ def parse_manifest(
         entries = entries[:MAX_SWITCHES]
 
     reserved = {str(k).strip().upper() for k in (reserved_env or set())}
-    accepted = _accept_switches(entries, reserved, _numeric_switches(patch_text))
+    accepted = _accept_switches(entries, reserved)
     switches = accepted.by_name
     problems.extend(accepted.problems)
     problems.extend(_resolve_edge_references(switches))
@@ -448,6 +429,15 @@ def leave_one_out_variants(
     return variants
 
 
+def unattributed_arms(variants: list[dict[str, Any]], pending: set[str]) -> list[dict[str, Any]]:
+    """Keep the lever arms whose lever is in ``pending``, and the combination arm while any of its levers is."""
+    return [
+        v
+        for v in variants
+        if pending.intersection([v["framework_lever"]] if v["framework_lever"] else v["framework_lever_bundle"])
+    ]
+
+
 def summarize(switches: list[dict[str, Any]], problems: list[str]) -> str:
     """Render a one-block summary of a parsed manifest for a log or a result."""
     if not switches and not problems:
@@ -484,6 +474,7 @@ __all__ = [
     "switch_env",
     "transitive_closure",
     "unarmed_env_reads",
+    "unattributed_arms",
 ]
 
 
@@ -494,18 +485,17 @@ def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
     on; dormant levers across patches get their own round (:func:`dormant_lever_bundle`).
     """
     rows = _lever_rows(shared_state)
-    pending = [row for row in rows if row.get("attributed_gain_pct") is None]
-    dormant = [row for row in pending if not row.get("default_on")]
-    active = [row for row in pending if row.get("default_on")]
-    payload: list[dict[str, Any]] = []
+    # Arms are built over every registered lever, so attribution only picks which run, never which envs they set.
+    pending = {row["switch"] for row in rows if row.get("attributed_gain_pct") is None}
+    dormant = [row for row in rows if not row.get("default_on")]
     decomposable = [row for patch in _by_patch(dormant) if len(patch) > 1 for row in patch]
+    payload: list[dict[str, Any]] = []
     for variant in additive_variants(decomposable):
         if variant["framework_lever"]:
             payload.append({**variant, "framework_lever_source": "additive"})
-    if active:
-        for variant in leave_one_out_variants(active):
-            payload.append({**variant, "framework_lever_source": LEAVE_ONE_OUT})
-    return payload
+    for variant in leave_one_out_variants([row for row in rows if row.get("default_on")]):
+        payload.append({**variant, "framework_lever_source": LEAVE_ONE_OUT})
+    return unattributed_arms(payload, pending)
 
 
 def dormant_lever_bundle(shared_state: Any) -> dict[str, Any] | None:

@@ -253,8 +253,8 @@ loads them and derives `PATH` / `LD_LIBRARY_PATH` from `ROCM_PATH` /
 |------------------------|------------------|--------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
 | `USER_DATA_PATH`       | recommended      | `/workspace/hyperloom` if `/workspace` is writable, else `<cwd>/session` | Writable root for session dirs, `runtime/`, `logs/`, optimizer artifacts. Bare-metal hosts without a writable `/workspace` take the second form, which is also what setup offers. |
 | `REPO_ROOT`            | rarely           | auto-detected from script location               | This Hyperloom checkout. Locates `.env`, skills, scripts.                                                        |
-| `KERNEL_AGENT_ENV`     | rarely           | `$USER_DATA_PATH/runtime/kernel-agent.env.sh`    | Output of `install.sh`; exports resolved paths and LLM aliases.                                                  |
-| `HYPERLOOM_RUNTIME_DIR`| rarely           | `$USER_DATA_PATH/runtime`                        | Shared runtime tree (env files, GEAK config, Recipe KB bookkeeping).                                             |
+| `KERNEL_AGENT_ENV`     | rarely           | `${TMPDIR:-/tmp}/hyperloom-<uid>-<key>/kernel-agent.env.sh` | Output of `install.sh`; exports resolved paths, LLM aliases and the Anthropic credentials. Kept on the container's own disk in a mode-`0700` directory, never under `USER_DATA_PATH`; see [Environment variables](environment-variables.md). |
+| `HYPERLOOM_RUNTIME_DIR`| rarely           | `$USER_DATA_PATH/runtime`                        | Shared runtime tree (GEAK config, Recipe KB bookkeeping); no credentials.                                        |
 
 ### Dependency checkout variables
 

@@ -289,7 +289,7 @@ def test_every_dispatch_group_keeps_its_rows_at_high_concurrency(tmp_path, conc)
 
 
 def test_a_group_whose_decode_lookups_already_hit_pays_no_band(tmp_path, monkeypatch):
-    # S1 GLM-5.3 conc=10: N=7168 logged decode misses, so decode ran and was logged; N=128/2624 logged none.
+    # conc=10: N=7168 logged decode misses, so decode ran and was logged; N=128 and N=2624 logged none.
     monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "9")
     keys = [
         {"M": 16639, "N": 2624, "K": 6144, "requests": 71},

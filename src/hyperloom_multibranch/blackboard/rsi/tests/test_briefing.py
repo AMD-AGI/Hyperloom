@@ -1,0 +1,951 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The full startup brief: what was tried, this session's lessons, and what other sessions left, under a cap."""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import re
+from pathlib import Path
+
+import pytest
+from hyperloom_kb import RemoteReadResult
+
+from hyperloom.contracts.measurement import REPRODUCED, AttachmentRef, Purpose, TestKind, TestRequest
+from hyperloom.contracts.recipe import (
+    ComponentChange,
+    ComponentPatches,
+    ConfigDelta,
+    KernelArtifact,
+    KernelKind,
+    LaunchConfig,
+    PatchRef,
+    Recipe,
+    RecipeDelta,
+)
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, UnknownRequest, Writer
+from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX
+from hyperloom_multibranch.contracts.blackboard.peers import BranchLogEntry, BranchLogType, IntentLayer, Verdict
+from hyperloom_multibranch.contracts.blackboard.records import (
+    BaselineRecord,
+    Learning,
+    LineageEvent,
+    BlackboardSnapshot,
+    MapDirection,
+    StartupBrief,
+    TestRecord,
+)
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LearningKind, LineageKind
+from hyperloom_multibranch.blackboard.knowledge.learning_recall import LearningRecall
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.knowledge.recall import (
+    INTERACTIVITY_OBJECTIVE,
+    THROUGHPUT_OBJECTIVE,
+    IdentityIndex,
+)
+from hyperloom_multibranch.blackboard.knowledge.tests.fakes import (
+    FakeExperienceReader,
+    FakeExport,
+    completed_read,
+    experience_summary,
+)
+from hyperloom_multibranch.contracts.blackboard.records import PeerReplay, WarmReplay
+from hyperloom_multibranch.blackboard.knowledge.reference_leads import ReferenceLead
+from hyperloom_multibranch.blackboard.knowledge.warm_start import (
+    PATCH_REFERENCE,
+    PreparedReplay,
+    ReplayReference,
+    ReplayRefusal,
+    WarmLead,
+)
+from hyperloom_multibranch.blackboard.knowledge.lessons import clipped
+from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, RetrievalLog
+from hyperloom_multibranch.blackboard.rsi import briefing as briefing_module
+from hyperloom_multibranch.blackboard.rsi.briefing import (
+    KNOWN_DEFECT,
+    ON_HEAD,
+    CrossSessionBriefing,
+    RecallCache,
+    SessionBriefs,
+)
+from hyperloom_multibranch.blackboard.rsi.cases import CasePool, PoolEntry
+from hyperloom_multibranch.blackboard.rsi.tests.repos import FakeRepo
+from hyperloom_multibranch.blackboard.tests.factories import (
+    START,
+    FakeClock,
+    delta,
+    intent,
+    judgement,
+    profile,
+    request,
+    result,
+)
+from hyperloom_multibranch.blackboard.tests.sessions import METRIC, SPLIT_KV, Writers, scripted_session
+from hyperloom_multibranch.blackboard.tools import (
+    FOCUS_BRANCHES,
+    FOCUS_HISTORY_TITLE,
+    FOCUS_LINE,
+    LINE_CHARS,
+    MAP_TITLE,
+    MAX_LINES,
+    render_brief,
+)
+from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
+
+
+SAME = {
+    "model": "deepseek-ai/DeepSeek-R1",
+    "gpu": "mi355x",
+    "framework": "vllm",
+    "tp": 8,
+    "conc": 64,
+    "bottleneck": "attention",
+    "isl": 1024,
+    "osl": 1024,
+}
+LEAD = WarmLead(
+    canonical_id="inference:older",
+    session_id="older",
+    scope={},
+    gain_pct=10.0,
+    best_throughput=1100.0,
+    server_args="--enable-expert-parallel",
+    envs={},
+    replayable=True,
+    pitfalls=("fp8 kv cache fails accuracy",),
+    what_failed=("block size 32 regressed",),
+)
+
+
+def _recalled(experience_id: str, decision: str, outcome: float, gpu: str = "mi355x") -> dict[str, object]:
+    identity = {**SAME, "gpu": gpu}
+    return experience_summary(experience_id, identity, decision=decision, outcome=outcome, change="--block-size 16")
+
+
+def _reader(*experiences: dict[str, object]) -> FakeExperienceReader:
+    return FakeExperienceReader(completed_read(*experiences))
+
+
+class _WithExtraFailure:
+    """The blackboard, with one more failed split-kv test on ``c1``."""
+
+    def __init__(self, blackboard: LocalBlackboard) -> None:
+        self.blackboard = blackboard
+
+    async def startup_brief(self, start_commit: str) -> StartupBrief:
+        return await self.blackboard.startup_brief(start_commit)
+
+    async def snapshot(self) -> BlackboardSnapshot:
+        snapshot = await self.blackboard.snapshot()
+        again = dataclasses.replace(SPLIT_KV, parent_commit="c1")
+        slower = judgement(-1.0, ("r9",), verdict=Verdict.REGRESSED)
+        extra = TestRecord(request("r9", again), result("r9"), slower, Conclusion.RECORDED_ONLY)
+        return dataclasses.replace(snapshot, records=(*snapshot.records, extra))
+
+
+async def test_the_brief_holds_this_sessions_lessons_and_both_kinds_of_recall(tmp_path: Path) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    reader = _reader(
+        _recalled("exp-faster", "keep", 1100.0),
+        _recalled("exp-slower", "revert", 950.0),
+        _recalled("exp-elsewhere", "keep", 1200.0, gpu="mi300x"),
+    )
+    briefing = CrossSessionBriefing(
+        _WithExtraFailure(blackboard),
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        warm=(LEAD,),
+        experiences=reader,
+        metric=METRIC,
+        focus="attention",
+        branch="s3",
+    )
+
+    brief = await briefing.startup_brief("c1")
+
+    assert {item.request_id for item in brief.tried} == {"r1", "r2", "r3", "r4", "r5"}
+    assert brief.lessons == (
+        "this session: attention / split kv failed 2 times on the states this one builds on",
+        "prior: --block-size 16: revert -5.00% [exp-slower]",
+        "to re-verify: --block-size 16: keep +20.00% (gpu differ) [exp-elsewhere]",
+        "inference:older: fp8 kv cache fails accuracy",
+        "inference:older: block size 32 regressed",
+    )
+    assert brief.leads == (
+        "recipe: inference:older: +10.00% `--enable-expert-parallel` [older]",
+        "prior: --block-size 16: keep +10.00% [exp-faster]",
+    )
+
+
+async def test_a_reference_launch_is_a_lead_after_the_recipe_kbs_champions_and_before_the_priors(
+    tmp_path: Path,
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    reference = ReferenceLead(
+        "dsr1-fp8-mi355x-vllm",
+        "benchmarks/single_node/fixed_seq_len/dsr1_fp8_mi355x_vllm.sh",
+        "deepseek-ai/DeepSeek-R1",
+        "mi355x",
+        "vllm",
+        "fp8",
+        "rocm/vllm:v0.11",
+        "ISL 1024/OSL 1024 at TP 8, conc 4-64",
+    )
+    reader = _reader(_recalled("exp-faster", "keep", 1100.0))
+    briefs = SessionBriefs(blackboard, warm=(LEAD,), references=(reference,), experiences=reader, metric=METRIC)
+
+    brief = await briefs.for_branch("s3", "attention").startup_brief("c1")
+
+    assert brief.leads == (
+        "recipe: inference:older: +10.00% `--enable-expert-parallel` [older]",
+        f"reference: {reference.describe()}",
+        "prior: --block-size 16: keep +10.00% [exp-faster]",
+    )
+
+
+async def test_the_cap_keeps_the_most_specific_items(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    monkeypatch.setattr(briefing_module, "MAX_BRIEF_CHARS", 150)
+    briefing = CrossSessionBriefing(
+        _WithExtraFailure(blackboard), recalls=RecallCache(), champions={}, refused={}, warm=(LEAD,)
+    )
+
+    brief = await briefing.startup_brief("c1")
+
+    assert len(brief.lessons) == 1 and brief.lessons[0].startswith("this session:")
+    assert brief.leads == ("recipe: inference:older: +10.00% `--enable-expert-parallel` [older]",)
+
+
+async def _reproduced_on_the_root(root: Path, pool: CasePool, diagnosis: str) -> None:
+    """A past session's case of ``diagnosis`` in ``pool``, and the repro test of the session at ``root`` that ran it on
+    the root ``c0``, where it reproduced."""
+
+    found = profile()
+    entry = PoolEntry(
+        "#!/bin/sh\nexit 1\n",
+        diagnosis,
+        "past-1",
+        "c1",
+        "sha256:" + "a" * 64,
+        found.model,
+        found.framework,
+        found.framework_version,
+        found.hardware,
+        START,
+    )
+    pool.write(entry)
+    toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    case = (AttachmentRef(FIX_CASE_ID, "dir", entry.case_id),)
+    repro = TestRequest(
+        TestKind.REPRO, Purpose.REPRO, INTEGRATION_BRANCH, "c0", RecipeDelta(), attachments=case, request_id="p9"
+    )
+    await toolbox.write_request(repro)
+    await toolbox.write_result(dataclasses.replace(result("p9"), repro_verdict=REPRODUCED))
+
+
+async def test_a_known_defect_is_clipped_as_every_lesson_is_so_a_long_diagnosis_leaves_the_rest_of_the_brief(
+    tmp_path: Path,
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    pool = CasePool(tmp_path / "cases")
+    diagnosis = "rope_theta is read as a quarter of its value, so greedy answers drift; " * 60
+    await _reproduced_on_the_root(tmp_path / "blackboard", pool, diagnosis)
+
+    brief = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, warm=(LEAD,), cases=pool
+    ).startup_brief("c1")
+    without = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, warm=(LEAD,)
+    ).startup_brief("c1")
+
+    assert len(diagnosis) > briefing_module.MAX_BRIEF_CHARS
+    assert brief.lessons == (clipped(f"{KNOWN_DEFECT} past-1 c1: {diagnosis.strip()}"), *without.lessons)
+    assert brief.leads == without.leads != ()
+
+
+async def test_a_champion_that_removes_an_option_of_the_resolved_launch_says_so_in_its_lead(tmp_path: Path) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    removing = dataclasses.replace(LEAD, remove_args=("--enable-linear-replayssm-spec",))
+    briefing = CrossSessionBriefing(blackboard, recalls=RecallCache(), champions={}, refused={}, warm=(removing,))
+
+    brief = await briefing.startup_brief("c1")
+
+    assert brief.leads[0] == (
+        "recipe: inference:older: +10.00% `--enable-expert-parallel` without `--enable-linear-replayssm-spec` [older]"
+    )
+
+
+async def test_the_first_batch_brief_is_cross_session_only(tmp_path: Path) -> None:
+    clock = FakeClock()
+
+    def as_role(role: Role) -> LocalBlackboard:
+        return LocalBlackboard(tmp_path / "fresh", Writer(role, role.value), clock=clock)
+
+    await as_role(Role.SCHEDULER).write_session_profile(profile())
+    await as_role(Role.SCHEDULER).record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await as_role(Role.GATE).write_baseline(BaselineRecord("c0", {METRIC: 1000.0}, {METRIC: 0.8}, {METRIC: 1.6}, ()))
+    briefing = CrossSessionBriefing(
+        as_role(Role.OBSERVER),
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        warm=(LEAD,),
+        experiences=_reader(_recalled("exp-faster", "keep", 1100.0)),
+    )
+
+    brief = await briefing.startup_brief("c0")
+
+    assert brief.tried == ()
+    assert brief.lessons == ("inference:older: fp8 kv cache fails accuracy", "inference:older: block size 32 regressed")
+    assert brief.leads == (
+        "recipe: inference:older: +10.00% `--enable-expert-parallel` [older]",
+        "prior: --block-size 16: keep +10.00% [exp-faster]",
+    )
+
+
+async def test_a_recalled_summary_without_conditions_is_sorted_by_the_index_the_briefing_holds(
+    tmp_path: Path,
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    bare = {key: value for key, value in _recalled("exp-faster", "keep", 1100.0).items() if key != "identity"}
+    index = IdentityIndex(FakeExport([{"id": "exp-faster", "identity": SAME, "objective": THROUGHPUT_OBJECTIVE}]))
+
+    with_index = CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, experiences=_reader(bare), identities=index
+    )
+    without = CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, experiences=_reader(bare)
+    )
+
+    assert (await with_index.startup_brief("c0")).leads == ("prior: --block-size 16: keep +10.00% [exp-faster]",)
+    assert without.identities is None
+    assert (await without.startup_brief("c0")).leads == ()
+
+
+async def test_an_experience_of_the_other_kind_of_session_is_only_a_lesson_to_reverify_naming_its_objective(
+    tmp_path: Path,
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    agentx = {"id": "exp-agentx", "identity": SAME, "objective": INTERACTIVITY_OBJECTIVE}
+    faster = {"id": "exp-faster", "identity": SAME, "objective": THROUGHPUT_OBJECTIVE}
+    reader = _reader(_recalled("exp-agentx", "keep", 1120.0), _recalled("exp-faster", "keep", 1100.0))
+
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        experiences=reader,
+        identities=IdentityIndex(FakeExport([agentx, faster])),
+    )
+    brief = await briefing.startup_brief("c0")
+
+    assert brief.leads == ("prior: --block-size 16: keep +10.00% [exp-faster]",)
+    assert brief.lessons[-1] == (
+        "to re-verify: --block-size 16: keep +12.00% on e2e_interactivity@v1 (objective differ) [exp-agentx]"
+    )
+
+
+async def test_a_lead_with_a_replay_says_how_to_replay_it_and_the_briefing_replays_it_on_the_branch_head(
+    tmp_path: Path,
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    unpacked = "the record holds no patch or kernel files"
+    prepared = PreparedReplay(LEAD.canonical_id, None, LaunchConfig("--enable-expert-parallel"), unpacked)
+    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"))
+    repo = FakeRepo({"s3": "c3"}, {"c3": head})
+    warm = (dataclasses.replace(LEAD, replay=prepared),)
+    briefing = CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, warm=warm, branch="s3", repo=repo
+    )
+
+    brief = await briefing.startup_brief("c1")
+    replayed = await briefing.warm_replay(LEAD.canonical_id)
+
+    assert (
+        "recipe: inference:older: +10.00% `--enable-expert-parallel` [older]; "
+        f"replay on your head with blackboard_replay: its launch config only, {unpacked}"
+    ) in brief.leads
+    assert replayed == WarmReplay(
+        LEAD.canonical_id,
+        "c3",
+        RecipeDelta(config=ConfigDelta(server_args="--enable-expert-parallel", remove_args=("--max-num-seqs",))),
+        IntentLayer.CONFIG,
+        unpacked,
+    )
+    assert await briefing.warm_replay("inference:none") is None
+    no_repo = CrossSessionBriefing(blackboard, recalls=RecallCache(), champions={}, refused={}, warm=warm, branch="s3")
+    assert await no_repo.warm_replay(LEAD.canonical_id) is None
+
+
+async def test_the_briefing_reads_a_patch_a_launch_only_replay_leaves_out_whatever_the_head(tmp_path: Path) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    image, upstream = "sha256:" + "b" * 64, "e" * 40
+    patch = ReplayReference(PATCH_REFERENCE, "sglang/gate.patch", "d" * 64, image, "sglang", upstream, "+gate\n")
+    prepared = PreparedReplay(LEAD.canonical_id, None, LaunchConfig("--enable-expert-parallel"), "refused", (patch,))
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        warm=(dataclasses.replace(LEAD, replay=prepared),),
+        branch="s3",
+    )
+
+    assert await briefing.warm_reference(LEAD.canonical_id, "sglang/gate.patch") == "+gate\n"
+    assert await briefing.warm_reference(LEAD.canonical_id, "other.patch") is None
+    assert await briefing.warm_reference("inference:none", "sglang/gate.patch") is None
+
+
+def _champion_merged(unpacked: str) -> tuple[tuple[WarmLead, ...], FakeRepo]:
+    """The scripted session's ``c1`` as the warm-start champion's recipe, and ``i1``, which merged it, tuned past it."""
+
+    image = "sha256:" + "a" * 64
+    prepared = PreparedReplay(LEAD.canonical_id, None, LaunchConfig("--enable-expert-parallel"), unpacked)
+    recipes = {
+        "c0": Recipe(image, LaunchConfig("--max-num-seqs 128")),
+        "c1": Recipe(image, LaunchConfig("--enable-expert-parallel")),
+        "i1": Recipe(image, LaunchConfig("--enable-expert-parallel --max-num-seqs 256")),
+    }
+    return (dataclasses.replace(LEAD, replay=prepared),), FakeRepo({"s3": "i1"}, recipes)
+
+
+async def test_a_champion_the_start_commit_builds_on_is_named_on_the_head_and_not_replayed_again(
+    tmp_path: Path,
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    unpacked = "the record holds no patch or kernel files"
+    warm, repo = _champion_merged(unpacked)
+    briefing = CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, warm=warm, branch="s3", repo=repo
+    )
+
+    on_head, on_root = await briefing.startup_brief("i1"), await briefing.startup_brief("c0")
+
+    assert on_head.lessons[0] == f"{ON_HEAD}: recipe inference:older: +10.00% `--enable-expert-parallel` [older]"
+    assert not [lead for lead in on_head.leads if lead.startswith("recipe:")]
+    assert on_root.leads[0] == (
+        "recipe: inference:older: +10.00% `--enable-expert-parallel` [older]; "
+        f"replay on your head with blackboard_replay: its launch config only, {unpacked}"
+    )
+    with pytest.raises(ValueError, match="your head i1 builds on c1, which is its recipe"):
+        await briefing.warm_replay(LEAD.canonical_id)
+
+
+async def test_a_replay_preludes_check_refused_is_named_in_the_brief_and_blackboard_replay_answers_with_it(
+    tmp_path: Path,
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    warm, repo = _champion_merged("the record holds no patch or kernel files")
+    refusal = ReplayRefusal(
+        "online_tuning_unsupported", "PYTORCH_TUNABLEOP_ENABLED=1 without PYTORCH_TUNABLEOP_TUNING=0"
+    )
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        warm=(dataclasses.replace(warm[0], refusal=refusal),),
+        branch="s3",
+        repo=repo,
+    )
+
+    brief = await briefing.startup_brief("c0")
+
+    assert brief.leads[0] == (
+        "recipe: inference:older: +10.00% `--enable-expert-parallel` [older]; not replayable here: "
+        "online_tuning_unsupported (PYTORCH_TUNABLEOP_ENABLED=1 without PYTORCH_TUNABLEOP_TUNING=0)"
+    )
+    with pytest.raises(ValueError, match="is not replayable here: online_tuning_unsupported"):
+        await briefing.warm_replay(LEAD.canonical_id)
+
+
+async def test_the_session_reads_each_commits_recipe_once_to_find_the_champions_on_a_head(tmp_path: Path) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    warm, repo = _champion_merged("the record holds no patch or kernel files")
+    briefs = SessionBriefs(blackboard, warm=warm, repo=repo)
+
+    first = await briefs.text("s3", "i1")
+    again = await briefs.text("s4", "i1")
+
+    assert first == again and ON_HEAD in first
+    assert sorted(repo.reads) == ["c0", "c1", "i1"]
+
+
+async def test_another_branchs_tested_change_is_replayed_on_the_branch_head_as_it_was_tested(tmp_path: Path) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"))
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        branch="s3",
+        repo=FakeRepo({"s3": "c3"}, {"c3": head}),
+    )
+
+    replayed = await briefing.peer_replay("r1")
+
+    tested = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
+    assert replayed == PeerReplay("r1", "s1", "c3", tested, IntentLayer.CONFIG)
+
+
+async def test_a_peer_replay_names_the_heads_kernel_its_change_takes_the_place_of(tmp_path: Path) -> None:
+    root = tmp_path / "blackboard"
+    blackboard = await scripted_session(root, FakeClock())
+    toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    own, other, theirs = (
+        KernelArtifact(KernelKind.GEMM, target, f"kernel/gemm/{name}.csv", digit * 64)
+        for target, name, digit in (("qkv_proj", "head", "b"), ("moe", "moe", "c"), ("qkv_proj", "peer", "d"))
+    )
+    await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(theirs,))))
+    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(own, other))
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        branch="s3",
+        repo=FakeRepo({"s3": "c3"}, {"c3": head}),
+    )
+
+    replayed = await briefing.peer_replay("r7")
+
+    assert replayed.replaces == (own,)
+    assert replayed.layer is IntentLayer.KERNEL
+
+
+async def test_a_peer_replay_gives_a_component_new_to_the_head_the_upstream_its_test_was_made_on(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "blackboard"
+    blackboard = await scripted_session(root, FakeClock())
+    toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    sglang, patch = "https://github.com/sgl-project/sglang", PatchRef("patch/sglang/decode.patch", "e" * 64)
+    tested = RecipeDelta(components=(ComponentChange("sglang", add_patches=(patch,)),))
+    await toolbox.write_request(request("r7", SPLIT_KV, tested))
+    plain = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"))
+    patched = dataclasses.replace(plain, components=(ComponentPatches("sglang", sglang, "f" * 40),))
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        branch="s3",
+        repo=FakeRepo({"s3": "c3"}, {"c3": plain, "c0": patched}),
+    )
+
+    replayed = await briefing.peer_replay("r7")
+
+    named = ComponentChange("sglang", upstream_ref="f" * 40, upstream_repo=sglang, add_patches=(patch,))
+    assert (replayed.delta.components, replayed.layer) == ((named,), IntentLayer.SOURCE)
+
+
+async def test_a_peer_replay_says_why_when_there_is_nothing_to_replay_on_the_branch_head(tmp_path: Path) -> None:
+    root = tmp_path / "blackboard"
+    blackboard = await scripted_session(root, FakeClock())
+    toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    dropped = RecipeDelta(remove_kernels=("kernel/gemm/old.csv",))
+    await toolbox.write_request(request("r8", SPLIT_KV, dropped))
+    await toolbox.write_request(request("r9", SPLIT_KV, RecipeDelta()))
+    plain = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"))
+    tuned = dataclasses.replace(plain, launch=LaunchConfig("--max-num-seqs 256"))
+
+    def replaying(branch: str, recipe: Recipe | None = plain) -> CrossSessionBriefing:
+        repo = FakeRepo({branch: "c3"}, {"c3": recipe}) if recipe is not None else None
+        return CrossSessionBriefing(
+            blackboard, recalls=RecallCache(), champions={}, refused={}, branch=branch, repo=repo
+        )
+
+    for briefing, request_id, why in (
+        (replaying("s3"), "r8", "no longer applies to your head c3: the recipe loads no kernel artifacts"),
+        (replaying("s3"), "r9", "r9 was measured without a change"),
+        (replaying("s1"), "r1", "r1 is this branch's own test"),
+        (replaying("s3", tuned), "r1", "your head c3 already has the change r1 tested"),
+        (replaying("s3", None), "r1", "reads no experiment repository"),
+        (
+            CrossSessionBriefing(
+                blackboard,
+                recalls=RecallCache(),
+                champions={},
+                refused={},
+                branch="s3",
+                repo=FakeRepo({"s3": "c0"}, {"c0": plain}),
+            ),
+            "r1",
+            "on your head c0",
+        ),
+    ):
+        with pytest.raises(ValueError, match=re.escape(why)):
+            await briefing.peer_replay(request_id)
+    with pytest.raises(UnknownRequest):
+        await replaying("s3").peer_replay("r404")
+
+
+async def test_recalled_leads_take_turns_by_the_layer_they_change(tmp_path: Path) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+
+    def kept(experience_id: str, outcome: float, family: str) -> dict[str, object]:
+        summary = experience_summary(experience_id, SAME, outcome=outcome, change=f"change {experience_id}")
+        return {**summary, "change_family": family}
+
+    reader = _reader(
+        kept("exp-c1", 1100.0, "config_variant"),
+        kept("exp-c2", 1080.0, "config_variant"),
+        kept("exp-c3", 1060.0, "config_variant"),
+        kept("exp-s1", 1050.0, "source_patch"),
+    )
+
+    brief = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, experiences=reader
+    ).startup_brief("c0")
+
+    assert brief.leads == (
+        "prior (config): change exp-c1: keep +10.00% [exp-c1]",
+        "prior (source): change exp-s1: keep +5.00% [exp-s1]",
+        "prior (config): change exp-c2: keep +8.00% [exp-c2]",
+        "prior (config): change exp-c3: keep +6.00% [exp-c3]",
+    )
+
+
+async def test_the_lessons_hold_what_this_session_and_past_sessions_learnt_about_the_focus(tmp_path: Path) -> None:
+    clock = FakeClock()
+    blackboard = await scripted_session(tmp_path / "blackboard", clock)
+    s2 = LocalBlackboard(tmp_path / "blackboard", Writer(Role.SPECIALIST_RUNTIME, "s2", "s2"), clock=clock)
+    learnt = await s2.append_learning(
+        Learning(
+            "s2", LearningKind.PITFALL, "split kv regresses when attention is not the bottleneck", request_ids=("r2",)
+        )
+    )
+    past = {
+        "experience_id": "exp-past",
+        "source_run_id": "sess-0",
+        "identity": {**SAME, "tp": 4},
+        "change_summary": "attention split kv pays only past conc 128",
+        "decision": "measured",
+    }
+    log = tmp_path / LEARNINGS_LOG
+    recall = LearningRecall(FakeExperienceReader(completed_read(past)), log=RetrievalLog(log))
+
+    briefing = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        focus="attention split kv",
+        branch="s3",
+        learnings=recall,
+    )
+    brief = await briefing.startup_brief("c0")
+    alone = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, focus="attention split kv"
+    ).startup_brief("c0")
+    (logged,) = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    assert (logged["branch"], logged["source"], logged["query"]) == ("s3", "brief", "attention split kv")
+    assert (logged["here"], logged["past"]) == ([learnt.entry_id], ["exp-past"])
+
+    assert (
+        f"learnt here: [s2, pitfall about attention / split kv] split kv regresses when attention is not the "
+        f"bottleneck (r2: regressed -2.00%, recorded_only) [{learnt.entry_id}]"
+    ) in brief.lessons
+    assert (
+        "learnt before: [sess-0, tp differ, measured] attention split kv pays only past conc 128 [exp-past]"
+        in brief.lessons
+    )
+    assert not any(lesson.startswith("learnt before") for lesson in alone.lessons)
+    assert any(lesson.startswith("learnt here") for lesson in alone.lessons)
+
+
+async def test_the_brief_logs_the_leads_it_kept_under_its_cap_with_the_change_each_suggests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    log = tmp_path / LEARNINGS_LOG
+    recall = LearningRecall(FakeExperienceReader(completed_read()), log=RetrievalLog(log))
+    reader = _reader(_recalled("exp-faster", "keep", 1100.0))
+    full = CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        warm=(LEAD,),
+        experiences=reader,
+        branch="s3",
+        learnings=recall,
+    )
+
+    await full.startup_brief("c0")
+    monkeypatch.setattr(briefing_module, "MAX_BRIEF_CHARS", 100)
+    await full.startup_brief("c0")
+    first, capped = [json.loads(line)["leads"] for line in log.read_text(encoding="utf-8").splitlines()]
+
+    recipe = {"ref": "inference:older", "change": "--enable-expert-parallel"}
+    assert first == [recipe, {"ref": "exp-faster", "change": "--block-size 16"}]
+    assert capped == [recipe]
+
+
+async def test_without_a_kb_or_a_profile_or_a_completed_read_nothing_is_recalled(tmp_path: Path) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    failed = FakeExperienceReader(RemoteReadResult("", "unavailable", "", (), ("planner_timeout",)))
+
+    class _NoProfile(_WithExtraFailure):
+        async def snapshot(self) -> BlackboardSnapshot:
+            return dataclasses.replace(await self.blackboard.snapshot(), profile=None)
+
+    unavailable = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, experiences=failed
+    ).startup_brief("c1")
+    no_profile = await CrossSessionBriefing(
+        _NoProfile(blackboard), recalls=RecallCache(), champions={}, refused={}, experiences=_reader()
+    ).startup_brief("c1")
+    no_kb = await CrossSessionBriefing(blackboard, recalls=RecallCache(), champions={}, refused={}).startup_brief("c1")
+
+    assert unavailable.lessons == unavailable.leads == no_profile.leads == no_kb.leads == ()
+
+
+class _Changing(_WithExtraFailure):
+    """The blackboard, which gets the extra failure once ``extra`` is set."""
+
+    extra = False
+
+    async def snapshot(self) -> BlackboardSnapshot:
+        return await super().snapshot() if self.extra else await self.blackboard.snapshot()
+
+
+async def test_a_brief_built_again_shows_the_blackboard_then_and_reads_the_kb_once(tmp_path: Path) -> None:
+    changing = _Changing(await scripted_session(tmp_path / "blackboard", FakeClock()))
+    reader = _reader(_recalled("exp-faster", "keep", 1100.0))
+    briefs = SessionBriefs(changing, experiences=reader, metric=METRIC)
+    repeated = "this session: attention / split kv failed 2 times on the states this one builds on"
+
+    briefs.for_branch("s3", "attention")
+    first = await briefs.text("s3", "c1")
+    changing.extra = True
+    later = await briefs.text("s3", "c1")
+
+    assert repeated not in first and repeated in later
+    assert "prior: --block-size 16: keep +10.00% [exp-faster]" in later
+    ((_, context, _),) = reader.calls
+    assert (context["observations"]["bottleneck"], context["observations"]["branch"]) == ("attention", "s3")
+
+
+async def test_a_read_that_did_not_complete_is_read_again_at_the_next_brief(tmp_path: Path) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    failed = FakeExperienceReader(RemoteReadResult("", "unavailable", "", (), ("planner_timeout",)))
+    briefs = SessionBriefs(blackboard, experiences=failed)
+
+    await briefs.text("s3", "c1")
+    await briefs.text("s3", "c1")
+
+    assert len(failed.calls) == 2
+
+
+async def test_the_brief_names_the_focus_the_scheduler_opened_the_branch_on_and_keeps_it_at_a_restart(
+    tmp_path: Path,
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    briefs = SessionBriefs(blackboard)
+    briefs.for_branch("s3", "gemm")
+
+    restarted, unfocused = await briefs.text("s3", "c1"), await briefs.text("s4", "c1")
+
+    assert restarted.splitlines()[:2] == ["Startup brief from c1", f"{FOCUS_LINE}gemm"]
+    assert not any(line.startswith(FOCUS_LINE) for line in unfocused.splitlines())
+
+
+async def test_each_branch_keeps_its_focus_and_every_branch_shares_one_index_and_cache(tmp_path: Path) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    briefs = SessionBriefs(blackboard, experiences=_reader())
+
+    briefs.for_branch("s3", "attention")
+    s3, s4 = briefs.for_branch("s3"), briefs.for_branch("s4")
+
+    assert (s3.focus, s4.focus) == ("attention", "")
+    assert s3.recalls is s4.recalls and s3.identities is s4.identities
+
+
+ACT_MUL = "_act_mul_and_dynamic_fp8_group_quant_kernel"
+GAVE_UP = "gave_up: its specialist gave up: its sessions in a row found nothing to test"
+FUSED = {
+    "why": "no_ceiling_above_bar",
+    "detail": "already fused, at 5 TB/s",
+    "reopen_if": "a profile shows it above 3%",
+}
+
+
+async def _stopped_on(w: Writers, branch: str, focus: str, tests: tuple[str, ...] = (), **exhausted: str) -> None:
+    """``branch`` opened on ``c1`` with ``focus``, its ``tests`` measured, its ``exhausted`` record written, stopped."""
+
+    scheduler = w.as_role(Role.SCHEDULER)
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="c1", focus=focus))
+    for request_id in tests:
+        await w.measure(branch, request_id, intent(branch, "c1", ACT_MUL, request_id), delta(f"--{request_id}"))
+    if exhausted:
+        record = {"direction": "Fusion", "head": "c1", "tried": list(tests), **exhausted}
+        entry = BranchLogEntry(branch, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
+        await w.as_role(Role.SPECIALIST_RUNTIME, branch).append_branch_log(entry)
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, branch, reason=GAVE_UP))
+
+
+async def test_the_brief_lists_the_stopped_branches_on_its_focus_op_with_their_exhausted_records(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    blackboard = await scripted_session(tmp_path / "blackboard", clock)
+    w = Writers(tmp_path / "blackboard", clock)
+    await _stopped_on(w, "s5", ACT_MUL, ("x1", "x2"), **FUSED)
+    await _stopped_on(w, "s6", ACT_MUL)
+    await _stopped_on(w, "s7", "aiter::add_rmsnorm_quant_kernel")
+    for branch in ("s8", "s9"):
+        await w.as_role(Role.SCHEDULER).record_lineage(
+            LineageEvent(LineageKind.OPEN, branch, from_commit="c1", focus=ACT_MUL)
+        )
+    briefs = SessionBriefs(blackboard)
+    briefs.for_branch("s9", f"the activation mul + fp8 quant ({ACT_MUL}.kd): fuse it into the GEMM epilogue")
+
+    text = await briefs.text("s9", "c1")
+
+    under = "from c1 to c1 (your start builds on its head)"
+    assert text.splitlines()[2:7] == [
+        FOCUS_HISTORY_TITLE,
+        f"- s6 {under}: 0 tests, no commit, stopped: {GAVE_UP}",
+        f"- s5 {under}: 2 tests, no commit, stopped: {GAVE_UP}",
+        "  exhausted no_ceiling_above_bar: already fused, at 5 TB/s",
+        "  worth again if a profile shows it above 3%",
+    ]
+    assert "- s7 " not in text and "- s8 " not in text
+
+
+async def test_a_brief_without_a_focus_or_with_no_branch_before_it_on_the_focus_has_no_history(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    blackboard = await scripted_session(tmp_path / "blackboard", clock)
+    w = Writers(tmp_path / "blackboard", clock)
+    await _stopped_on(w, "s5", ACT_MUL, ("x1",), **FUSED)
+    await w.as_role(Role.SCHEDULER).record_lineage(
+        LineageEvent(LineageKind.OPEN, "s8", from_commit="c1", focus="aiter::add_rmsnorm_quant_kernel")
+    )
+    briefs = SessionBriefs(blackboard)
+    briefs.for_branch("s8", "aiter::add_rmsnorm_quant_kernel")
+
+    for branch in ("s8", "s9"):
+        brief = await briefs.for_branch(branch).startup_brief("c1")
+        assert brief.focus_history == ()
+        assert FOCUS_HISTORY_TITLE not in render_brief(brief)
+
+
+async def test_the_brief_lists_the_newest_branches_on_the_focus_and_counts_the_rest(tmp_path: Path) -> None:
+    clock = FakeClock()
+    blackboard = await scripted_session(tmp_path / "blackboard", clock)
+    w = Writers(tmp_path / "blackboard", clock)
+    opened = [f"t{index}" for index in range(FOCUS_BRANCHES + 2)]
+    for branch in opened:
+        await _stopped_on(w, branch, ACT_MUL)
+    await w.as_role(Role.SCHEDULER).record_lineage(
+        LineageEvent(LineageKind.OPEN, "s9", from_commit="c1", focus=ACT_MUL)
+    )
+
+    brief = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, focus=ACT_MUL, branch="s9"
+    ).startup_brief("c1")
+    shown = render_brief(brief).splitlines()
+
+    assert [line.split()[1] for line in shown if line.startswith("- t")] == opened[::-1][:FOCUS_BRANCHES]
+    assert f"... 2 earlier branches on it, {len(opened)} in all" in shown
+
+
+async def test_a_focus_that_names_no_op_recalls_only_the_branches_opened_on_the_same_words(tmp_path: Path) -> None:
+    clock = FakeClock()
+    blackboard = await scripted_session(tmp_path / "blackboard", clock)
+    w = Writers(tmp_path / "blackboard", clock)
+    await _stopped_on(w, "s5", "Tune the MoE gate")
+    await _stopped_on(w, "s6", "Tune attention")
+    await w.as_role(Role.SCHEDULER).record_lineage(
+        LineageEvent(LineageKind.OPEN, "s9", from_commit="c1", focus="Tune attention")
+    )
+
+    brief = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, focus="Tune attention", branch="s9"
+    ).startup_brief("c1")
+
+    assert [item.branch for item in brief.focus_history] == ["s6"]
+
+
+#: Arbor's map of the scripted session: b7 runs and holds ``m-gemm``; s2, which held ``m-attn``, stopped.
+ARBOR_MAP = (
+    MapDirection("m-gemm", "Dense GEMMs: tuned kernels", "open", holder="b7"),
+    MapDirection("m-act", "Fold the activation mul into the GEMM epilogue", "open", f"root profile: {ACT_MUL} 30%"),
+    MapDirection("m-moe", "MoE routing", "open"),
+    MapDirection("m-fp8", "FP8 weights", "killed", "pays only by changing the precision of record: root is BF16"),
+    MapDirection("m-attn", "Decode attention", "open", holder="s2"),
+    MapDirection("m-norm", "Fuse the norms", "below_floor"),
+)
+
+
+async def test_the_brief_binds_the_branch_to_the_directions_of_arbors_map_on_its_focus_held_or_set_aside(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    blackboard = await scripted_session(tmp_path / "blackboard", clock)
+    scheduler = Writers(tmp_path / "blackboard", clock).as_role(Role.SCHEDULER)
+    for branch, focus in (("b7", ""), ("s9", ACT_MUL)):
+        await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="c1", focus=focus))
+    await scheduler.write_agent_map(ARBOR_MAP)
+
+    shown = (await SessionBriefs(blackboard).text("s9", "c1")).splitlines()
+
+    assert shown[1:9] == [
+        MAP_TITLE,
+        "- m-gemm (held by b7): Dense GEMMs: tuned kernels",
+        "- m-act (open, it names your focus): Fold the activation mul into the GEMM epilogue",
+        "- m-fp8 (set aside, killed): FP8 weights",
+        "  why: pays only by changing the precision of record: root is BF16",
+        "- m-norm (set aside, below_floor): Fuse the norms",
+        "  why: not given",
+        "Tried:",
+    ]
+
+
+async def test_a_session_without_arbors_map_briefs_no_map(tmp_path: Path) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+
+    brief = await SessionBriefs(blackboard).for_branch("s1").startup_brief("c1")
+
+    assert (brief.agent_map, dict(brief.map_holders)) == ((), {})
+    assert MAP_TITLE not in render_brief(brief)
+
+
+def test_arbors_map_in_the_brief_keeps_to_the_line_and_list_caps_and_a_long_title_leaves_the_why_whole() -> None:
+    title = "Retune every dense GEMM of the decode path at each batch size " * 4
+    aside = tuple(MapDirection(f"m-{n}", title, "killed", f"reason {n}") for n in range(MAX_LINES))
+
+    shown = render_brief(StartupBrief("c1", (), agent_map=aside)).splitlines()
+
+    listed = shown[shown.index(MAP_TITLE) + 1 :]
+    kept = (MAX_LINES - 1) // 2
+    assert len(listed) == 2 * kept + 1 and listed[-1] == f"... {MAX_LINES - kept} more directions of the map"
+    assert listed[0].startswith("- m-0 (set aside, killed): Retune every") and len(listed[0]) == LINE_CHARS
+    assert listed[1:-1:2] == [f"  why: reason {n}" for n in range(kept)]
+
+
+def test_arbors_map_in_the_brief_puts_the_held_directions_first_and_cuts_only_between_directions() -> None:
+    aside = tuple(MapDirection(f"m-{n}", f"direction {n}", "done", f"reason {n}") for n in range(MAX_LINES))
+    held = (
+        MapDirection("m-gemm", "Dense GEMMs", "open", holder="b7"),
+        MapDirection("m-moe", "MoE routing", "open", holder="b8"),
+    )
+    brief = StartupBrief("c1", (), agent_map=(*aside, *held), map_holders={"m-gemm": "b7", "m-moe": "b8"})
+
+    shown = render_brief(brief).splitlines()
+
+    listed = shown[shown.index(MAP_TITLE) + 1 :]
+    kept = (MAX_LINES - 1 - len(held)) // 2
+    assert listed[: len(held)] == ["- m-gemm (held by b7): Dense GEMMs", "- m-moe (held by b8): MoE routing"]
+    assert listed[len(held) : -1 : 2] == [f"- m-{n} (set aside, done): direction {n}" for n in range(kept)]
+    assert listed[len(held) + 1 : -1 : 2] == [f"  why: reason {n}" for n in range(kept)]
+    assert listed[-1] == f"... {MAX_LINES - kept} more directions of the map"

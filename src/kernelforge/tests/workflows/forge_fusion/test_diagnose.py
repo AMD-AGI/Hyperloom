@@ -176,7 +176,7 @@ class TestLoadTrace:
         assert dg.categorize_kernel_name("vectorized_elementwise BinaryFunctor mul<bf16>") == "mul"
 
 
-class TestCollectivesAndDecodeSteps:
+class TestCollectives:
     def test_collective_kernels_are_their_own_category_and_not_launch_bound(self):
         """Collectives are not counted under the reduce or copy categories."""
         names = {
@@ -191,8 +191,10 @@ class TestCollectivesAndDecodeSteps:
         assert {name: dg.categorize_kernel_name(name) for name in names} == names
         assert "collective" not in dg.LAUNCH_BOUND_CATEGORIES
 
+
+class TestDecodeSteps:
     def test_the_category_shares_count_only_the_decode_steps(self, tmp_path):
-        """S1: forge-fuse chased a bf16 add that ran only outside the step windows, 0.05% of decode time."""
+        """A bf16 add that runs only outside the step windows is no share of decode time."""
         events = [
             {"cat": "gpu_user_annotation", "name": "step[VERIFY bs=2]", "ts": 0, "dur": 100},
             {"cat": "kernel", "name": "Cijk_Alik_Bljk_MT64x16x256", "ts": 10, "dur": 60},

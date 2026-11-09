@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GEAK uses its supported clients; Hyperloom owns canonical AgentX validation."""
+"""GEAK replays the AgentX workload Hyperloom declares; Hyperloom owns canonical AgentX validation."""
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -14,6 +15,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
+from hyperloom.orchestrator.actions.executors._workload_envs import geak_acceptance
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -24,6 +26,7 @@ from ._geak_helpers import stop_geak_before_launch
 def _isolate_workload_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in tuple(os.environ):
         if key.startswith(("AGENTX_", "HYPERLOOM_PROFILE_")) or key in {
+            "AIPERF_BIN",
             "HYPERLOOM_AGENTX",
             "HYPERLOOM_PERF_METRIC",
             "E2E_METRIC",
@@ -55,6 +58,53 @@ _BASIS_OF = {
     "output": "aggregate_output_tok_s",
     "e2e_norm_intvty_p50": "e2e_norm_intvty_p50",
 }
+
+#: A corpus other than GEAK's default, so a declared one can only have come from the round.
+_ROUND_CORPUS = "semianalysis_cc_traces_weka_062126_256k"
+
+
+def _accepted_round_report(workspace: Path) -> None:
+    """Leave the validated report Magpie writes for the accepted round in ``workspace``."""
+    workspace.mkdir(parents=True, exist_ok=True)
+    report = {
+        "scenario": "agentx",
+        "success": True,
+        "benchmark_valid": True,
+        "publishable": True,
+        "agentx_metrics": {
+            "execution_owner": "magpie",
+            "server_launch": {"effective_argv": ["python", "-m", "sglang.launch_server"]},
+            "dataset": {"loader": _ROUND_CORPUS, "num_dataset_entries": 512},
+            "requests": {"successful": 600},
+            "throughput": {
+                "input_tokens_per_second": 30000.0,
+                "output_tokens_per_second": 120.0,
+                "duration_seconds": 3600.0,
+            },
+        },
+    }
+    (workspace / "benchmark_report.json").write_text(json.dumps(report), encoding="utf-8")
+
+
+def _round_replay_client(workspace: Path, *, interpreter: str) -> Path:
+    """Leave the aiperf venv InferenceX's AgentX client builds in the round's workspace."""
+    bin_dir = workspace / ".agentx-runtime" / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "python").symlink_to(interpreter)
+    client = bin_dir / "aiperf"
+    client.write_text("#!/bin/sh\n", encoding="utf-8")
+    client.chmod(0o755)
+    return client
+
+
+def _only_on_path(monkeypatch: pytest.MonkeyPatch, bin_dir: Path, *names: str) -> None:
+    """Make ``bin_dir`` the whole ``PATH``, holding an executable stub for each of ``names``."""
+    bin_dir.mkdir()
+    for name in names:
+        stub = bin_dir / name
+        stub.write_text("#!/bin/sh\n", encoding="utf-8")
+        stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
 
 
 def _coord(
@@ -135,6 +185,7 @@ def _coord(
                 "runtime_environment": {"ACCEPTED_SETTING": "1", "HIP_VISIBLE_DEVICES": "6,7"},
             }
         }
+        _accepted_round_report(tmp_path / "accepted_run")
     coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
     return coord
 
@@ -196,10 +247,22 @@ async def test_native_handoff_keeps_supported_schema_and_seeds_geaks_own_launche
     assert handoff["schema_version"] == 3
     assert handoff["bench_client"] == "auto"
     assert handoff["bench_launcher"] == "native"
-    assert (
-        not {"bench_client_config", "benchmark_mode", "workload_identity", "launch_server_script", "workload_spec"}
-        & handoff.keys()
-    )
+    assert not {"bench_client_config", "benchmark_mode", "workload_identity", "launch_server_script"} & handoff.keys()
+    assert handoff["workload_spec"] == {
+        "kind": "agentx_trace_replay",
+        "client": "aiperf",
+        "corpus": _ROUND_CORPUS,
+        "canonical_corpus": _ROUND_CORPUS,
+        "num_entries": 512,
+        "canonical_num_entries": 512,
+        "observed_isl": 180000,
+        "observed_osl": 720,
+        "observed_requests": 600,
+        "concurrency": 6,
+        "metric_basis": "e2e_norm_intvty_p50",
+        "intvty_p90_veto_pct": 5.0,
+        "acceptance": geak_acceptance("e2e_norm_intvty_p50", 5.0),
+    }
     assert handoff["e2e_metric"] == "e2e_norm_intvty_p50"
     assert handoff["framework"] == framework
     assert handoff["model_path"] == "/models/accepted"
@@ -252,6 +315,101 @@ async def test_native_handoff_does_not_depend_on_inferencex_shell_launchers(
     assert handoff["bench_launcher"] == "native"
 
 
+@pytest.mark.asyncio
+async def test_native_handoff_without_the_rounds_report_still_declares_agentx_and_leaves_the_corpus_to_geak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    coord = _coord(tmp_path)
+    (tmp_path / "accepted_run" / "benchmark_report.json").unlink()
+
+    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.phases.kernel_geak_dispatch"):
+        handoff = await _handoff(coord, monkeypatch)
+
+    spec = handoff["workload_spec"]
+    assert spec["kind"] == "agentx_trace_replay"
+    assert (spec["concurrency"], spec["metric_basis"]) == (6, "e2e_norm_intvty_p50")
+    replayed_trace_keys = {
+        "corpus",
+        "canonical_corpus",
+        "num_entries",
+        "canonical_num_entries",
+        "observed_isl",
+        "observed_osl",
+    }
+    assert not replayed_trace_keys & spec.keys()
+    assert "GEAK replays its canonical corpus" in caplog.text
+
+
+@pytest.mark.parametrize("interpreter_runs", [True, False], ids=["runs-here", "interpreter-gone-after-resume"])
+@pytest.mark.asyncio
+async def test_geak_gets_the_aiperf_the_accepted_round_replayed_with_only_when_it_runs_here(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interpreter_runs: bool
+) -> None:
+    coord = _coord(tmp_path)
+    interpreter = sys.executable if interpreter_runs else str(tmp_path / "gone" / "python3.11")
+    client = _round_replay_client(tmp_path / "accepted_run", interpreter=interpreter)
+    # GEAK falls back to the aiperf on PATH, so a round client that cannot run still lets it launch.
+    _only_on_path(monkeypatch, tmp_path / "bin", "aiperf")
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    _gpus_at_handoff(monkeypatch, _GPUS_FREE)
+
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    [env] = launches
+    assert env.get("AIPERF_BIN") == (str(client) if interpreter_runs else None)
+
+
+@pytest.mark.parametrize("interpreter_runs", [True, False], ids=["round-client-runs", "round-client-gone"])
+@pytest.mark.asyncio
+async def test_an_operators_aiperf_bin_outranks_the_rounds_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interpreter_runs: bool
+) -> None:
+    coord = _coord(tmp_path)
+    interpreter = sys.executable if interpreter_runs else str(tmp_path / "gone" / "python3.11")
+    _round_replay_client(tmp_path / "accepted_run", interpreter=interpreter)
+    _only_on_path(monkeypatch, tmp_path / "bin")
+    monkeypatch.setenv("AIPERF_BIN", "/opt/operator/aiperf")
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    _gpus_at_handoff(monkeypatch, _GPUS_FREE)
+
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    [env] = launches
+    assert env["AIPERF_BIN"] == "/opt/operator/aiperf"
+
+
+@pytest.mark.asyncio
+async def test_geak_is_skipped_with_a_reason_when_no_aiperf_can_run_here(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path)
+    _round_replay_client(tmp_path / "accepted_run", interpreter=str(tmp_path / "gone" / "python3.11"))
+    _only_on_path(monkeypatch, tmp_path / "bin")
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    _gpus_at_handoff(monkeypatch, _GPUS_FREE)
+
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert launches == []
+    result = coord.shared_state.geak_result
+    assert (result["status"], result["error_class"]) == ("skipped", "agentx_client_unavailable")
+    assert str(tmp_path / "accepted_run") in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_synthetic_handoff_launches_geak_without_any_aiperf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path, agentx=False)
+    _only_on_path(monkeypatch, tmp_path / "bin")
+    launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
+    _gpus_at_handoff(monkeypatch, _GPUS_FREE)
+
+    await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert len(launches) == 1
+
+
 @pytest.mark.parametrize(
     ("metric_override", "expected_metric"),
     [
@@ -272,6 +430,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     if metric_override is not None:
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", metric_override)
     coord = _coord(tmp_path, metric=expected_metric)
+    _round_replay_client(tmp_path / "accepted_run", interpreter=sys.executable)
     # Seed a DIFFERENT axis so the assertion below proves the handoff overrides the
     # inherited env rather than happening to agree with it.
     monkeypatch.setenv("E2E_METRIC", "total")
@@ -283,7 +442,8 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     [captured_env] = launches
     assert (handoff["e2e_metric"], captured_env["E2E_METRIC"]) == (expected_metric, expected_metric)
-    assert "workload_spec" not in handoff
+    assert handoff["workload_spec"]["metric_basis"] == _BASIS_OF[expected_metric]
+    assert handoff["workload_spec"].get("acceptance") == geak_acceptance(_BASIS_OF[expected_metric], 5.0)
     assert handoff["same_config_reference_status"] == "unverified"
     assert handoff["same_config_reference_verification_status"] == "unverified_workload"
     assert handoff["orchestrator_best_tput_same_config"] == 0.0
@@ -322,6 +482,7 @@ async def test_gpus_that_cannot_be_checked_are_still_handed_to_geak(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     coord = _coord(tmp_path)
+    _round_replay_client(tmp_path / "accepted_run", interpreter=sys.executable)
     launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
     _gpus_at_handoff(
         monkeypatch, GpuHandoff(reaped=[], busy=[], holders=[], unverified="rocm-smi could not report VRAM")

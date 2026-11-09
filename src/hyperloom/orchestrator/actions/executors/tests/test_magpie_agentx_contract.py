@@ -117,6 +117,32 @@ def test_a_candidate_that_unsets_hit_logging_runs_without_it(source, tmp_path):
     assert (launch["env"], launch["unset_env"]) == ({}, ["AITER_LOG_TUNED_CONFIG"])
 
 
+def test_a_native_round_with_no_tuned_hit_is_graded_zero_hit(source, tmp_path):
+    """The candidate env does not name the flag; the server the round launches logs hits, so no hit is a zero hit."""
+    from hyperloom.orchestrator.kernel.gemm_shape_coverage import aiter_log_tuned_config_enabled
+    from hyperloom.orchestrator.measurement.apply_verification import verify_applied
+
+    tuned = "/work/bf16_tuned_gemm.csv"
+    candidate_env = {"AITER_CONFIG_GEMM_BF16": tuned}
+    rendered = materialize_benchmark_config(source, tmp_path / "round", launch=LaunchLayer(extra_envs=candidate_env))
+    assert load_benchmark(rendered)["agentx"]["launch_overrides"]["env"]["AITER_LOG_TUNED_CONFIG"] == "1"
+    miss = (
+        "[aiter] shape is M:15, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, "
+        f"scaleAB=False, bpreshuffle=False, not found tuned config in {tuned}"
+    )
+    server_log = tmp_path / "server.log"
+    server_log.write_text(miss + "\n", encoding="utf-8")
+
+    verdict = verify_applied(
+        server_log,
+        [tuned],
+        hit_logging=aiter_log_tuned_config_enabled(candidate_env),
+        runtime_table_names=["bf16_tuned_gemm.csv"],
+    )
+
+    assert verdict.verdict == "zero_hit" and verdict.blocks_keep
+
+
 @pytest.mark.parametrize("seeded", [False, True], ids=["no-overrides", "cli-generated"])
 def test_pre_baseline_candidate_carries_operator_server_args(source, tmp_path, monkeypatch, seeded):
     if seeded:
@@ -271,30 +297,6 @@ def test_native_power_reaches_baseline_and_keep_budgets(report, tmp_path, watts,
     if watts is not None and started == 1000.0:
         assert measurement["gpu_power_avg_w"] == watts
         assert measurement["gpu_power_by_gpu_w"] == {"0": watts}
-
-
-def test_the_rounds_aiperf_export_gives_the_corpus_shape_its_sequence_lengths(report, tmp_path):
-    """Magpie's report carries no sequence lengths; aiperf's own summary in the round's artifacts does."""
-    from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
-
-    artifacts = tmp_path / "benchmark_sglang_round" / "aiperf_artifacts"
-    artifacts.mkdir(parents=True)
-    isl = {"unit": "tokens", "avg": 153732.5, "p50": 108140.0, "p75": 180420.5, "p90": 362330.6, "p99": 557494.0}
-    osl = {"unit": "tokens", "avg": 773.4, "p50": 378.5, "p75": 775.25, "p90": 1404.2, "p99": 7313.2}
-    export = {"input_sequence_length": isl, "output_sequence_length": osl}
-    (artifacts / "profile_export_aiperf.json").write_text(json.dumps(export))
-
-    measured = extract_benchmark_measurement(report, workspace=artifacts.parent)
-
-    shape = map_corpus_shape(measured)
-    assert shape["isl"] == {"avg": 153732, "p50": 108140, "p75": 180420, "p90": 362330, "p99": 557494}
-    assert shape["osl"] == {"avg": 773, "p50": 378, "p75": 775, "p90": 1404, "p99": 7313}
-
-
-def test_a_round_without_an_aiperf_export_reports_no_sequence_lengths(report, tmp_path):
-    measured = extract_benchmark_measurement(report, workspace=tmp_path)
-
-    assert ("isl_distribution" in measured, "osl_distribution" in measured) == (False, False)
 
 
 def test_public_metrics_and_identity_reach_keep_guards(report):

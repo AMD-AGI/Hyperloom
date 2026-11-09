@@ -7,19 +7,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
 
 from typing import Any
 
 import yaml
 
+from hyperloom.common.agentx_workload import find_aiperf_artifact
 from hyperloom.common.launch_log_evidence import (
     engine_adjusted_settings_from_log,
     observed_server_config_from_log,
     observed_server_identity_from_log,
     operand_digest,
 )
+
+#: Where InferenceX's ``install_agentic_deps`` (``benchmarks/benchmark_lib.sh``) builds the round's aiperf,
+#: relative to the round's workspace: Magpie points ``AIPERF_RUNTIME_DIR`` at ``<workspace>/.agentx-runtime``.
+_ROUND_AIPERF = Path(".agentx-runtime", "venv", "bin", "aiperf")
 
 
 def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
@@ -56,7 +63,7 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
         "total_token_throughput": throughput.get("total_tokens_per_second"),
         "total_throughput": throughput.get("total_tokens_per_second"),
         "completed_requests": requests.get("successful"),
-        "requested_requests": requests.get("total"),
+        "requested_requests": requests.get("profiled_total"),
         "duration_seconds": throughput.get("duration_seconds"),
         "request_error_rate": None if requests.get("error_rate") is None else requests["error_rate"] * 100,
         "e2e_norm_intvty_p50": intvty.get("p50"),
@@ -122,30 +129,28 @@ def native_launch_evidence(
 
 
 _SHAPE_PERCENTILES = ("avg", "p50", "p75", "p90", "p99")
-_SEQUENCE_LENGTHS = (("isl_distribution", "input_sequence_length"), ("osl_distribution", "output_sequence_length"))
+# Magpie's AgentX report carries no sequence lengths; the aiperf summary it leaves in the round's workspace does.
+_AIPERF_SUMMARY = "profile_export_aiperf.json"
 
 
-def aiperf_sequence_lengths(workspace: Path | None) -> dict[str, dict[str, int]]:
-    """The round's ISL/OSL percentiles from aiperf's own summary, which Magpie's report does not carry."""
-    if workspace is None:
-        return {}
-    exports = sorted(
-        Path(workspace).glob("**/aiperf_artifacts/profile_export_aiperf.json"), key=lambda p: p.stat().st_mtime
-    )
-    if not exports:
+def measured_corpus_shape(workspace: Path | None) -> dict[str, Any]:
+    """The ISL/OSL percentiles the round replayed, from aiperf's export; ``{}`` when it does not carry both."""
+    path = None if workspace is None else find_aiperf_artifact(workspace, _AIPERF_SUMMARY)
+    if path is None:
         return {}
     try:
-        export = json.loads(exports[-1].read_text())
+        export = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    lengths: dict[str, dict[str, int]] = {}
-    for field, name in _SEQUENCE_LENGTHS:
+    if not isinstance(export, dict):
+        return {}
+    shape: dict[str, Any] = {}
+    for key, name in (("isl", "input_sequence_length"), ("osl", "output_sequence_length")):
         metric = export.get(name)
-        if isinstance(metric, dict):
-            shape = {key: int(metric[key]) for key in _SHAPE_PERCENTILES if isinstance(metric.get(key), (int, float))}
-            if shape:
-                lengths[field] = shape
-    return lengths
+        if not isinstance(metric, dict):
+            return {}
+        shape[key] = {p: int(metric[p]) for p in _SHAPE_PERCENTILES if isinstance(metric.get(p), (int, float))}
+    return {**shape, "source": "measured"} if all(shape.values()) else {}
 
 
 def read_agentx_report(workspace: Path) -> dict[str, Any] | None:
@@ -162,3 +167,47 @@ def read_agentx_report(workspace: Path) -> dict[str, Any] | None:
         return None
     measured = agentx_measurement(report)
     return measured if measured["valid_measurement"] else {}
+
+
+@dataclass(frozen=True)
+class ReplayedTrace:
+    """The corpus a valid AgentX round replayed and the mean request it served."""
+
+    corpus: str
+    entries: int
+    requests: int
+    mean_isl: int
+    mean_osl: int
+
+
+def replayed_trace(workspace: Path) -> ReplayedTrace | None:
+    """The trace the latest valid AgentX round under ``workspace`` replayed, or ``None`` without one.
+
+    The report publishes token rates over the measured window rather than token counts, so each
+    mean is its rate times the window over the successful requests.
+    """
+    measured = read_agentx_report(workspace)
+    if not measured:
+        return None
+    dataset = measured["agentx_metrics"].get("dataset") or {}
+    requests, window = measured["completed_requests"], measured["duration_seconds"]
+    rates = (measured["input_throughput"], measured["output_throughput"])
+    if not (dataset.get("loader") and dataset.get("num_dataset_entries") and requests and window and all(rates)):
+        return None
+    return ReplayedTrace(
+        corpus=str(dataset["loader"]),
+        entries=int(dataset["num_dataset_entries"]),
+        requests=int(requests),
+        mean_isl=round(rates[0] * window / requests),
+        mean_osl=round(rates[1] * window / requests),
+    )
+
+
+def round_replay_client(workspace: Path) -> Path | None:
+    """The aiperf the AgentX round in ``workspace`` replayed with, or ``None`` when it cannot run here.
+
+    Its venv links an interpreter the round installed outside the workspace, so the client runs only
+    in a container where a Magpie round has run.
+    """
+    client = workspace / _ROUND_AIPERF
+    return client if os.access(client, os.X_OK) and client.with_name("python").is_file() else None

@@ -25,8 +25,7 @@ OUTCOME_ALREADY_PRESENT: str = "already_present"
 OUTCOME_REVERTED_SWITCH_OFF_PARITY: str = "reverted_switch_off_parity"
 # The parity leg produced no usable measurement, so the invariant was never tested.
 OUTCOME_REVERTED_PARITY_INCONCLUSIVE: str = "reverted_parity_inconclusive"
-# An env-gated rewrite benched below the KEEP threshold and kept in the tree with every switch off, its switches
-# registered as levers to bench together with others.
+# A switched rewrite that missed the KEEP gate, kept dormant with its switches registered as levers.
 OUTCOME_KEPT_INERT: str = "kept_inert_levers_registered"
 ALLOWED_OUTCOMES: frozenset[str] = frozenset(
     {

@@ -70,6 +70,23 @@ def is_network_fs(path: str) -> bool:
     return _path_fstype(path).lower() in _NETWORK_FS_TYPES
 
 
+def is_private_dir(directory: Path | str) -> bool:
+    """Whether ``directory`` is a directory of this user's, not a link, that its group and others cannot write: in a
+    temporary directory every account shares, no other unprivileged account can have made it or put an entry in it.
+
+    For local temporary directories only. On shared storage another account of the group may own a directory this one
+    must write, and in a user namespace it shows as the overflow id: ask
+    :func:`~hyperloom_common.shared_storage.writable_problems` there.
+    """
+    try:
+        info = os.lstat(directory)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    )
+
+
 _PRIVATE_MODE = 0o600
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 

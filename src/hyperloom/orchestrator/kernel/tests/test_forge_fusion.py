@@ -17,6 +17,7 @@ import pytest
 
 from hyperloom.orchestrator.kernel import forge_fusion
 from hyperloom.orchestrator.kernel.nomination_result import parse_outcome
+from kernelforge.agent_backends import watchdog_timeout_sec
 from kernelforge.workflows.forge_fusion.shadow_repo import SHADOW_GIT_DIRNAME, ensure_git_workspace
 
 
@@ -183,7 +184,7 @@ def test_run_passes_timeout_and_author_env_to_the_subprocess(tmp_path, monkeypat
     cmd = captured["cmd"]
     deadline = float(cmd[cmd.index("--deadline-unix") + 1])
     assert before + 9 <= deadline <= time.time() + 9
-    assert captured["timeout"] > 9, "the kill backstops the deadline instead of racing it"
+    assert captured["timeout"] == int(watchdog_timeout_sec(9)), "the kill backstops the deadline instead of racing it"
     assert captured["label"] == "forge_fusion"
     assert captured["cmd"][3] == "forge-fuse"
     assert captured["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
