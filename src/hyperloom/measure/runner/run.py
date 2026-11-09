@@ -393,6 +393,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         phases=ctx.phases,
         short_prompts=p.short_prompts,
         long_context=p.long_context,
+        checkpoint=p.checkpoint,
     )
 
 

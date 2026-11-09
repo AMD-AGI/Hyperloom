@@ -56,6 +56,8 @@ def test_the_literal_sentinels_in_failures_equal_their_definitions() -> None:
 
     assert failures._SESSION_TIME_EXHAUSTED_RC == kill.SESSION_TIME_EXHAUSTED_RETURNCODE
     assert failures._ORCHESTRATOR_CANCELLED_RC == kill.ORCHESTRATOR_CANCELLED_RETURNCODE
+    assert failures._AGENTX_EARLY_STOP_RC == kill.AGENTX_EARLY_STOP_RETURNCODE
+    assert failures.AGENTX_EARLY_STOP == kill.AGENTX_EARLY_STOP_ERROR_CLASS
 
 
 def test_a_server_that_was_not_ready_in_time_is_the_candidates_failure_unless_its_log_names_another_cause() -> None:
@@ -260,6 +262,11 @@ def test_an_error_class_nobody_handles_is_a_program_error_not_a_candidate_failur
     assert verdict.failure_reason == "unknown_error_class:brand_new_thing"
 
 
+def test_a_checkpoint_stop_reported_as_an_error_class_is_the_candidates_ruling_not_a_program_error() -> None:
+    verdict = classify_test_failure(returncode=0, error_class="agentx_early_stop")
+    assert (verdict.disposition, verdict.failure_class) == (Disposition.FAILED, FailureClass.CANDIDATE)
+
+
 @pytest.mark.parametrize(
     ("returncode", "disposition", "failure_class", "reason"),
     [
@@ -269,6 +276,7 @@ def test_an_error_class_nobody_handles_is_a_program_error_not_a_candidate_failur
         (returncodes.HOSTED_RESULT_REJECTED_RC, Disposition.PROGRAM_ERROR, None, "result_rejected"),
         (-915, Disposition.STOPPED, None, "session_time_exhausted"),
         (-917, Disposition.STOPPED, None, "orchestrator_cancelled"),
+        (-919, Disposition.FAILED, FailureClass.CANDIDATE, "agentx_early_stop"),
     ],
 )
 def test_the_sentinel_return_codes_classify_by_what_they_mean(returncode, disposition, failure_class, reason) -> None:

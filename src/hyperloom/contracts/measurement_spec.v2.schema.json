@@ -696,6 +696,27 @@
               }
             }
           }
+        },
+        "checkpoint": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The AgentX checkpoint the test's measured round is held to: the reference's median e2e-normalised interactivity over its first 1800 s of profiling, and whether a round trailing it by more than 2% is stopped (enforce) or the ruling only recorded (shadow). Absent when no round is judged.",
+          "required": [
+            "reference_p50",
+            "mode"
+          ],
+          "properties": {
+            "reference_p50": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "mode": {
+              "enum": [
+                "shadow",
+                "enforce"
+              ]
+            }
+          }
         }
       }
     },
