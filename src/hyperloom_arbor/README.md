@@ -9,7 +9,7 @@ learned along the way.
 ## Ways to run it
 
 - **Standalone:** Arbor owns a GPU node, its container and its clock. Launchers provision the node
-  and start the driver; on Cluster A, a long campaign rolls from job to job.
+  and start the driver; on a cluster with a short job limit, a long campaign rolls from job to job.
 - **Inside a host (component mode):** a host such as Hyperloom's multibranch owns the cards, the
   deadline and the merge; Arbor works on the worktree and the GPU lease it is given, and hands back
   a snapshot of every KEEP. See [docs/hosts.md](docs/hosts.md).
@@ -20,7 +20,7 @@ learned along the way.
 
 ```bash
 python3 -m pip install pyyaml claude-agent-sdk
-python3 -m arbor run --config configs/agentx-glm52-mi355x.json --dry-run
+python3 -m arbor run --config configs/serving-template.json --dry-run
 ```
 
 The dry run drives the real loop on synthetic numbers in a temporary repository: no GPU, container
@@ -53,7 +53,7 @@ Design records: [docs/component-mode.md](docs/component-mode.md),
 | `arbor/` | the harness: the driver, the loop and its agents' prompts, the gate, the pack loader, component and parallel modes, collectors and the dashboard |
 | `packs/` | what a campaign optimizes and how it is measured |
 | `configs/` | where a campaign runs |
-| `scripts/` | launchers and tools for the clusters (Cluster A, Cluster B), parallel mode, the component test |
+| `scripts/` | launchers and tools for the clusters, parallel mode, the component test |
 | `.claude/skills/` | skills the agents may use (dossier, profiler with TraceLens, kernels, hardware, ...) |
 | `docs/` | this documentation, design records, and model dossiers (`docs/dossier/`, read by the dossier skill) |
 | `evals/` | trajectory traces of campaigns |

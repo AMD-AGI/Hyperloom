@@ -168,7 +168,7 @@ next round starts; not confirmed, the campaign stops with `ROUND_STOP.md`. Witho
 reaching the target ends the run.
 
 **The rebased bar:** when a campaign moves to another node, the launcher can rebase its bar to
-that node (`scripts/model-m-campaign/rebase_bar.py`), but only for a campaign with a dossier and a map
+that node with a script of its own, but only for a campaign with a dossier and a map
 (`arbor/rebaseline.py`).
 
 ## What a campaign leaves behind
@@ -198,8 +198,8 @@ In the session directory ([reference.md](reference.md) has the full layout):
   node; see [operations.md](operations.md).
 - **Component mode:** Arbor runs inside a host (Hyperloom's multibranch today) that owns the cards,
   the deadline and the merge. See [hosts.md](hosts.md).
-- **Rolling chunks** (`ARBOR_ROLL=1`, Cluster A): a campaign longer than one job's wall moves from node
-  to node. See [operations.md](operations.md).
+- **Rolling chunks** (`ARBOR_ROLL=1`, on a cluster with a job time limit): a campaign longer than
+  one job's wall moves from node to node. See [operations.md](operations.md).
 - **Parallel mode** (`python3 -m arbor.parallel`): rounds of map, lanes on separate nodes, and an
   A/B per lane at integration. Built and tested on fakes, never run on GPUs. See
   [operations.md](operations.md).

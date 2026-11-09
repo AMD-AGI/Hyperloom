@@ -17,7 +17,8 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
@@ -90,17 +91,13 @@ from hyperloom_multibranch.scheduling.settings import (
     KernelOptimizer,
     Workload,
 )
-from hyperloom_multibranch.specialist import agent_sessions as agent_sessions_module
-from hyperloom_multibranch.specialist import model_sessions as model_sessions_module
 from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSetup
-from hyperloom_multibranch.specialist.agent_sessions import LocalAgentSandboxes, RemoteAgentSandboxes
 from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox
 from hyperloom_multibranch.tests.fakes import RefusingCritic
 from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
 from hyperloom_multibranch.specialist.gate_client import GateClient
-from hyperloom_multibranch.specialist.model_sessions import ModelSessions
 from hyperloom_multibranch.specialist.prompts import role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionStart, SpecialistRuntime
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
@@ -113,6 +110,21 @@ from hyperloom_multibranch.toolbox.hosted_toolbox import HostedToolbox, HostedTo
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+
+if TYPE_CHECKING:
+    from hyperloom_multibranch.specialist.model_sessions import ModelSessions
+
+
+def _model_sessions() -> ModuleType:
+    """The specialist's model-backed sessions, which the wiring builds; a test that builds them is skipped while the
+    specialist package has none."""
+    return pytest.importorskip("hyperloom_multibranch.specialist.model_sessions")
+
+
+def _agent_sessions() -> ModuleType:
+    """The autonomous agents' sessions and sandboxes, which the wiring builds; skipped as :func:`_model_sessions`."""
+    return pytest.importorskip("hyperloom_multibranch.specialist.agent_sessions")
+
 
 WORKLOAD = Workload(
     "/models/Llama-3-8B", "sglang", 2, 16, "bf16", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
@@ -491,7 +503,7 @@ async def _peers(
                 raise AssertionError("no worktree is used here")
             return SimpleNamespace(path=tmp_path / branch, holds=lambda component: False)
 
-        return ModelSessions(factory, worktrees)
+        return SimpleNamespace(factory=factory, worktrees=worktrees, dossier_pass=None)
 
     peers = local_peers(host, sessions, setup)
     [wiring] = wired
@@ -732,8 +744,11 @@ async def test_a_session_lending_dev_sandboxes_leases_the_toolbox_cards_to_a_spe
 def test_a_hosted_session_lends_the_dev_sandboxes_of_its_grant_on_its_tp_and_runs_its_agents_there(
     tmp_path: Path,
 ) -> None:
+    agent_sessions = _agent_sessions()
     layout = SimpleNamespace(branch_dir=lambda branch: tmp_path / "MB-branches" / branch)
-    setup = SimpleNamespace(layout=layout, workload=replace(WORKLOAD, tp=4), processes=None)
+    setup = SimpleNamespace(
+        layout=layout, workload=replace(WORKLOAD, tp=4), processes=None, agents=("https://agents.example/tuner.git",)
+    )
     worktree = SimpleNamespace(path=tmp_path / "worktree", holds=lambda component: False)
     lease = HostedBranchLease("lease-1", "b01", (0, 1, 2, 3), Path("/app/work"), {}, 4, "dev-4", 3600, object())
 
@@ -741,7 +756,8 @@ def test_a_hosted_session_lends_the_dev_sandboxes_of_its_grant_on_its_tp_and_run
     local = branch_sandboxes(LocalCards((0, 1)), setup, lambda branch: worktree)
 
     assert (hosted.dev_cards, local.dev_cards) == (4, 1)
-    assert isinstance(hosted.agents, RemoteAgentSandboxes) and isinstance(local.agents, LocalAgentSandboxes)
+    assert isinstance(hosted.agents, agent_sessions.RemoteAgentSandboxes)
+    assert isinstance(local.agents, agent_sessions.LocalAgentSandboxes)
     sandbox = hosted.dev("b01", lease)
     assert (
         isinstance(sandbox, RemoteAgentSandbox) and sandbox.root == tmp_path / "MB-branches" / "b01" / "dev" / "lease-1"
@@ -814,6 +830,7 @@ async def test_an_agentx_test_in_the_services_sandboxes_may_outlast_its_trace_wi
 def _agent_clients(monkeypatch: pytest.MonkeyPatch) -> list[GateClient | None]:
     """The gate's client every session's agents are built with from here on; no specialist session is built."""
 
+    model_sessions, agent_sessions = _model_sessions(), _agent_sessions()
     clients: list[GateClient | None] = []
 
     def agents(*args: object, client: GateClient | None = None, dossier: str | None = None, **_: object) -> object:
@@ -821,10 +838,10 @@ def _agent_clients(monkeypatch: pytest.MonkeyPatch) -> list[GateClient | None]:
         return SimpleNamespace()
 
     def sessions(*args: object, **kwargs: object) -> ModelSessions:
-        return ModelSessions(lambda start: None, lambda branch: None)
+        return model_sessions.ModelSessions(lambda start: None, lambda branch: None)
 
-    monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
-    monkeypatch.setattr(agent_sessions_module, "AgentSessions", agents)
+    monkeypatch.setattr(model_sessions, "model_sessions", sessions)
+    monkeypatch.setattr(agent_sessions, "AgentSessions", agents)
     return clients
 
 
@@ -857,7 +874,7 @@ async def test_the_agents_are_given_the_reviewed_dossier_the_run_names_and_none_
         return SimpleNamespace()
 
     _agent_clients(monkeypatch)
-    monkeypatch.setattr(agent_sessions_module, "AgentSessions", agents)
+    monkeypatch.setattr(_agent_sessions(), "AgentSessions", agents)
     wiring = _with_agent(built.wiring)
 
     model_backed_sessions(AgentCommand("claude", "claude"))(
@@ -892,13 +909,14 @@ async def test_a_session_without_agents_reads_no_canonical(built: _Built, monkey
 async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_session_lends(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    model_sessions = _model_sessions()
     built: list[AgentSetup] = []
 
     def sessions(setup: AgentSetup, **_: object) -> ModelSessions:
         built.append(setup)
-        return ModelSessions(lambda start: None, lambda branch: None)
+        return model_sessions.ModelSessions(lambda start: None, lambda branch: None)
 
-    monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
+    monkeypatch.setattr(model_sessions, "model_sessions", sessions)
     leases = SimpleNamespace(limits=SimpleNamespace(cap=1))
     layout = SimpleNamespace(logs=tmp_path, source=tmp_path, branch_dir=lambda branch: tmp_path)
     for held in (None, leases):
@@ -971,6 +989,7 @@ def _git_checkout_of(root: Path) -> str:
 def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_a_develop_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, aiter: str, laid_out: list[str]
 ) -> None:
+    _agent_sessions()
     installed = {"sglang": _package(tmp_path / "site", "sglang", "sglang", "0.5.0")}
     if aiter == "develop":
         installed["aiter"] = _develop_aiter(tmp_path / "aiter-checkout")
@@ -1101,13 +1120,14 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
         return installed[layout.import_name]
 
     monkeypatch.setattr(worktree_module, "locate_installed_package", locate)
-    real = model_sessions_module.model_sessions
+    model_sessions = _model_sessions()
+    real = model_sessions.model_sessions
 
     def sessions(setup: AgentSetup, **kwargs: object) -> ModelSessions:
         roles.append(setup.role)
         return real(setup, **kwargs)
 
-    monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
+    monkeypatch.setattr(model_sessions, "model_sessions", sessions)
     for native, source in ((native_trees(environ), "with"), (native_trees({}), "without")):
         layout = SimpleNamespace(
             logs=tmp_path / "logs", source=tmp_path / source, branch_dir=lambda branch: tmp_path / branch

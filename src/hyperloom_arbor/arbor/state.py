@@ -29,9 +29,9 @@ MAX_CONSECUTIVE_PROBES = 2
 # When the loop has produced this many nulls in a row AND has no tier left to
 # escalate into, it does not know what to do next — which is precisely when it
 # should buy knowledge rather than guess again. At that point a probe is
-# MANDATED, not merely permitted. An earlier campaign sat at a high null_streak
-# on the terminal tier with many unresolved ledger findings and never probed,
-# because every counter it could see treated probing as failure.
+# MANDATED, not merely permitted: otherwise a campaign on the terminal tier
+# with many unresolved ledger findings never probes, because every counter it
+# can see treats probing as failure.
 PROBE_MANDATE_NULL_STREAK = 3
 
 # Consecutive not-measured iterations that mean the harness, not the campaign,
@@ -59,9 +59,8 @@ MAX_CONSECUTIVE_INVALID = 3
 # It deliberately does NOT auto-correct the bar. Moving an incumbent without a
 # measurement is how a campaign talks itself into a number no tree produces.
 # What it does is make the situation VISIBLE and mandate the cheap experiment
-# that settles it -- a null re-bench of the unchanged tree. One campaign
-# reached that experiment on its own, late, and only because
-# that agent was exceptional; nothing in the harness asked for it.
+# that settles it -- a null re-bench of the unchanged tree, which nothing
+# else in the harness asks for.
 SECONDARY_SUSPECT_STREAK = 3
 
 # ── The BARREN knob ─────────────────────────────────────────────────────────
@@ -70,8 +69,8 @@ SECONDARY_SUSPECT_STREAK = 3
 #
 # `null_streak` is wired to three consumers that want different things —
 # escalation, the LEARN mandate, and a reset from LEARN-with-findings. That
-# third wire is correct (without it an earlier campaign sat at
-# a high null_streak with many unresolved findings and never probed) but it makes the
+# third wire is correct (without it a campaign can sit at
+# a high null_streak with many unresolved findings and never probe) but it makes the
 # counter unable to answer "are we converting effort into wins?". A campaign
 # can go many iterations without moving either bar while `null_streak` reads
 # 0, because a REVERT raises it to 1 and the next LEARN — closing genuine
@@ -88,7 +87,7 @@ BARREN_ACT = 16
 # The one wire between the two knobs. A drought WIDENS the LEARN budget rather
 # than tightening it, which is the correction: today the system rations
 # exploration hardest at the moment exploitation has proven least productive
-# (one campaign sat with its probe budget exhausted deep into its
+# (a probe budget exhausted deep into a
 # drought). A LEARN touching only `eval/` and the ledger skips the server run,
 # so this is nearly free in wall-clock.
 #
@@ -272,7 +271,7 @@ class CampaignState:
         """Write session.json atomically: a temp file beside it, then a rename.
 
         Other processes read this file while a campaign runs (a parallel run's
-        coordinator, rebase_bar, the dashboards). A plain write_text lets them
+        coordinator, a launcher's rebaseline step, the dashboards). A plain write_text lets them
         see a half-written file and fail on JSONDecodeError.
         """
         p = Path(path)
@@ -425,7 +424,7 @@ class CampaignState:
         # ── The BARREN knob ──────────────────────────────────────────────
         # Only a real advance clears it. A LEARN that closed a dozen findings
         # does not, which is the entire point: `null_streak` already credits
-        # that, and crediting it twice is how a campaign spent dozens of iterations barren
+        # that, and crediting it twice would let a campaign stay barren for dozens of iterations
         # while every visible counter read zero.
         #
         # FIX-CORRECTNESS is EXEMPT (not merely reset-proof): a correctness
@@ -467,7 +466,7 @@ class CampaignState:
 
         Called BEFORE the bars are mutated, so it must not be moved below the
         _record_* dispatch. Either axis counts: the two peak at different
-        iterations (in one campaign, several iterations apart), and
+        iterations, and
         tying them together would lose every second-axis-only advance.
         """
         def better(v, best, direction):
@@ -689,9 +688,9 @@ class CampaignState:
         finding. The original rule — never reset — was written to stop a
         campaign surveying forever, but combined with the probe cap it made
         every visible counter treat probing as failure: probe_streak is a
-        limit, null_streak kept climbing, best_metric could not move. An
-        earlier campaign stopped probing early and accumulated
-        many unresolved findings while its null_streak climbed. A probe that
+        limit, null_streak kept climbing, best_metric could not move. A
+        campaign then stops probing early and accumulates
+        many unresolved findings while its null_streak climbs. A probe that
         closes a real uncertainty IS progress; a probe that closes nothing is
         still counted as a null, and MAX_CONSECUTIVE_PROBES still bounds the
         survey.
@@ -734,10 +733,8 @@ class CampaignState:
 
         Deliberately not a correction. The only honest way to move an incumbent
         is to measure it: bench the CURRENT tree unchanged and compare. That
-        run is cheap relative to what it settles — one campaign spent
-        several iterations being refused on this axis before one
-        agent thought to try it, and the answer was that a
-        byte-identical tree read as a regression.
+        run is cheap relative to what it settles: a byte-identical tree can
+        read as a regression.
         """
         n = self.policy.secondary_suspect_streak if limit is None else limit
         return n > 0 and self.secondary_only_streak >= n

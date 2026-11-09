@@ -63,8 +63,8 @@ reaches {STALL_TESTS}, its specialist is asked to read its brief again and recon
 to stop it.
 A specialist branch's components also carry its stall evidence: stalled_tests, its tests judged since its last commit
 that did not fail to merge; stall_bar, the stall the stop rule stops at this round; merged_commits and merged_gain_pct,
-what of it the integration branch took; near_bar_tests, how many of its last stall_bar judged tests came near the bar;
-stranded_lead_pct, its lead over the integration head on commits that failed to merge, while that lead holds it.
+what of it the integration branch took; stranded_lead_pct, its lead over the integration head on commits that failed
+to merge, while that lead holds it.
 stop_candidate is 1 when its stall reached the bar and nothing holds it: stop a branch for stalling only when it is 1.
 probation is 1 for a stop candidate drawn to run more tests first. Follow the scheduling playbook the prompt shows: it
 says when to stop and when to open, and the scheduler cuts the opens it does not allow. Open areas, when shown, are
@@ -76,9 +76,8 @@ the root's value: context for its stall evidence, and no reason to stop it, as t
 the integrator merges.""",
     grace="as many of its explore tests as the playbook's grace says",
     envelope="""
-near_bar_lead, stranded_lead and probation: the playbook's safety envelope keeps a branch whose recent tests came near
-the bar, one whose head leads the integration head on commits that failed to merge, and one drawn for probation: you
-may lower their K, not stop them.""",
+stranded_lead and probation: the playbook's safety envelope keeps a branch whose head leads the integration head on
+commits that failed to merge, and one drawn for probation: you may lower their K, not stop them.""",
 )
 
 
