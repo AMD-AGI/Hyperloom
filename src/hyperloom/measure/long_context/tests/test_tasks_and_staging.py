@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -253,3 +255,17 @@ def test_another_bound_is_another_entry_and_an_entry_built_before_the_bound_reco
     manifest = json.loads((tmp_path / short_staging.EVALSETS_DIR / today.key / "manifest").read_text())
     assert manifest["inputs"]["bound"] == BOUND and manifest["prompts"]["count"] == PROMPTS
     assert staged_set(before.key, environ).bound is None
+
+
+def test_the_directory_of_sets_in_a_shared_runner_cache_is_one_the_group_can_stage_in(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    os.chmod(cache, 0o2775)  # a cache set up to be shared by the accounts of one group
+    previous = os.umask(0o022)
+    try:
+        entry = stage_entry(cache, prompt_set(), {"seed": 1, "length": LENGTH, "tokenizer": {"fake": "0" * 64}})
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(os.stat(cache / "evalsets").st_mode) == 0o2775
+    assert entry.path.is_dir() and stat.S_IMODE(os.stat(entry.path).st_mode) & 0o005 == 0o005, "every runner reads it"

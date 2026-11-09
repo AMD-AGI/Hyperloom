@@ -11,7 +11,8 @@ never run counts as not passed and makes the check ``incomplete``, which is neve
 The root's reading (:class:`LongContextRoot`, made by :func:`root_reading`) pools the complete checks of the session root's
 tests and states its score with a Wilson 95% interval; a candidate's result carries the reading the toolbox had when the
 candidate ended. :func:`refuses` is the bar the gate applies: a drop from the lower end of the root's interval of more
-than the check's own sampling noise, ``NOISE_SHARE`` of the items (3 of 64). Like the rest of the measurement contract
+than the check's own sampling noise, :func:`noise_items` of the candidate's ``n`` items (3 of 64, 1.75 of 16). Like the
+rest of the measurement contract
 they are frozen dataclasses that validate on construction and round-trip through ``to_document()`` and
 ``from_document()``.
 """
@@ -44,12 +45,14 @@ __all__ = [
     "PROMPT_ERROR",
     "PROMPT_NOT_RUN",
     "PROMPT_OK",
-    "NOISE_SHARE",
+    "NOISE_CONTINUITY",
+    "NOISE_SPREAD",
     "PROMPT_STATUSES",
     "LongContextPrompt",
     "LongContextResult",
     "LongContextRoot",
     "LongContextTask",
+    "noise_items",
     "refuses",
     "root_reading",
     "wilson_interval",
@@ -136,8 +139,24 @@ class LongContextTask:
 
 #: The z of the two-sided 95% interval on the root's score.
 CI_Z = 1.959963984540054
-#: The check's own sampling noise, as a share of its prompts: about 3 of 64 binary items.
-NOISE_SHARE = 3 / 64
+#: The check's own sampling noise in items (:func:`noise_items`): half an item of continuity correction for a count, plus
+#: ``NOISE_SPREAD`` times the square root of the candidate's ``n``, the way the binomial spread of a count of ``n`` items
+#: grows. Calibrated to 3 items at 64 prompts; see :func:`noise_items` for what that keeps at smaller sets.
+NOISE_CONTINUITY = 0.5
+NOISE_SPREAD = 2.5 / 8
+
+
+def noise_items(n: int) -> float:
+    """The check's own sampling noise on a candidate's ``n`` items: ``NOISE_CONTINUITY + NOISE_SPREAD * sqrt(n)``.
+
+    It is 3 items at 64 (the tolerance the bar was set with), 1.75 at 16 and 1.38 at 8. The spread term follows the
+    binomial standard deviation of an unchanged candidate's count, which grows as the square root of ``n``, so a smaller
+    set is not refused more often than 64 prompts were: with a root of one to five pooled baseline checks and a true pass
+    rate from 0.5 to 0.99, an unchanged candidate on 8, 16 or 32 prompts is refused no more often than on 64 (at a pass
+    rate of 0.95 and three root checks, 0.73% at 16 against 0.84% at 64), within 0.05 percentage points. A fixed share
+    of ``n`` would not keep that: 3/64 of 16 items refuses an unchanged candidate 3.9% of the time there.
+    """
+    return NOISE_CONTINUITY + NOISE_SPREAD * math.sqrt(n)
 
 
 def wilson_interval(passed: int, n: int) -> tuple[float, float]:
@@ -320,12 +339,12 @@ def refuses(candidate: LongContextResult | None, root: LongContextRoot | None) -
     """Whether the candidate's check shows a drop beyond the check's own sampling noise.
 
     The drop is taken after the CI on the root's score: from the lower end of the root's 95% interval, in the candidate's
-    items, ``root.ci_low * n - passed``. It refuses when that drop exceeds ``NOISE_SHARE`` of the candidate's ``n`` (3
-    items of 64); a drop of exactly that much does not. Nothing is refused without a complete check, without a root
+    items, ``root.ci_low * n - passed``. It refuses when that drop exceeds :func:`noise_items` of the candidate's ``n``
+    (3 items of 64, 1.75 of 16); a drop of exactly that much does not. Nothing is refused without a complete check, without a root
     reading, or when the two were made on different prompt sets: an ``incomplete`` check is recorded and never blocks.
     """
     if candidate is None or root is None or candidate.status != LONG_CONTEXT_COMPLETE:
         return False
     if candidate.prompt_set_sha256 != root.prompt_set_sha256:
         return False
-    return root.ci_low * candidate.n - candidate.passed > NOISE_SHARE * candidate.n + _EPSILON
+    return root.ci_low * candidate.n - candidate.passed > noise_items(candidate.n) + _EPSILON
