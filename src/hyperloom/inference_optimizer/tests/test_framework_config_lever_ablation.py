@@ -59,9 +59,11 @@ def test_a_replace_mode_survives_to_the_launcher():
 
 
 def test_an_unknown_args_mode_falls_back_to_append():
+    """Append is the default control, so the lever carries no ``args_mode``."""
     lever = _framework_config_levers_from_done(_done({"name": "x", "extra_args": "--tp 8", "args_mode": "clobber"}))
 
-    assert lever["args_mode"] == "append"
+    assert lever["extra_server_args"] == "--tp 8"
+    assert "args_mode" not in lever
 
 
 def test_a_proposal_with_nothing_in_it_is_still_not_a_lever():
