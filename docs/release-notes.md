@@ -20,6 +20,20 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **`forge-loop --kernel-backend mono` optimizes sgl-amd-mono monokernels and
+  keeps a candidate only when the repository's own tests pass.** The backend is
+  also inferred for sources under the `sgl_amd_mono/` package. Its prompt states
+  the `MonoSpec` contract a candidate must not move, and its campaigns read the
+  new `framework/sgl_amd_mono/` knowledge (also served to any campaign on that
+  package's sources) and the `lever_monokernel.md` card. Like assembly, a
+  candidate that clears the driver must then pass the workspace's
+  `compile_command` and `correctness_command`, and a workspace without a
+  `config.yaml` keeps nothing. A multi-rank driver whose outputs carry different
+  contracts gives each `dist_harness` case a `judge`: the run prints `allclose`
+  from the worst rank and each rank's metrics as `judge:` lines, and
+  `verify_replay=True` refuses to report a time when the last timed graph replay
+  fails its judge.
+
 - **An Arbor agent on an AgentX multi-branch session needs no launch flag.**
   `hyperloom-multibranch run --autonomous-agent` now serves every Arbor the
   session's frozen base launch, resolved from InferenceX or the framework's
