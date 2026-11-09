@@ -1573,7 +1573,7 @@ def _no_local_cards() -> tuple[int, ...]:
     raise AssertionError("a hosted run measures on the grant's cards, not this container's")
 
 
-@pytest.mark.parametrize(("max_sandboxes", "tests"), [(8, 4), (3, 3)])
+@pytest.mark.parametrize(("max_sandboxes", "tests"), [(8, 3), (3, 2)])
 @pytest.mark.usefixtures("ready_environment")
 def test_a_hosted_session_runs_as_many_tests_at_once_as_the_grant_has_cards_and_sandboxes_for(
     max_sandboxes: int, tests: int, host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
@@ -1585,7 +1585,9 @@ def test_a_hosted_session_runs_as_many_tests_at_once_as_the_grant_has_cards_and_
     assert cli.main(["hosted", "run"]) == 0
 
     [settings] = agent_cli
-    assert settings.caps.max_parallel_tests == tests, "TP=2 on 8 GPUs, at most one test per sandbox"
+    assert settings.caps.max_parallel_tests == tests, (
+        "TP=2 on 8 GPUs, at most one test per sandbox, and one test's room kept for the sandbox handed to the next test"
+    )
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -2087,9 +2089,9 @@ def test_a_hosted_run_measures_in_the_sandboxes_of_the_grant_handed_to_it(handed
         None,
     )
     assert host.sandbox_keys.measurement.reveal() == HANDED["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"]
-    assert settings.caps.max_parallel_tests == 3, "TP=2 on 8 GPUs, at most one test per sandbox"
-    on_three_cards = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 3)
-    assert settings == replace(on_three_cards, max_hours=settings.max_hours), "the flags give the workload"
+    assert settings.caps.max_parallel_tests == 2, "TP=2 on 8 GPUs and 3 sandboxes, one test's room kept for a handover"
+    on_two_tests = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 2)
+    assert settings == replace(on_two_tests, max_hours=settings.max_hours), "the flags give the workload"
     assert "HYPERLOOM_SANDBOX_KEY_MEASUREMENT" not in os.environ, "no child process inherits a grant key"
 
 

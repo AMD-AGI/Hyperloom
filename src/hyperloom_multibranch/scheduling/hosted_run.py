@@ -51,7 +51,6 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from collections.abc import Callable, Mapping
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -273,13 +272,19 @@ def _multibranch_section(section: object) -> dict[str, Any]:
 
 
 def grant_tests_that_fit(host: HostInfo) -> Callable[[int], int]:
-    """How many tests of a TP the grant ``host`` holds runs at once; raises ValueError when one does not fit, and
-    ImportError when the ``hosted`` extra is not installed."""
+    """How many tests of a TP the grant ``host`` holds runs at once, as the hosted toolbox runs them: one fewer than the
+    grant fits where a finished test's sandbox is kept for the next (make-before-break, which the toolbox does by
+    default); raises ValueError when one does not fit, and ImportError when the ``hosted`` extra is not installed."""
 
     # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
-    from hyperloom_multibranch.toolbox.hosted_toolbox import parallel_tests_for
+    from hyperloom_multibranch.toolbox.hosted_toolbox import handover_for, parallel_tests_for
 
-    return partial(parallel_tests_for, toolbox_grant(host.grant_limits))
+    grant = toolbox_grant(host.grant_limits)
+
+    def tests_that_fit(tp: int) -> int:
+        return parallel_tests_for(grant, tp, handover_for(grant, tp))
+
+    return tests_that_fit
 
 
 def toolbox_grant(limits: HostGrantLimits | None) -> GrantLimits | None:
