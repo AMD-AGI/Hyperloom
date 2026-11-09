@@ -237,7 +237,6 @@ def app_git(
     *args: str,
     timeout: float = _DEFAULT_TIMEOUT_SEC,
     env: Mapping[str, str] | None = None,
-    common: Path | None = None,
     admin: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``git <args>`` in ``worktree`` against its trusted admin dir, never against what the worktree holds.
@@ -249,13 +248,13 @@ def app_git(
     No program the repository's config names runs: the ``NO_PROGRAMS`` pins, every configured driver program blanked,
     and no transport. The driver programs are read from the config just before the command, which reads it again; the
     config lies in the admin and common directories, the app's, so no one but the app writes a driver in between. A repository nested in the tree is the caller's to keep out (see the module docstring).
-    ``env`` adds variables of the caller's (an index file, an identity) under the ones that keep this so; ``common``
-    is as :func:`trusted_admin_dir`'s, and not used when ``admin`` is given.
+    ``env`` adds variables of the caller's (an index file, an identity) under the ones that keep this so. A caller that
+    holds the repository passes ``admin=trusted_admin_dir(worktree, common)`` to have the admin dir checked against it.
 
     Raises:
         OSError: The worktree's git metadata is not the app's, or its config cannot be neutralized (nothing was run).
     """
-    admin = trusted_admin_dir(worktree, common) if admin is None else admin
+    admin = trusted_admin_dir(worktree) if admin is None else admin
     env = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, **(env or {})}
     env.update(
         GIT_CONFIG_NOSYSTEM="1",
