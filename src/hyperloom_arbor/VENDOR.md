@@ -146,10 +146,12 @@ install pins.
 **A site's settings** (from `v0.9.4`): when it is imported, Arbor reads `~/.arbor/settings.env`, or the file
 `ARBOR_SETTINGS` names, and sets each `ARBOR_*` value there that the environment does not set already; other keys are
 ignored. A site's own collector projects go in the file `ARBOR_PROJECTS` names. A machine without the file runs as
-before. Under MB, no user's file is read:
-- **MB runs Arbor's commands with `ARBOR_SETTINGS=/dev/null`** (`specialist/arbor_adapter.py`), so a local, unconfined
-  run does not pick up the running user's values (a roll, a review gate, an agent backend). An empty value would not
-  turn the file off.
+before. Under MB:
+- **Arbor's sessions:** MB runs them with `ARBOR_SETTINGS=/dev/null` (`ARBOR_PYTHON` in `specialist/arbor_adapter.py`),
+  so a local, unconfined run does not pick up the running user's values (a roll, a review gate, an agent backend). An
+  empty value would not turn the file off.
+- **The directions commands** (`generate` and `split`, run by the adapter in MB's own process environment) are not run
+  that way yet, so they read the running user's file. They act on no setting it could hold.
 - **Hosted,** each branch also has its own home, and its confined environment carries no `ARBOR_*` value.
 
 ## How it is updated
