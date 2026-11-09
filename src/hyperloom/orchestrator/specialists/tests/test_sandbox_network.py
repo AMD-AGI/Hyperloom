@@ -142,7 +142,8 @@ def test_a_base_url_in_a_task_text_on_the_command_line_widens_nothing(tmp_path: 
     env = {"OPENAI_BASE_URL": gateway["OPENAI_BASE_URL"], **launch.env_additions}
 
     dsh = specialist_reach(cmd, env, None)
-    codex = specialist_reach(["codex", "exec", "--json", task, "-"], {}, None)
+    quoted = "model_providers.p.base_url=https://evil.example.test:9"  # the setting's text, as a prompt word
+    codex = specialist_reach(["codex", "exec", "--json", task, quoted, "-"], {}, None)
 
     assert dict(dsh.loopback) == {} and dict(codex.loopback) == {}
     assert dsh.remote == {("gateway.example.test", 443), ("api.anthropic.com", 443)}
@@ -352,8 +353,8 @@ def test_through_the_apps_proxy_a_later_request_on_one_connection_never_reaches_
     upstream.wait_ended(2)
 
     assert to_443.startswith(b"HTTP/1.1 403 Forbidden")
-    assert tunnel == b"HTTP/1.1 200 Connection established\r\n\r\n" and plain == b""
     assert upstream.requests == [b"CONNECT api.example.test:443 HTTP/1.1", b"CONNECT gw.example.test:8000 HTTP/1.1"]
+    assert tunnel == b"HTTP/1.1 200 Connection established\r\n\r\n" and plain == b""
     assert sorted(upstream.tunnelled) == sorted([_SMUGGLED, b"GET /v1?a=1 HTTP/1.1\r\nHost: gw\r\n\r\n" + _SMUGGLED])
 
 
