@@ -8,6 +8,7 @@ from hyperloom.common.perf_metric import (
     GRADED_ERROR_RATE,
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
+    GRADED_INTVTY_P50_CHECKPOINT,
     GRADED_OUTPUT,
     GRADED_REQUESTS_TOTAL,
     GRADED_UNSERVED_REQUESTS,
@@ -254,3 +255,17 @@ def test_a_total_throughput_gain_the_p50_guard_held_back_is_retested(retest, ver
     assert first.verdict is Verdict.NEEDS_CONFIRM
     assert (judgement.verdict, judgement.refused_by) == (verdict, ("p50_regressed",))
     assert judgement.threshold_pct == pytest.approx(2.0)
+
+
+def test_the_checkpoint_median_is_recorded_so_a_committed_candidate_is_the_next_ones_reference():
+    candidate = {**PARENT, GRADED_INTVTY_P50: 104.0, GRADED_INTVTY_P50_CHECKPOINT: 52.0}
+    judgement = compare(candidate, PARENT, "r1", P50)
+    assert judgement.verdict is Verdict.IMPROVED
+    assert judgement.recorded_value[GRADED_INTVTY_P50_CHECKPOINT] == 52.0
+
+
+def test_a_retest_averages_the_checkpoint_median_like_every_recorded_axis():
+    first = compare({**PARENT, **P90_BROKEN, GRADED_INTVTY_P50_CHECKPOINT: 50.0}, PARENT, "r1", P50)
+    retest = {**PARENT, GRADED_INTVTY_P50: 105.0, GRADED_INTVTY: 74.0, GRADED_INTVTY_P50_CHECKPOINT: 54.0}
+    judgement = confirm(first, retest, PARENT, "r2", P50)
+    assert judgement.recorded_value[GRADED_INTVTY_P50_CHECKPOINT] == pytest.approx(52.0)

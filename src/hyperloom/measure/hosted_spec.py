@@ -398,6 +398,8 @@ def _procedure_section(call: TestCall, first: BenchmarkPoint, deadline_unix: flo
         section["short_prompts"] = call.short_prompts.to_document()
     if call.long_context is not None:
         section["long_context"] = call.long_context.to_document()
+    if call.checkpoint is not None:
+        section["checkpoint"] = call.checkpoint.to_document()
     return section
 
 

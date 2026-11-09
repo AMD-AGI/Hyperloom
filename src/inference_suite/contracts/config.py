@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from hyperloom_common.contract_fields import ContractFields, field_names
+from hyperloom_common.gpu_telemetry import fast_interval
 from inference_suite.argv import normalize_argv, parse_removal_specs
 from inference_suite.contracts.base_launch import _ENV_NAME, _OPTION, BaseLaunch, Workload
 
@@ -615,6 +616,10 @@ class GpuTelemetry:
     def __post_init__(self) -> None:
         _FIELDS.boolean(self.enabled, "the GPU telemetry's enabled")
         _positive(self.interval_sec, "the GPU telemetry interval")
+        try:
+            fast_interval(self.interval_sec)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
 
     def to_document(self) -> dict[str, object]:
         return {"enabled": self.enabled, "interval_sec": self.interval_sec}

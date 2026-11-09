@@ -272,6 +272,24 @@ def test_the_operator_file_is_the_base_and_its_credentials_stay_out_of_the_froze
     assert base.env["DEEPEP_COMBINE_TOKEN_BALANCED"] == "1"
 
 
+@pytest.mark.parametrize(
+    "name", ["LD_PRELOAD", "PYTHONPATH", "HF_ENDPOINT", "HTTPS_PROXY", "TMPDIR", "TP", "CONC", "MODEL_PATH"]
+)
+def test_an_operator_file_setting_what_no_launch_may_take_from_a_source_exits_2_naming_it(
+    tmp_path, fetched, capsys, name
+):
+    script = tmp_path / "launch.sh"
+    script.write_text(
+        f"export SGLANG_USE_AITER=1\nexport {name}=/x\npython3 -m sglang.launch_server --model-path /models/r1 --tp 4\n"
+    )
+    session = tmp_path / "session"
+    session.mkdir()
+
+    err = _refused(session, _args(operator_tp=4, reference_script=str(script)), capsys)
+
+    assert f"env {name}" in err and "SGLANG_USE_AITER" not in err
+
+
 _PROBE_ENV = (
     "AWS_ACCESS_KEY_ID",
     "LLM_GATEWAY_KEY",

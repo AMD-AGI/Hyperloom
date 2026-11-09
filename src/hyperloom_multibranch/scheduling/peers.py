@@ -26,6 +26,7 @@ from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
+from hyperloom.common.agentx_early_stop import EarlyStopMode
 from hyperloom_multibranch.scheduling.settings import AGENT_PORT, SHARE_MINUTES, Workload
 
 if TYPE_CHECKING:
@@ -87,7 +88,7 @@ class PeerSetup:
     does, or ``""`` for neither), ``agent_maps`` the scheduler's side of a mapping branch, ``None`` without agents, and
     ``agent_share_minutes`` the least an agent must have left to run for its branch to wait for cards its lease was
     refused. ``inferencex_commit`` is the commit a fresh session's base launch reads InferenceX at (``""`` for the
-    head of its ``main``).
+    head of its ``main``). ``agentx_early_stop`` is the session's AgentX checkpoint mode (``RunSettings``).
     """
 
     layout: SessionLayout
@@ -108,6 +109,7 @@ class PeerSetup:
     agent_maps: MapCalls | None = None
     agent_share_minutes: float = SHARE_MINUTES
     inferencex_commit: str = ""
+    agentx_early_stop: EarlyStopMode = EarlyStopMode.SHADOW
 
 
 PeerFactory = Callable[[PeerSetup], Peers]

@@ -38,7 +38,13 @@ from inference_suite.contracts import (
     ServerFacts,
     WorkloadKind,
 )
-from inference_suite.contracts.report import AGENTX_COUNT_KEYS, AGENTX_LATENCY_KEYS, AGENTX_THROUGHPUT_KEYS
+from inference_suite.contracts.report import (
+    AGENTX_COUNT_KEYS,
+    AGENTX_LATENCY_KEYS,
+    AGENTX_THROUGHPUT_KEYS,
+    POWER_SUMMARY_KEYS,
+    PowerSummary,
+)
 
 _DIGEST = "sha256:" + "a" * 64
 _SHA = "b" * 64
@@ -252,6 +258,63 @@ def test_agentx_section_round_trips_with_its_error_rate_definition() -> None:
     document["agentx"]["error_rate_definition"] = "elsewhere/1"
     with pytest.raises(ReportError, match="error rate definition"):
         Report.from_document(document)
+
+
+_POWER_JSON = {
+    "scope": {"serving_gpus": [0, 1], "energy_gpus": [0, 1], "unread_gpus": []},
+    "energy": {
+        "window": {"duration_s": 100.0},
+        "per_gpu": {"0": {"integral_j": 70_000.0}, "1": {"integral_j": 60_000.0}},
+        "total_gpu_energy_j": 130_000.0,
+        "avg_power_w": 650.0,
+        "joules_per_output_token": 1.3,
+        "accumulator_check": {"relative_error": 0.012},
+        "power_valid": 1,
+        "reasons": ["invalid_input_token_count"],
+        "warnings": [],
+    },
+    "phases": {"measured": {"per_gpu": {"0": {"throttle": {"ppt": 0.25}}, "1": {"throttle": {"ppt": 0.5}}}}},
+}
+
+
+def test_the_power_section_summarizes_power_json_and_round_trips() -> None:
+    power = PowerSummary.of("power.json", _POWER_JSON)
+    assert power.per_gpu_avg_power_w == {"0": 700.0, "1": 600.0}
+    assert power.power_throttle_fraction_max == 0.5 and power.accumulator_relative_error == 0.012
+    assert power.metrics["total_gpu_energy_j"] == 130_000.0 and power.metrics["joules_per_input_token"] is None
+    report = _report(power=power)
+    document = _document(report)
+    assert tuple(document["power"]) == POWER_SUMMARY_KEYS
+    assert Report.from_document(document) == report
+
+
+def test_an_invalid_energy_has_no_per_card_power() -> None:
+    invalid = {**_POWER_JSON, "energy": {**_POWER_JSON["energy"], "power_valid": 0}}
+    assert PowerSummary.of("power.json", invalid).per_gpu_avg_power_w is None
+
+
+def test_power_valid_is_zero_or_one() -> None:
+    document = _document(_report(power=PowerSummary.of("power.json", _POWER_JSON)))
+    document["power"]["power_valid"] = True
+    with pytest.raises(ReportError, match="power_valid"):
+        Report.from_document(document)
+
+
+def test_a_report_written_before_the_power_section_and_token_counts_reads_them_as_null() -> None:
+    agentx = AgentxResult(
+        counts={**dict.fromkeys(AGENTX_COUNT_KEYS, 1), "input_tokens": None, "output_tokens": None},
+        throughput=dict.fromkeys(AGENTX_THROUGHPUT_KEYS),
+        latency_seconds=dict.fromkeys(AGENTX_LATENCY_KEYS, 0.5),
+        e2e_norm_intvty={"p50": 30.0, "p90": None},
+        stopped_by_threshold=False,
+        fast_mode=False,
+    )
+    report = _report(workload_kind=WorkloadKind.AGENTX, fixed=None, agentx=agentx)
+    document = _document(report)
+    del document["power"]
+    for key in ("input_tokens", "output_tokens"):
+        del document["agentx"]["counts"][key]
+    assert Report.from_document(document) == report
 
 
 def test_gpu_monitor_block_is_read_whole_by_the_host_gpu_artifact() -> None:

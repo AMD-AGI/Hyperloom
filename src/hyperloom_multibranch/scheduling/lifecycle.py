@@ -49,6 +49,7 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import NotRecorded, U
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, ManifestFingerprint, SessionProfile
 from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import (
@@ -85,6 +86,7 @@ from hyperloom_multibranch.scheduling.agent_plans import (
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.checkpoint_tally import CheckpointScope
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_before_final
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
@@ -344,6 +346,7 @@ class Session:
             MapCalls(self._map_start, self._map_split) if settings.agents else None,
             settings.agent_share_minutes,
             settings.inferencex_commit,
+            settings.agentx_early_stop,
         )
 
     def _score_with_defaults(self) -> None:
@@ -908,7 +911,13 @@ class Session:
     def _closer(self) -> Closer:
         dashboard = self._dashboard(self._scoring())
         sources = ExportSources(
-            self._blackboard, self._repo, self._blobs, dashboard, self._image_check, self._briefs.warm
+            self._blackboard,
+            self._repo,
+            self._blobs,
+            dashboard,
+            self._image_check,
+            self._briefs.warm,
+            _checkpoint_scope(self._settings),
         )
         services = ExportServices(self._recipe_kb, self._author, self._curator)
         closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, services)
@@ -1060,6 +1069,14 @@ def prelude_landed(root: Path) -> bool:
         return False
     reader = LocalBlackboard(layout.blackboard, Writer(Role.OBSERVER, RESTART_READER))
     return asyncio.run(recorded_baseline(reader)) is not None
+
+
+def _checkpoint_scope(settings: RunSettings) -> CheckpointScope | None:
+    """The AgentX checkpoint the session ran under; an InferenceX session has none."""
+    workload = settings.workload
+    if workload.kind is not WorkloadKind.AGENTX:
+        return None
+    return CheckpointScope(settings.agentx_early_stop, workload.agentx_objective)
 
 
 def persisted_run(root: Path) -> PersistedRun:
