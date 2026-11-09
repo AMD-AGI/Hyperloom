@@ -27,6 +27,9 @@ TRACEBACK = f"""Traceback (most recent call last):
     fd = os.open(self.lock_file, open_flags, self._context.mode)
 PermissionError: [Errno 13] Permission denied: '{LOCK}'
 """
+SHA = "e53f048f0d6a9b7c1e2d3f4a5b6c7d8e9f0a1b2c"
+BUILDER_LOCK = f"/some/cache/openai___gsm8k/main/0.0.0/{SHA}_builder.lock"
+INFO_LOCK = f"/some/cache/openai___gsm8k/main/0.0.0/{SHA}_info.lock"
 IGNORED = (
     "huggingface_hub.file_download WARNING Could not cache non-existence of file. Will ignore error and continue. "
     "Error: [Errno 13] Permission denied: '/root/.cache/huggingface/hub/models--Qwen--Qwen3-8B/.no_exist'"
@@ -59,6 +62,11 @@ def test_a_dataset_cache_lock_permission_error_is_infra_and_names_the_path() -> 
         "/shared/cache/hub/datasets--openai--gsm8k/snapshots/e53f048/main/test.parquet",
         # the lock datasets takes, wherever HF_DATASETS_CACHE puts the cache
         "/shared/hf_ds/_shared_hf_ds_openai___gsm8k_main_0.0.0_e53f048.lock",
+        # the locks it takes beside the prepared dataset's directory, while it prepares it and writes its info
+        BUILDER_LOCK,
+        INFO_LOCK,
+        "/some/cache/gsm8k/main/0.0.0/0123456789abcdef_builder.lock",
+        "/some/cache/json/default-5f2e1c0a9b8d7e6f/0.0.0/5f2e1c0a9b8d7e6f_info.lock",
     ],
 )
 def test_a_refused_path_of_a_huggingface_cache_is_infra(path: str) -> None:
@@ -94,6 +102,19 @@ def test_a_cache_refusal_survived_before_another_error_is_not_the_cause() -> Non
     )
 
 
+@pytest.mark.parametrize("lock", [BUILDER_LOCK, INFO_LOCK])
+def test_a_build_lock_refusal_is_infra_only_when_the_test_ended_on_it(lock: str) -> None:
+    ended = TRACEBACK.replace(LOCK, lock)
+    verdict = classify_test_failure(returncode=1, logs=[ended])
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, f"{HF_CACHE_PERMISSION}: {lock}")
+    later = "ValueError: the prompt is longer than the context"
+    survived = classify_test_failure(returncode=1, logs=[ended + later])
+    assert (survived.failure_class, survived.failure_reason) == (
+        FailureClass.UNCLEAR,
+        f"{PYTHON_EXCEPTION_REASON}: {later}",
+    )
+
+
 def test_the_cache_refusal_that_ends_the_evaluation_is_infra_whatever_the_server_logged_and_survived() -> None:
     server = f"{IGNORED}\nserver up\nserver down\n"
     verdict = classify_test_failure(returncode=1, logs=[server, "Running loglikelihood requests\n" + TRACEBACK])
@@ -111,6 +132,13 @@ def test_the_cache_refusal_that_ends_the_evaluation_is_infra_whatever_the_server
         "/workspace/candidate/datasets/_out.lock",
         # under the cache a variable names, but in no layout of a Hugging Face cache
         "/shared/cache/gsm8k/main/train.arrow",
+        # beside a prepared dataset's directory, but not one of the locks datasets takes there
+        f"/some/cache/openai___gsm8k/main/0.0.0/{SHA}/dataset_info.json",
+        f"/some/cache/openai___gsm8k/main/0.0.0/{SHA}/gsm8k-test.arrow",
+        f"/some/cache/openai___gsm8k/main/0.0.0/{SHA}_other.lock",
+        # named like those locks, but not beside a dataset's version directory, or not named after a hash
+        f"/workspace/candidate/{SHA}_builder.lock",
+        "/some/cache/openai___gsm8k/main/0.0.0/candidate_builder.lock",
     ],
 )
 def test_an_ordinary_permission_error_keeps_its_old_class(path: str, monkeypatch: pytest.MonkeyPatch) -> None:
