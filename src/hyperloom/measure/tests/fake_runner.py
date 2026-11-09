@@ -14,7 +14,8 @@ measures nothing: what it writes is chosen by ``fake_mode`` and friends in the Y
 list), ``no_manifest`` and ``hang`` (never finishes); ``fake_ready: true`` stamps the server ready first.
 ``fake_delay`` seconds pass before the work starts;
 ``fake_throughput`` and ``fake_completed`` set the report. ``fake_accuracy`` adds an accuracy round to the rounds file
-with that score (``none``: a round that holds no score). ``fake_trace: true`` adds the torch-profiler trace a profile
+with that score (``none``: a round that holds no score), and ``fake_accuracy_returncode`` gives that round a return code
+under the outcome's success, which the runner never writes. ``fake_trace: true`` adds the torch-profiler trace a profile
 test leaves (``profile/torch_trace/...``), ``capture_only`` only a CUDA-graph capture sidecar; ``fake_report: false`` leaves out the benchmark report, as a profiled round
 that printed no readable measurement. ``fake_repro: true`` runs the repro case the sheet carries for real (the shipped
 attachment placement and ``run_case``) against no server, and lists the verdict and log it leaves in the manifest.
@@ -166,7 +167,12 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         values = [] if score is None else [{"task": "gsm8k", "metric": "exact_match,flexible-extract", "score": score}]
         if "fake_accuracy_version" in config:
             values = [{**value, "version": config["fake_accuracy_version"]} for value in values]
-        accuracy_round = {**rounds[0], "phase": "accuracy", "accuracy": values}
+        accuracy_round = {
+            **rounds[0],
+            "phase": "accuracy",
+            "returncode": int(config.get("fake_accuracy_returncode", 0)),
+            "accuracy": values,
+        }
         if held:
             accuracy_round["dir"] = f"variant_00_eval/{bench}"
             if score is not None:

@@ -277,6 +277,15 @@ def test_a_result_that_does_not_verify_is_rejected_and_lands_nowhere(rig, tmp_pa
     assert r.provider.find({}, role="measurement") == []
 
 
+def test_a_failed_round_under_an_outcome_that_says_success_is_rejected_before_anything_is_kept(rig, tmp_path) -> None:
+    r = rig()
+    call, outcome = _run(r, tmp_path, fake_accuracy=0.95, fake_accuracy_returncode=1)
+    assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
+    assert "(manifest_invalid)" in outcome.stderr, outcome.stderr
+    assert not call.output_dir.exists() or not any(call.output_dir.iterdir()), "nothing was written to the output dir"
+    assert not (tmp_path / "archive").exists() or not any((tmp_path / "archive").iterdir()), "nothing was archived"
+
+
 def test_nothing_is_downloaded_from_a_manifest_whose_signature_fails(rig, tmp_path) -> None:
     r = rig()
     copied: list[str] = []

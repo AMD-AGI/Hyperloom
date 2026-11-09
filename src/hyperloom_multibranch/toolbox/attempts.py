@@ -33,6 +33,7 @@ from dataclasses import dataclass, replace
 from typing import NamedTuple, Protocol
 
 from hyperloom.measure.failures import (
+    HF_CACHE_PERMISSION,
     HUB_RATE_LIMITED,
     JIT_BUILD_TIMEOUT,
     SANDBOX_ACQUIRE_TIMEOUT,
@@ -56,8 +57,9 @@ DEFAULT_MAX_INFRA_RETRIES = 3
 #: about how the test was built, not about a node: a patch whose files the server did not import from the farm imports
 #: them from the same place in every sandbox, so a retry only spends GPU time. An attempt that waited the test's whole
 #: timeout for a sandbox slot or for room in the quota (``SANDBOX_ACQUIRE_TIMEOUT``) never started, and a retry would
-#: wait on the same sandboxes: the test ends with what held it instead.
-UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset({INERT_PATCH, SANDBOX_ACQUIRE_TIMEOUT})
+#: wait on the same sandboxes: the test ends with what held it instead. A Hugging Face cache that refused the test
+#: (``HF_CACHE_PERMISSION``) is a volume every sandbox mounts alike, so every sandbox is refused the same way.
+UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset({INERT_PATCH, SANDBOX_ACQUIRE_TIMEOUT, HF_CACHE_PERMISSION})
 #: The hosted backend's ``error_class`` when the platform made the sandbox and it failed before it ran
 #: (``hyperloom.measure.hosted.SANDBOX_CREATE_FAILED``).
 SANDBOX_CREATE_FAILED = "sandbox_create_failed"
@@ -77,9 +79,17 @@ RUNNER_LOST = "runner_lost"
 #: taking its sandbox back when the node's allocation ended, which the toolbox cannot tell from a node that died; a node
 #: that is sick shows it in the failures that stay held against it (the card guard, GPU and node faults). A sandbox that
 #: failed before it ran failed on its template or what the platform mounted, and was never placed on a node it could blame.
-#: A download the Hugging Face Hub refused for its rate limit is refused for the egress address every node shares.
+#: A download the Hugging Face Hub refused for its rate limit is refused for the egress address every node shares, and a
+#: Hugging Face cache that refused the test is the shared volume's permissions, not the node's.
 NODE_BLAMELESS_INFRA_REASONS: frozenset[str] = frozenset(
-    {RUNNER_START_FAILED, RUNNER_LOST, SANDBOX_CREATE_FAILED, HUB_RATE_LIMITED, SANDBOX_ACQUIRE_TIMEOUT}
+    {
+        RUNNER_START_FAILED,
+        RUNNER_LOST,
+        SANDBOX_CREATE_FAILED,
+        HUB_RATE_LIMITED,
+        SANDBOX_ACQUIRE_TIMEOUT,
+        HF_CACHE_PERMISSION,
+    }
 )
 #: Infrastructure failures whose node is not reported.
 _UNREPORTED_INFRA_REASONS = ONCE_RETRIED_INFRA_REASONS | NODE_BLAMELESS_INFRA_REASONS
