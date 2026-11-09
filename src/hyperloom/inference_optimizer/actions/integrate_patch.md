@@ -63,21 +63,34 @@ delegate{
    triple-lock.
 3. `git apply` each patch against the framework source roots
    (`framework_source_roots[0]`), at the first `-p` level that checks
-   cleanly. A patch that does not apply, and is not already in the tree,
-   is REVERT-immediate (record `apply_failed`); a failed apply leaves the
-   tree untouched, and the revert resets it to the HEAD recorded before
-   the attempt. When every patch is already in the tree and the task
-   changes nothing else, the action ends `already_present` here: no
-   restart, no benchmark.
+   cleanly. On a git tree, a patch the strict apply refuses, and that is
+   not already in the tree, is merged onto HEAD, which carries every KEEP
+   so far: first `git apply -3` (strategy `three_way`), then both sides
+   of every conflict region whose merge base is empty (strategy
+   `union_disjoint`). A union must keep every line the patch adds and,
+   in a `.py` file, parse and define no module-level name twice unless
+   HEAD already does. A merged patch is benched like any other and listed
+   under `patches_merged`. A region where both sides changed the same
+   lines is declined, never resolved: the files the merge touched are
+   restored to HEAD and the round ends `apply_failed`, its `error`
+   carrying the strict apply error plus the merge steps. For
+   `perf_framework` / `perf_explore` lanes the framework phase then
+   re-authors the patch on the kept stack, within the authored-lane
+   retry cap. A non-git tree has no merge step: a patch that does not
+   apply ends the round `apply_failed`. The revert resets the tree to the
+   HEAD recorded before the attempt. When every patch is already in the
+   tree and the task changes nothing else, the action ends
+   `already_present` here: no restart, no benchmark.
 4. Layer `config_changes` onto the server-launch env.
-5. Stop the server this session launched, by the pid and process group it
-   recorded; wait for VRAM to drain. No pattern-based kill runs.
-6. Launch via `$ARBOR_LAUNCH_SCRIPT` (or the installed scripts);
-   health-check until ready (≤ 20min for large MoE models).
-7. Run the Magpie throughput benchmark + GSM8K accuracy eval, graded via
-   the shared `_accuracy_gate.parse_eval_results(...)` +
+5. Run an inference_suite round on the session's base launch with those
+   changes: it boots the server, waits for it to be ready, runs the
+   throughput benchmark and the GSM8K accuracy eval, and stops the server
+   it booted. On native AgentX the eval is its own round, on a server
+   without the golden acceptance, once throughput clears the KEEP
+   threshold. Both are graded via the shared
+   `_accuracy_gate.parse_eval_results(...)` +
    `gain_math.accuracy_passed(...)` helpers.
-8. Decide:
+6. Decide:
    - KEEP — bench tput ≥ grading anchor * (1 + keep_threshold_pct/100) AND
      accuracy did not drop more than 0.05 absolute. Append the patch + config_changes to
      `SharedState.optimization_stack`, update `current_best`, restamp
@@ -95,12 +108,16 @@ delegate{
   "delta_pct":         <float | null>,
   "accuracy_pass":   <bool | null>,
   "patches_applied": ["patches/001_cuda_graph_fix.patch", ...],
+  "patches_merged":  [{"patch": "...", "strategy": "three_way" | "union_disjoint", "steps": ["..."]}],
   "config_changes_applied": {"VLLM_USE_AITER": "1"},
   "reason":          "<one-line summary>",
   "specialist_task_id": "<id>",
   "evidence":        {"bench_log": "...", "gate_log": "..."}
 }
 ```
+
+`patches_merged` is present only when a patch was merged onto the kept
+stack: one row per merged patch, naming its strategy and merge steps.
 
 ## Idempotency & resume
 
@@ -113,7 +130,8 @@ hash and `optimization_stack` is the authoritative ledger.
 
 | Symptom | Cause | Mitigation |
 |---|---|---|
-| `git apply` rejects | base HEAD drifted under specialist | reject patch, record `apply_failed`, REVERT path |
+| strict `git apply` rejects, hunks only displaced | an earlier KEEP moved the patch's context or inserted at the same anchor | merged onto HEAD (`three_way` or `union_disjoint`), listed under `patches_merged`; benched and graded as usual |
+| strict `git apply` rejects, hunks overlap a kept change | an earlier KEEP changed the same lines | `apply_failed` with the merge steps in `error`, touched files restored to HEAD; `perf_framework` / `perf_explore` patches re-authored on the kept stack |
 | every patch is already in the tree | the change landed upstream or in an earlier round | `already_present`, with the reverse check per patch under `already_present`; framework KB row `already_present` when the candidate carries an upstream PR identity |
 | server fails to start | broken patch | `git checkout` + restart prior config, mark REVERT |
 | accuracy drops >0.05 absolute | semantic regression | REVERT, record into pitfalls KB |

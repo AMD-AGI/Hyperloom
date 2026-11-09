@@ -332,7 +332,7 @@ _REQUIRED_FIELDS = (
     "sandbox_templates",
     "source_sha",
 )
-_OPTIONAL_FIELDS = ("tp", "dev_key", "grant_limits", "runner_cache_manifest_sha256", "sandbox_workspace")
+_OPTIONAL_FIELDS = ("tp", "dev_key", "grant_limits", "runner_cache_manifest_sha256", "sandbox_workspace", "session_id")
 
 
 def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: Path) -> None:
@@ -349,6 +349,7 @@ def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: P
         "grant_limits": dict(_GRANT),
         "runner_cache_manifest_sha256": _MANIFEST,
         "sandbox_workspace": "workspace-a",
+        "session_id": "MB-session",
     }
     assert set(plain) == {*_REQUIRED_FIELDS, *_OPTIONAL_FIELDS}
     inputs = HostedToolboxInputs(**plain)
@@ -399,6 +400,16 @@ def test_the_source_of_a_sha256_repository_is_a_commit_hash_too(tmp_path: Path) 
 
 
 # -- what is built from them ---------------------------------------------------------------------------------------
+
+
+def test_two_sessions_of_one_run_hand_out_request_ids_of_their_own(tmp_path: Path) -> None:
+    def first_id(session: str) -> str:
+        (tmp_path / session).mkdir(exist_ok=True)
+        toolbox = _toolbox(None, tmp_path / session, session_id=session)
+        return toolbox._log.request_id("root", 1)
+
+    assert first_id("MB-a") != first_id("MB-b"), "the run id they share is the first part of every sandbox's key"
+    assert first_id("MB-a") == first_id("MB-a"), "a restart of one session hands out the ids it would have"
 
 
 async def test_the_toolbox_is_built_from_the_inputs(tmp_path: Path) -> None:

@@ -1,0 +1,700 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Specialists launched in a real bubblewrap sandbox, through the dispatcher, the agent runner and the Ray actor's
+process manager: what the agent reaches, how it is stopped, and how a sandbox that could not be set up reads."""
+
+from __future__ import annotations
+
+import asyncio
+import http.server
+import ipaddress
+import json
+import logging
+import os
+import signal
+import socket
+import sys
+import subprocess
+import tempfile
+import threading
+import time
+from dataclasses import replace
+from pathlib import Path
+from typing import Callable, Iterator
+
+import pytest
+
+from hyperloom_common.git_safety import app_git, recorded_admin_dir, trusted_admin_dir, worktree_head
+from hyperloom_common.tests._bwrap_host import unavailable, usable_bwrap
+from hyperloom.common import agent_isolation, confinement
+from hyperloom.common.agent_isolation import BwrapIsolation, session_isolation_lines
+from hyperloom.common.deadline import Deadline
+from hyperloom_common.proctree import REAP_MARK_ENV, marked_pids, proc_identity, signal_processes
+from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
+from hyperloom.orchestrator.specialists import agent_runner, launch_env
+from hyperloom.orchestrator.specialists import subprocess_ as ss
+from hyperloom.orchestrator.specialists.agent_runner import AgentConfigError
+from hyperloom.orchestrator.specialists.launch_env import (
+    CLAUDE_LOGIN_REFUSAL,
+    CLAUDE_LOGIN_UNCONFINED,
+    CLAUDE_TOKEN_VARIABLES,
+    LaunchPlace,
+    SandboxedProcess,
+    prepare_launch,
+)
+from hyperloom.orchestrator.specialists.subprocess_ import (
+    SpecialistSpawn,
+    SpecialistSubprocessConfig,
+    SpecialistSubprocessDispatcher,
+)
+from hyperloom.orchestrator.specialists.tests._agent_fixtures import (
+    FORGES_ITS_GIT,
+    make_runner,
+    make_spec,
+    wait_finished,
+)
+from hyperloom.orchestrator.specialists.worktrees import _setup_worktree, link_worktree
+from hyperloom.orchestrator.tests._helpers import init_git_repo
+
+pytestmark = pytest.mark.agent_isolation
+
+#: The stand-in claude CLI: it records what it reaches, then writes its done file where it works.
+_REACH = """#!/bin/sh
+cat > got_prompt
+{{
+  echo "home=$HOME"
+  echo "tmpdir=$TMPDIR"
+  echo "mark=${{{mark}:+set}}"
+  cat {secret} >/dev/null 2>&1 && echo "secret=read" || echo "secret=unreachable"
+  test -e {app_tmp} && echo "app_tmp=seen" || echo "app_tmp=absent"
+  kill -0 {app_pid} 2>/dev/null && echo "app=signalled" || echo "app=unreachable"
+  echo "pids=$(ls /proc | grep -c '^[0-9]')"
+  echo "model=$(cat {model}/config.json)"
+}} > reach.txt
+echo '{{"summary": "sandboxed", "proposal_set": []}}' > specialist_done.json
+"""
+#: The stand-in CLI that leaves a link to a directory of the host where its worktree was, and names a file there.
+_SWAPS = """#!/bin/sh
+cat > /dev/null
+cd {workspace}
+mv worktree worktree.orig && ln -s {host} worktree && echo swapped > swapped
+echo '{{"summary": "swapped", "proposal_set": [], "targets": ["creds.txt"]}}' > specialist_done.json
+"""
+#: The stand-in CLI that moves its worktree aside, makes a directory of its own in its place and writes a patch there,
+#: which its done file claims.
+_MOVES = """#!/bin/sh
+cat > /dev/null
+cd {workspace}
+mv worktree worktree.orig && mkdir -p worktree/patches && echo moved > moved
+printf '%s\\n' '--- a/mod.py' '+++ b/mod.py' '@@ -1 +1 @@' '-old = 1' '+new = 2' > worktree/patches/x.patch
+echo '{{"summary": "moved", "proposal_set": [], "patches_written": ["worktree/patches/x.patch"]}}' > specialist_done.json
+"""
+#: The stand-in CLI that swaps its worktree for a link to a host directory and keeps running, checkpointing in its
+#: workspace, while the reaper polls.
+_SWAPS_AND_RUNS = """#!/bin/sh
+cat > /dev/null
+cd {workspace}
+mv worktree worktree.orig && ln -s {host} worktree
+echo '{{"summary": "mine"}}' > specialist_done.partial.json
+sleep 1.5
+echo '{{"summary": "done", "proposal_set": []}}' > specialist_done.json
+"""
+#: The stand-in claude CLI whose one login is its file under the app's home: it notes whether it could read it.
+_LOGIN_FILE_ONLY = """#!/bin/sh
+cat > /dev/null
+{{ cat {login} > /dev/null 2>&1 && echo read || echo unreadable; }} > login_seen
+echo '{{"summary": "ran", "proposal_set": []}}' > specialist_done.json
+"""
+_CANARY = "APP-SECRET-CANARY"
+#: Run in a specialist's sandbox: say ready, wait for the host's go, then name what each path reads as.
+_LATER = r"""
+import errno, json, sys
+print("ready", flush=True)
+sys.stdin.readline()
+def outcome(path):
+    try:
+        return "ok:" + open(path).read()
+    except OSError as exc:
+        return errno.errorcode.get(exc.errno, str(exc.errno))
+print(json.dumps({name: outcome(path) for name, path in json.loads(sys.argv[1]).items()}))
+"""
+_TRAPPED = """#!/bin/sh
+trap 'echo stopped > "{out}"; exit 0' TERM
+sleep 1000 &
+wait
+"""
+
+
+def _script(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+@pytest.fixture
+def sandboxed(monkeypatch: pytest.MonkeyPatch) -> BwrapIsolation:
+    """Every specialist launch here goes through the host's real bubblewrap; the CLI's login is a token."""
+    isolation = BwrapIsolation(usable_bwrap())
+    monkeypatch.setattr(launch_env, "choose_agent_isolation", lambda **_kwargs: isolation)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "token-for-the-test")
+    return isolation
+
+
+def _dispatcher(cli: Path) -> SpecialistSubprocessDispatcher:
+    return SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(agent_backend="claude", claude_executable=str(cli), poll_interval_seconds=0.1)
+    )
+
+
+def _spawn(workspace: Path, **overrides: object) -> SpecialistSpawn:
+    fields: dict = {
+        "task_id": "t-sandboxed",
+        "workspace": workspace,
+        "worktree": None,
+        "worktree_base": None,
+        "system_prompt": "system",
+        "user_prompt": "the task",
+        "deadline": Deadline.after(60.0),
+    }
+    fields.update(overrides)
+    return SpecialistSpawn(**fields)
+
+
+async def test_a_sandboxed_specialist_writes_its_workspace_reads_its_model_and_reaches_nothing_of_the_app(
+    tmp_path: Path, sandboxed: BwrapIsolation
+) -> None:
+    secret = tmp_path / "app" / "state" / "exit.json"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("APP-SECRET", encoding="utf-8")
+    model = tmp_path / "models" / "llama"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text("weights-config", encoding="utf-8")
+    with tempfile.NamedTemporaryFile(prefix="hl-b3-app-") as app_tmp:
+        cli = _script(
+            tmp_path / "cli" / "bin" / "claude",
+            _REACH.format(mark=REAP_MARK_ENV, secret=secret, app_tmp=app_tmp.name, app_pid=os.getpid(), model=model),
+        )
+        workspace = tmp_path / "ws"
+        result = await _dispatcher(cli).run(_spawn(workspace, readable=(model,)))
+
+    reach = dict(line.split("=", 1) for line in (workspace / "reach.txt").read_text(encoding="utf-8").splitlines())
+    assert result.error == "" and result.exit_code == 0 and result.done_payload["summary"] == "sandboxed"
+    assert (workspace / "got_prompt").read_text(encoding="utf-8") == "the task"
+    assert reach == {
+        "home": str(workspace / ".home"),
+        "tmpdir": "/tmp",
+        "mark": "set",
+        "secret": "unreachable",
+        "app_tmp": "absent",
+        "app": "unreachable",
+        "pids": reach["pids"],
+        "model": "weights-config",
+    }
+    assert int(reach["pids"]) < 10
+
+
+async def test_the_harvest_of_a_sandboxed_specialist_never_takes_the_git_dir_it_points_its_worktree_at(
+    tmp_path: Path, sandboxed: BwrapIsolation
+) -> None:
+    """In the sandbox the agent is the app's own uid and writes its worktree's ``.git``: the admin dir it makes there
+    passes every ownership check, so the app's git goes through the one the repository records."""
+    repo, workspace = tmp_path / "repo", tmp_path / "ws"
+    init_git_repo(repo, seed_file="mod.py", seed_text="old = 1\n")
+    worktree, err = _setup_worktree(repo, workspace / "worktree", "specialist-t-sandboxed")
+    assert worktree is not None, err
+    admin = recorded_admin_dir(repo, worktree)
+    head = worktree_head(worktree, admin=admin)
+    cli = _script(
+        tmp_path / "cli" / "bin" / "claude",
+        FORGES_ITS_GIT.format(workspace=workspace, worktree=worktree, objects=repo / ".git" / "objects", head=head),
+    )
+
+    result = await _dispatcher(cli).run(_spawn(workspace, worktree=worktree, worktree_base=repo, worktree_admin=admin))
+
+    assert trusted_admin_dir(worktree) == workspace / "forged.git" / "worktrees" / "w"
+    assert (workspace / "git_seen").read_text(encoding="utf-8") == f"{head}\n"  # its repository is shown read-only
+    assert result.error == "" and result.done_payload["summary"] == "forged"
+    assert len(result.patches) == 1 and result.patch_roots == {result.patches[0]: str(repo)}
+    patch = Path(result.patches[0]).read_text(encoding="utf-8")
+    assert "--- a/mod.py\n+++ b/mod.py\n" in patch and "+new = 2" in patch
+
+
+async def test_a_worktree_swapped_for_a_link_to_a_host_directory_leaves_the_app_nothing_to_read_or_write_there(
+    tmp_path: Path, sandboxed: BwrapIsolation
+) -> None:
+    """The agent is the app's uid and writes the workspace its worktree sits in, so it can leave a link to any host
+    directory there. The app's git, its patch scan and its patch write reach the worktree by path, as the app, outside
+    the sandbox: after the swap none of them runs, the link is removed, and the result says why."""
+    repo, workspace, host = tmp_path / "repo", tmp_path / "ws", tmp_path / "app-secrets"
+    host.mkdir()
+    (host / "creds.txt").write_text(f"{_CANARY}\n", encoding="utf-8")
+    init_git_repo(repo, seed_file="mod.py", seed_text="old = 1\n")
+    linked = link_worktree(repo, workspace / "worktree", "specialist-t-sandboxed")
+    assert linked.path is not None and linked.admin is not None, linked.error
+    cli = _script(tmp_path / "cli" / "bin" / "claude", _SWAPS.format(workspace=workspace, host=host))
+
+    result = await _dispatcher(cli).run(
+        _spawn(workspace, worktree=linked.path, worktree_base=repo, worktree_admin=linked.admin)
+    )
+
+    assert (workspace / "swapped").read_text(encoding="utf-8") == "swapped\n"  # the premise: the agent can swap it
+    assert result.done_payload["summary"] == "swapped" and result.patches == [] and result.patch_roots == {}
+    assert result.worktree_refused == (
+        f"worktree_refused: {linked.path} is no longer the directory the specialist was given; "
+        "the link left in its place was removed"
+    )
+    assert result.worktree_refused in result.error and _CANARY not in repr(result)
+    assert not os.path.lexists(linked.path) and (workspace / "worktree.orig" / "mod.py").is_file()
+    assert sorted(p.name for p in host.iterdir()) == ["creds.txt"]  # nothing written there
+    # The app's git never ran over that directory: the index the repository records holds none of its paths.
+    assert app_git(workspace / "worktree.orig", "ls-files", admin=linked.admin).stdout.split() == ["mod.py"]
+
+
+async def test_a_worktree_moved_aside_for_a_directory_of_the_agents_own_gives_no_patch_harvested_scanned_or_claimed(
+    tmp_path: Path, sandboxed: BwrapIsolation
+) -> None:
+    """Not a link: a directory the agent made at the worktree's path. It is not the tree the specialist was given,
+    so the app's git does not diff it, its ``patches/`` is not scanned, and the done file's claim is not read."""
+    repo, workspace = tmp_path / "repo", tmp_path / "ws"
+    init_git_repo(repo, seed_file="mod.py", seed_text="old = 1\n")
+    linked = link_worktree(repo, workspace / "worktree", "specialist-t-sandboxed")
+    assert linked.path is not None and linked.admin is not None, linked.error
+    cli = _script(tmp_path / "cli" / "bin" / "claude", _MOVES.format(workspace=workspace))
+
+    result = await _dispatcher(cli).run(
+        _spawn(workspace, worktree=linked.path, worktree_base=repo, worktree_admin=linked.admin)
+    )
+
+    assert (workspace / "moved").read_text(encoding="utf-8") == "moved\n"  # the premise: the agent can move it
+    assert (linked.path / "patches" / "x.patch").is_file() and (workspace / "worktree.orig" / "mod.py").is_file()
+    assert result.done_payload["summary"] == "moved" and result.done_payload["patches_written"]
+    assert result.patches == [] and result.patch_roots == {} and result.patch_claims_ignored
+    assert result.worktree_refused == (
+        f"worktree_refused: {linked.path} is no longer the directory the specialist was given"
+    )
+    assert result.worktree_refused in result.error
+    assert sorted(p.name for p in (linked.path / "patches").iterdir()) == ["x.patch"]  # no harvest written there
+    assert app_git(workspace / "worktree.orig", "ls-files", admin=linked.admin).stdout.split() == ["mod.py"]
+
+
+async def test_a_running_specialists_checkpoint_is_never_read_through_a_link_it_left_at_its_worktree(
+    tmp_path: Path, sandboxed: BwrapIsolation
+) -> None:
+    """While the agent runs, the reaper publishes its checkpoints, the worktree's first: a link the agent left at the
+    worktree's path is not followed to a checkpoint of that name in a host directory."""
+    repo, workspace, host = tmp_path / "repo", tmp_path / "ws", tmp_path / "app-secrets"
+    host.mkdir()
+    (host / "specialist_done.partial.json").write_text(f'{{"summary": "{_CANARY}"}}', encoding="utf-8")
+    init_git_repo(repo, seed_file="mod.py", seed_text="old = 1\n")
+    linked = link_worktree(repo, workspace / "worktree", "specialist-t-sandboxed")
+    assert linked.path is not None and linked.admin is not None, linked.error
+    cli = _script(tmp_path / "cli" / "bin" / "claude", _SWAPS_AND_RUNS.format(workspace=workspace, host=host))
+    published: list[dict] = []
+
+    async def progress(payload: dict, _elapsed: float) -> None:
+        published.append(payload)
+
+    result = await _dispatcher(cli).run(
+        _spawn(workspace, worktree=linked.path, worktree_base=repo, worktree_admin=linked.admin, progress_cb=progress)
+    )
+
+    assert result.done_payload["summary"] == "done" and result.worktree_refused
+    assert published and {payload["summary"] for payload in published} == {"mine"}
+
+
+async def test_a_specialist_killed_at_its_deadline_runs_its_own_stop_first(
+    tmp_path: Path, sandboxed: BwrapIsolation
+) -> None:
+    workspace = tmp_path / "ws"
+    cli = _script(tmp_path / "cli" / "bin" / "claude", _TRAPPED.format(out=workspace / "trapped"))
+
+    result = await _dispatcher(cli).run(_spawn(workspace, deadline=Deadline.after(1.0)))
+
+    assert result.timed_out
+    assert (workspace / "trapped").read_text(encoding="utf-8") == "stopped\n"
+    assert result.exit_code == 0  # bubblewrap ended with the agent's own exit
+
+
+async def test_a_sandboxed_cli_that_goes_silent_is_reaped_as_stale_not_taken_for_its_own_tool(
+    tmp_path: Path, sandboxed: BwrapIsolation
+) -> None:
+    """Liveness looks below the agent's own process: bubblewrap's pid 1 and the CLI itself are not tools it waits on."""
+    hang = f'#!/bin/sh\necho started\nexec {sys.executable} -I -S -c "import signal; signal.pause()"\n'
+    cli = _script(tmp_path / "cli" / "bin" / "claude", hang)
+    dispatcher = SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(
+            agent_backend="claude", claude_executable=str(cli), poll_interval_seconds=0.1, heartbeat_stale_seconds=1.0
+        )
+    )
+
+    result = await dispatcher.run(_spawn(tmp_path / "ws", deadline=Deadline.after(30.0)))
+
+    assert result.stale_heartbeat and not result.timed_out, result.error
+
+
+async def test_an_agent_killed_by_a_signal_reads_as_bubblewraps_128_plus_n(
+    tmp_path: Path, sandboxed: BwrapIsolation
+) -> None:
+    cli = _script(tmp_path / "cli" / "bin" / "claude", "#!/bin/sh\nkill -KILL $$\n")
+
+    result = await _dispatcher(cli).run(_spawn(tmp_path / "ws"))
+
+    assert result.exit_code == 137 and "sandbox" not in result.error
+
+
+async def test_a_sandbox_that_cannot_be_set_up_fails_the_task_as_that_with_bubblewraps_line(
+    tmp_path: Path, sandboxed: BwrapIsolation, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gone = tmp_path / "removed-before-the-launch"
+    real = launch_env.prepare_launch
+
+    def prepare(*args: object) -> launch_env.PreparedLaunch:
+        prepared = real(*args)
+        prepared.policy = replace(prepared.policy, writable=(*prepared.policy.writable, str(gone)))
+        return prepared
+
+    monkeypatch.setattr(ss, "prepare_launch", prepare)
+    cli = _script(tmp_path / "cli" / "bin" / "claude", "#!/bin/sh\nexit 3\n")
+
+    result = await _dispatcher(cli).run(_spawn(tmp_path / "ws"))
+
+    assert result.exit_code is None
+    assert result.error.startswith("specialist sandbox could not be set up: bwrap: Can't find source path")
+    assert str(gone) in result.error
+
+
+async def test_a_cancelled_sandboxed_cli_runs_its_own_stop_and_a_failed_setup_reads_as_that(
+    tmp_path: Path, sandboxed: BwrapIsolation, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "w"
+    cli = _script(tmp_path / "cli" / "bin" / "agent", _TRAPPED.format(out=workspace / "trapped"))
+    runner = make_runner(tmp_path / "session")
+    handle = await runner.launch(make_spec(workspace, argv=(str(cli),), env={"CLAUDE_CODE_OAUTH_TOKEN": "t"}))
+    try:
+        await asyncio.sleep(0.5)
+        await runner.cancel(handle)
+        status = await wait_finished(runner, handle)
+        await runner.collect(handle)
+    finally:
+        await runner.cancel(handle)
+    assert isinstance(handle.session.proc, SandboxedProcess)
+    assert (workspace / "trapped").read_text(encoding="utf-8") == "stopped\n" and status.returncode == 0
+
+    real = launch_env.prepare_launch
+    gone = str(tmp_path / "gone")
+
+    def prepare(*args: object) -> launch_env.PreparedLaunch:
+        prepared = real(*args)
+        prepared.policy = replace(prepared.policy, writable=(*prepared.policy.writable, gone))
+        return prepared
+
+    monkeypatch.setattr(agent_runner, "prepare_launch", prepare)
+    failed = await runner.launch(make_spec(tmp_path / "w2", argv=(str(cli),), env={"CLAUDE_CODE_OAUTH_TOKEN": "t"}))
+    status = await wait_finished(runner, failed)
+    await runner.collect(failed)
+    assert status.returncode is None and "sandbox could not be set up: bwrap: Can't find source path" in status.error
+
+
+async def test_a_claude_cli_with_only_its_login_file_runs_unconfined_here_and_is_refused_in_a_hosted_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The real chooser and probe, through the dispatcher and the agent runner: bubblewrap works here, and a claude CLI
+    with no login in its environment runs unconfined (its login file is read), said once and counted for the session
+    report; given a token it runs sandboxed, where that file is not there; a hosted run refuses it."""
+    found = usable_bwrap()
+    monkeypatch.setattr(launch_env, "choose_agent_isolation", agent_isolation.choose_agent_isolation)
+    login = tmp_path / "home" / ".claude" / ".credentials.json"
+    login.parent.mkdir(parents=True)
+    login.write_text('{"claudeAiOauth": {}}', encoding="utf-8")
+    monkeypatch.setenv("HOME", str(login.parent.parent))
+    for name in (*CLAUDE_TOKEN_VARIABLES, "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CONFIG_DIR", "HYPERLOOM_SPECIALIST_USER"):
+        monkeypatch.delenv(name, raising=False)
+    cli = _script(tmp_path / "cli" / "bin" / "claude", _LOGIN_FILE_ONLY.format(login=login))
+    runner = make_runner(tmp_path / "session")
+
+    with caplog.at_level(logging.WARNING):
+        local = await _dispatcher(cli).run(_spawn(tmp_path / "ws"))
+        handle = await runner.launch(make_spec(tmp_path / "w", argv=(str(cli),)))
+        status = await wait_finished(runner, handle)
+        await runner.collect(handle)
+
+    assert (local.error, local.exit_code, status.returncode, status.error) == ("", 0, 0, "")
+    assert not isinstance(handle.session.proc, SandboxedProcess)
+    seen = [(tmp_path / name / "login_seen").read_text(encoding="utf-8") for name in ("ws", "w")]
+    assert seen == ["read\n", "read\n"]
+    warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    unconfined = CLAUDE_LOGIN_UNCONFINED
+    assert len(warnings) == 1 and warnings[0].endswith(f"({unconfined})"), warnings
+    assert session_isolation_lines() == (f"agent isolation: 2 agent launches ran unconfined: {unconfined}",)
+
+    with monkeypatch.context() as token:
+        token.setenv("CLAUDE_CODE_OAUTH_TOKEN", "token-for-the-test")
+        confined = await _dispatcher(cli).run(_spawn(tmp_path / "ws-token"))
+    assert (confined.error, confined.exit_code) == ("", 0)
+    assert (tmp_path / "ws-token" / "login_seen").read_text(encoding="utf-8") == "unreadable\n"
+
+    agent_isolation.require_agent_isolation(bwrap=found.path)  # a hosted run whose layer's bubblewrap is this one
+    hosted = await _dispatcher(cli).run(_spawn(tmp_path / "ws-hosted"))
+    with pytest.raises(AgentConfigError) as refused:
+        await runner.launch(make_spec(tmp_path / "w-hosted", argv=(str(cli),)))
+    assert hosted.error == f"specialist agent runtime unavailable (backend=claude): {CLAUDE_LOGIN_REFUSAL}"
+    assert str(refused.value) == CLAUDE_LOGIN_REFUSAL
+    assert not any((tmp_path / name / "login_seen").exists() for name in ("ws-hosted", "w-hosted"))
+
+
+def test_a_ray_actors_process_manager_runs_the_sandbox_and_its_status_reaches_this_host(
+    tmp_path: Path, sandboxed: BwrapIsolation
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    for code, failure in ((5, ""), (0, "bwrap: Can't find source path")):
+        env = {"PATH": "/usr/bin:/bin", REAP_MARK_ENV: f"ray-{code}"}
+        prepared = prepare_launch(sandboxed, LaunchPlace(workspace), ["/bin/sh", "-c", f"exit {code}"], env)
+        if failure:
+            prepared.policy = replace(prepared.policy, writable=(*prepared.policy.writable, str(tmp_path / "gone")))
+        spawn = prepared.actor(["/bin/sh", "-c", f"exit {code}"], env)
+        log = workspace / f"process-{code}.log"
+        manager = ManagedServerProcess()
+        try:
+            pid = manager.start(spawn.argv, env=spawn.env, cwd=str(workspace), log_path=str(log))
+            proc = prepared.started(ss._RayLeaseProcess(manager, pid))
+            deadline = time.monotonic() + 30
+            while manager.exit_code() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert proc.setup_failure(log).startswith(failure) if failure else proc.setup_failure(log) == ""
+            assert manager.exit_code() == (1 if failure else code), log.read_text(encoding="utf-8")
+        finally:
+            manager.stop()
+            prepared.release()
+
+
+def test_a_login_the_app_replaces_or_makes_while_a_specialist_runs_is_not_shown_to_it(
+    tmp_path: Path, sandboxed: BwrapIsolation, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The specialist's confinement as launches derive it: the app's Hugging Face cache (its default under the app's
+    home, shown read-only) gets its token at the first login, and the references it reads hold a login file the app
+    registered, which the app replaces by a rename. Neither, done while the specialist runs, shows inside; the model
+    and the reference beside them do."""
+    home, refs, workspace = tmp_path / "app-home", tmp_path / "refs", tmp_path / "ws"
+    hf = home / ".cache" / "huggingface"
+    model, doc, login = hf / "hub" / "model.txt", refs / "doc.txt", refs / "login.json"
+    for path, text in ((model, "weights"), (doc, "reference"), (login, "SECRET-OLD")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    workspace.mkdir()
+    registry = confinement.PrivatePaths()
+    registry.add(login, "a login the app keeps beside the references")
+    monkeypatch.setattr(confinement, "PRIVATE_PATHS", registry)
+    monkeypatch.setenv("HOME", str(home))
+    for name in ("HF_HOME", "HF_HUB_CACHE", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    paths = {"token": str(hf / "token"), "login": str(login), "model": str(model), "doc": str(doc)}
+    argv = [sys.executable, "-I", "-S", "-c", _LATER, json.dumps(paths)]
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(home)}
+    prepared = prepare_launch(sandboxed, LaunchPlace(workspace, readable=(refs,)), argv, env)
+    try:
+        spawn = prepared.local(argv, env)
+        with subprocess.Popen(
+            spawn.argv,
+            env=spawn.env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            **spawn.kwargs,
+        ) as child:
+            try:
+                assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+                (hf / "token").write_text("SECRET-HF", encoding="utf-8")
+                login.with_name("login.json.lock").write_text("SECRET-NEW", encoding="utf-8")
+                login.with_name("login.json.lock").replace(login)
+                out, err = child.communicate("go\n", timeout=60)
+            finally:
+                child.kill()
+    finally:
+        prepared.release()
+
+    assert child.returncode == 0, err
+    assert "SECRET" not in out + err
+    assert json.loads(out) == {"token": "ENOENT", "login": "ENOENT", "model": "ok:weights", "doc": "ok:reference"}
+
+
+#: The stand-in CLI that calls its LLM gateways and MCP server, and tries what else listens on this host: a Ray
+#: head's port on loopback and at the host's address, directly and through the proxy the sandbox names.
+_CALLS = """#!{python} -I
+import json, socket, sys, urllib.request
+sys.stdin.read()
+def post(url):
+    try:
+        return urllib.request.urlopen(urllib.request.Request(url, data=b"{{}}"), timeout=20).read().decode()
+    except Exception as exc:
+        return type(exc).__name__
+def tcp(host, port):
+    try:
+        socket.create_connection((host, port), timeout=5).close()
+        return "connected"
+    except OSError as exc:
+        return type(exc).__name__
+reach = {{
+    "gateway": post("{gateway}/v1/messages"),
+    "far_gateway": post("{far}/v1/responses"),
+    "mcp": post("{mcp}"),
+    "head": tcp("127.0.0.1", {head}),
+    "head_at_host": tcp("{host}", {head}),
+    "head_jobs_api": post("http://{host}:{head}/api/jobs/"),
+}}
+json.dump(reach, open("reach.json", "w"))
+open("specialist_done.json", "w").write('{{"summary": "called", "proposal_set": []}}')
+"""
+
+
+def _host_address() -> str:
+    """This host's address on its default route (a UDP connect sends nothing); unavailable on a host without one."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        try:
+            probe.connect(("192.0.2.1", 9))
+            found = probe.getsockname()[0]
+        except OSError:
+            found = "127.0.0.1"
+    if ipaddress.ip_address(found).is_loopback:
+        unavailable("this host has no address besides loopback to try its listeners at")
+    return found
+
+
+class _Recorded(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        server = self.server
+        assert isinstance(server, _RecordingServer)
+        server.seen.append(self.path)
+        body = server.name.encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+class _RecordingServer(http.server.ThreadingHTTPServer):
+    """An HTTP server on ``host`` answering a POST with its ``name`` and recording the paths it was asked."""
+
+    def __init__(self, name: str, host: str) -> None:
+        super().__init__((host, 0), _Recorded)
+        self.name = name
+        self.seen: list[str] = []
+
+
+@pytest.fixture
+def http_servers() -> Iterator[Callable[[str, str], _RecordingServer]]:
+    """Start :class:`_RecordingServer` instances on this host; each is shut down after the test."""
+    started: list[_RecordingServer] = []
+
+    def start(name: str, host: str) -> _RecordingServer:
+        server = _RecordingServer(name, host)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        started.append(server)
+        return server
+
+    yield start
+    for server in started:
+        server.shutdown()
+        server.server_close()
+
+
+async def test_a_sandboxed_specialist_calls_its_llm_gateways_and_mcp_server_and_reaches_nothing_else_on_this_host(
+    tmp_path: Path, sandboxed: BwrapIsolation, monkeypatch: pytest.MonkeyPatch, http_servers
+) -> None:
+    """Its network is its own: the gateway and MCP server on loopback are relayed in at their ports, the gateway at
+    the host's address goes through the bridge's proxy, and a Ray head's port (bound to every address, as ``ray
+    start --head`` binds its GCS) is refused on loopback, unroutable at the host's address, and a 403 through the
+    proxy, which never connects to it."""
+    host = _host_address()
+    gateway, far, mcp = (
+        http_servers("gateway", "127.0.0.1"),
+        http_servers("far", host),
+        http_servers("mcp", "127.0.0.1"),
+    )
+    head = http_servers("head", "0.0.0.0")
+    head_port = head.server_address[1]
+    gateway_url, far_url = f"http://127.0.0.1:{gateway.server_address[1]}", f"http://{host}:{far.server_address[1]}"
+    mcp_url = f"http://localhost:{mcp.server_address[1]}/mcp"
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", gateway_url)
+    monkeypatch.setenv("OPENAI_BASE_URL", far_url)
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"tools": {"type": "http", "url": mcp_url}}}), encoding="utf-8")
+    calls = _CALLS.format(
+        python=sys.executable, gateway=gateway_url, far=far_url, mcp=mcp_url, head=head_port, host=host
+    )
+    cli = _script(tmp_path / "cli" / "bin" / "claude", calls)
+    dispatcher = SpecialistSubprocessDispatcher(
+        SpecialistSubprocessConfig(
+            agent_backend="claude", claude_executable=str(cli), poll_interval_seconds=0.1, mcp_config_path=str(config)
+        )
+    )
+    workspace = tmp_path / "ws"
+
+    result = await dispatcher.run(_spawn(workspace))
+
+    assert result.error == "" and result.done_payload["summary"] == "called", result
+    assert json.loads((workspace / "reach.json").read_text(encoding="utf-8")) == {
+        "gateway": "gateway",
+        "far_gateway": "far",
+        "mcp": "mcp",
+        "head": "ConnectionRefusedError",
+        "head_at_host": "OSError",
+        "head_jobs_api": "HTTPError",
+    }
+    assert (gateway.seen, mcp.seen, far.seen) == (["/v1/messages"], ["/mcp"], [f"{far_url}/v1/responses"])
+    assert head.seen == []
+
+
+#: Run as a Ray actor's worker would: the actor's process manager starts the launch, then the actor waits.
+_ACTOR = """
+import json, sys, time
+from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
+spawn = json.loads(sys.argv[1])
+print(ManagedServerProcess().start(spawn["argv"], env=spawn["env"], cwd=spawn["cwd"]), flush=True)
+time.sleep(600)
+"""
+
+
+def _marked_within(mark: str, done: Callable[[list[int]], bool], seconds: float) -> list[int]:
+    """The processes carrying ``mark`` once ``done`` holds for them, or when ``seconds`` have passed."""
+    deadline = time.monotonic() + seconds
+    while True:
+        found = marked_pids(REAP_MARK_ENV, mark)
+        if done(found) or time.monotonic() > deadline:
+            return found
+        time.sleep(0.1)
+
+
+def test_a_sandbox_a_ray_actor_started_ends_when_the_actor_is_killed(tmp_path: Path, sandboxed: BwrapIsolation):
+    """The actor's death (an OOM kill, say) ends its bubblewrap, and with it every process of the sandbox: nothing
+    keeps the GPU devices and the worktree with no deadline, heartbeat or reaper left to end it."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    mark = f"actor-dies-{os.getpid()}-{time.monotonic_ns()}"
+    cmd = ["/bin/sh", "-c", "sleep 300 & sleep 300 & wait"]
+    env = {"PATH": "/usr/bin:/bin", REAP_MARK_ENV: mark}
+    prepared = prepare_launch(sandboxed, LaunchPlace(workspace), cmd, env)
+    spawn = prepared.actor(cmd, env)
+    child_env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+    payload = json.dumps({"argv": spawn.argv, "env": spawn.env, "cwd": str(workspace)})
+    actor = subprocess.Popen([sys.executable, "-c", _ACTOR, payload], env=child_env, stdout=subprocess.PIPE, text=True)
+    try:
+        assert actor.stdout is not None and actor.stdout.readline().strip().isdigit()
+        running_before = _marked_within(mark, lambda found: len(found) >= 3, 30)
+        actor.kill()
+        actor.wait(timeout=30)
+        left = _marked_within(mark, lambda found: not found, 30)
+    finally:
+        actor.kill()
+        signal_processes(
+            [(pid, seen[1]) for pid in marked_pids(REAP_MARK_ENV, mark) if (seen := proc_identity(pid))], signal.SIGKILL
+        )
+        prepared.release()
+    assert len(running_before) >= 3  # the shell, its two sleeps (and the network relay)
+    assert left == []

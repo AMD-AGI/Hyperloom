@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint
 import functools
 import logging
 import os
@@ -17,7 +17,7 @@ from typing import Any
 import yaml
 
 from hyperloom_common.coerce import to_float, to_int, to_str_list
-from hyperloom.common.gain_math import accuracy_passed, gain_pct
+from hyperloom.common.gain_math import accuracy_passed, gain_pct, graded_gate_row
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
@@ -25,6 +25,7 @@ from hyperloom.common.perf_metric import (
     GRADED_ERROR_RATE,
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
+    GRADED_INTVTY_P50_CHECKPOINT,
     GRADED_OUTPUT,
     VERDICT_REVERT,
     GradingAnchor,
@@ -38,6 +39,7 @@ from hyperloom.common.perf_metric import (
 from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
+from ...state.explore_ledger import land_verdict, ledger_view, variant_knobs
 from ...state.failure_evidence import (
     UNMEASURED_OUTCOMES,
     FAILURE_STAGE_DECISION,
@@ -52,19 +54,27 @@ from ...state.shared_state import (
     resolve_graded_comparison,
     stack_base_params,
 )
-from ..stop_attribution import (
-    StoppedByTheRun,
-    stopped_by_the_run_class,
-    variant_budget_stop,
-)
-from ._accuracy_gate import parse_eval_results
+from ..stop_attribution import StoppedByTheRun, stopped_by_the_run_class, variant_budget_stop
+from ._accuracy_gate import AccuracyReference, parse_eval_results
 from . import _framework_switch_manifest as _switch_manifest
-from .bypass_scriptable import declared_lever_payload
+from .explore_prefilter.declared_levers import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
-from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
-from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
+from ._proposal_identity import (
+    BaseControls,
+    controls_of,
+    effective_fingerprint,
+    keeps_effective_args,
+    normalize_proposal,
+)
+from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
+from ._grid_base import importable_overlay_dir, variant_config_of
+from ._agentx_checkpoint import round_checkpoint
+from ._subprocess_kill import AGENTX_EARLY_STOP_ERROR_CLASS
 from .benchmark_result import double_run_requested
+from .benchmark_run.accuracy import accuracy_round_due, record_accuracy_round, run_candidate_accuracy_round
+from .explore_prefilter._prefilter import prefilter_round, record_decision_round
+from .explore_prefilter._remeasure import STACK_REVALIDATE_SOURCE, _is_config_replay_variant, is_stack_revalidation
 from ._grid_runner import (
     GridLaunch,
     GridRecipe,
@@ -72,12 +82,13 @@ from ._grid_runner import (
     GridVariant,
     SessionDirField,
     _build_variant_yaml,
-    _num_gpus_for_config,
+    lease_cards,
     _safe,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
     session_grid_bounds,
+    teardown_variant_server,
 )
 from ._grid_variant_filter import (
     ServingStack,
@@ -88,19 +99,14 @@ from ._grid_variant_filter import (
     reorder_grid_for_multi_node,
     resolve_skip_spec,
 )
-from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-from hyperloom.inference_optimizer.grid_server_args import (
-    compose_server_args,
-)
+from hyperloom.inference_optimizer.framework_registry import is_scriptable, server_args_env_name
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 from ._ray_serving import maybe_serving_lease
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 
 from ._launch_restatement import Launch, config_envs, launch_change, observed_launch_after, read_launch
-from ._server_argv import ConfigUnreadable, config_server_argv
-from ._server_lifecycle import (
-    resolve_lifecycle_params,
-    teardown_lifecycle_server,
-)
+from ._server_argv import ConfigUnreadable, config_point, config_server_argv
+from ._server_lifecycle import resolve_lifecycle_params
 from ._workload_envs import (
     BenchmarkTarget,
     FrameworkScriptMismatchError,
@@ -115,8 +121,6 @@ log = logging.getLogger(__name__)
 
 _now_iso = functools.partial(now_iso, "auto")
 
-STACK_REVALIDATE_SOURCE: str = "stack_revalidate"
-
 # ``skipped_dup`` reason for a variant whose launch the session already measured on the same stack.
 ALREADY_MEASURED: str = "already_measured"
 # ... for one that starts the stack's own server, or a server this round already launched.
@@ -125,10 +129,8 @@ ROUND_DUP: str = "round_dup"
 
 #: The provenance of a grid row that names none: the model proposed it directly.
 _DIRECT_PROVENANCE = "llm_direct"
-
-
-def is_stack_revalidation(params: dict | None) -> bool:
-    return str((params or {}).get("source") or "") == STACK_REVALIDATE_SOURCE
+# ``framework_lever_source`` of an arm that switches one active lever off.
+_LEAVE_ONE_OUT = "leave_one_out"
 
 
 # Audit/provenance metadata stashed on a GridVariant that must survive being rebuilt into a derived variant.
@@ -186,17 +188,6 @@ def _variant_fingerprint(variant: Any) -> str:
     return str(getattr(variant, "canonical_fp", "") or "")
 
 
-def _keep_uses_effective_args(
-    benchmark: dict[str, Any], base_mode: str, variant_mode: str, remove_args: list[str], unset_envs: list[str]
-) -> bool:
-    """Native KEEP edits remain relative to the verified recipe unless explicitly replaced."""
-    return (
-        base_mode == "replace"
-        or variant_mode == "replace"
-        or (not is_magpie_agentx(benchmark) and bool(remove_args or unset_envs))
-    )
-
-
 def _action_reasoning(raw: dict[str, Any]) -> tuple[str, str]:
     """Return the action-authored rationale and the payload field that supplied it."""
     for field in ("reasoning", "rationale", "reason", "note"):
@@ -245,22 +236,15 @@ def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
     """Build explore variants that attribute each registered rewrite lever."""
     if shared_state is None:
         return []
-    rows = list(getattr(shared_state, "authored_framework_levers", None) or [])
-    if not rows:
-        return []
-    pending = [row for row in rows if isinstance(row, dict) and row.get("attributed_gain_pct") is None]
-    if not pending:
-        return []
-    dormant = [row for row in pending if not row.get("default_on")]
-    active = [row for row in pending if row.get("default_on")]
+    rows = [row for row in getattr(shared_state, "authored_framework_levers", None) or [] if isinstance(row, dict)]
+    # Arms are built over every registered lever, so attribution only picks which run, never which envs they set.
+    pending = {row["switch"] for row in rows if row.get("attributed_gain_pct") is None}
     payload: list[dict[str, Any]] = []
-    if dormant:
-        for variant in _switch_manifest.additive_variants(dormant):
-            payload.append({**variant, "framework_lever_source": "additive"})
-    if active:
-        for variant in _switch_manifest.leave_one_out_variants(active):
-            payload.append({**variant, "framework_lever_source": "leave_one_out"})
-    return payload
+    for variant in _switch_manifest.additive_variants([row for row in rows if not row.get("default_on")]):
+        payload.append({**variant, "framework_lever_source": "additive"})
+    for variant in _switch_manifest.leave_one_out_variants([row for row in rows if row.get("default_on")]):
+        payload.append({**variant, "framework_lever_source": _LEAVE_ONE_OUT})
+    return _switch_manifest.unattributed_arms(payload, pending)
 
 
 def _framework_lever_attributions(
@@ -282,11 +266,13 @@ def _framework_lever_attributions(
         seed = by_name.get(str(row.get("variant_name") or ""))
         if seed is None:
             continue
-        measured = (row.get("metrics") or {}).get("gain_pct")
+        # A REVERT keeps its measured movement in ``graded_gain_pct``; a regressed leave-one-out arm is that case.
+        metrics = row.get("metrics") or {}
+        measured = metrics.get("gain_pct", metrics.get("graded_gain_pct"))
         if not isinstance(measured, (int, float)):
             continue
         source = str(seed.get("framework_lever_source") or "")
-        gain = -float(measured) if source == "leave_one_out" else float(measured)
+        gain = -float(measured) if source == _LEAVE_ONE_OUT else float(measured)
         out.append(
             {
                 "switch": str(seed["framework_lever"]),
@@ -297,14 +283,6 @@ def _framework_lever_attributions(
             }
         )
     return out
-
-
-_CONFIG_REPLAY_PROVENANCE = frozenset({"geak_revalidate"})
-
-
-def _is_config_replay_variant(variant: Any) -> bool:
-    """Whether a variant replays an already-validated config verbatim."""
-    return str(getattr(variant, "provenance", "") or "").strip() in _CONFIG_REPLAY_PROVENANCE
 
 
 def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, str]]:
@@ -371,14 +349,14 @@ def filter_context_copy_drafts(
         tmp_root = Path(tmp_dir)
         try:
             base = _materialized_launch(recipe, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base")
-        except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
+        except _UNREADABLE_LAUNCH as exc:
             log.warning("explore: could not materialize the base to read its speculative decoding (%s)", exc)
             base = ("", {})
         for idx, gv in enumerate(grid):
             against = base
             try:
                 launch = _materialized_launch(recipe, gv, tmp_root / f"v{idx}")
-            except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
+            except _UNREADABLE_LAUNCH as exc:
                 log.warning("explore: could not materialize %s to read its speculative decoding (%s)", gv.name, exc)
                 launch = (str(gv.extra_server_args or ""), {str(k): str(v) for k, v in (gv.extra_envs or {}).items()})
                 against = ("", {})
@@ -514,14 +492,11 @@ def _materialized_round_config(
         raise _RoundRefused("framework_script_mismatch", str(exc)) from exc
 
 
-def _framework_of(config_path: Path) -> tuple[str, dict[str, Any]]:
+def _round_point(config_path: Path) -> BenchmarkPoint:
     try:
-        with config_path.open(encoding="utf-8") as handle:
-            bench = (yaml.safe_load(handle) or {}).get("benchmark") or {}
-    except (OSError, yaml.YAMLError) as exc:
-        log.warning("explore: could not resolve framework from %s: %s", config_path, exc)
-        return "", {}
-    return str(bench.get("framework") or "").lower(), bench
+        return config_point(config_path)
+    except ConfigUnreadable as exc:
+        raise _RoundRefused("unreadable_config", str(exc)) from exc
 
 
 def _anchor_the_params(params: dict[str, Any], ss: Any) -> None:
@@ -553,7 +528,9 @@ def _lever_seeded_payload(payload: list[Any], levers: list[dict[str, Any]]) -> l
     if not fresh:
         return payload
     log.info("explore: seeding %d framework-rewrite lever variant(s) for attribution", len(fresh))
-    return fresh + list(payload)
+    # A leave-one-out arm only attributes a switch already on, so the arms that could KEEP run before it.
+    attribution = [v for v in fresh if v.get("framework_lever_source") == _LEAVE_ONE_OUT]
+    return [v for v in fresh if v not in attribution] + list(payload) + attribution
 
 
 def _seed_grid_payload(params: dict[str, Any], framework: str, yaml_envs: dict[str, Any]) -> list[Any]:
@@ -627,7 +604,7 @@ def runnable_grid_variants(params: Mapping[str, Any] | None, shared_state: Any) 
 # The numbers a measured variant produced. ``base_tput`` is carried verbatim rather than left to be back-solved
 # from the gain: each KEEP advances the round anchor, so a consumer dividing the gain out of the final throughput
 # reconstructs whichever anchor happens to be current, and a FAILED variant has no gain to divide.
-_VARIANT_METRIC_KEYS: tuple[str, ...] = ("tput", "gain_pct", "base_tput")
+_VARIANT_METRIC_KEYS: tuple[str, ...] = ("tput", "gain_pct", "graded_gain_pct", "base_tput")
 
 # The ledgers' views of the row the round records for a variant.
 _VARIANT_FIELDS: tuple[str, ...] = (
@@ -651,25 +628,6 @@ _REJECTED_FIELDS: tuple[str, ...] = (
 )
 
 
-def _ledger_view(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
-    return {key: row[key] for key in fields if key in row}
-
-
-def _variant_knobs(te: dict[str, Any]) -> dict[str, Any]:
-    # Carry the variant knobs so the journal's ``classify_change_kind`` can classify the change kind.
-    return {
-        "name": str(te.get("name") or ""),
-        "extra_server_args": str(te.get("extra_server_args") or ""),
-        "extra_envs": dict(te.get("extra_envs") or {}),
-        "remove_args": list(te.get("remove_args") or []),
-        "unset_envs": list(te.get("unset_envs") or []),
-        "args_mode": str(te.get("args_mode") or "append"),
-        "note": str(te.get("note") or ""),
-        "reasoning_origin": str(te.get("reasoning_origin") or ""),
-        "experience_citations": list(te.get("experience_citations") or []),
-    }
-
-
 def _outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str) -> dict[str, Any]:
     name = str(te.get("name") or "")
     outcome = str(te.get("outcome") or "")
@@ -687,6 +645,7 @@ def _outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str
         "error_class": str(te.get("error_class") or ""),
         "failure_attribution": classify_failure_attribution(
             error_class=te.get("error_class"),
+            framework_changed=bool(te.get("framework_changed")),
             error_excerpt=te.get("error_excerpt"),
             reason=reason,
         )
@@ -695,7 +654,7 @@ def _outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str
         "server_log_path": te.get("server_log_path"),
         "workspace": te.get("workspace"),
         "raw_result_path": te.get("raw_result_path"),
-        "variant": _variant_knobs(te),
+        "variant": variant_knobs(te),
         # The verdicts and the stack behind them, as the round ruled. Absent keys mean the variant never got that
         # far: no gate ruled on a warmup failure, and nothing validated one that was killed before it was graded.
         "measured_against": te.get("measured_against") or {},
@@ -713,6 +672,9 @@ def _sanitized_overrides(params: dict[str, Any]) -> tuple[str | None, str | None
 
 class _ExploreRound:
     """One explore round: the stack it accumulates, the variants it measures, and the ledgers it writes."""
+
+    projection: dict[str, Any] | None = None
+    prefilter_dropped = 0
 
     def __init__(self, ctx: Any, params: dict[str, Any], output_root: Path) -> None:
         extra = getattr(ctx, "extra", None) or {}
@@ -734,9 +696,9 @@ class _ExploreRound:
         grading = getattr(self.ss, "grading", None)
         self.config_path = _materialized_round_config(params, output_root, self.target, grading)
         _anchor_the_params(params, self.ss)
-        self.framework, bench = _framework_of(self.config_path)
-        self.bench = bench
-        self.yaml_envs = bench.get("envs") or {}
+        self.point = _round_point(self.config_path)
+        self.framework = self.point.framework.lower()
+        self.yaml_envs = dict(self.point.envs)
         self.base_args = str(params.get("base_extra_args") or "").strip()
         self.base_envs = dict(params.get("base_extra_envs") or {})
         self.base_remove_args = to_str_list(params.get("base_remove_args"))
@@ -753,12 +715,7 @@ class _ExploreRound:
         self.running_tput = self.base_tput
         self.running_perf: Any = None
         self.keep_threshold_pct = float(params["keep_threshold_pct"])
-        # The measured baseline outranks a proposed one.
-        self.baseline_accuracy = to_float(getattr(self.ss, "baseline_accuracy", 0.0), 0.0) or 0.0
-        if self.baseline_accuracy <= 0:
-            self.baseline_accuracy = (
-                to_float(params.get("accuracy_baseline"), 0.0) or to_float(params.get("baseline_accuracy"), 0.0) or 0.0
-            )
+        self.accuracy_reference = AccuracyReference.of_session(self.ss, params)
         # A context-copying draft is refused on the synthetic benchmark, whose repetition loops it would copy.
         self.refuse_context_copy = not agentx_active(
             benchmark_mode=getattr(self.ss, "benchmark_mode", "")
@@ -794,12 +751,14 @@ class _ExploreRound:
         self.untested = 0
         self.lease: Any = None
 
-    async def run(self) -> dict[str, Any]:
+    async def run(self, session_dir: Path | None = None) -> dict[str, Any]:
+        self.session_dir = session_dir
         self._resolve_grid()
         self._shape_runnable()
         self._open_schedule()
+        round_ctx = await prefilter_round(self, session_dir)
         # One Ray serving lease (actor) spans the WHOLE round; every variant reuses it.
-        self.lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(self.config_path)) if self.runnable else None
+        self.lease = maybe_serving_lease(num_gpus=lease_cards(self.config_path, session_dir)) if self.runnable else None
         try:
             for idx, gv in enumerate(self.runnable):
                 if self._refused(gv, idx):
@@ -814,20 +773,21 @@ class _ExploreRound:
                     if self.run_stop is not None:
                         break
                     if measurement is not None:
-                        self._settle(gv, run_gv, measurement, slot)
+                        row = await self._settle(gv, run_gv, measurement, slot)
+                        await record_decision_round(round_ctx, gv, measurement, row)
                 finally:
-                    # Reap THIS variant's persistent server on every exit path (idempotent + no-op when reuse was
-                    # ineligible).
+                    # The warmup and decision rounds share this slot's server; reap it on every exit path.
                     if self.lifecycle_eligible:
-                        teardown_lifecycle_server(
-                            pid_dir=slot, framework=self.lifecycle_framework, port=self.lifecycle_port
-                        )
+                        self._reap_variant_server(slot)
         finally:
-            # Release the round's Ray serving lease/actor exactly once (this was a per-variant ``ray.kill`` before
-            # -- the raylet worker churn that destabilised the single-node cluster).
+            # One lease spans the round; a per-variant ``ray.kill`` churns raylet workers on a single-node cluster.
             if self.lease is not None:
                 self.lease.close()
         return self._result()
+
+    def _reap_variant_server(self, slot: Path) -> None:
+        if survivors := teardown_variant_server(slot):
+            log.error("explore: pids %s outlived SIGKILL; %s keeps their record", survivors, slot)
 
     # ----- the stack the round accumulates ---------------------------------
 
@@ -843,7 +803,7 @@ class _ExploreRound:
         """
         return {
             "throughput": self.running_tput,
-            "accuracy": self.baseline_accuracy or None,
+            "accuracy": self.accuracy_reference.score or None,
             "extra_server_args": self.args,
             "extra_envs": dict(self.envs),
             "remove_args": list(self.remove_args),
@@ -995,9 +955,8 @@ class _ExploreRound:
         # cold decision round instead of one that re-attaches to the warmup's server).
         lifecycle = resolve_lifecycle_params(self.config_path)
         self.lifecycle_eligible = bool(lifecycle.get("eligible"))
-        self.lifecycle_framework = str(lifecycle.get("framework") or "")
         self.lifecycle_port = to_int(lifecycle.get("port"), 0) or 0
-        self.use_warm_decision = self.lifecycle_eligible and double_run_requested(self.params)
+        self.use_warm_decision = self.lifecycle_eligible and double_run_requested(self.params, self.config_path)
         # Stop testing further variants once the session wall-clock budget runs out; untested variants stay out of
         # the ledger so a resume can retry them.
         self.session_deadline_sec, session_expected_sec = session_grid_bounds(self.ss)
@@ -1211,7 +1170,9 @@ class _ExploreRound:
                 ready_server_log=warmup.server_log_path if warmup is not None else None,
             ),
             stop=GridStop(
-                session_deadline_sec=self.session_deadline_sec, variant_expected_sec=self.decision_expected_sec
+                session_deadline_sec=self.session_deadline_sec,
+                variant_expected_sec=self.decision_expected_sec,
+                checkpoint=round_checkpoint(self.running_perf),
             ),
         )
         return None if self._stopped_by_the_run(results[0], gv, idx, "decision") else results[0]
@@ -1278,7 +1239,7 @@ class _ExploreRound:
 
     # ----- the verdict -----------------------------------------------------
 
-    def _settle(self, gv: GridVariant, run_gv: GridVariant, r: Any, slot: Path) -> None:
+    async def _settle(self, gv: GridVariant, run_gv: GridVariant, r: Any, slot: Path) -> dict[str, Any]:
         # Rule on this variant's measurement and fold a KEEP onto the round's stack.
         #
         # A variant KEEPs when it clears the graded verdict and the accuracy gate. The axes and the threshold floor
@@ -1290,6 +1251,7 @@ class _ExploreRound:
             GRADED_INTVTY: r.intvty_p90,
             "tpot_p90_ms": r.tpot_p90_ms,
             GRADED_INTVTY_P50: r.intvty_p50,
+            GRADED_INTVTY_P50_CHECKPOINT: r.intvty_p50_checkpoint,
             GRADED_DURATION: r.duration_seconds,
             GRADED_ERROR_RATE: r.request_error_rate,
             **constraint_fields(r),
@@ -1318,10 +1280,13 @@ class _ExploreRound:
             "validation_basis": "",
         }
         if row["outcome"] == TS_FAILED and not row["reason"]:
+            if accuracy_round_due(self.ss):
+                await self._run_accuracy_round(row, slot, r.workspace)
             self._apply_accuracy_gate(row, slot)
         self._record(gv, row)
         if row["outcome"] == "KEEP":
             self.winners.append(self._keep(gv, run_gv, r, row, variant_meas))
+        return row
 
     def _variant_facts(self, gv: GridVariant) -> dict[str, Any]:
         return {
@@ -1331,6 +1296,7 @@ class _ExploreRound:
             "extra_envs": dict(gv.extra_envs),
             **controls_of(vars(gv)),
             **_decision_fields(gv),
+            "framework_changed": bool(importable_overlay_dir(gv)),
         }
 
     def _graded_verdict(self, gv: GridVariant, r: Any, variant_meas: dict[str, Any]) -> dict[str, Any]:
@@ -1355,7 +1321,9 @@ class _ExploreRound:
         graded_gain: float | None = None
         outcome = TS_FAILED
         reason = ""
-        if r.status != "succeeded":
+        if r.error_class == AGENTX_EARLY_STOP_ERROR_CLASS:
+            outcome, reason = "REVERT", f"{AGENTX_EARLY_STOP_ERROR_CLASS} ({r.error})"
+        elif r.status != "succeeded":
             reason = (r.error or "")[-1200:] or "no_measurement"
         elif graded.degrade_reason:
             # Same fail-closed rule as ``lift_to_current_best``: an AgentX session that could not grade on
@@ -1375,21 +1343,7 @@ class _ExploreRound:
             reason = graded.veto_reason or (f"{graded.refused_by} ({axes})" if on_intvty else GAIN_BELOW_THRESHOLD)
         else:
             gain = gain_pct(graded.candidate, graded.reference)
-        gates: list[dict[str, Any]] = []
-        if r.status == "succeeded":
-            gates.append(
-                {
-                    "gate": graded.vetoed_by
-                    if graded.veto_reason
-                    else ("graded_axes" if (on_intvty or graded.degrade_reason) else "keep_threshold"),
-                    "passed": False if graded.degrade_reason else graded.verdict != VERDICT_REVERT,
-                    # The anchor is the reference; the floor the candidate has to clear belongs to the gate, as
-                    # the tolerance does for accuracy.
-                    "observed": graded.candidate if on_intvty else gain_pct(graded.candidate, graded.reference),
-                    "threshold": graded.reference if on_intvty else self.keep_threshold_pct,
-                    "reason": reason,
-                }
-            )
+        gates = [graded_gate_row(graded, self.keep_threshold_pct, reason)] if r.status == "succeeded" else []
         return {
             "outcome": outcome,
             # Which gate refused the variant. The prompt ledger renders this row, and without the reason a REVERT
@@ -1401,25 +1355,31 @@ class _ExploreRound:
             "gates": gates,
         }
 
+    async def _run_accuracy_round(self, row: dict[str, Any], slot: Path, workspace: str) -> None:
+        if self.lifecycle_eligible:  # the round boots a server of its own on the variant's GPUs
+            self._reap_variant_server(slot)
+        launch = variant_config_of(workspace)
+        outcome = await run_candidate_accuracy_round(slot, launch, self.ss, session=self.session_dir, lease=self.lease)
+        record_accuracy_round(row, outcome)
+
     def _apply_accuracy_gate(self, row: dict[str, Any], slot: Path) -> None:
         # Rule on the round's accuracy evidence for a variant no earlier gate refused.
         #
         # A session with no baseline accuracy gates nothing, so its KEEPs rest on throughput alone -- a weaker
         # claim than one an accuracy gate ruled on, and ``validation_basis`` must not read alike for the two.
-        from hyperloom.inference_optimizer import framework_registry
-
-        scriptable = framework_registry.is_scriptable(self.framework)
+        scriptable = is_scriptable(self.framework)
         observed: Any = None
         reference: float | None = None
         passed = True
         # Serving still needs a measured baseline to compare against; scriptable compares against a fixed 1.0.
-        gated = scriptable or self.baseline_accuracy > 0
+        gated = scriptable or self.accuracy_reference.score > 0
         if gated:
-            observed = parse_eval_results(
+            results = parse_eval_results(
                 slot, framework=self.framework, benchmark_mode=str(getattr(self.ss, "benchmark_mode", "") or "")
-            ).get("accuracy")
+            )
+            observed = results.get("accuracy") if scriptable else self.accuracy_reference.comparable(results)
             if isinstance(observed, (int, float)):
-                reference = 1.0 if scriptable else self.baseline_accuracy
+                reference = 1.0 if scriptable else self.accuracy_reference.score
                 passed = accuracy_passed(reference, float(observed))
             else:
                 passed = False
@@ -1442,8 +1402,21 @@ class _ExploreRound:
     def _record(self, gv: GridVariant, row: dict[str, Any]) -> None:
         self.tested[row["fingerprint"]] = row
         if row["outcome"] != "KEEP":
-            self.rejected.append({**_ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)})
-            self.losers.append(_ledger_view(row, _LOSER_FIELDS))
+            rejected = {**ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)}
+            self.rejected.append(rejected)
+            self.losers.append(ledger_view(row, _LOSER_FIELDS))
+            if self.ss is not None and self.session_dir is not None:
+                # A preempted round keeps the verdicts it judged; a KEEP lands at settlement.
+                outcome = _outcome_row(
+                    row, row["fingerprint"], str(row.get("reason") or ""), str(self.ctx.task.task_id)
+                )
+                attributions = _framework_lever_attributions([outcome], self.lever_payload)
+                land_verdict(
+                    self.ss,
+                    self.session_dir,
+                    {"tested": {row["fingerprint"]: row}, "rejected": [rejected]},
+                    attributions,
+                )
             return
         self.winners_history.append(
             {
@@ -1489,8 +1462,8 @@ class _ExploreRound:
             effective["remove_args"] = list(run_remove_args)
         if run_gv.unset_envs:
             effective["unset_envs"] = list(run_gv.unset_envs)
-        persist = _keep_uses_effective_args(
-            self.bench, self.args_mode, gv.args_mode, run_remove_args, run_gv.unset_envs
+        persist = keeps_effective_args(
+            self.point.agentx, self.args_mode, gv.args_mode, run_remove_args, run_gv.unset_envs
         )
         if persist:
             effective["args_mode"] = "replace"
@@ -1574,9 +1547,10 @@ class _ExploreRound:
             )
         best = max(self.winners, key=lambda w: to_float(w.get("gain_pct"), 0.0) or 0.0, default=None)
         best_gain_pct = (to_float(best.get("gain_pct"), 0.0) or 0.0) if best else 0.0
-        # A round whose every variant already had its verdict, or only restated the stack, is answered, as if
-        # measured again.
-        answered = bool(self.runnable) and self.judged_without_measuring == len(self.runnable)
+        # A round whose every variant a pre-filter dropped, already had its verdict, or only restated the stack is
+        # answered, as if measured again.
+        offered = len(self.runnable) + self.prefilter_dropped
+        answered = bool(offered) and self.judged_without_measuring + self.prefilter_dropped == offered
         measured = any(t.get("outcome") in ("KEEP", "REVERT") for t in self.tested.values())
         status = "succeeded" if measured or self.winners or answered else "failed"
         return {
@@ -1606,7 +1580,8 @@ class _ExploreRound:
             "framework": self.framework,
             # gain_pct for the audit trail (best gain of the batch).
             "gain_pct": best_gain_pct,
-            "explore_grid_exhausted": not self.runnable,
+            "explore_grid_exhausted": not self.runnable and not self.prefilter_dropped,
+            "projection": self.projection,
         }
 
     def _budget_error(self, status: str) -> dict[str, Any]:
@@ -1662,7 +1637,7 @@ class ExploreExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
         try:
-            return await _ExploreRound(ctx, params, output_root).run()
+            return await _ExploreRound(ctx, params, output_root).run(self.session_dir)
         except _RoundRefused as refusal:
             return refusal.result
 

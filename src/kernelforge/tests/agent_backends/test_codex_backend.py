@@ -29,6 +29,7 @@ from kernelforge.agent_backends.base import (
     StdioMcpServer,
 )
 from kernelforge.agent_backends.registry import resolve_agent_runtime
+from kernelforge.agent_backends.structured_output import AgentAnswer, output_json_schema
 from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.agent_backends.session_resume import (
     is_api_failure,
@@ -475,6 +476,20 @@ def test_codex_sdk_sandbox_keeps_runtime_and_write_policy_separate(
     sandbox = backend._sdk_sandbox(_FakeCodexSdk, spec)
 
     assert sandbox == expected
+
+
+class _Findings(AgentAnswer):
+    findings: list[str]
+
+
+def test_a_codex_turn_is_held_to_the_answer_schema_its_spec_names() -> None:
+    """Codex constrains the turn's final message itself; a free-form turn is given no schema."""
+    backend = CodexBackend(runtime=AgentRuntimeConfig(provider="codex", model="gpt-test"))
+    held = AgentRunSpec(system_prompt="Inspect only.", user_prompt="Return findings.", cwd=".", output_schema=_Findings)
+    free = AgentRunSpec(system_prompt="Inspect only.", user_prompt="Return findings.", cwd=".")
+
+    assert backend._turn_options(_FakeCodexSdk, held)["output_schema"] == output_json_schema(_Findings)
+    assert "output_schema" not in backend._turn_options(_FakeCodexSdk, free)
 
 
 def test_normalize_codex_sdk_result() -> None:
@@ -1669,6 +1684,39 @@ def test_codex_backend_restores_driver_and_target_on_violation(
     assert kernel.read_text() == "VALUE = 1\n"
     assert driver.read_text() == "DRIVER = 'original'\n"
     assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_a_session_that_imports_a_benchmark_module_leaves_no_byte_code_to_reject(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Importing a module under a protected ``benchmark/`` directory reads it; it does not edit it."""
+    repo, kernel, driver = _make_repo(tmp_path)
+    (repo / ".gitignore").write_text("forge_driver.py\n__pycache__/\n")
+    (repo / "benchmark").mkdir()
+    (repo / "benchmark" / "__init__.py").write_text("")
+    (repo / "benchmark" / "datasets.py").write_text("ROWS = 1\n")
+    _git(repo, "add", ".gitignore", "benchmark")
+    _git(repo, "commit", "-q", "-m", "benchmark package")
+    fake = _write_fake_codex(
+        tmp_path,
+        """
+        sys.path.insert(0, str(workspace))
+        import benchmark.datasets
+        print(json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "read the datasets"},
+        }))
+        print(json.dumps({"type": "turn.completed", "usage": {}}))
+        """,
+    )
+    monkeypatch.setenv("FAKE_CODEX_WORKSPACE", str(repo))
+    monkeypatch.setenv("FAKE_CODEX_API_KEY", "test-secret")
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+
+    asyncio.run(_backend(fake).run(_spec(repo, kernel, driver)))
+
+    assert not (repo / "benchmark" / "__pycache__").exists()
 
 
 def test_codex_guard_honors_additional_exact_protected_paths(

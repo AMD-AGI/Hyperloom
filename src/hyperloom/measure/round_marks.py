@@ -3,13 +3,13 @@
 
 """What a round of a test left on disk about when its parts began, and the phases that follow from it.
 
-``run_grid`` runs a round as one or two Magpie runs (a warmup run whose result is discarded, then the measured one) and
-writes beside each run's server log what the launcher's watchdog saw: ``server_ready_at`` (the instant the server
-reported ready and how long its boot took from the spawn) and ``kv_metrics.json`` (the instants the watchdog saw the
-client start its evaluation, or, for an AgentX client, its warmup and measured phases begin and end; it looks every half
-second, and the file's own time is when the run ended). The backend asks for no more than that of ``run_grid``; this
-module reads those marks after the round and turns them into phase boundaries. A mark that is not there only makes a phase coarser: the boundaries tile the round's window, so the
-seconds the marks cannot place stay in the phase before them and none are dropped.
+A round is one or two inference_suite runs (a warmup run whose result is discarded, then the measured one), and each
+run's run_dir holds ``server_ready_at`` (the instant the server reported ready and how long its boot took from the
+spawn) and ``kv_metrics.json`` (the instants the round's client began its evaluation, or, for an AgentX client, its
+warmup and measured phases began and ended; the file's own time is when the run ended), both written by the
+inference_suite round. This module reads those marks after the round and turns them into phase boundaries. A mark that
+is not there only makes a phase coarser: the boundaries tile the round's window, so the seconds the marks cannot place
+stay in the phase before them and none are dropped.
 """
 
 from __future__ import annotations
@@ -40,9 +40,11 @@ from hyperloom.measure.phases import (
     TEARDOWN,
     WARMUP,
 )
+from inference_suite.contracts import RunLayout
 
 __all__ = [
     "ROLE_BOOT",
+    "ROLE_EVAL",
     "ROLE_MEASURE",
     "ROLE_WARMUP",
     "BootParts",
@@ -54,17 +56,15 @@ __all__ = [
     "round_boundaries",
 ]
 
-#: The roles of a round's call: one that only boots the server, the warmup round of a graded test, and one that measures.
+#: The roles of a round's call: one that only boots the server, the warmup round of a test on a held server, one that
+#: measures, and the round that only evaluates a graded test after its measured bench.
 ROLE_BOOT = "boot"
 ROLE_WARMUP = "warmup"
 ROLE_MEASURE = "measure"
+ROLE_EVAL = "eval"
 #: Where ``run_grid`` keeps the discarded warmup run of a round, below the round's own directory.
 _WARMUP_DIR = "warmup_round"
 _ROUND_GLOB = "variant_*"
-_KV_FILE = "kv_metrics.json"
-_SERVER_LOG = "server.log"
-#: Magpie runs a server in a directory of its own below the run's: ``<run directory>/benchmark_sglang_<time>/server.log``.
-_SERVER_LOG_DIRS = "benchmark_*"
 _UTF8 = "utf-8"
 #: The phases ``kv_metrics.json`` records the instants of: the client's evaluation, and an AgentX client's own phases.
 _EVAL, _CLIENT_WARMUP, _CLIENT_MEASURED, _CLIENT_FINISHED = "eval", "warmup", "measured", "finished"
@@ -115,11 +115,11 @@ class BootParts:
 
 @dataclass(frozen=True)
 class RunMarks:
-    """The instants one Magpie run of a round left: when its server was ready and how long it took to boot (0 for a run
+    """The instants one run of a round left: when its server was ready and how long it took to boot (0 for a run
     that found it ready), when the client began its evaluation or its own phases, and when the run ended.
 
-    ``ended`` is the modification time of ``kv_metrics.json``, which the watchdog writes as the run ends; ``None`` when the
-    run left none.
+    ``ended`` is the modification time of ``kv_metrics.json``, which the run writes as it ends; ``None`` when the run left
+    none.
     """
 
     directory: Path
@@ -178,7 +178,7 @@ def _run_directories(output_root: Path) -> Iterator[Path]:
 
 def _marks_of(directory: Path, stamp: tuple[float, float], since: float) -> RunMarks:
     ready, boot = stamp
-    instants, ended = _kv_instants(directory / _KV_FILE, since)
+    instants, ended = _kv_instants(RunLayout(directory).kv_metrics, since)
     return RunMarks(
         directory,
         ready,
@@ -192,7 +192,7 @@ def _marks_of(directory: Path, stamp: tuple[float, float], since: float) -> RunM
 
 
 def _kv_instants(path: Path, since: float) -> tuple[dict[str, float], float | None]:
-    """The first instant (at or after ``since``) the watchdog saw each phase begin, and when the file was written."""
+    """The first instant (at or after ``since``) the run marked each phase begin, and when the file was written."""
     try:
         if path.stat().st_size > _KV_MAX_BYTES:
             return {}, None
@@ -218,22 +218,6 @@ def _instant(value: object) -> float | None:
     except OverflowError:
         return None
     return instant if math.isfinite(instant) else None
-
-
-def server_log_of(run_directory: Path) -> Path:
-    """The server log of the run in ``run_directory``: the one in it, else the newest launch's below it.
-
-    Magpie keeps a launch's log in ``benchmark_<framework>_<time>`` below the run's directory; the time is in the name, so
-    the last of them in name order is the launch that went on to serve (an earlier one is a launch that was started again).
-    """
-    direct = run_directory / _SERVER_LOG
-    if direct.is_file():
-        return direct
-    try:
-        launches = sorted(run_directory.glob(f"{_SERVER_LOG_DIRS}/{_SERVER_LOG}"))
-    except OSError:
-        return direct
-    return launches[-1] if launches else direct
 
 
 def boot_parts(server_log: Path) -> BootParts:
@@ -288,7 +272,9 @@ def round_boundaries(window: tuple[float, float], runs: Sequence[RunMarks], shap
     boundaries = [Boundary(ROUND_SETUP, started)]
     for index, run in enumerate(runs):
         last = index == len(runs) - 1
-        client = MEASURED if last and shape.role == ROLE_MEASURE else WARMUP
+        client = (
+            ACCURACY_EVAL if shape.role == ROLE_EVAL else MEASURED if last and shape.role == ROLE_MEASURE else WARMUP
+        )
         boundaries.extend(_run_boundaries(run, shape, client))
         if run.ended is not None:
             boundaries.append(Boundary(shape.tail if last else ROUND_COLLECT, run.ended))
@@ -299,8 +285,9 @@ def _run_boundaries(run: RunMarks, shape: RoundShape, client: str) -> list[Bound
     """One run: the boot when it booted the server, then its client work, which counts as ``client`` and is split at the
     instants the client left.
 
-    A discarded run, and the one run of a boot or a warmup call, is warmup. An AgentX measured run is split at its
-    client's own phases when its measured phase began; any other measured run is measured up to its evaluation.
+    A discarded run, and the one run of a boot or a warmup call, is warmup; the run of an evaluation call is the
+    evaluation from the start. An AgentX measured run is split at its client's own phases when its measured phase began;
+    any other measured run is measured up to its evaluation.
     """
     boundaries = _boot_boundaries(run) if run.boot_seconds > 0 else []
     if shape.agentx and client == MEASURED and run.client_measured_at is not None:
@@ -312,7 +299,7 @@ def _run_boundaries(run: RunMarks, shape: RoundShape, client: str) -> list[Bound
         ]
         return boundaries + [step for step in steps if step.at is not None]
     boundaries.append(Boundary(client, run.ready))
-    if run.eval_at is not None:
+    if run.eval_at is not None and client != ACCURACY_EVAL:
         boundaries.append(Boundary(ACCURACY_EVAL, run.eval_at))
     return boundaries
 
@@ -321,7 +308,7 @@ def _boot_boundaries(run: RunMarks) -> list[Boundary]:
     """The boot of a run: one phase, or, when the engine's log says what part of it each took, its parts in the order an
     engine does them (what the log does not say first, then the weights, the compile, the graphs)."""
     spawned = run.ready - run.boot_seconds
-    known = boot_parts(server_log_of(run.directory)).known()
+    known = boot_parts(RunLayout(run.directory).server_log).known()
     if not known:
         return [Boundary(SERVER_BOOT, spawned)]
     left, parts = run.boot_seconds, []

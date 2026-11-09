@@ -63,7 +63,7 @@ EVAL_TAIL = (
     "+ local eval_exit=1\n"
     "+ set +x\n"
     "ERROR: run_eval failed with exit code 1\n"
-    "[magpie_bench_remote_compat] accuracy artifact: /work/out/variant_00_warmup/benchmark_sglang/accuracy_report.json\n"
+    "[bench] accuracy artifact: /work/out/variant_00_warmup/benchmark_sglang/accuracy_report.json\n"
 )
 SERVER_REFUSAL = (
     '[2000-01-01 00:00:00] INFO:     127.0.0.1:40000 - "POST /v1/chat/completions HTTP/1.1" 400 Bad Request\n'

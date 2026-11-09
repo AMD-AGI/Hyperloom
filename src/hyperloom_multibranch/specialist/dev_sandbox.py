@@ -19,9 +19,9 @@ which outlives the run), and every lease when the branch stops
 (:class:`~hyperloom_multibranch.specialist.agent_session.DevLeaseHolder`); the toolbox's close releases whatever is left.
 
 Commands run in a :class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox` on the leased cards, at a
-lower CPU priority, or, on the hosted backend, in the leased ``dev`` sandbox
-(:class:`~hyperloom_multibranch.specialist.remote_sandbox.RemoteAgentSandbox`), whose root is on the shared storage
-below the branch's directory. Either way they import the branch worktree's source, with every JIT and kernel cache in
+lower CPU priority, in bubblewrap where it can sandbox an agent here, or, on the hosted backend, in the leased ``dev``
+sandbox (:class:`~hyperloom_multibranch.specialist.remote_sandbox.RemoteAgentSandbox`), whose root is on the shared
+storage below the branch's directory. Either way they import the branch worktree's source, with every JIT and kernel cache in
 the sandbox's :attr:`DevSandbox.cache_root`: a cache beside the package it compiles for would be in the worktree, and
 its files in the next patch. A lease's sandbox lives as long as the lease asks, unless the toolbox lets it live less, which then bounds the
 lease. A lease whose sandbox is not up within :attr:`DevLimits.lease_wait_s` answers that it is starting, so the MCP
@@ -44,11 +44,11 @@ from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol
 
 from hyperloom.hosted.mcp_server import CallContext, InvalidParamsError, McpServer, ToolError
 from hyperloom.measure.compile import COMPONENT_LAYOUTS
-from hyperloom.measure.ports import DEV_SANDBOX_PORTS
+from hyperloom.common.ports import DEV_SANDBOX_PORTS
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
@@ -63,16 +63,24 @@ from hyperloom_multibranch.contracts.toolbox import (
     RequestRejected,
 )
 from hyperloom_multibranch.specialist.agent_onboarding import AgentProcess, AgentSandbox
-from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox, framework_protection
+from hyperloom.common.agent_isolation import BwrapIsolation
+from hyperloom_multibranch.specialist.agent_sandbox import (
+    FrameworkProtection,
+    LocalAgentSandbox,
+    SandboxIsolation,
+    SandboxPaths,
+    framework_protection,
+    sandbox_isolation,
+)
 from hyperloom_multibranch.specialist.agent_session import Processes
 from hyperloom_multibranch.specialist.framework_guard import FrameworksUnguarded
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox, forwarded_env
 from hyperloom_multibranch.specialist.tools import WorktreeFor
 from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
+from hyperloom_multibranch.toolbox.mcp_tools import on_home_loop
 
 logger = logging.getLogger(__name__)
-T = TypeVar("T")
 
 #: The cache variables a sandbox command gets, each a directory below the lease root's ``cache``.
 CACHE_DIRS = {"TRITON_CACHE_DIR": "triton", "AITER_JIT_DIR": "aiter-jit", "TORCH_EXTENSIONS_DIR": "torch-extensions"}
@@ -424,9 +432,11 @@ class DevLeases:
         pending = self._starting.pop(branch, None)
         if pending is None:
             return
+        # A start that finished is no longer starting: a lease it granted is held, and ends only by the held rules.
+        abandoned = not pending.done()
         pending.cancel()
         await asyncio.gather(pending, return_exceptions=True)
-        if branch in self._held:
+        if abandoned and branch in self._held:
             await self._end(branch, "it was abandoned while starting")
 
     async def sweep(self) -> None:
@@ -556,6 +566,7 @@ class DevLeases:
 
     async def _end(self, branch: str, reason: str) -> None:
         held = self._held.pop(branch)
+        self._starting.pop(branch, None)
         del self._slots[branch]
         self._ended[branch] = self._clock()
         self._reclaimed[branch] = reason
@@ -669,24 +680,48 @@ def _caches(root: Path) -> dict[str, str]:
 
 
 def local_dev_sandboxes(
-    worktrees: WorktreeFor, processes: Processes | None, limits: DevLimits = DevLimits()
+    worktrees: WorktreeFor,
+    processes: Processes | None,
+    limits: DevLimits = DevLimits(),
+    choose: Callable[[], SandboxIsolation] = sandbox_isolation,
 ) -> SandboxFor:
-    """Sandboxes on this host, importing the source of every component the branch's worktree holds, with the image's
-    installed frameworks protected."""
+    """Sandboxes on this host, importing the source of every component the branch's worktree holds. Where bubblewrap
+    can sandbox an agent here (asked once, at the first lease, of ``choose``), each runs in one that writes the
+    lease's root only: the worktree, and what its links point at, are read-only, as the specialist edits its worktree,
+    never a lease's command. Else each runs as before, with the image's installed frameworks protected.
 
-    frameworks = framework_protection()
+    Raises:
+        IsolationRefused: In a hosted run, where bubblewrap cannot sandbox an agent.
+    """
+
+    chosen: list[SandboxIsolation] = []
+    protected: list[FrameworkProtection] = []
 
     def sandbox(branch: str, lease: BranchLease) -> LocalAgentSandbox:
-        base_env = {**os.environ, **lease.env}
+        if not chosen:
+            chosen.append(choose())
+        isolation, base_env = chosen[0], {**os.environ, **lease.env}
+        sources, niceness = _sources(worktrees, branch), limits.niceness
+        if isinstance(isolation, BwrapIsolation):
+            worktree = worktrees(branch)
+            paths = SandboxPaths(readable=(worktree.path, *worktree.linked))
+            forwarded = forwarded_env(os.environ)
+            return LocalAgentSandbox(
+                lease.gpu_ids,
+                sources,
+                lease.root,
+                processes,
+                branch,
+                base_env,
+                niceness=niceness,
+                isolation=isolation,
+                paths=paths,
+                forwarded=forwarded,
+            )
+        if not protected:
+            protected.append(framework_protection())
         return LocalAgentSandbox(
-            lease.gpu_ids,
-            _sources(worktrees, branch),
-            lease.root,
-            processes,
-            branch,
-            base_env,
-            niceness=limits.niceness,
-            frameworks=frameworks,
+            lease.gpu_ids, sources, lease.root, processes, branch, base_env, niceness=niceness, frameworks=protected[0]
         )
 
     return sandbox
@@ -852,18 +887,12 @@ def _release_tool(leases: DevLeases) -> _DevTool:
 
 def _handler(home: asyncio.AbstractEventLoop | None, call: _DevCall) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
-        done = asdict(await _at_home(home, call(ctx.principal.branch, arguments)))
+        done = asdict(await on_home_loop(home, call(ctx.principal.branch, arguments)))
         if "output" in done:
             done["output"] = "\n".join(done["output"].splitlines()[-arguments.get("lines", LINES) :])
         return done
 
     return handle
-
-
-async def _at_home(home: asyncio.AbstractEventLoop | None, call: Coroutine[Any, Any, T]) -> T:
-    if home is None or asyncio.get_running_loop() is home:
-        return await call
-    return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(call, home))
 
 
 __all__ = [

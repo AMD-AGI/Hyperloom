@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: MIT
 
 import json
+from dataclasses import replace
 
 import pytest
 
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.measure.fake_gain import FAKE_GAINS
+from hyperloom.orchestrator.state.base_launch import ServerBase
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.fork import RepairRequest
@@ -15,6 +17,7 @@ from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord, InboxItem
 from hyperloom_multibranch.contracts.blackboard.vocab import InboxKind
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.specialist import prompts
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy
@@ -25,6 +28,7 @@ from hyperloom_multibranch.specialist.prompts import (
     SUMMARY_ENTRIES,
     SUMMARY_ENTRY_CHARS,
     VERSION_HEX,
+    RoleWorkload,
     launch_prompt,
     prompt_versions,
     role_prompt,
@@ -43,7 +47,8 @@ from hyperloom_multibranch.blackboard.tools import (
 )
 from hyperloom_multibranch.toolbox.mcp_tools import REPLY_INBOX_HEADER
 
-WORKLOAD = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
+NAMED = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
+WORKLOAD = RoleWorkload(NAMED)
 TOOLS = (
     "blackboard_branch_log",
     "blackboard_claim",
@@ -74,9 +79,9 @@ def _launch(*, brief: str = "", direction: str = "", **overrides) -> str:
 
 
 def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
-    prompt = role_prompt(WORKLOAD.replace(", ", ",\n  "))
+    prompt = role_prompt(RoleWorkload(NAMED.replace(", ", ",\n  ")))
 
-    assert f"The session optimizes one workload: {WORKLOAD}." in prompt
+    assert f"The session optimizes one workload: {NAMED}." in prompt
     assert all(tool in prompt for tool in TOOLS)
     assert 'Never submit purpose "confirm"' in prompt
     assert "target_share_pct" in prompt and "w/(1-w)" in prompt
@@ -84,7 +89,7 @@ def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
     assert "A fixable defect" in prompt and "An inherent trade-off" in prompt
     assert prompt.index("blackboard_learn, citing the candidate") < prompt.index("then call decline_repair")
     with pytest.raises(ValueError, match="names the workload"):
-        role_prompt(" \n")
+        role_prompt(RoleWorkload(" \n"))
 
 
 def test_the_role_reads_the_briefs_two_direction_lists_before_claiming_and_chooses_as_before_without_them():
@@ -123,11 +128,33 @@ def test_the_role_says_an_explore_delta_carries_the_claimed_change():
 
 def test_the_role_names_the_config_delta_keys_that_recipe_delta_reads():
     prompt = role_prompt(WORKLOAD)
-    example = prompt.split("with exactly these keys: ", 1)[1].split(". extra_server_args", 1)[0]
+    example = prompt.split("with these keys, each optional: ", 1)[1].split(". extra_server_args", 1)[0]
 
     config = RecipeDelta.from_document(json.loads(example)).config
     assert (config.server_args, dict(config.envs)) == ("--flag value --other-flag", {"NAME": "value"})
+    assert (config.remove_args, config.unset_envs) == (("--old-flag",), ("OLD_NAME",))
     assert "a key the delta does not define is refused, and the error lists the keys it takes" in prompt
+
+
+def test_the_role_says_when_a_flag_of_the_base_launch_can_be_removed():
+    prompt = " ".join(role_prompt(WORKLOAD).split())
+
+    assert "one only the session's base launch sets is removed from the launch on an AgentX workload" in prompt
+    assert "on an InferenceX workload (ISL and OSL) that removal is refused" in prompt
+    assert "unset_envs drops variables your head's recipe sets" in prompt
+
+
+def test_the_role_shows_the_session_s_frozen_base_launch_read_only():
+    base = ServerBase(args="--tp-size 4 --enable-hierarchical-cache --hicache-size 180", env={"SGLANG_X": "true"})
+    prompt = " ".join(role_prompt(WORKLOAD, base=base).split())
+
+    assert "The session's base launch, frozen when it started and read-only" in prompt
+    assert "Server arguments: --tp-size 4 --enable-hierarchical-cache --hicache-size 180." in prompt
+    assert "Environment: SGLANG_X=true." in prompt
+    assert "an empty extra_server_args means this launch as it is" in prompt
+    assert "frozen when it started" not in " ".join(role_prompt(WORKLOAD).split())
+    empty = " ".join(role_prompt(WORKLOAD, base=ServerBase()).split())
+    assert "Server arguments: none. Environment: none." in empty
 
 
 def test_the_role_says_a_direction_another_branch_tests_comes_back_as_a_peer_outcome():
@@ -163,11 +190,14 @@ def test_the_role_carries_what_found_gains_on_rocm_with_examples():
     assert prompt.index("What has found gains") < prompt.index("Examples:") < prompt.index("How a candidate is judged")
 
 
-def test_the_role_points_at_a_bf16_gemm_left_among_fp8_ones_and_the_table_a_shape_really_reads():
+def test_the_role_keeps_the_weight_precision_and_points_at_the_table_a_shape_really_reads():
     prompt = role_prompt(WORKLOAD)
 
-    assert "a large GEMM still in bf16, such as lm_head (the vocabulary projection), is a candidate" in prompt
-    assert "a source change on top of an FP8 GEMM kernel" in prompt
+    assert "lm_head (the vocabulary projection), is a candidate" not in prompt
+    assert "The model's weight precision is the session's, never yours to change, down or up" in prompt
+    assert "no patch that quantizes or de-quantizes weights, lm_head's included" in prompt
+    assert "--quantization-param-path, --online-quant-config" in prompt
+    assert "Intermediates may change while the weights stay as they are and accuracy passes" in prompt
     assert "the server.log's tuned-config lookups name the table each shape reads" in prompt
     assert "a table for a path the model no longer reaches changes nothing" in prompt
 
@@ -215,11 +245,13 @@ def test_the_role_says_a_change_never_selects_its_file_or_setting_with_setdefaul
     assert "a variable the recipe already sets silently wins" in prompt
 
 
-def test_the_role_lets_small_changes_too_small_alone_go_together_as_one_intent():
+def test_the_role_bundles_sub_bar_changes_from_their_readings_instead_of_retesting_one_alone():
     prompt = role_prompt(WORKLOAD)
 
     assert "Keep a candidate to one intent" not in prompt
-    assert "may go together as one intent" in prompt
+    assert "A change that read below the bar is not tested alone again" in prompt
+    assert "each read at least half the bar and touch nothing in common" in prompt
+    assert "go together as one intent once together they can clear it" in prompt
     assert "the summed share of the operators they speed up" in prompt
 
 
@@ -326,11 +358,37 @@ def test_the_role_holds_the_specialist_to_arbor_s_map_when_its_brief_has_one():
     assert "a direction a running Arbor branch holds" in role and "answers its reason" in role
 
 
-def test_the_role_names_each_workload_s_bar_as_its_gate_sets_it():
-    role = role_prompt(WORKLOAD)
+def test_an_inferencex_role_names_its_bar_and_defects_and_no_agentx_objective():
+    role = " ".join(role_prompt(WORKLOAD).split())
 
-    assert "on InferenceX from the spread of the baseline measurements" in role
-    assert "on AgentX a fixed threshold on the P50" in role
+    assert "clear the session's bar, set from the spread of the baseline measurements" in role
+    assert "the accuracy gate, requests it did not complete (dropped_requests)" in role
+    assert "(long_context_dropped). It waits for your diagnosis" in role
+    assert "accuracy whatever the scales. Write the lesson" in role
+    assert not any(word in role for word in ("P50", "P90", "interactivity", "output throughput"))
+
+
+@pytest.mark.parametrize("objective", list(AgentXObjective))
+def test_an_agentx_role_tells_its_objective_bar_and_guards(monkeypatch, objective):
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "4")
+    role = " ".join(role_prompt(RoleWorkload(NAMED, objective)).split())
+    guards = objective.guards
+
+    assert f"graded on {objective.title} ({objective.metric}): {objective.description}" in role
+    assert f"bar of +{objective.bar_pct:g}% on it" in role and "+2%" in role
+    assert " and ".join(f"{guard.name} ({guard.metric})" for guard in guards) + " each hold within 4%" in role
+    assert all(f"{guard.name} as {guard.refusal}" in role for guard in guards)
+    assert f"a {objective.title} gain bought with {guards[0].name} or {guards[1].name}" in role
+    assert "output throughput" not in role and "dropped_requests" not in role
+    assert "spread of the baseline measurements" not in role
+
+
+def test_the_two_agentx_objectives_tell_what_moves_them():
+    p50, total = AgentXObjective.P50_INTERACTIVITY, AgentXObjective.TOTAL_TOKEN_THROUGHPUT
+
+    assert "median request's per-output-token speed" in p50.description and "TTFT" in p50.description
+    assert "only at high concurrency" in total.description and "prefix-cache" in total.description
+    assert [guard.name for guard in total.guards] == ["P90 interactivity", p50.title]
 
 
 def test_a_resumed_cli_hears_why_it_stopped_its_worktree_and_what_arrived_meanwhile():
@@ -616,7 +674,9 @@ def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):
         ("_DEV_SANDBOX", lambda text: text + " One more rule.", "specialist_role"),
         ("_NATIVE", lambda text: text + " One more rule.", "specialist_role"),
         ("_REFERENCES", lambda text: text + " One more rule.", "specialist_role"),
+        ("_BASE", lambda text: text + " One more rule.", "specialist_role"),
         ("_HOLDS", lambda holds: {**holds, "geak": holds["geak"] + " more"}, "specialist_role"),
+        ("_INFERENCEX_GRADING", lambda grading: replace(grading, trade_off=", more"), "specialist_role"),
         ("_LEASE_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
         ("_WAIT_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
     ],
@@ -789,11 +849,11 @@ def test_the_gemm_attention_and_fusion_directions_carry_the_strongest_kernel_exa
     assert "scales from its epilogue" in attention
 
 
-def test_the_role_retests_a_lesson_or_a_peer_s_flat_result_on_the_current_head_before_closing_on_it():
+def test_the_role_does_not_ask_for_a_peer_s_flat_result_to_be_retested_on_another_head():
     prompt = role_prompt(WORKLOAD)
 
-    assert "A lesson, a learning or another branch's flat result closes nothing on a different head" in prompt
-    assert "retest it on your current head before you call it closed" in prompt
+    assert "flat result closes nothing" not in prompt
+    assert "retest it on your current head" not in prompt
 
 
 def test_the_role_says_a_blocked_or_missing_capability_exhausted_names_the_path_tried():

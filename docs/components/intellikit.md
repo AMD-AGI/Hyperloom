@@ -13,20 +13,16 @@ Model Context Protocol (MCP) servers. It's structured as a monorepo of
 independently installable packages (Kerncap, Metrix, Linex, Nexus, Accordo, plus
 the `rocm_mcp` and `uprof_mcp` server bundles).
 
-Within Hyperloom, IntelliKit is not called directly. It sits underneath
-[Magpie](magpie.md), which relies on IntelliKit for some of its low-level GPU
-profiling primitives. Hyperloom therefore depends on IntelliKit transitively,
-through Magpie.
+Hyperloom does not call IntelliKit.
 
 - **Source**: <https://github.com/AMDResearch/intellikit>
 - **License**: MIT
 
 ## Role in Hyperloom
 
-Hyperloom doesn't reference IntelliKit directly. Kernel profiling and
-validation in Hyperloom is powered by [Magpie](magpie.md), which in turn relies
-on IntelliKit for some of its low-level GPU profiling primitives. IntelliKit is
-an indirect, transitive dependency reached through Magpie.
+Hyperloom has no runtime dependency on IntelliKit. Benchmark and profile rounds
+run through [InferenceSuite](../reference/inference-suite.md), and trace analysis
+through [TraceLens](tracelens.md).
 
 ## IntelliKit documentation
 

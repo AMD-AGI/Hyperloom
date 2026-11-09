@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from hyperloom.orchestrator.specialists.domains import FREEFORM_DOMAIN
-from hyperloom.orchestrator.specialists.runner import (
+from hyperloom.orchestrator.specialists.failure_class import (
     SpecialistFailureType,
     classify_specialist_failure,
 )

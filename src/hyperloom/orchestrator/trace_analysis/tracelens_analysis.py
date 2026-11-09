@@ -13,6 +13,7 @@ Two routes produce the report: ``agent`` runs the TraceLens skill under a model,
 import argparse
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import shutil
@@ -26,7 +27,12 @@ from hyperloom.inference_optimizer.framework_paths import (
 )
 
 
-from .tracelens_arch_benchmark import internal_extension_arch_json, normalize_platform, populate_gpu_arch_json
+from .tracelens_arch_benchmark import (
+    ArchSpec,
+    internal_extension_arch_json,
+    normalize_platform,
+    populate_gpu_arch_json,
+)
 from .tracelens_skill_runner import (
     TraceLensSkillRequest,
     TraceLensSkillRunResult,
@@ -34,6 +40,7 @@ from .tracelens_skill_runner import (
     extract_compute_pct_from_analysis_md,
     extract_exposed_comm_pct_from_analysis_md,
     extract_idle_pct_from_analysis_md,
+    require_claude_sdk,
     run_tracelens_skill,
     write_run_config,
 )
@@ -50,7 +57,7 @@ from ._analysis_reports import OrchestratorOutcome, write_reports
 from ._analysis_run import AnalysisRun, finish_run, report_failure, start_run
 from ._run_status import note_step
 from .analysis_route import AnalysisRoute
-from ._candidate_assembly import _finalize_candidates, write_source_resolution_artifact
+from ._candidate_assembly import _finalize_candidates, source_resolution_warning, write_source_resolution_artifact
 from ._collective_candidates_inject import _inject_collective_candidates
 from ._kernel_roofline import default_roofline_fields
 from ._kernel_search import refresh_kernel_search_roots
@@ -121,26 +128,37 @@ def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextMan
     )
 
 
-def _gpu_arch_json(
-    args: argparse.Namespace, *, tl_root: Path, tl_internal_root: Path | None, log_path: Path
-) -> Path | None:
+def _gpu_arch_json(run: AnalysisRun, *, tl_root: Path, tl_internal_root: Path | None) -> ArchSpec | None:
     """The arch JSON roofline reads: the bundled spec under the internal extension, else bundled, measured or fallback."""
+    log_path = run.log_path
     arch_benchmark_timeout_s = _resolve_arch_benchmark_timeout_s()
     if tl_internal_root is not None:
-        return internal_extension_arch_json(args.target_platform, log=lambda msg: append_log(log_path, msg))
+        return internal_extension_arch_json(run.args.target_platform, log=lambda msg: append_log(log_path, msg))
     return populate_gpu_arch_json(
         tracelens_root=tl_root,
-        platform=args.target_platform,
+        platform=run.args.target_platform,
+        fallback_dir=run.session_runs_dir / "gpu_arch",
         log=lambda msg: append_log(log_path, msg),
-        run_command=lambda cmd, *, cwd, timeout_s, env=None: run_command(
+        run_command=lambda cmd, *, cwd, env=None: run_command(
             cmd,
             cwd=cwd,
             log_path=log_path,
-            timeout_s=timeout_s,
+            timeout_s=arch_benchmark_timeout_s,
             env=env,
         ),
-        timeout_s=arch_benchmark_timeout_s,
     )
+
+
+def _record_gpu_arch(run: AnalysisRun, gpu_arch: ArchSpec | None) -> Path | None:
+    """Record the arch JSON roofline reads, and a warning when it holds vendor peaks, on ``run``; return its path."""
+    if gpu_arch is None:
+        return None
+    run.artifacts["tracelens_gpu_arch_json"] = str(gpu_arch.path)
+    note_step(run.run_meta, "populate_gpu_arch_json", category="preflight", status="ok", source=gpu_arch.source.value)
+    warning = gpu_arch.health_warning(run.args.target_platform)
+    if warning is not None:
+        run.trace_health_warnings.append(warning)
+    return gpu_arch.path
 
 
 class _TraceLensCheckout(NamedTuple):
@@ -378,6 +396,23 @@ def _run_agent_skill(
         )
 
 
+def _trace_quality_warnings(texts: list[str], source: Path) -> list[dict[str, Any]]:
+    """One ``trace_quality_poor`` warning per reason the report gives for a poor-quality trace."""
+    return [
+        {"code": "trace_quality_poor", "severity": "warning", "message": text, "source": str(source)} for text in texts
+    ]
+
+
+def _poor_quality_reasons(analysis_json: Path) -> list[str]:
+    """Why ``report_info`` rates the trace poor: its warnings, else its mode; empty when the quality is not poor."""
+    report_info = json.loads(analysis_json.read_text(encoding="utf-8")).get("report_info") or {}
+    if report_info.get("trace_quality") != "poor":
+        return []
+    return [str(text) for text in report_info.get("warnings") or []] or [
+        f"TraceLens analysis mode is {report_info.get('mode')}"
+    ]
+
+
 def _agent_route_outcome(
     skill_result: TraceLensSkillRunResult,
     args: argparse.Namespace,
@@ -385,8 +420,11 @@ def _agent_route_outcome(
     warnings: list[dict[str, Any]],
     log_path: Path,
 ) -> RouteOutcome:
-    """Gate on the skill's ``analysis.md``, read candidates from its ``analysis.json``."""
+    """Gate on the skill's ``analysis.md``, read trace quality and candidates from its ``analysis.json``."""
     report_path = skill_result.report_path
+    # TraceLens owns the parse/group/prose/impact/order; render its structured analysis.json beside the md.
+    analysis_json = render_analysis_json(report_path)
+    warnings.extend(_trace_quality_warnings(_poor_quality_reasons(analysis_json), analysis_json))
     shares = WorkloadShares(
         idle_pct=extract_idle_pct_from_analysis_md(report_path),
         compute_pct=extract_compute_pct_from_analysis_md(report_path),
@@ -397,8 +435,7 @@ def _agent_route_outcome(
     if gates.suppressed:
         _record_gate_suppression(gates, warnings, log_path)
     else:
-        # TraceLens owns the parse/group/prose/impact/order; render its structured analysis.json beside the md.
-        report_cands = load_report_tasks(render_analysis_json(report_path))
+        report_cands = load_report_tasks(analysis_json)
         raw_candidates = _inject_collective_candidates(
             skill_result.output_dir,
             report_cands,
@@ -425,10 +462,7 @@ def _run_non_llm_route(
     """
     analysis = analyze_perf_report(run_config_path)
     report_path = analysis.report_path
-    warnings.extend(
-        {"code": "trace_quality_poor", "severity": "warning", "message": text, "source": str(report_path)}
-        for text in analysis.warnings
-    )
+    warnings.extend(_trace_quality_warnings(analysis.warnings, report_path))
     gates = _evaluate_report_gates(analysis.shares, report_path, raw_trace_path, warnings, log_path)
     raw_candidates: list[dict[str, Any]] = []
     if gates.suppressed:
@@ -933,6 +967,9 @@ def _run_route(
             model_name=args.model_name,
             log_path=log_path,
         )
+        unresolved_warning = source_resolution_warning(route_candidates)
+        if unresolved_warning is not None:
+            run.trace_health_warnings.append(unresolved_warning)
     return _RouteResult(outcome.report_path, outcome.orchestrator_mode, route_candidates)
 
 
@@ -945,6 +982,9 @@ def _analyse_trace(run: AnalysisRun, trace_input: Path, trace_files: list[Path])
         current_step="check_tracelens_dependencies",
     )
     tl_root, tl_internal_root, skill = _check_tracelens_checkout(args, run.log_path)
+    # Fail before the arch microbenchmark, which can run up to its timeout.
+    if run.route is AnalysisRoute.AGENT:
+        require_claude_sdk()
 
     tracelens_dir = run.run_dir / "tracelens"
     tracelens_dir.mkdir(parents=True, exist_ok=True)
@@ -956,9 +996,7 @@ def _analyse_trace(run: AnalysisRun, trace_input: Path, trace_files: list[Path])
         state="running",
         current_step="populate_gpu_arch_json",
     )
-    gpu_arch_path = _gpu_arch_json(args, tl_root=tl_root, tl_internal_root=tl_internal_root, log_path=run.log_path)
-    if gpu_arch_path is not None:
-        run.artifacts["tracelens_gpu_arch_json"] = str(gpu_arch_path)
+    gpu_arch_path = _record_gpu_arch(run, _gpu_arch_json(run, tl_root=tl_root, tl_internal_root=tl_internal_root))
 
     # Split the full-window filtered trace into steady-state chunks via
     # TraceLens's own splitter, since the perf report expects a single

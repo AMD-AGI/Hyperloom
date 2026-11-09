@@ -6,12 +6,9 @@
 from __future__ import annotations
 
 import logging
-import os
-from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
-from hyperloom.inference_optimizer.inferencex_checkout import has_benchmark_lib
 
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE
 from ._promote_outcome import IntegrateRecoveryIncomplete
@@ -41,17 +38,6 @@ class ResumeConsistencyMixin:
             "fixes": [],
             "warnings": [],
         }
-        active_inferencex = str(state.active_inferencex_path or "").strip()
-        if active_inferencex:
-            if has_benchmark_lib(active_inferencex):
-                os.environ["INFERENCEX_PATH"] = active_inferencex
-            elif Path(active_inferencex).is_dir():
-                # Not an InferenceX tree: dropped, so the checkout this launch resolved stays the one every round uses.
-                report["warnings"].append({"kind": "active_inferencex_checkout_invalid", "path": active_inferencex})
-                state.active_inferencex_path = ""
-            else:
-                report["warnings"].append({"kind": "active_inferencex_checkout_missing", "path": active_inferencex})
-                state.set_stop_reason("active_inferencex_checkout_missing")
         # Loading the state file is the one boundary the persisted
         # ``optimization_stack`` crosses, so bind its rows to their members here:
         # a row that cannot name what it integrated makes every later read of the
@@ -186,29 +172,21 @@ class ResumeConsistencyMixin:
     async def _resume_reenter_kernel_if_needed(self) -> None:
         """Idempotently re-fire the KERNEL_AGENT entry hook on resume.
 
-        Phase-entry side effects (the GEAK delegation and its ``result.json``
-        crash-recovery) are bound
-        to a phase *transition* via ``_on_phase_entered``; a resume only restores
-        ``phase`` from state.json and never re-enters the current phase. Without
-        this, a session that crashed mid ``KERNEL_AGENT`` sits idle until the
-        phase budget cap fires, then hands SWEEP an empty result — the whole
-        delegation is silently lost.
+        Phase-entry side effects (the ``kernel_agent`` task) are bound to a
+        phase *transition*; a resume restores ``phase`` without re-entering it
+        and reaps the dead leg's task. Whether THIS phase's round finished decides:
 
-        General across every crash timing (not case-by-case): the decision is
-        driven purely by whether THIS KERNEL phase's history row already carries
-        a ``geak`` completion record, so it self-classifies:
+          * finished -> the phase machine exits KERNEL on the next tick with no
+            re-run (GEAK: a ``geak`` completion record on the current phase row;
+            Forge: this macro cycle's rewrite controller reported terminal);
+          * not finished -> re-enter ``on_enter_kernel``, which reuses a live
+            ``kernel_agent`` row or queues a replacement for the reaped one. A
+            GEAK re-entry promotes an existing OK ``result.json`` and re-runs the
+            e2e only when there is nothing to recover.
 
-          * completed-this-phase -> the kernel work is done; the phase machine
-            exits KERNEL automatically on the next tick (agent settled, no pending work)
-            with no e2e re-run;
-          * not-completed -> re-enter ``on_enter_kernel``; its own entry guard
-            promotes an existing OK ``result.json`` (crash-before-handback) and
-            re-runs the e2e only when there is genuinely nothing to recover
-            (run_e2e itself then continues from the pinned eval_dir on disk).
-
-        No-op unless resumed while parked in ``KERNEL_AGENT`` with the GEAK
-        backend selected.
+        No-op unless resumed while parked in ``KERNEL_AGENT``.
         """
+        from ..phases.controller_settlement import kernel_controller_settled
         from ..phases.machine_state import PHASE_KERNEL_AGENT
 
         if not self._resumed_from.get("is_resume"):
@@ -216,23 +194,19 @@ class ResumeConsistencyMixin:
         state = self.shared_state
         if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
             return
-        if not (state.kernel_enabled and self._coord.phase_kernel.geak_enabled()):
+        if not state.kernel_enabled:
             return
-        history = state.phase_history or []
-        row = history[-1] if history else {}
-        evidence = row.get("evidence") if isinstance(row, dict) else {}
-        completed_this_phase = isinstance(evidence, dict) and isinstance(evidence.get("geak"), dict)
-        if completed_this_phase:
-            # The delegation landed during this phase but the SWEEP transition
-            # never persisted (crash between hook and the next tick). The exit
-            # rule sees geak_result set (terminal) and no work pending, so the
-            # machine advances on the next tick without any hint.
-            log.info("resume: KERNEL GEAK already completed this phase; machine will exit on next tick.")
+        if self._coord.phase_kernel.geak_enabled():
+            history = state.phase_history or []
+            row = history[-1] if history else {}
+            evidence = row.get("evidence") if isinstance(row, dict) else {}
+            finished = isinstance(evidence, dict) and isinstance(evidence.get("geak"), dict)
+        else:
+            finished = kernel_controller_settled(state)
+        if finished:
+            log.info("resume: KERNEL round already finished this phase; machine will exit on next tick.")
             return
-        log.info(
-            "resume: re-entering KERNEL GEAK delegation (no completion "
-            "evidence on the current phase row); recover-from-disk or re-run."
-        )
+        log.info("resume: re-entering KERNEL (its round did not finish before the leg stopped).")
         from hyperloom.orchestrator.phases.machine import Transition
 
         await self._coord.phase_kernel.on_enter_kernel(

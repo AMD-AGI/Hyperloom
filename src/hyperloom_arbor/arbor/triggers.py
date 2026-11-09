@@ -8,7 +8,9 @@ for it run, and a host's callbacks for it are called. None of them holds the ses
   - **How each runs:** in an agent turn of its own, in a process of its own (``python3 -m arbor.triggers run ...``),
     dispatched as ``/<skill> <brief>``. Its log is under ``<session>/runs/``, and its end goes to the journal (kind
     ``trigger``).
-  - **A blocking skill** (``metadata.arbor.blocking: true``) runs to its end before the session goes on.
+  - **A blocking skill** (``metadata.arbor.blocking: true``) runs to its end before the session goes on: for at most
+    ``BLOCKING_TIMEOUT_S``, and no longer than the time the session has left (``budget_s``: a host's deadline, a
+    time budget). With under ``BLOCKING_MIN_S`` left it is skipped, and the journal says so.
 - **Callbacks:** a host registers them in the config's component block, ``"callbacks": {"<event>": [<command>, ...]}``.
   - **A command** is a string (split as a shell would, never run by one) or a list of arguments.
   - **How it runs:** started without waiting for it, with ``ARBOR_EVENT``, ``ARBOR_SESSION`` and ``ARBOR_EVENT_JSON``
@@ -16,7 +18,7 @@ for it run, and a host's callbacks for it are called. None of them holds the ses
   - **Each call** goes to the journal (kind ``callback``).
 
 **Fired today:** ``session_start``, ``iteration_start``, ``keep``, ``revert``, ``probe``, ``invalid``,
-``agent_failed``, ``map_set``, ``round_end`` and ``end``. The other events are named, and fired as their record points
+``agent_failed``, ``map_set``, ``round_end``, ``stretch_end`` and ``end``. The other events are named, and fired as their record points
 are wired.
 """
 
@@ -31,13 +33,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-from arbor import lifecycle
+from arbor import conflicts, lifecycle
 
 #: Events the driver fires today (the rest of ``lifecycle.EVENT_NAMES`` are named, not yet fired).
 FIRED = ("session_start", "iteration_start", "keep", "revert", "probe", "invalid", "agent_failed", "map_set",
-         "round_end", "end")
+         "round_end", "stretch_end", "end")
 #: How long a blocking trigger skill may take before the session goes on without it.
 BLOCKING_TIMEOUT_S = 1800
+#: The least time left in which a blocking trigger skill still starts: one agent turn's worth.
+BLOCKING_MIN_S = 60
 #: How a process is started without waiting for it, and run to its end: read when an event fires, so a test can
 #: replace them here.
 SPAWN = subprocess.Popen
@@ -79,14 +83,15 @@ def callbacks(config: dict, event: str) -> list[list[str]]:
 
 
 def fire(campaign, session_dir, arbor_root, config_path, event: str, iteration: int | None = None,
-         spawn=None, run=None, **detail) -> dict:
+         spawn=None, run=None, budget_s: float | None = None, **detail) -> dict:
     """Fire ``event``: journal it, start its trigger skills and the host's callbacks; the journal entry. Nothing
-    raised here reaches the session: an event is a notice, never a reason to stop."""
+    raised here reaches the session: an event is a notice, never a reason to stop. ``budget_s``: the seconds the
+    session has left, which bound a blocking skill (None: no bound but ``BLOCKING_TIMEOUT_S``)."""
 
     spawn, run = spawn or SPAWN, run or RUN
     entry = lifecycle.record(session_dir, "event", event, iteration=iteration, **detail)
     try:
-        _start_skills(campaign, session_dir, arbor_root, config_path, event, iteration, spawn, run)
+        _start_skills(campaign, session_dir, arbor_root, config_path, event, iteration, spawn, run, budget_s)
         _call_back(campaign, session_dir, event, entry, spawn)
     except Exception as exc:  # noqa: BLE001 - see the docstring
         lifecycle.record(session_dir, "event_error", event, iteration=iteration, error=str(exc)[:300])
@@ -100,21 +105,32 @@ def _blocking(arbor_root, skill: str) -> bool:
     return bool(found and found.arbor.get("blocking") is True)
 
 
-def _start_skills(campaign, session_dir, arbor_root, config_path, event, iteration, spawn, run) -> None:
+def _start_skills(campaign, session_dir, arbor_root, config_path, event, iteration, spawn, run,
+                  budget_s: float | None = None) -> None:
     plan = lifecycle.declared(campaign)
     for skill in plan.triggered(event) if plan is not None else ():
+        blocking = _blocking(arbor_root, skill)
+        if blocking and budget_s is not None and budget_s < BLOCKING_MIN_S:
+            lifecycle.record(session_dir, "trigger", skill, event=event, iteration=iteration, status="skipped",
+                             reason=f"{max(0.0, budget_s):.0f} s left before the session must stop")
+            continue
         argv = [sys.executable, "-m", "arbor.triggers", "run", "--config", str(config_path), "--arbor-root",
                 str(arbor_root), "--session", str(session_dir), "--skill", skill, "--event", event,
                 "--iteration", str(iteration if iteration is not None else -1)]
         log = Path(session_dir) / "runs" / f"trigger-{skill.replace(':', '__')}-{event}.log"
         log.parent.mkdir(parents=True, exist_ok=True)
+        status = "started"
         with log.open("a", encoding="utf-8") as out:
-            if _blocking(arbor_root, skill):
-                run(argv, stdout=out, stderr=subprocess.STDOUT, timeout=BLOCKING_TIMEOUT_S, check=False)
+            if blocking:
+                timeout = BLOCKING_TIMEOUT_S if budget_s is None else min(BLOCKING_TIMEOUT_S, budget_s)
+                try:
+                    run(argv, stdout=out, stderr=subprocess.STDOUT, timeout=timeout, check=False)
+                    status = "ran"
+                except subprocess.TimeoutExpired:
+                    status = "timed_out"
             else:
                 spawn(argv, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
-        lifecycle.record(session_dir, "trigger", skill, event=event, iteration=iteration,
-                         status="ran" if _blocking(arbor_root, skill) else "started")
+        lifecycle.record(session_dir, "trigger", skill, event=event, iteration=iteration, status=status)
 
 
 def _call_back(campaign, session_dir, event, entry, spawn) -> None:
@@ -145,16 +161,24 @@ def run_skill(config_path, arbor_root, session_dir, skill: str, event: str, iter
         f"- **session:** `{session_dir}`",
         f"- **config:** `{config_path}`",
         f"- **campaign:** {getattr(campaign, 'identity', '')}: {getattr(campaign, 'goal', '')}",
+        "",
+        "The event's entry in the journal:",
+        "",
+        "```json",
+        json.dumps(lifecycle.last(session_dir, "event", event) or {}, indent=1, default=str),
+        "```",
     ]) + "\n", encoding="utf-8")
     plan = lifecycle.declared(campaign)
+    invoke = conflicts.dispatch(session_dir, skill)    # a merged flat skill is the session's merged:<name>
     try:
         if run_agent is None:
             from arbor.policy.claude_loop import _run_claude
-            text = asyncio.run(_run_claude(f"/{skill} {brief}", str(arbor_root), allowed_tools=["Bash", "Read", "Edit"],
+            text = asyncio.run(_run_claude(f"/{invoke} {brief}", str(arbor_root), allowed_tools=["Bash", "Read", "Edit"],
+                                           dirs=[str(session_dir)],
                                            label=f"trigger:{skill}", skills=[],
-                                           plugins=lifecycle.plugin_paths(campaign, arbor_root)))
+                                           plugins=lifecycle.plugin_paths(campaign, arbor_root, session_dir)))
         else:
-            text = run_agent(f"/{skill} {brief}")
+            text = run_agent(f"/{invoke} {brief}")
     except Exception as exc:  # noqa: BLE001 - recorded, and the session never waits on it
         lifecycle.record(session_dir, "trigger", skill, event=event, iteration=iteration, status="failed",
                          error=str(exc)[:300])

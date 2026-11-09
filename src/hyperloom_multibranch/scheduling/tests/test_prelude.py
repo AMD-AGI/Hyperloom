@@ -45,6 +45,7 @@ from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE, PROFILE
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS, FLOOR_PCT
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.rules import AgentXRule, Rule
 from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling import prelude as prelude_module
@@ -293,7 +294,7 @@ async def test_an_agentx_prelude_anchors_its_baseline_on_one_root_test_and_has_n
     tmp_path: Path,
 ) -> None:
     layout = _layout(tmp_path)
-    peers = _peers(layout, rule=AgentXRule())
+    peers = _peers(layout, rule=AgentXRule(AgentXObjective.P50_INTERACTIVITY))
 
     result = await _run(_prelude(layout, peers), AGENTX)
 
@@ -714,7 +715,7 @@ async def test_the_champion_is_replayed_beside_the_root_tests_on_the_profile_and
 async def test_an_agentx_champion_measured_before_its_root_test_ended_is_judged_once_that_test_anchored_the_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    layout, peers, events, prelude = _replaying(tmp_path, AgentXRule())
+    layout, peers, events, prelude = _replaying(tmp_path, AgentXRule(AgentXObjective.P50_INTERACTIVITY))
     _root_tests_held_until(monkeypatch, peers, lambda: bool(events))
 
     await _run(prelude, AGENTX)
@@ -728,7 +729,7 @@ async def test_a_failing_agentx_replay_takes_back_the_root_test_running_beside_i
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     failure = RuntimeError("the integration branch cannot be written")
-    layout, peers, events, prelude = _replaying(tmp_path, AgentXRule(), failure)
+    layout, peers, events, prelude = _replaying(tmp_path, AgentXRule(AgentXObjective.P50_INTERACTIVITY), failure)
     _root_tests_held_until(monkeypatch, peers, lambda: False)
 
     with pytest.raises(RuntimeError, match="cannot be written"):
@@ -740,7 +741,7 @@ async def test_a_failing_agentx_replay_takes_back_the_root_test_running_beside_i
 
 
 async def test_a_failing_agentx_root_test_ends_the_replay_running_beside_it(tmp_path: Path) -> None:
-    layout, peers, events, prelude = _replaying(tmp_path, AgentXRule())
+    layout, peers, events, prelude = _replaying(tmp_path, AgentXRule(AgentXObjective.P50_INTERACTIVITY))
     peers.toolbox.script(lambda request: request.purpose is Purpose.BASELINE, [Fate.MEASUREMENT])
 
     with pytest.raises(PreludeFailed, match="the baseline anchors nothing"):

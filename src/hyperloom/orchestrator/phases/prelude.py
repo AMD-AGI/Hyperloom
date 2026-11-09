@@ -7,11 +7,10 @@ from __future__ import annotations
 
 import logging as _logging
 import sqlite3
-from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
-from hyperloom_common.coerce import to_float
+from hyperloom_common.coerce import to_float, to_int
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradingAnchor, constraint_fields, graded_axes_of
 from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
@@ -39,7 +38,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
 
 from . import machine_state as _phase_state
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args, merge_cumulative_extra_server_args
-from hyperloom.inference_optimizer.inferencex_checkout import pick_tree
 from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_OTHER,
@@ -47,11 +45,12 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     JournalEntry,
     Verdict,
 )
+from ..actions.executors._accuracy_gate import AccuracyReference
 from ..actions.executors.benchmark_run.warm_patches import revert_warm_kernel_patches
 from ..actions.executors.explore import restates_the_baseline_launch
 from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
-from ..state.task_registry import Task, TaskSpec
+from ..state.task_registry import Task, TaskSpec, create_on_free_key
 from ..loop.time_budget import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
@@ -68,13 +67,10 @@ from .warm_replay_stack import (
 )
 from .prelude_warm_kernel import _WarmKernelPrepMixin, _merge_named_current_recipe_configs
 from .prelude_warm_launch import suppress_recipe_config, warm_replay_task_spec
+from .warm_replay_eval import read_replay_eval
 
 log = _logging.getLogger(__name__)
 
-
-# The ``parse_eval_results`` reasons that prove an eval produced output: a results file it could not decode, and one
-# carrying no metric it recognises.
-_EVAL_RAN_BUT_UNSCORABLE = ("parse error:", "no recognized metric in")
 
 # The phase segment of the warm-replay event id. A literal rather than a read of
 # ``state.phase``: the id must be identical at the tick that enqueues the replay
@@ -150,15 +146,6 @@ def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]
         "incomplete": sum(1 for row in rows if row.get("complete") is False),
         "artifacts_outside_root": sum(_count(row.get("artifacts_outside_root")) for row in rows),
     }
-
-
-@dataclass(frozen=True)
-class _ReplayEval:
-    """A replay's accuracy as read back from its eval output."""
-
-    accuracy: float | None
-    ran: bool
-    error: str
 
 
 def _warm_donor_metadata(replay: Mapping[str, Any]) -> dict[str, Any]:
@@ -864,45 +851,6 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
         self._conclude_warm_replay(outcome, Verdict.FAILED)
         return False
 
-    @staticmethod
-    def _replay_eval_search_root(result: dict) -> Path | None:
-        """Directory holding every round of this replay task."""
-        from ..actions.executors.benchmark_run.records import (
-            _MEASURE_ROUND_DIR,
-            _WARMUP_ROUND_DIR,
-        )
-
-        round_dirs = {_WARMUP_ROUND_DIR, _MEASURE_ROUND_DIR}
-        for key in ("output_dir", "workspace"):
-            raw = str(result.get(key) or "").strip()
-            if not raw:
-                continue
-            path = Path(raw)
-            for candidate in (path, *path.parents):
-                if candidate.name in round_dirs:
-                    return candidate.parent
-            return path
-        return None
-
-    def _replay_eval_on_disk(self, result: dict) -> _ReplayEval:
-        """Read the replay's accuracy from the eval output its round left on disk."""
-        from ..actions.executors._accuracy_gate import parse_eval_results
-
-        root = self._replay_eval_search_root(result)
-        if root is None:
-            return _ReplayEval(None, False, "replay result names no round directory")
-        try:
-            eval_out = parse_eval_results(root)
-        except (OSError, AttributeError, TypeError, ValueError) as exc:  # an unreadable eval is "no verdict"
-            eval_out = {"error": f"eval parse raised: {type(exc).__name__}"}
-        parsed = eval_out.get("accuracy")
-        if isinstance(parsed, (int, float)):
-            return _ReplayEval(float(parsed), True, "")
-        eval_error = str(eval_out.get("error") or "no accuracy in eval output")
-        # Only a results file the parser reached can say the eval ran; a parser that never got one says
-        # nothing either way.
-        return _ReplayEval(None, eval_error.startswith(_EVAL_RAN_BUT_UNSCORABLE), eval_error)
-
     def _judge_warm_replay_accuracy(
         self, result: dict, task: "Task | None", outcome: dict, recorder: Any = None
     ) -> Verdict | None:
@@ -924,14 +872,10 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
             accuracy_passed,
         )
 
-        baseline_accuracy = self.shared_state.baseline_accuracy or 0.0
-
-        measured = result.get("accuracy")
-        eval_ran = isinstance(measured, (int, float))
-        eval_error = ""
-        if not eval_ran:
-            on_disk = self._replay_eval_on_disk(result)
-            measured, eval_ran, eval_error = on_disk.accuracy, on_disk.ran, on_disk.error
+        baseline = AccuracyReference.of_baseline(self.shared_state)
+        baseline_accuracy = baseline.score
+        replay_eval = read_replay_eval(result, baseline)
+        measured, eval_ran, eval_error = replay_eval.accuracy, replay_eval.ran, replay_eval.error
 
         outcome["eval_ran"] = bool(eval_ran)
         outcome["eval_error"] = eval_error or None
@@ -1127,14 +1071,11 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
         """Skip a replay whose launch would be the baseline's own; True when it did.
 
         Patches and kernel items change the code, which no launch comparison sees,
-        so a replay carrying any of them always runs. So does one under reference
-        launch controls: materialization rebuilds the args from the reference, so
-        the replay's launch is not the baseline config plus the request.
+        so a replay carrying any of them always runs.
         """
-        state = self.shared_state
-        if code_changes or state.reference_launch_controls:
+        if code_changes:
             return False
-        if not restates_the_baseline_launch(state, args, envs):
+        if not restates_the_baseline_launch(self.shared_state, args, envs):
             return False
         log.info("PRELUDE: warm replay skipped: %r %s only restate the baseline launch", args, sorted(envs))
         self._skip_warm_replay(
@@ -1549,7 +1490,6 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
             )
         if promoted_checkout:
             outcome["active_framework_root"] = promoted_checkout
-            state.active_inferencex_path = pick_tree(promotion["target_repos"], state.active_inferencex_path)
         outcome["status"] = "reproduced"
         outcome.pop("replayed_patch_refs", None)
         if replayed_patch_refs:
@@ -1693,25 +1633,21 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
 
     def _analysis_attempt_suffix(self, kind: str) -> str:
         """Idempotency-key suffix separating a re-armed roofline retry from the attempt that failed."""
-        if kind != "roofline":
-            return ""
-        try:
-            streak = int(self.shared_state.roofline_failure_streak or 0)
-        except (TypeError, ValueError):
-            streak = 0
+        streak = to_int(self.shared_state.roofline_failure_streak, 0) if kind == "roofline" else 0
         return f"-a{streak}" if streak > 0 else ""
 
     async def enqueue_internal_analysis_task(self, *, reason: str, idem_scope: str = "") -> "Task | None":
-        """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key
-        internal-analysis-<reason><idem_scope>; ``idem_scope`` separates repeated triggers that share a reason.
-        Returns None when the stack cannot produce a GPU trace for it to analyze.
+        """Build + enqueue a Coordinator-internal analysis task (roofline or profile) keyed internal-analysis-<reason>
+        <idem_scope> (``idem_scope`` separates triggers sharing a reason), stepped past cancelled attempts. Returns None
+        when the stack cannot produce a GPU trace for it to analyze, or every retry key holds a cancelled attempt.
         """
         params = self.internal_analysis_params(reason=reason)
         if params is None:
             return None
         kind = self.internal_analysis_kind()
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(kind)
-        task, was_existing = await self.tasks.create_or_return_existing(
+        created = await create_on_free_key(
+            self.tasks,
             TaskSpec(
                 kind=kind,
                 params=params,
@@ -1722,8 +1658,12 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
                 dispatch_class="coordinator",
-            )
+            ),
+            spent=lambda existing: existing.state == "cancelled",
         )
+        if created is None:
+            return None
+        task, was_existing = created
         if was_existing:
             log.info(
                 "internal-analysis task already exists (idempotent: kind=%s task_id=%s, state=%s)",

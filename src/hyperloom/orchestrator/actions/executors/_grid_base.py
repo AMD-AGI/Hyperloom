@@ -1,16 +1,27 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared value types and helpers for the ``explore`` executor's grid runs."""
+"""Shared value types and helpers for the ``explore`` executor's grid runs.
+
+A grid round of a session that froze a base launch (:func:`._suite.rounds.suite_route`) runs through
+:func:`run_grid_suite_round`, which holds the server as the point's ``server_lifecycle`` block says
+(:func:`._suite.rounds.point_server`) and hands the round back the way the grid reads a finished benchmark process: a
+round the session deadline or a cancel stopped exits with the sentinel the grid reads as the run's own stop, any other
+failed step exits ``1``, and the grid records it under that step's error class (:func:`failed_step_class`).
+"""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from hyperloom_common.coerce import to_str_list
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT
 from hyperloom.common.env_safety import (
     BLOCKED_EXTERNAL_ENV_NAMES,
     filter_untrusted_env_mapping,
@@ -23,6 +34,21 @@ from hyperloom.inference_optimizer.grid_server_args import (
     remove_moe_runner_backend_arg,
 )
 
+from inference_suite import stop
+from inference_suite.contracts import FailedStep
+
+from ._agentx_checkpoint import AgentxCheckpoint, read_checkpoint
+from ._failed_step import failed_step_error_class
+from ._subprocess_kill import (
+    AGENTX_EARLY_STOP_ERROR_CLASS,
+    AGENTX_EARLY_STOP_RETURNCODE,
+    ORCHESTRATOR_CANCELLED_RETURNCODE,
+    SESSION_TIME_EXHAUSTED_RETURNCODE,
+    sync_agentx_phase_wait,
+)
+from ._ray_serving import ServingLease
+from ._suite.rounds import SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, point_server, run_suite_round
+
 log = logging.getLogger(__name__)
 
 
@@ -33,6 +59,121 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 # they are neither a KEEP nor a REVERT.
 TS_FAILED = "FAILED"
 TS_SKIPPED_DEDUP = "SKIPPED_DEDUP"
+
+#: The point YAML a grid variant's rounds run from, in the variant's slot beside the rounds' workspaces.
+VARIANT_CONFIG_FILE = "config.yaml"
+
+
+def variant_config_of(workspace: str) -> Path:
+    """The point YAML the grid round whose workspace is ``workspace`` ran from."""
+    return Path(workspace).parent / VARIANT_CONFIG_FILE
+
+
+def sync_benchmark_timeout(config_path: Path, timeout_sec: float) -> None:
+    """Hold the round of the point at ``config_path`` to the same cap as the enclosing benchmark process."""
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    bench = cfg["benchmark"]
+    bench["timeout_seconds"] = timeout_sec
+    if bench.get("server_lifecycle"):
+        bench["server_lifecycle"]["server_ready_timeout_s"] = timeout_sec
+    envs = bench.setdefault("envs", {})
+    envs["PYTHONUNBUFFERED"] = "1"
+    sync_agentx_phase_wait(envs, timeout_sec)
+    config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+
+@dataclass(frozen=True)
+class GridRound:
+    """One benchmark round of a grid: the config and directories it runs with, and its stop gates.
+
+    ``server_already_ready`` is whether an earlier round left the round's server up. ``boot_only`` is whether the
+    round only brings its server up for the rounds after it, which an inference_suite round does without a load.
+    ``checkpoint`` stops an AgentX round that trails its reference at the checkpoint.
+    """
+
+    config_path: Path
+    output_dir: Path
+    timeout_sec: int
+    cwd: str
+    result_dir: str | None = None
+    silence_timeout_sec: float | None = None
+    server_already_ready: bool = False
+    session_deadline_sec: float | None = None
+    warmup: bool = False
+    boot_only: bool = False
+    checkpoint: AgentxCheckpoint | None = None
+
+
+_FAILED_RETURNCODE = 1
+_STOPPED_BY_THE_RUN: Mapping[FailedStep, int] = {
+    FailedStep.DEADLINE_EXHAUSTED: SESSION_TIME_EXHAUSTED_RETURNCODE,
+    FailedStep.CANCELLED: ORCHESTRATOR_CANCELLED_RETURNCODE,
+}
+
+
+@dataclass(frozen=True)
+class SuiteRoundExit:
+    """How a grid round on inference_suite ended: its exit code and, when it failed, the report's failure detail."""
+
+    returncode: int
+    detail: str = ""
+
+
+def run_grid_suite_round(
+    route: SuiteRoute,
+    round_: GridRound,
+    *,
+    env_drop: frozenset[str],
+    serving_lease: ServingLease | None,
+    on_poll: Callable[[], None],
+) -> SuiteRoundExit:
+    """Run ``round_`` on ``route``; ``env_drop`` names host variables its processes do not inherit.
+
+    ``serving_lease`` is the Ray lease whose actor runs the round, ``None`` to run it in this process.
+
+    Raises:
+        SuiteRoundRefused: When the round is refused before it runs.
+    """
+    sync_benchmark_timeout(round_.config_path, round_.timeout_sec)
+    server = point_server(round_.config_path, finds_server=round_.server_already_ready)
+    request = SuiteRound(
+        config_path=round_.config_path,
+        round_dir=round_.output_dir,
+        lifecycle=server.lifecycle,
+        warmup=round_.warmup,
+        boot_only=round_.boot_only,
+        deadline_unix=deadline_unix(round_.session_deadline_sec),
+        env_drop=env_drop,
+        serving_lease=serving_lease,
+        checkpoint=round_.checkpoint,
+    )
+    try:
+        report = run_suite_round(route, request, on_poll=on_poll).report
+    except SuiteRoundRefused as exc:
+        if exc.error_class != AGENTX_EARLY_STOP_ERROR_CLASS:
+            raise
+        return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE, exc.detail)
+    finally:
+        if server.stop_after is not None and (survivors := stop(server.stop_after).survivors):
+            log.error("grid: pids %s outlived SIGKILL; %s keeps their record", survivors, server.stop_after)
+    if report.failed_step is None:
+        return SuiteRoundExit(0)
+    # A leased round's client takes the checkpoint's SIGTERM with its CLI, so its report may name any step.
+    if _stopped_by_checkpoint(round_):
+        return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE, report.failure_detail or report.failed_step.value)
+    returncode = _STOPPED_BY_THE_RUN.get(report.failed_step, _FAILED_RETURNCODE)
+    return SuiteRoundExit(returncode, report.failure_detail or report.failed_step.value)
+
+
+def _stopped_by_checkpoint(round_: GridRound) -> bool:
+    """Whether the ruling the round's checkpoint wrote into its slot stopped it; the round runner clears a stale one."""
+    return round_.checkpoint is not None and bool((read_checkpoint(round_.output_dir) or {}).get("stopped"))
+
+
+def failed_step_class(measurement: Mapping[str, Any]) -> str | None:
+    """The error class of the step a run_dir's round failed at, or ``None`` for a round that failed at no step."""
+    step = measurement.get("failed_step")
+    return None if step is None else failed_step_error_class(FailedStep(step))
 
 
 @dataclass
@@ -75,7 +216,7 @@ class VariantResult:
     extra_envs: dict[str, str]
     status: str
     benchmark_backend: str | None = None
-    benchmark_valid: bool | None = None
+    valid_measurement: bool | None = None
     diagnostic_only: bool | None = None
     workload_identity: str | None = None
     output_throughput: float | None = None
@@ -92,6 +233,7 @@ class VariantResult:
     tpot_p90_ms: float | None = None
     intvty_p90: float | None = None
     intvty_p50: float | None = None
+    intvty_p50_checkpoint: float | None = None
     request_error_rate: float | None = None
     workspace: str | None = None
     report_path: str | None = None
@@ -103,7 +245,7 @@ class VariantResult:
     # Short failure-classification tag; empty for successes.
     error_class: str = ""
     note: str = ""
-    # Wall-clock seconds the Magpie subprocess consumed.
+    # Wall-clock seconds the round consumed.
     runtime_sec: float | None = None
     # True iff reaped by the overtime soft deadline.
     killed_overtime: bool = False
@@ -121,7 +263,7 @@ class VariantResult:
         """Serialize this result to a plain JSON-friendly dict."""
         return {
             "benchmark_backend": self.benchmark_backend,
-            "benchmark_valid": self.benchmark_valid,
+            "valid_measurement": self.valid_measurement,
             "diagnostic_only": self.diagnostic_only,
             "workload_identity": self.workload_identity,
             "name": self.name,
@@ -142,6 +284,7 @@ class VariantResult:
             "tpot_p90_ms": self.tpot_p90_ms,
             "e2e_norm_intvty_p90": self.intvty_p90,
             "e2e_norm_intvty_p50": self.intvty_p50,
+            GRADED_INTVTY_P50_CHECKPOINT: self.intvty_p50_checkpoint,
             "request_error_rate": self.request_error_rate,
             "workspace": self.workspace,
             "report_path": self.report_path,

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.measure.ports import DEV_SANDBOX_PORTS
+from hyperloom.common.ports import DEV_SANDBOX_PORTS
 from hyperloom_multibranch.specialist.dev_sandbox import DevLimits
 
 

@@ -139,6 +139,7 @@ _PROBE = textwrap.dedent(
             setattr(o, name, tuple(f"{name}_{i}" for i in range(len(value))))
 
     from hyperloom.common import aiter_layout, env_safety, failure_signature, visible_devices
+    from hyperloom.common.benchmark_config import BenchmarkPoint
     from hyperloom.measure import compile as compiled
     from hyperloom.measure import agentx_requests, eval_context, farm, hosted_spec, local, log_causes, points, surface
     from hyperloom.measure.framework import base as framework_base
@@ -152,7 +153,7 @@ _PROBE = textwrap.dedent(
         "causes": [value.pattern for name, value in vars(log_causes).items() if hasattr(value, "pattern")],
         "surface": [surface.SURFACE_ENV_KEYS, surface.POINT_ENV_KEYS, surface.REQUEST_ENV_KEYS],
         "points": [points._PROFILE_PINNED, points._PROFILE_SURFACE_EXEMPT],
-        "local": [sorted(local._BOOT_CLIENT_ENVS), sorted(local._MEASURED_ENVS)],
+        "local": [sorted(local._BOOT_CLIENT_ENVS), sorted(local._BENCH_ENVS), sorted(local._EVAL_ENVS)],
         "compile": [compiled.IMAGE_SOURCE_ROOTS, sorted(compiled.PER_DEVICE_TABLE_ENVS)],
         "configs": framework_base.DEFAULT_CONFIGS,
         "context": [eval_context.EVAL_CONTEXT_ENV, eval_context.CONTEXT_FLAGS],
@@ -162,7 +163,7 @@ _PROBE = textwrap.dedent(
         "blocked": sorted(env_safety.BLOCKED_EXTERNAL_ENV_NAMES),
         "reserved": sorted(templates.RESERVED_ENV_NAMES),
         "rocr": visible_devices.ROCR_LEVEL_VARS[0],
-        "gpus": hosted_spec.gpu_count_of({"benchmark": {"envs": {"ENV_TP": "4"}}}),
+        "gpus": hosted_spec.gpu_count_of(BenchmarkPoint.from_document({"benchmark": {"envs": {"ENV_TP": "4"}}})),
         "concurrency": hosted_executor._concurrency_in("benchmark: {envs: {ENV_CONC: 7}}"),
         "visible": run._visible({"ROCR_VISIBLE_DEVICES_ENV": "0,2"}),
         "export": list(agentx_requests._EXPORT_PATTERNS),
@@ -260,16 +261,16 @@ def test_inferencex_env_names_are_read_from_the_owner(probe: dict[str, Any]) -> 
         "ENV_ISL",
         "ENV_OSL",
         "ENV_RANDOM_RANGE_RATIO",
-        "ENV_MAGPIE_EVAL_TASKS",
-        "ENV_MAGPIE_EVAL_LIMIT",
-        "ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS",
+        "ENV_EVAL_TASKS",
+        "ENV_EVAL_LIMIT",
+        "ENV_EVAL_TOKENIZED_REQUESTS",
     ]
     assert surface[1:] == [["ENV_NUM_PROMPTS", "ENV_NUM_WARMUPS"], ["ENV_CONC", "ENV_RUN_EVAL"]]
     assert probe["points"] == [
         ["ENV_TP", "ENV_EP", "ENV_ISL", "ENV_RANDOM_RANGE_RATIO", "ENV_MAX_MODEL_LEN"],
         ["envs.ENV_OSL"],
     ]
-    assert probe["local"] == [["ENV_NUM_PROMPTS", "ENV_RUN_EVAL"], ["ENV_RUN_EVAL"]]
+    assert probe["local"] == [["ENV_NUM_PROMPTS", "ENV_RUN_EVAL"], ["ENV_RUN_EVAL"], ["ENV_EVAL_ONLY", "ENV_RUN_EVAL"]]
     assert [hint[2] for hint in probe["hints"][1]] == ["ENV_CONC", "ENV_OSL", "ENV_RANDOM_RANGE_RATIO", "ENV_ISL"]
     assert {"ENV_TP", "ENV_EP", "ENV_CONC", "ENV_ISL", "ENV_OSL", "ENV_MAX_MODEL_LEN", "ENV_RUN_EVAL"} <= set(
         probe["blocked"]

@@ -316,7 +316,8 @@ def test_runtime_installer_workspace_initialization_handles_readonly(
         "HYPERLOOM_RUNTIME_DIR=/old/runtime\nKERNEL_AGENT_ENV=/old/env\n"
         + _installer_environment_block()
         + '\n[ "$HYPERLOOM_RUNTIME_DIR" = "${USER_DATA_PATH}/runtime" ]\n'
-        '[ "$KERNEL_AGENT_ENV" = "${USER_DATA_PATH}/runtime/kernel-agent.env.sh" ]\n'
+        # Derived again for the selected workspace, and never under it (test_install_session_paths has the place).
+        '[ "$KERNEL_AGENT_ENV" != /old/env ] && [ "${KERNEL_AGENT_ENV#"$USER_DATA_PATH"/}" = "$KERNEL_AGENT_ENV" ]\n'
         'printf "%s" "$USER_DATA_PATH"',
     )
     if readonly_root and file_root == "/different/session":

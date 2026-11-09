@@ -16,13 +16,12 @@ import time
 from hyperloom.measure import local
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
-from hyperloom.measure.tests.test_boot_watch import (  # noqa: F401 - the fixture
+from hyperloom.measure.tests.test_boot_watch import (
     READY_SERVER,
     TUNING_SERVER,
     _call,
     _point,
     _ServerGrid,
-    magpie_backend,
 )
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 from hyperloom.orchestrator.actions.executors import ORCHESTRATOR_CANCELLED_RETURNCODE

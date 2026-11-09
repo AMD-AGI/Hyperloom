@@ -1,10 +1,11 @@
 """Realtime collector: a campaign's live state, as one JSON snapshot.
 
-Ported from an earlier campaign dashboard's collector (collector version 1), with the same top-level keys so that page can render a
-snapshot unchanged. What differs: it runs where the campaign runs, writes the
+Ported from an earlier per-cluster campaign dashboard's collector (collector
+version 1), with the same top-level keys so that page can render a snapshot
+unchanged. What differs: it runs where the campaign runs, writes the
 snapshot to a local directory, and pushes it to the share (``share.py``); it
 never samples GPU nodes (a probe during a measured replay perturbs it), and it
-takes every path as an argument instead of a Cluster A layout.
+takes every path as an argument instead of one cluster's layout.
 
 Standard library only, and it never raises: every section records its own
 failure in ``errors`` so a partial snapshot still renders.
@@ -91,10 +92,10 @@ def warm_chain(session: Path, lessons: list, end):
     # The first node's scale as arbor/rebaseline.py chains it, but with a warm reading on
     # both sides of each step: the last KEEP's or bar's on the old node over the new
     # node's bar. A rebased bar's warm reading is its record's replays after the
-    # container's first, which reads low (scripts/model-m-campaign/rebase_bar.py), unless
+    # container's first, which reads low (the launcher's bar measurement), unless
     # the record discarded a warm-up itself. Each lesson gets the factor in force after it;
-    # returned: the factor now, and the best on this node, warm. On one campaign the
-    # chained reading overstated the gain; this reading agreed with its round-end A/B.
+    # returned: the factor now, and the best on this node, warm. Read this way, one
+    # campaign's chain agreed with its round-end A/B, where the driver's chain read high.
     scale = 1.0
     for x in lessons:
         d, m = x.get("decision"), x.get("metric")
@@ -194,11 +195,11 @@ PHASE_RULES = [
     (r"^\[arbor\] Gate: ", "gate", "gate decided"),
     (r"^\[arbor\] Cooling down", "cooldown", "cooling down between iterations"),
     (r"^\[arbor\] roll: handing off", "handoff", "handing over to the next job"),
-    # Between iterations: a chunk's start, its bar (scripts/model-m-campaign/campaign_model_m.sbatch),
-    # a round end's A/B (round_ab.py; the page shows the A/B's last line).
+    # Between iterations: a chunk's start, its bar (a campaign launcher's log prefix),
+    # a round end's A/B (the launcher's round_ab hook; the page shows the A/B's last line).
     (r"^\[chunk .* takes over", "chunk", "a new chunk starts"),
-    (r"^\[campaign\] .*(measuring the bar|\[rebase\])", "rebase", "measuring this node's bar"),
-    (r"^\[campaign\] .*driver starting", "driver", "driver starting"),
+    (r"^\[(?!arbor\])[\w.-]+\] .*(measuring the bar|\[rebase\])", "rebase", "measuring this node's bar"),
+    (r"^\[(?!arbor\])[\w.-]+\] .*driver starting", "driver", "driver starting"),
     (r"^\[(round-ab\]|arbor\] round: A/B)", "round_ab", "round-end A/B"),
 ]
 
@@ -251,7 +252,7 @@ def collect_jobs(slurm_job: str, errors: list[str], session: Path | None = None)
         for j in running:
             j["role"] = "campaign" if j["id"] == main else "successor"
     for j in jobs["ours"]:
-        try:  # a preempted job is requeued under its own id (Cluster A's <partition>): Restarts counts them
+        try:  # a preempted job is requeued under its own id (on some partitions): Restarts counts them
             m = re.search(r"Restarts=(\d+)", subprocess.run(["scontrol", "show", "job", j["id"]],
                                                             capture_output=True, text=True, timeout=15).stdout)
             j["restarts"] = int(m.group(1)) if m else None
@@ -328,7 +329,7 @@ def collect_log(session: Path, log: Path | None, errors: list[str],
 
 
 def collect_round_ab(session: Path, rt: dict | None, metric, secondary):
-    # The pending (else the last) round end's A/B (scripts/model-m-campaign/round_ab.py),
+    # The pending (else the last) round end's A/B (the launcher's round_ab hook),
     # attempt by attempt, oldest first: each row [round, arm, concurrency, metric,
     # secondary], or the current arm's full GSM8K as a dict; the node and verdict once
     # the attempt wrote its summary.

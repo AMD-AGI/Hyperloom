@@ -665,6 +665,30 @@ def test_the_handoff_records_which_cards_geak_was_given(tmp_path):
     assert handoff["gpu_pin"]["var"] == "ROCR_VISIBLE_DEVICES"
 
 
+def test_the_handoff_records_the_launch_geak_started_from(tmp_path):
+    recorder = _geak_recorder()
+    recorder.record_geak_handoff({"schema_version": 3, "baseline_env_spec": {"launch_digest": "sha256:" + "a" * 64}})
+    recorder.finish(KernelExit(tput_after=900.0))
+
+    handoff = _kernel_events(tmp_path)[0]["ext"]["geak"]["handoff"]
+    assert handoff["launch_digest"] == "sha256:" + "a" * 64
+    assert "launch_recipe" not in handoff
+
+
+def test_an_archived_handoff_that_named_a_recipe_still_reads(tmp_path):
+    from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import PRODUCER, SECTION_EVENT
+
+    recorder = _geak_recorder()
+    EventSink(recorder.event_id, producer=PRODUCER).record(
+        SECTION_EVENT, {"geak_handoff": {"schema_version": 3, "launch_recipe": "/s/baseline.yaml"}}
+    )
+    recorder.finish(KernelExit(tput_after=900.0))
+
+    handoff = _kernel_events(tmp_path)[0]["ext"]["geak"]["handoff"]
+    assert handoff["launch_recipe"] == "/s/baseline.yaml"
+
+
 def test_a_handoff_without_a_pin_is_not_read_as_a_pin_to_card_zero(tmp_path):
     recorder = _geak_recorder()
     recorder.record_geak_handoff({"schema_version": 3, "gpu_ids": "0,1"})

@@ -73,6 +73,7 @@ output_tps_per_gpu = output_tps / ($TP)
 total_tps_per_gpu = total_tps / ($TP)
 
 result = {
+    'total_throughput': round(total_tps_per_gpu, 1),
     'output_throughput': round(output_tps_per_gpu, 1),
     'total_throughput_per_gpu': round(total_tps_per_gpu, 1),
     'conc': CONC,

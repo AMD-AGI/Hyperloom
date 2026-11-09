@@ -1,11 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for KV collection riding the watchdog loop.
+"""Tests for KV collection and for the checkpoint judge riding the watchdog loop.
 
-Covers the phase split, the recorder itself, and the ``finally`` that closes a
-window on every exit path. Also covers the scanner's truncation branch, which
-has been reachable and untested since it was written.
+Covers the phase split, the recorder itself, and the ``finally`` that closes the judge on every exit path.
 """
 
 from __future__ import annotations
@@ -17,11 +15,11 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
-from hyperloom.orchestrator.actions.executors._kv_metrics import (
+from inference_suite.telemetry.kv_poll import KvSample
+from inference_suite.telemetry.kv_record import (
     KV_ARTIFACT_NAME,
     KvMetricsRecorder,
     KvRound,
-    KvSample,
     counter_delta,
 )
 
@@ -44,50 +42,6 @@ def _sample(**kwargs) -> KvSample:
     base = {"ts": 1.0, "mono": 1.0, "engine": "sglang", "active_pool_usage": 0.5}
     base.update(kwargs)
     return KvSample(**base)
-
-
-# --------------------------------------------------------------------------
-# scanner
-# --------------------------------------------------------------------------
-def test_scan_survives_truncation_by_rescanning_from_the_top(tmp_path):
-    """A rotated log is shorter than the consumed offset; markers in the new
-    content must still be seen rather than skipped past."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("x" * 500 + "\n", encoding="utf-8")
-    first = sk._scan_server_log_increment(str(log_path), 0)
-    assert first.offset == log_path.stat().st_size
-
-    log_path.write_text("Application startup complete\n", encoding="utf-8")
-    after = sk._scan_server_log_increment(str(log_path), first.offset)
-
-    assert after.saw_ready is True
-    assert after.offset == log_path.stat().st_size
-
-
-def test_scan_reports_agentx_phase_boundaries(tmp_path):
-    """aiperf prints these itself; we add no marker of our own."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("Phase warmup (warmup) started | target: 44 requests\n", encoding="utf-8")
-    warm = sk._scan_server_log_increment(str(log_path), 0)
-    assert warm.saw_warmup_begin is True and warm.saw_measured_begin is False
-
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write("Phase profiling (profiling) started | phase_index=0\n")
-    measured = sk._scan_server_log_increment(str(log_path), warm.offset)
-    assert measured.saw_measured_begin is True and measured.saw_warmup_begin is False
-
-
-def test_resolve_scan_logs_includes_the_agentx_client_log(tmp_path):
-    """An AgentX workspace has no benchmark_stderr.log, so without this the
-    phase lines are unreachable."""
-    bench = tmp_path / "benchmark_sglang_20260903"
-    (bench / "aiperf_artifacts" / "logs").mkdir(parents=True)
-    (bench / "server.log").write_text("up\n", encoding="utf-8")
-    (bench / "aiperf_artifacts" / "logs" / "aiperf.log").write_text("phases\n", encoding="utf-8")
-
-    resolved = sk._resolve_scan_logs(str(tmp_path / "server.log"))
-
-    assert any(p.endswith("aiperf.log") for p in resolved)
 
 
 # --------------------------------------------------------------------------
@@ -356,24 +310,28 @@ def test_close_never_raises_on_an_unwritable_path(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# loop integration
+# the round's checkpoint judge in the watchdog loop
 # --------------------------------------------------------------------------
-class _Recorder:
-    """Minimal stand-in matching the duck-typed contract the loop expects."""
+class _Judge:
+    """Minimal stand-in for the judge a round's checkpoint builds."""
 
     def __init__(self):
-        self.phases: list[str] = []
         self.ticks = 0
         self.closed_aborted: bool | None = None
-
-    def note_phase(self, phase, mono):
-        self.phases.append(phase)
 
     def tick(self, mono):
         self.ticks += 1
 
     def close(self, *, aborted=False):
         self.closed_aborted = aborted
+
+
+class _Checkpoint:
+    def __init__(self, judge):
+        self._judge = judge
+
+    def judge(self):
+        return self._judge
 
 
 class _DoneProc:
@@ -401,244 +359,45 @@ class _Capture:
 
     last_activity_at = None
 
-    def note_output(self):
-        pass
-
     def finish(self):
         return ("out", "err")
 
 
-def _watch(proc, watched, recorders):
-    return sk._communicate_with_watchdog(proc, watched, recorders=recorders, capture=_Capture())
+def _watch(proc, watch):
+    return sk._communicate_with_watchdog(proc, sk._WatchedRound(watch), capture=_Capture())
 
 
-def test_recorder_is_closed_on_the_normal_return_path():
-    rec = _Recorder()
-    _watch(_DoneProc(), sk._WatchedRound(sk.RoundWatch(timeout=5)), sk._RecorderFanout([rec]))
+def test_the_judge_rules_from_the_first_poll_and_is_closed_on_the_normal_return_path():
+    judge = _Judge()
+    out = _watch(_DoneProc(), sk.RoundWatch(timeout=5, checkpoint=_Checkpoint(judge)))
 
-    assert rec.closed_aborted is False
-
-
-def test_no_scraping_before_the_server_is_up():
-    """The scrape blocks, and before the engine binds its port every attempt is
-    a refused connection paid for inside the watchdog loop -- during boot, when
-    the ready marker and the death gate most need it responsive. Boot has no
-    traffic to measure anyway."""
-    rec = _Recorder()
-    _watch(_DoneProc(), sk._WatchedRound(sk.RoundWatch(timeout=5)), sk._RecorderFanout([rec]))
-
-    assert rec.ticks == 0
-
-
-def test_warm_reuse_rounds_scrape_immediately_and_are_tagged_measured():
-    """A round re-attaching to a live server writes no ready marker.
-
-    Gating on that marker alone collected nothing; gating only the *scrape* on
-    it was worse -- samples were taken but left in ``boot``, the one phase that
-    never enters a comparison, so the whole round aggregated to empty.
-    """
-    rec = _Recorder()
-    _watch(
-        _DoneProc(),
-        sk._WatchedRound(sk.RoundWatch(timeout=5, server_already_ready=True)),
-        sk._RecorderFanout([rec]),
-    )
-
-    assert rec.ticks >= 1
-    assert rec.phases == ["measured"]
-
-
-def test_marker_split_across_a_read_boundary_is_still_seen(tmp_path):
-    """Half a marker is in neither chunk, so without a carried tail the phase
-    boundary is lost outright -- not seen late, never seen."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("Phase profiling (prof", encoding="utf-8")
-
-    residuals: dict[str, str] = {}
-    first = sk._scan_server_log_increment(str(log_path), 0, residuals.get("k", ""))
-    residuals["k"] = first.residual
-    assert first.saw_measured_begin is False
-
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write("iling) started | phase_index=0\n")
-    second = sk._scan_server_log_increment(str(log_path), first.offset, residuals["k"])
-
-    assert second.saw_measured_begin is True
-
-
-def test_residual_is_held_per_path(tmp_path):
-    """The resolved logs have different writers; splicing one's tail into
-    another's next read would invent a line neither of them wrote."""
-    bench = tmp_path / "benchmark_sglang"
-    bench.mkdir()
-    (bench / "server.log").write_text("Phase profiling (prof", encoding="utf-8")
-    (bench / "benchmark_stderr.log").write_text("iling) started\n", encoding="utf-8")
-
-    cursor = sk._LogCursor()
-    scan = cursor.advance(str(tmp_path / "server.log"))
-
-    assert scan.saw_measured_begin is False
-    assert len(cursor.residuals) >= 2
-
-
-def test_truncation_drops_the_carried_tail(tmp_path):
-    """The tail belonged to a file that no longer exists."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("Phase profiling (prof", encoding="utf-8")
-    first = sk._scan_server_log_increment(str(log_path), 0)
-    assert first.residual
-
-    log_path.write_text("iling) started\n", encoding="utf-8")
-    after = sk._scan_server_log_increment(str(log_path), 10_000, first.residual)
-
-    assert after.saw_measured_begin is False
-
-
-def test_scope_identifies_the_round_without_another_file(tmp_path):
-    """A consumer must not have to join against something else to know which
-    variant and action produced the artifact."""
-    workspace = tmp_path / "runs" / "explore" / "task-abc" / "variant_03_fp8" / "benchmark_sglang"
-    workspace.mkdir(parents=True)
-
-    rec = sk._build_kv_recorder(str(workspace / "server.log"), {})
-
-    assert rec._scope["workspace"] == "benchmark_sglang"
-    assert rec._scope["run_path"] == "explore/task-abc/variant_03_fp8/benchmark_sglang"
-
-
-def test_recorder_is_closed_as_aborted_when_a_gate_raises():
-    """The failure a consumer cannot recover from is a window that never closed."""
-    rec = _Recorder()
-    with pytest.raises(sk.subprocess.TimeoutExpired):
-        _watch(_HangingProc(), sk._WatchedRound(sk.RoundWatch(timeout=0.01)), sk._RecorderFanout([rec]))
-
-    assert rec.closed_aborted is True
-
-
-def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
-    """Ready opens the measured window; AgentX's own lines refine it."""
-    rec = _Recorder()
-    scans = iter(
-        [
-            sk._LogScan(True, False, False, True, False, False, False),
-            sk._LogScan(False, False, False, True, False, True, False),
-            sk._LogScan(False, False, False, True, False, False, True),
-            sk._LogScan(False, False, True, True, False, False, False),
-        ]
-    )
-    monkeypatch.setattr(sk._LogCursor, "advance", lambda *_a, **_k: next(scans, sk._LogScan(*([False] * 7))))
-    monkeypatch.setattr(sk, "stamp_server_ready", lambda *_a, **_k: None)
-    log_path = tmp_path / "server.log"
-    log_path.write_text("x\n", encoding="utf-8")
-
-    class _SlowProc:
-        args = ["x"]
-        calls = 0
-
-        def poll(self):
-            return None
-
-        def wait(self, timeout=None):
-            _SlowProc.calls += 1
-            if _SlowProc.calls <= 4:
-                raise sk.subprocess.TimeoutExpired(self.args, timeout)
-            return 0
-
-    _watch(
-        _SlowProc(),
-        sk._WatchedRound(sk.RoundWatch(timeout=60, server_log_path=str(log_path))),
-        sk._RecorderFanout([rec]),
-    )
-
-    assert rec.phases == ["measured", "warmup", "measured", "eval"]
-    assert rec.closed_aborted is False
-
-
-def test_no_recorder_leaves_the_loop_unchanged():
-    """An empty fanout must be a strict no-op: this is a production watchdog."""
-    out = _watch(_DoneProc(), sk._WatchedRound(sk.RoundWatch(timeout=5)), sk._RecorderFanout([]))
     assert out == ("out", "err")
+    assert judge.ticks >= 1
+    assert judge.closed_aborted is False
 
 
-def test_a_failing_recorder_fails_the_round(monkeypatch, tmp_path):
-    """Recorders absorb their own scrape and write failures, so anything else they raise is a defect that surfaces."""
+def test_the_judge_is_closed_as_aborted_when_a_gate_raises():
+    """The failure a consumer cannot recover from is a window that never closed."""
+    judge = _Judge()
+    with pytest.raises(sk.subprocess.TimeoutExpired):
+        _watch(_HangingProc(), sk.RoundWatch(timeout=0.01, checkpoint=_Checkpoint(judge)))
 
-    class _Exploding:
-        def note_phase(self, phase, mono):
-            raise RuntimeError("boom")
+    assert judge.closed_aborted is True
 
+
+def test_a_failing_judge_fails_the_round():
+    """A judge absorbs its own read and write failures, so anything else it raises is a defect that surfaces."""
+
+    class _Exploding(_Judge):
         def tick(self, mono):
             raise RuntimeError("boom")
 
-        def close(self, *, aborted=False):
-            raise RuntimeError("boom")
-
-    monkeypatch.setattr(sk, "_build_kv_recorder", lambda *a: _Exploding())
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._gpu_power.build_gpu_power_recorder", lambda *a: None)
     with pytest.raises(RuntimeError, match="^boom$"):
-        _watch(
-            _DoneProc(),
-            sk._WatchedRound(sk.RoundWatch(timeout=5, server_already_ready=True)),
-            sk._build_round_recorders(str(tmp_path / "server.log"), {}),
-        )
+        _watch(_DoneProc(), sk.RoundWatch(timeout=5, checkpoint=_Checkpoint(_Exploding())))
 
 
 def test_artifact_name_is_stable():
     assert Path(KV_ARTIFACT_NAME).suffix == ".json"
-
-
-# --------------------------------------------------------------------------
-# call-site wiring
-# --------------------------------------------------------------------------
-def test_no_recorder_without_a_server_log_path():
-    """A helper subprocess has no engine to scrape and no round to scope to."""
-    assert sk._build_kv_recorder(None, {}) is None
-    assert sk._build_kv_recorder("", {}) is None
-
-
-def test_kill_switch_disables_collection(tmp_path, monkeypatch):
-    """A loop this central needs a way out that does not require a redeploy."""
-    log_path = str(tmp_path / "server.log")
-    assert sk._build_kv_recorder(log_path, {}) is not None
-
-    monkeypatch.setenv(sk._KV_METRICS_ENV, "0")
-    assert sk._build_kv_recorder(log_path, {}) is None
-
-
-def test_recorder_targets_the_round_workspace_and_the_bound_port(tmp_path):
-    """The port is the per-session ephemeral one the config pinned, not 8888."""
-    rec = sk._build_kv_recorder(str(tmp_path / "server.log"), {"PORT": "31234"})
-
-    assert rec._output_path == str(tmp_path / KV_ARTIFACT_NAME)
-    assert ":31234/metrics" in rec._poller.url
-
-
-def test_run_with_session_kill_produces_the_artifact(tmp_path):
-    """End to end: the artifact has to exist on disk after a real round.
-
-    The wiring this covers was the gap between "the loop accepts a recorder" and
-    "a recorder is ever built" -- with it missing, every piece below had tests
-    that passed while nothing was ever collected.
-    """
-    import sys
-
-    log_path = tmp_path / "server.log"
-    log_path.write_text("Application startup complete\n", encoding="utf-8")
-
-    sk.run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(1.2)"],
-        watch=sk.RoundWatch(timeout=30, server_log_path=str(log_path)),
-    )
-
-    artifact = tmp_path / KV_ARTIFACT_NAME
-    assert artifact.is_file()
-    payload = json.loads(artifact.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 1
-    # No engine was listening, and that is recorded rather than reported as an
-    # idle pool: every metric stays absent instead of reading zero.
-    assert payload["available"] is not True
-    assert payload["capacity_tokens"] is None
-    assert payload["retract_delta"] is None
 
 
 def test_artifact_is_in_the_package_globs():
@@ -738,7 +497,7 @@ def test_a_round_that_nobody_reached_is_still_unavailable(tmp_path):
 
 
 def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
-    from hyperloom.orchestrator.actions.executors._kv_metrics import (
+    from inference_suite.telemetry.kv_poll import (
         aggregate_series,
         read_aiperf_server_metrics,
     )
@@ -858,7 +617,7 @@ def test_the_port_is_read_from_the_server_the_config_did_not_pin(tmp_path):
     can only ever be right for one of the two. The server's own banner is right
     for both.
     """
-    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_server_log, resolve_metrics_port
+    from inference_suite.telemetry.kv_poll import port_from_server_log, resolve_metrics_port
 
     nested = tmp_path / "benchmark_vllm_1"
     nested.mkdir()
@@ -888,7 +647,7 @@ def test_agentx_rust_frontend_port_is_read_from_vllm_command(tmp_path):
         encoding="utf-8",
     )
 
-    from hyperloom.orchestrator.actions.executors._kv_metrics import (
+    from inference_suite.telemetry.kv_poll import (
         port_from_server_command,
         resolve_metrics_port,
     )
@@ -916,7 +675,7 @@ def test_bind_line_recognition(tmp_path, line, expected):
     Enumerating phrasings is how this collector got its original bug, so the test
     is the combination: a line announcing the server, carrying a URL with a port.
     """
-    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_server_log
+    from inference_suite.telemetry.kv_poll import port_from_server_log
 
     (tmp_path / "server.log").write_text(line + "\n", encoding="utf-8")
 
@@ -925,7 +684,7 @@ def test_bind_line_recognition(tmp_path, line, expected):
 
 def test_the_pinned_config_still_outranks_the_server_banner(tmp_path):
     """Both exist on a synthetic round and the config is the earlier authority."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import resolve_metrics_port
+    from inference_suite.telemetry.kv_poll import resolve_metrics_port
 
     (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
     (tmp_path / "server.log").write_text("INFO:     Uvicorn running on http://0.0.0.0:8000\n", encoding="utf-8")
@@ -936,7 +695,7 @@ def test_the_pinned_config_still_outranks_the_server_banner(tmp_path):
 def test_the_port_is_resolved_on_first_use_not_at_construction(tmp_path):
     """The server writes its banner after the recorder is built, so resolving
     eagerly would cache the default and scrape a port nothing is listening on."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import KvMetricsPoller
+    from inference_suite.telemetry.kv_poll import KvMetricsPoller
 
     poller = KvMetricsPoller(workspace=tmp_path)
     # The round has not booted yet; the log appears only now.
@@ -972,7 +731,7 @@ def test_counters_resolve_under_aiperfs_family_naming(tmp_path):
     cumulative counters come back empty on this path, and an empty counter looks
     exactly like a round that never retracted.
     """
-    from hyperloom.orchestrator.actions.executors._kv_metrics import families_from_aiperf_record
+    from inference_suite.telemetry.kv_poll import families_from_aiperf_record
 
     families = families_from_aiperf_record(
         {
@@ -991,7 +750,7 @@ def test_counters_resolve_under_aiperfs_family_naming(tmp_path):
 
 def test_histogram_samples_are_skipped_not_mistaken_for_gauges(tmp_path):
     """aiperf carries histograms as buckets with no ``value``."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import families_from_aiperf_record
+    from inference_suite.telemetry.kv_poll import families_from_aiperf_record
 
     families = families_from_aiperf_record(
         {
@@ -1026,7 +785,7 @@ def test_port_comes_from_the_round_config_not_the_default(tmp_path):
     exported into the subprocess environment, so resolving from the environment
     alone lands on 8888 and scrapes a port nothing is listening on.
     """
-    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_workspace, resolve_metrics_port
+    from inference_suite.telemetry.kv_poll import port_from_workspace, resolve_metrics_port
 
     (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
 
@@ -1036,7 +795,7 @@ def test_port_comes_from_the_round_config_not_the_default(tmp_path):
 
 def test_port_is_read_from_the_benchmark_config_too(tmp_path):
     """A warm-reuse round carries it here rather than in a lifecycle YAML."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_workspace
+    from inference_suite.telemetry.kv_poll import port_from_workspace
 
     nested = tmp_path / "benchmark_vllm_1"
     nested.mkdir()
@@ -1047,7 +806,7 @@ def test_port_is_read_from_the_benchmark_config_too(tmp_path):
 
 def test_explicit_env_still_outranks_the_config(tmp_path):
     """An operator pin has to win over a file we merely found."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import resolve_metrics_port
+    from inference_suite.telemetry.kv_poll import resolve_metrics_port
 
     (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
 
@@ -1056,7 +815,7 @@ def test_explicit_env_still_outranks_the_config(tmp_path):
 
 def test_a_round_without_a_pinned_port_falls_back_to_the_default(tmp_path):
     """Which is what the one round that worked was relying on."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import DEFAULT_METRICS_PORT, resolve_metrics_port
+    from inference_suite.telemetry.kv_poll import DEFAULT_METRICS_PORT, resolve_metrics_port
 
     (tmp_path / "baseline_config.with_envs.yaml").write_text(
         "benchmark:\n  framework: vllm\n  envs:\n    TP: 1\n", encoding="utf-8"
@@ -1067,7 +826,7 @@ def test_a_round_without_a_pinned_port_falls_back_to_the_default(tmp_path):
 
 def test_unreadable_config_does_not_raise(tmp_path):
     """Malformed YAML in a round directory is not a reason to fail a round."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_workspace
+    from inference_suite.telemetry.kv_poll import port_from_workspace
 
     (tmp_path / "broken.yaml").write_text("benchmark: [unclosed\n", encoding="utf-8")
 
@@ -1076,7 +835,7 @@ def test_unreadable_config_does_not_raise(tmp_path):
 
 def _refuse(monkeypatch):
     """Make every scrape fail the way a closed port does."""
-    from hyperloom.orchestrator.actions.executors import _kv_metrics as km
+    from inference_suite.telemetry import kv_poll as km
 
     def _boom(*_a, **_k):
         raise OSError("connection refused")
@@ -1090,7 +849,7 @@ def test_poller_does_not_give_up_on_a_slow_start(monkeypatch):
     Giving up on the count alone parked collection for the rest of a round over a
     server that was merely still binding.
     """
-    from hyperloom.orchestrator.actions.executors._kv_metrics import KvMetricsPoller
+    from inference_suite.telemetry.kv_poll import KvMetricsPoller
 
     _refuse(monkeypatch)
     poller = KvMetricsPoller(port=1)
@@ -1104,7 +863,7 @@ def test_poller_gives_up_once_the_grace_has_also_passed(monkeypatch):
     """An endpoint that answered nothing for a minute is not coming back."""
     import time
 
-    from hyperloom.orchestrator.actions.executors._kv_metrics import _GIVE_UP_GRACE_SEC, KvMetricsPoller
+    from inference_suite.telemetry.kv_poll import _GIVE_UP_GRACE_SEC, KvMetricsPoller
 
     _refuse(monkeypatch)
     poller = KvMetricsPoller(port=1)
@@ -1147,7 +906,7 @@ def _now() -> float:
 
 def test_progress_address_is_read_from_the_round_directory(tmp_path):
     """The client publishes it; the watchdog is a different process."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import AiperfProgressPoller
+    from inference_suite.telemetry.kv_poll import AiperfProgressPoller
 
     artifacts = tmp_path / "aiperf_artifacts"
     artifacts.mkdir()
@@ -1158,7 +917,7 @@ def test_progress_address_is_read_from_the_round_directory(tmp_path):
 
 def test_progress_address_is_found_in_a_nested_benchmark_directory(tmp_path):
     """An AgentX round nests its artifacts one level below the server log."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import AiperfProgressPoller
+    from inference_suite.telemetry.kv_poll import AiperfProgressPoller
 
     artifacts = tmp_path / "benchmark_agentx_1" / "aiperf_artifacts"
     artifacts.mkdir(parents=True)
@@ -1169,7 +928,7 @@ def test_progress_address_is_found_in_a_nested_benchmark_directory(tmp_path):
 
 def test_missing_progress_address_is_not_an_error(tmp_path):
     """Every non-AgentX round is this case."""
-    from hyperloom.orchestrator.actions.executors._kv_metrics import AiperfProgressPoller
+    from inference_suite.telemetry.kv_poll import AiperfProgressPoller
 
     poller = AiperfProgressPoller(tmp_path)
     assert poller._resolve_url() is None
@@ -1336,7 +1095,7 @@ def test_the_stored_scrape_window_contains_the_real_one():
 
 def test_a_request_starting_at_the_scrape_instant_is_still_correlated(tmp_path):
     """The regression: a sub-millisecond scrape must not lose the work it saw."""
-    from hyperloom.orchestrator.actions.executors._agentx_timeline import (
+    from inference_suite.telemetry.agentx_timeline import (
         correlate_rows,
         parse_profile_export,
     )
@@ -1518,12 +1277,12 @@ def test_a_failing_progress_poll_propagates_before_the_engine_is_scraped():
 
 
 def test_a_failing_aiperf_read_propagates_from_the_summary(tmp_path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors import _kv_metrics as kv
+    from inference_suite.telemetry import kv_record as kv
 
     def _boom(_path):
         raise RuntimeError("aiperf read bug")
 
-    monkeypatch.setattr(kv, "_server_metrics_exports", lambda _workspace: [tmp_path / "export.json"])
+    monkeypatch.setattr(kv, "server_metrics_exports", lambda _workspace: [tmp_path / "export.json"])
     monkeypatch.setattr(kv, "read_aiperf_server_metrics", _boom)
     rec = KvMetricsRecorder(poller=_StubPoller([]), min_interval_sec=0.0, kv_round=KvRound(workspace=tmp_path))
 
@@ -1532,7 +1291,7 @@ def test_a_failing_aiperf_read_propagates_from_the_summary(tmp_path, monkeypatch
 
 
 def test_a_failing_timeline_build_propagates_from_the_summary(tmp_path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors import _agentx_timeline as timeline
+    from inference_suite.telemetry import agentx_timeline as timeline
 
     def _boom(_workspace):
         raise RuntimeError("timeline bug")

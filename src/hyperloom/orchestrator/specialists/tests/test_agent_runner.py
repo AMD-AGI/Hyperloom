@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio as real_asyncio
+import errno
 import json
 import os
 import signal
@@ -18,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.proctree import descendants
+from hyperloom_common.proctree import descendants
 from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists import reap_watch
 from hyperloom.orchestrator.specialists import subprocess_ as ss
@@ -310,6 +311,43 @@ async def test_resource_records_are_complete_and_appended(tmp_path: Path) -> Non
     assert container["cpu_quota_us"] == 400000
     assert container["max_concurrent_specialists"] == 1
     assert oct((tmp_path / "session" / "agents" / "resources.jsonl").stat().st_mode & 0o777) == "0o600"
+
+
+@pytest.mark.parametrize(
+    ("planted", "refusal"),
+    [("symlinked file", errno.ELOOP), ("hard-linked file", errno.EINVAL), ("symlinked agents dir", errno.ENOTDIR)],
+)
+async def test_a_link_planted_where_the_records_go_is_refused_and_its_target_is_untouched(
+    tmp_path: Path, planted: str, refusal: int
+) -> None:
+    session, outside = tmp_path / "session", tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "resources.jsonl"
+    target.write_text("kept\n")
+    agents = session / "agents"
+    if planted == "symlinked agents dir":
+        session.mkdir()
+        agents.symlink_to(outside, target_is_directory=True)
+    else:
+        agents.mkdir(parents=True)
+        if planted == "symlinked file":
+            (agents / "resources.jsonl").symlink_to(target)
+        else:
+            os.link(target, agents / "resources.jsonl")
+    runner = make_runner(session)
+    handle = await runner.launch(make_spec(tmp_path / "w", code="pass"))
+    await wait_finished(runner, handle)
+    with pytest.raises(OSError) as refused:
+        await runner.collect(handle)
+    assert refused.value.errno == refusal
+    assert target.read_text() == "kept\n"
+    assert sorted(p.name for p in outside.iterdir()) == ["resources.jsonl"]
+
+    (agents if planted == "symlinked agents dir" else agents / "resources.jsonl").unlink()
+    await runner.collect(handle)
+    records = [json.loads(x) for x in (agents / "resources.jsonl").read_text().splitlines()]
+    assert [r["kind"] for r in records] == ["specialist_resources", "container_resources"]
+    assert target.read_text() == "kept\n"
 
 
 async def test_concurrency_at_start_counts_sessions_already_running(tmp_path: Path) -> None:

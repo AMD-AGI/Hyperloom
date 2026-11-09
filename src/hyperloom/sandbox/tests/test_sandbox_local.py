@@ -9,6 +9,7 @@ import contextlib
 import itertools
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -19,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import proctree
+from hyperloom_common import proctree
 from hyperloom.sandbox import local_sandbox, reaper
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
 from hyperloom.sandbox.gpu_pool import GpuPool
@@ -196,6 +197,79 @@ def test_a_dev_symlink_cannot_escape_the_root(make) -> None:
     sb.run("ln -s /tmp tmpdir")
     with pytest.raises(SandboxDenied, match="resolves outside the sandbox"):
         sb.write_file("/work/tmpdir/escape.txt", b"x")
+
+
+@pytest.mark.parametrize("verb", ["read_file", "copy_out", "list_dir", "write_file"])
+def test_a_path_swapped_for_a_link_out_after_its_gate_is_never_followed(
+    make, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verb: str
+) -> None:
+    """A sandbox's process that puts a link to an app's file where the gated path was, in the moment between the gate
+    and the open, gets a refusal: no name is resolved twice, so nothing of the app's is read, listed or written."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "credentials.json").write_text("SECRET")
+    provider = make([LocalTemplate("dev", "dev")])
+    sb = _create(provider, "dev", "dev")
+    sb.run("mkdir -p out/files && echo harmless > out/files/a.log")
+    real_gate = local_sandbox.LocalSandbox._gate
+
+    files = sb.fs / "work" / "out" / "files"
+    gated, target = (files, outside) if verb == "list_dir" else (files / "a.log", outside / "credentials.json")
+
+    def swapped(self, path: str, *, write: bool):
+        if gated.is_symlink():  # what any gate (a second one too) checks is the sandbox's own file
+            gated.unlink()
+            gated.mkdir() if verb == "list_dir" else gated.write_text("harmless\n")
+        found = real_gate(self, path, write=write)
+        (self.fs / "work" / "swap").symlink_to(target)
+        if gated.is_dir():
+            shutil.rmtree(gated)
+        os.replace(self.fs / "work" / "swap", gated)
+        return found
+
+    monkeypatch.setattr(local_sandbox.LocalSandbox, "_gate", swapped)
+    named = f"/work/{gated.relative_to(sb.fs / 'work')}"
+    with pytest.raises(SandboxDenied, match="resolves outside the sandbox"):
+        if verb == "copy_out":
+            sb.copy_out(named, tmp_path / "saved.log")
+        elif verb == "write_file":
+            sb.write_file(named, b"chosen by the app")
+        else:
+            getattr(sb, verb)(named)
+    assert (outside / "credentials.json").read_text() == "SECRET" and sorted(os.listdir(outside)) == [
+        "credentials.json"
+    ]
+    assert not (tmp_path / "saved.log").exists() or b"SECRET" not in (tmp_path / "saved.log").read_bytes()
+
+
+def test_a_pipe_in_the_tree_is_refused_without_blocking_and_links_inside_the_root_are_followed(make) -> None:
+    provider = make([LocalTemplate("dev", "dev")])
+    sb = _create(provider, "dev", "dev")
+    sb.run(
+        "mkfifo pipe && echo real > real.txt && mkdir dir && ln -s real.txt alias && ln -s dir via && "
+        'ln -s "$HYPERLOOM_SANDBOX_ROOT/work/real.txt" absolute'
+    )
+    outcome: list[object] = []
+
+    def read_pipe() -> None:
+        try:
+            outcome.append(sb.read_file("/work/pipe"))
+        except SandboxDenied as exc:
+            outcome.append(exc)
+
+    reader = threading.Thread(target=read_pipe, daemon=True)
+    reader.start()
+    reader.join(10)
+    if reader.is_alive():
+        os.close(os.open(sb.fs / "work" / "pipe", os.O_WRONLY | os.O_NONBLOCK))  # lets the blocked read end
+    assert [type(found) for found in outcome] == [SandboxDenied] and "not a regular file" in str(outcome[0])
+    with pytest.raises((SandboxDenied, OSError)):  # no reader: ENXIO; a reader: not a regular file
+        sb.write_file("/work/pipe", b"x")
+    sb.write_file("/work/via/new/file.txt", b"through a link inside")
+    assert sb.read_file("/work/alias") == b"real\n" and sb.read_file("/work/absolute") == b"real\n"
+    assert sb.read_file("/work/dir/new/file.txt") == b"through a link inside"
+    with pytest.raises(IsADirectoryError):
+        sb.read_file("/work/dir")
 
 
 def test_path_traversal_is_confined_to_the_root(make) -> None:
@@ -718,6 +792,59 @@ def test_a_survivor_the_launchers_reap_names_is_looked_at_again_after_the_tag_sw
         _end(monkeypatch, survivor)
 
 
+def test_a_launcher_that_outlives_its_wait_is_collected_by_its_popen_alone(make, monkeypatch) -> None:
+    """A launcher named because its wait timed out is this process's own child: once it exits its ``Popen`` collects it,
+    with the status SIGKILL left, and the wait for the zombies of what a reap named never takes it."""
+    monkeypatch.setattr(reaper, "_WINDOW_SEC", 0.5)
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0, 1])
+    sb = _create(provider, "dev", "dev")
+    sb.run("sleep 600", background=True)
+    launchers: list[proctree.ProcessId] = []
+    popens: list[subprocess.Popen[bytes]] = []
+    named: list[reaper.Leftovers] = []
+    waited: list[proctree.ProcessId] = []
+    kill_launchers, sweep_tagged = reaper.kill_launchers, reaper.sweep_tagged
+    reap_exited_children = proctree.reap_exited_children
+
+    def _kill_launchers(procs, **kw) -> reaper.Leftovers:
+        popens.extend(procs)
+        for proc in procs:
+            identity = proctree.proc_identity(proc.pid)
+            assert identity is not None
+            launchers.append((proc.pid, identity[1]))
+        # Its wait times out, as while the kernel still tears it down; stopped, it cannot end once its tree has.
+        os.kill(procs[0].pid, signal.SIGSTOP)
+        _immortal(monkeypatch, procs[0].pid)
+        named.append(kill_launchers(procs, **kw))
+        return named[-1]
+
+    def _sweep(sandbox_id: str) -> reaper.Leftovers:
+        _mortal(monkeypatch)  # the launcher carries the tag, and the sweep's SIGKILL now ends it
+        return sweep_tagged(sandbox_id)
+
+    def _reap_exited_children(processes) -> int:
+        processes = list(processes)
+        waited.extend(processes)
+        return reap_exited_children(processes)
+
+    monkeypatch.setattr(reaper, "kill_launchers", _kill_launchers)
+    monkeypatch.setattr(reaper, "sweep_tagged", _sweep)
+    monkeypatch.setattr(proctree, "reap_exited_children", _reap_exited_children)
+    try:
+        sb.kill()
+        [launcher] = popens
+        assert [left.running for left in named] == [tuple(launchers)], "the launchers' reap named it"
+        assert launcher.returncode == -signal.SIGKILL, "its Popen collected it, with its own exit status"
+        assert launcher.pid not in {pid for pid, _ in waited}
+        assert provider.quarantined == set()
+        assert provider.pool.free_cards() == (0, 1)
+    finally:
+        _mortal(monkeypatch)
+        for proc in popens:
+            proc.kill()
+            proc.wait()
+
+
 def test_a_named_survivor_that_dies_is_waited_when_it_is_this_process_s_child(make, monkeypatch) -> None:
     """A survivor re-parented to this process (a child subreaper) leaves no zombie once it dies after it was named."""
     monkeypatch.setattr(reaper, "_WINDOW_SEC", 0.5)
@@ -830,6 +957,50 @@ def test_withheld_cards_come_back_once_what_outlived_the_reap_is_gone(make, monk
     assert provider.release_freed_cards() == (), "cards come back once"
 
 
+def test_withheld_cards_of_a_launcher_that_outlived_its_wait_come_back_through_its_popen(make, monkeypatch) -> None:
+    """A launcher still there after the kill keeps the cards; once it exits they come back, and its ``Popen`` collects
+    it with the status SIGKILL left, never the wait for the zombies of what a reap named."""
+    monkeypatch.setattr(reaper, "_WINDOW_SEC", 0.5)
+    provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0, 1])
+    sb = _create(provider, "dev", "dev")
+    sb.run("sleep 600", background=True)
+    popens: list[subprocess.Popen[bytes]] = []
+    waited: list[proctree.ProcessId] = []
+    kill_launchers, reap_exited_children = reaper.kill_launchers, proctree.reap_exited_children
+
+    def _kill_launchers(procs, **kw) -> reaper.Leftovers:
+        popens.extend(procs)
+        # It outlives its wait and the sweep, as while the kernel tears it down; stopped, it cannot end once its tree has.
+        os.kill(procs[0].pid, signal.SIGSTOP)
+        _immortal(monkeypatch, procs[0].pid)
+        return kill_launchers(procs, **kw)
+
+    def _reap_exited_children(processes) -> int:
+        processes = list(processes)
+        waited.extend(processes)
+        return reap_exited_children(processes)
+
+    monkeypatch.setattr(reaper, "kill_launchers", _kill_launchers)
+    monkeypatch.setattr(proctree, "reap_exited_children", _reap_exited_children)
+    try:
+        with pytest.raises(SandboxUnavailable, match="its GPUs stay leased"):
+            sb.kill()
+        [launcher] = popens
+        assert provider.release_freed_cards() == (), "the launcher still runs"
+        _mortal(monkeypatch)
+        os.kill(launcher.pid, signal.SIGKILL)
+        _wait(lambda: _state(launcher.pid) == "Z")
+        assert provider.release_freed_cards() == (0,)
+        assert launcher.returncode == -signal.SIGKILL, "its Popen collected it, with its own exit status"
+        assert launcher.pid not in {pid for pid, _ in waited}
+        assert provider.pool.free_cards() == (0, 1)
+    finally:
+        _mortal(monkeypatch)
+        for proc in popens:
+            proc.kill()
+            proc.wait()
+
+
 def test_withheld_cards_stay_while_a_process_with_the_sandbox_tag_runs(make, monkeypatch) -> None:
     provider = make([LocalTemplate("dev", "dev", gpus=1)], gpus=[0])
     sb = _create(provider, "dev", "dev")
@@ -900,6 +1071,17 @@ def test_close_kills_every_sandbox_and_removes_the_base_dir() -> None:
     provider.close()
     assert all(b.ended for b in boxes)
     assert not base.exists()
+
+
+def test_no_launcher_outlives_the_close_of_its_provider() -> None:
+    provider = LocalSandboxProvider([LocalTemplate("dev", "dev")])
+    sb = _create(provider, "dev", "dev")
+    sb.run("sleep 300", background=True)
+    assert sb.run("true").exit_code == 0
+    launchers = [proc.pid for proc in sb._procs]
+    assert len(launchers) == 2
+    provider.close()
+    _assert_all_gone(launchers)
 
 
 def test_a_second_kill_waits_for_the_first_to_finish(make) -> None:

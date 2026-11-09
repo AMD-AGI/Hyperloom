@@ -6,7 +6,9 @@
 ``run`` takes the fixed workload, spelled as ``hyperloom optimize`` spells it, the wall-clock budget and the kernel
 optimizer its recipes are scoped to, and the hard limits the judge works within. ``--workload`` names the workload
 kind: ``inferencex`` takes ``--isl`` and ``--osl``, and ``agentx`` refuses them, as the trace it replays fixes its
-requests; ``agentx`` takes ``--ep``, 1 when not given, and ``inferencex`` refuses it. An agentx session serves its
+requests; ``agentx`` takes ``--ep``, 1 when not given, and ``--agentx-duration-sec``, the trace window its tests
+replay (the measuring harness's default when not given), and ``--agentx-objective``, the axis it is graded on
+(``p50_interactivity`` when not given, or ``total_token_throughput``), and ``inferencex`` refuses all three. An agentx session serves its
 model in the image ``HYPERLOOM_ACTIVE_IMAGE_REF`` names, and a ``--model`` that is a directory is recorded by its
 resolved path, which its benchmark pins. An operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than
 ``--workload``, or that names a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
@@ -37,15 +39,20 @@ Arbor run once on a mapping branch EXPLORE opens beside the others, for at most 
 kernel shares); each share then opens as a branch of its own, when it still has ``--agent-share-minutes`` (default 63,
 0 for always) to its cutoff, the least in which Arbor runs an iteration. A negative or non-finite value of either,
 as of any other limit, is a usage error.
-``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's
-serving template; a name that is not one directory, or one given with no agent, is a usage error, and a pack the Arbor
-checkout lacks is refused when the branch starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX
-recipe's adds to, which Magpie resolves from InferenceX and MB does not carry yet; a file the adapter cannot use, or one
-given with no agent, is a usage error. Each ``--specialist-prompt`` file holds a direction the user wrote
-for one specialist: its branch opens at PRELUDE's
-root ahead of the opening batch, counted within ``--max-branches``, its specialist sees the text in every launch
-prompt, and the judge neither stops it nor lowers its K for its first judged tests; an empty or unreadable file, or
-more files than ``--max-branches``, is a usage error.
+``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's serving template; a name that is not one
+directory, or one given with no agent, is a usage error, and a pack the Arbor checkout lacks is refused when the branch
+starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX recipe's adds to, as resolved from InferenceX;
+a file the adapter cannot use, an unfilled template among them, a base launch record, or one given with no agent or
+with ``--reference-script``, is a usage error. ``--reference-script FILE`` is the session's base launch, as for
+``hyperloom optimize``: a shell launch script, or a base launch record (``hyperloom-base-launch/1``) frozen elsewhere,
+which the session freezes without reading any recipe source; every Arbor is then served the frozen base and checks its
+launch against it. A file that cannot serve as a base of the session's framework is a usage error, and one on another
+topology than the workload's is refused when the session freezes it. ``--inferencex-commit SHA`` resolves a fresh
+session's base launch from InferenceX at that commit instead of the head of its ``main``; one that is not 7 to 40 hex
+digits is a usage error. Each ``--specialist-prompt`` file holds a direction the user
+wrote for one specialist: its branch opens at PRELUDE's root ahead of the opening batch, counted within
+``--max-branches``, its specialist sees the text in every launch prompt, and the judge neither stops it nor lowers its K
+for its first judged tests; an empty or unreadable file, or more files than ``--max-branches``, is a usage error.
 Each ``--reference NAME=DIR`` names a directory the specialists read as reference, such as GEAK's tuning and kernel
 knowledge: it is copied to ``MB-reference/NAME`` before PRELUDE and the commit its checkout is on is recorded in the
 manifest, so every branch reads one fixed copy and the session says which. Only an InferenceX checkout named
@@ -60,11 +67,13 @@ anything is created, so a missing one fails the command without leaving a sessio
 PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is configured by ``KB_STORE_URL`` and
 ``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI archive ``HYPERLOOM_RSI_ARCHIVE``
 names must be set and a writable directory (no path is assumed: each deployment names its own shared folder); a
-session measured in hosted sandboxes also needs ``HYPERLOOM_RUNNER_CACHE``, this host's directory of the runner cache; the measurement pins must be readable, the image the session runs on named by both
-``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` included; the framework's package must be
-installed in the image; and the agent CLI the specialists run must be installed. A canonical measurement that cannot
-be taken, one naming a launcher the InferenceX checkout lacks and Magpie cannot supply included, fails the command the
-same way once the session directory exists. Before PRELUDE the session checks the rule pack's facts about outside
+session's runners read the inference_suite staging from ``HYPERLOOM_RUNNER_CACHE``, this host's directory of the runner
+cache, which a session measured in hosted sandboxes must set and one on this machine's cards takes as ``/runner-cache``
+when unset; the image the session runs on must be named by both
+``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``; the application's inference_suite tool cache
+must hold a staging of the InferenceX client that verifies; the framework's package must be installed in the image;
+and the agent CLI the specialists run must be installed. A canonical measurement that cannot be taken fails the command
+the same way once the session directory exists. Before PRELUDE the session checks the rule pack's facts about outside
 projects against this environment as ``HYPERLOOM_IMAGE_CHECK`` says: ``warn`` (the default) logs a failing fact,
 ``strict`` fails the command the same way before any phase runs, ``off`` checks nothing, and any other value is a usage
 error. The manifest records the check's summary and CLOSE writes the whole report to ``MB-reports/image_check.json``.
@@ -79,11 +88,12 @@ need the ``dev`` key (``HYPERLOOM_SANDBOX_KEY_DEV``) and ``USER_DATA_PATH``, the
 the same path; a usage error names what is missing.
 ``hosted run`` takes no arguments: it runs the session of the campaign spec a host injected, as
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
-sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`). Started again over a
-run whose ``session.json`` names a session, it finishes that session as ``final-only`` does. It tells the host the run
-is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment, a missing package of
-the ``hosted`` extra or the runner cache keeps a session from running, with exit code 2 for a refused spec or session
-and 1 otherwise; a crash leaves no ``exit.json``, and the host starts the run again.
+sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`) or on this container's
+cards, as the spec says. Started again over a run whose ``session.json`` names a session, it finishes that session as
+``final-only`` does. It tells the host the run is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when
+the spec, the environment, agents it cannot isolate, a missing package of the ``hosted`` extra or the runner cache keeps
+a session from running, with exit code 2 for a refused spec or session and 1 otherwise; a crash leaves no ``exit.json``,
+and the host starts the run again. Each command says at start how agents are isolated; manifest and report record it.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
@@ -113,22 +123,19 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
-from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
-from hyperloom_common.env import EnvValueError
-from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_from_environment
-from hyperloom.common.perf_metric import agentx_enabled
+from hyperloom_common.shared_storage import open_shared_append
+from hyperloom.common.outside_facts.image_check import ImageCheckFailed
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
+from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec
 from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
 from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.measure.runner.cache_build import CacheBuildError
-from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
-from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
-from hyperloom_multibranch.contracts.llm_prices import price_of
+from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
-from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -138,13 +145,17 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     HostedExit,
     arm_grant_stop,
     campaign_spec,
+    earlier_session,
     grant_deadline,
+    grant_tests_that_fit,
+    hosted_storage,
     record_session,
     recorded_session,
     refuse_unhosted_branches,
     reported_stop_reason,
+    require_hosted_isolation,
+    require_local_image,
     run_argv,
-    toolbox_grant,
     write_final_exit,
 )
 from hyperloom_multibranch.scheduling import review
@@ -163,17 +174,24 @@ from hyperloom_multibranch.scheduling.llm import (
     default_model,
 )
 from hyperloom_multibranch.scheduling.local_peers import (
-    AGENTX_ENV,
     load_peers,
     machine_parallel_tests,
-    specialist_model,
 )
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.reference import ReferenceSource, reference_source
 from hyperloom_multibranch.scheduling.roster import RosterCaps
+from hyperloom_multibranch.scheduling.session_environment import (
+    EnvironmentIncomplete,
+    hosted_runner_cache,
+    recipe_kb_from_env,
+    require_session_environment,
+    require_writable_storage,
+    rsi_archive_dir,
+)
 from hyperloom_multibranch.scheduling.settings import (
     AGENT_PORT,
+    DEFAULT_AGENTX_OBJECTIVE,
     DOSSIER_MINUTES,
     SHARE_MINUTES,
     InferenceXShape,
@@ -183,6 +201,8 @@ from hyperloom_multibranch.scheduling.settings import (
     Workload,
 )
 from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_INDEX, ArborRefused, read_launch
+from inference_suite import UserFileError, parse_inferencex_commit, parse_user_file
+from inference_suite.contracts import BaseLaunchError
 
 PROG = "hyperloom-multibranch"
 EXIT_FAILED = 1
@@ -195,9 +215,7 @@ LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
 log = logging.getLogger(__name__)
-#: The GPU types a session runs on: those Magpie has a benchmark script of their own for, and mi350x, which runs
-#: mi355x's (the same gfx950 die) through ``gpu_runner_type``, as the toolbox's environment sets ``GPU_TYPE``.
-#: ``hyperloom optimize`` also runs mi308x and mi325x on mi300x's script; a session does not accept them yet.
+#: The GPU types a session runs on; the toolbox's environment exports the board itself as ``GPU_TYPE``.
 MAGPIE_RUNNER_GPU_TYPES = ("mi300x", "mi350x", "mi355x")
 #: The options an inferencex workload requires and an agentx one refuses.
 SEQUENCE_LENGTHS = ("isl", "osl")
@@ -212,10 +230,6 @@ HOSTED_COMMAND = "hosted"
 #: What a grant handed to ``run --measurement hosted`` must give: the sandbox service, the measurement key and
 #: templates, the grant's limits and creation time, and the source the runner cache is built from.
 HANDED_GRANT = (HostGroup.SANDBOX, HostGroup.MEASUREMENT_KEY, HostGroup.GRANT, HostGroup.SOURCE)
-
-
-class EnvironmentIncomplete(RuntimeError):
-    """The environment lacks what a session needs; the message names the variables to set."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -255,6 +269,33 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     run.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
 
 
+def _add_agentx_options(run: argparse.ArgumentParser) -> None:
+    """The options only an agentx workload takes."""
+
+    run.add_argument(
+        "--ep",
+        type=int,
+        default=None,
+        help=f"Expert-parallel size of an agentx workload, default {DEFAULT_EP}; refused for inferencex.",
+    )
+    run.add_argument(
+        "--agentx-duration-sec",
+        type=int,
+        default=None,
+        help="Trace window of an agentx workload's tests, written as the benchmark's DURATION; refused for inferencex.",
+    )
+    run.add_argument(
+        "--agentx-objective",
+        choices=[objective.value for objective in AgentXObjective],
+        default=None,
+        help=f"Axis an agentx workload is graded on, default {DEFAULT_AGENTX_OBJECTIVE.value}: a "
+        f"{DEFAULT_AGENTX_OBJECTIVE.bar_pct:g}%% gain on it is "
+        "kept while P90 interactivity and the other axis (total token throughput, or P50 interactivity) hold within "
+        "the noise band. total_token_throughput suits a high --conc only: at a low one the trace's tool and think "
+        "time paces the lanes, so a server gain barely moves it. Refused for inferencex.",
+    )
+
+
 def _add_workload_options(run: argparse.ArgumentParser) -> None:
     """The fixed workload, spelled as ``hyperloom optimize`` spells it, and the kernel optimizer its recipes are scoped
     to."""
@@ -269,18 +310,39 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
     run.add_argument("--conc", type=int, required=True, help="Concurrency of the primary operating point.")
     for name in SEQUENCE_LENGTHS:
         run.add_argument(f"--{name}", type=int, default=None, help="Required for inferencex; refused for agentx.")
-    run.add_argument(
-        "--ep",
-        type=int,
-        default=None,
-        help=f"Expert-parallel size of an agentx workload, default {DEFAULT_EP}; refused for inferencex.",
-    )
+    _add_agentx_options(run)
     run.add_argument("--precision", required=True, help="Model precision, as hyperloom optimize spells it.")
     run.add_argument(
         "--kernel-optimizer",
         choices=[optimizer.value for optimizer in KernelOptimizer],
         default=KernelOptimizer.FORGE.value,
         help="Kernel optimizer the session's recipes are scoped to.",
+    )
+    run.add_argument(
+        "--reference-script",
+        dest="reference_script",
+        type=Path,
+        default=None,
+        metavar=FILE_METAVAR,
+        help=(
+            "The session's base launch, as for hyperloom optimize: a shell launch script, or a base launch record"
+            " (hyperloom-base-launch/1) frozen by another session, which is frozen without reading any recipe source"
+            " (examples/multibranch-arbor-launch). It wins over every recipe source; omitted, the base comes from"
+            " InferenceX, then the framework's cookbook, then the default table. Every Arbor --autonomous-agent is"
+            " served the frozen base. Not the --reference directories the specialists read."
+        ),
+    )
+    run.add_argument(
+        "--inferencex-commit",
+        dest="inferencex_commit",
+        default="",
+        metavar="SHA",
+        help=(
+            "Resolve the session's base launch from InferenceX at this commit (a full sha, or a prefix of 7 or more hex"
+            " digits) instead of the head of its main, and record the full sha in the frozen base; the cookbooks are"
+            " still read at main. A commit InferenceX does not have, or one that lacks code the resolver runs, stops"
+            " the session before PRELUDE; a resumed session keeps its frozen base."
+        ),
     )
 
 
@@ -470,9 +532,9 @@ def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar=FILE_METAVAR,
         help=(
-            "The launch an AgentX recipe's adds to, as Magpie resolves it from InferenceX, for an Arbor"
-            " --autonomous-agent: a JSON object of server_flags, server_env, model_name and client"
-            " (examples/multibranch-arbor-launch)."
+            "For an Arbor --autonomous-agent: the launch an AgentX recipe's adds to, as resolved from InferenceX"
+            " (server_flags, server_env, model_name, client; examples/multibranch-arbor-launch). A base launch record"
+            " is given as --reference-script, whose frozen base the Arbors are served instead."
         ),
     )
     run.add_argument(
@@ -540,12 +602,11 @@ def _shape_errors(args: argparse.Namespace) -> list[str]:
     return missing or _positive(args, SEQUENCE_LENGTHS)
 
 
-def _ep_errors(args: argparse.Namespace) -> list[str]:
-    if args.ep is None:
-        return []
+def _agentx_only_errors(args: argparse.Namespace) -> list[str]:
+    given = [name for name in ("ep", "agentx_duration_sec", "agentx_objective") if getattr(args, name) is not None]
     if WorkloadKind(args.workload) is WorkloadKind.INFERENCEX:
-        return [f"--ep is not taken by an inferencex workload, which is served at EP {DEFAULT_EP}"]
-    return _positive(args, ("ep",))
+        return [f"--{name.replace('_', '-')} is not taken by an inferencex workload" for name in given]
+    return _positive(args, tuple(name for name in given if name != "agentx_objective"))
 
 
 def _workload_shape(args: argparse.Namespace) -> InferenceXShape | None:
@@ -624,18 +685,40 @@ def _agent_pack(name: str | None, agents: list[str]) -> str:
     return name
 
 
-def _agent_launch(path: Path | None, agents: list[str]) -> str:
+def _agent_launch(path: Path | None, agents: list[str], reference_script: Path | None) -> str:
     """The absolute path of the launch file the Arbor agents are served, ``""`` without one; refused with no agent to
-    serve, or with every reason the adapter could not use it."""
+    serve, beside a ``reference_script``, whose frozen base they are served, when it is a base launch record, which
+    is given as ``reference_script``, or with every reason the adapter could not use it."""
 
     if path is None:
         return ""
     if not agents:
         raise ValueError("--agent-launch needs an --autonomous-agent to serve it")
+    if reference_script is not None:
+        raise ValueError("--agent-launch is not taken with --reference-script: the Arbors are served the frozen base")
     try:
-        read_launch(path)
+        launch = read_launch(path)
     except ArborRefused as exc:
         raise ValueError(f"--agent-launch: {exc}") from exc
+    if launch.record:
+        raise ValueError(
+            f"--agent-launch {path} is a base launch record; give it as --reference-script, which freezes it as the"
+            " session's base and serves it to the Arbors"
+        )
+    return str(path.absolute())
+
+
+def _reference_script(path: Path | None, framework: str) -> str:
+    """The absolute path of the operator's launch file the session freezes as its base, ``""`` without one; refused
+    when it cannot serve as a ``framework`` base: unreadable, no launch of ``framework``, a flag set from a shell
+    variable, or a record that fails its schema or digest. Its topology is checked when the session freezes it."""
+
+    if path is None:
+        return ""
+    try:
+        parse_user_file(str(path), path.read_bytes(), framework=framework)
+    except (OSError, UserFileError, BaseLaunchError) as exc:
+        raise ValueError(f"--reference-script {path} cannot serve as the base launch: {exc}") from exc
     return str(path.absolute())
 
 
@@ -706,7 +789,7 @@ def settings_from(
     does not fit: this machine's cards for ``run``, the grant for ``hosted run``.
     """
 
-    errors = _shape_errors(args) + _ep_errors(args) + _positive(args, ("tp", "conc"))
+    errors = _shape_errors(args) + _agentx_only_errors(args) + _positive(args, ("tp", "conc"))
     errors += _limit_errors(args)
     if errors:
         raise ValueError("; ".join(errors))
@@ -721,6 +804,8 @@ def settings_from(
         KernelOptimizer(args.kernel_optimizer),
         _workload_shape(args),
         DEFAULT_EP if args.ep is None else args.ep,
+        args.agentx_duration_sec,
+        AgentXObjective(args.agentx_objective or DEFAULT_AGENTX_OBJECTIVE),
     )
     caps = RosterCaps(args.max_branches, args.max_k_per_branch, parallel)
     prompts, agents = args.specialist_prompts or [], args.agents or []
@@ -734,17 +819,19 @@ def settings_from(
         user_directions=_user_directions(prompts, caps.max_branches),
         agents=_agents(agents, caps.max_branches - len(prompts)),
         references=_references(args.references or []),
+        reference_script=_reference_script(args.reference_script, args.framework),
         dev_leases=args.dev_leases,
         playbook=PlaybookMode(args.playbook),
         agent_directions=_agent_directions(args.agent_directions, agents),
         agent_pack=_agent_pack(args.agent_pack, agents),
-        agent_launch=_agent_launch(args.agent_launch, agents),
+        agent_launch=_agent_launch(args.agent_launch, agents, args.reference_script),
         agent_dossier_minutes=args.agent_dossier_minutes,
         agent_share_minutes=args.agent_share_minutes,
         agent_port=_agent_port(args.agent_port, agents),
         stop_after_map=_stop_after_map(args.stop_after_map, agents, args.agent_directions),
         agent_dossier=_agent_dossier(args.agent_dossier, args.agent_directions),
         review_gate=args.review_gate,
+        inferencex_commit=parse_inferencex_commit(args.inferencex_commit) if args.inferencex_commit else "",
     )
 
 
@@ -784,66 +871,6 @@ def _parallel_tests(args: argparse.Namespace, tests_that_fit: Callable[[int], in
     if parallel > fitting:
         raise ValueError(f"--max-parallel-tests must be at most {fitting}, the tests that run at once at TP")
     return parallel
-
-
-def require_workload_switch(workload: Workload, env: Mapping[str, str]) -> None:
-    """Raise ValueError when ``env`` sets ``HYPERLOOM_AGENTX`` to anything but what ``workload``'s kind says, or names
-    a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``; the session sets both for an AgentX workload itself, so an
-    operator who set them means a workload ``--workload`` and its flags do not name."""
-
-    if benchmark_config_path(env) is not None:
-        raise ValueError(f"{BENCHMARK_CONFIG_ENV} names a workload YAML; --workload and its flags define the workload")
-    if AGENTX_ENV not in env:
-        return
-    try:
-        agentx = agentx_enabled(env)
-    except EnvValueError as exc:
-        raise ValueError(str(exc)) from exc
-    if agentx != (workload.kind is WorkloadKind.AGENTX):
-        raise ValueError(f"{AGENTX_ENV}={env[AGENTX_ENV]!r} contradicts --workload {workload.kind.value}")
-
-
-def require_priced_models(max_llm_usd: float, env: Mapping[str, str]) -> None:
-    """Raise ValueError when ``max_llm_usd`` caps the session's LLM dollars and the price sheet lists no rate for the
-    model the judge, the patch resolver and the fix critic ask or the one the specialists of ``env`` run on: their
-    calls would record tokens only, which the cap cannot count."""
-
-    if not max_llm_usd:
-        return
-    models = {"the judge's": default_model(), "the specialists'": specialist_model(env)}
-    unpriced = [f"{whose} model {model}" for whose, model in models.items() if price_of(model) is None]
-    if unpriced:
-        raise ValueError(
-            f"--max-llm-usd cannot count the dollars of {' or '.join(unpriced)}, which the price sheet does not list;"
-            " run on a listed model or without a dollar cap"
-        )
-
-
-def recipe_kb_from_env() -> RemoteRecipeClient | None:
-    """The Recipe KB client ``KB_STORE_URL`` and ``KB_STORE_TOKEN`` configure, ``None`` when neither is set; raises
-    :class:`EnvironmentIncomplete` when only one is."""
-
-    if not any(os.environ.get(name, "").strip() for name in ("KB_STORE_URL", "KB_STORE_TOKEN")):
-        return None
-    try:
-        return RemoteRecipeClient.from_env()
-    except RemoteRecipeConfigurationError as exc:
-        raise EnvironmentIncomplete(f"the Recipe KB is half configured: {exc}") from exc
-
-
-def require_rsi_archive(env: Mapping[str, str]) -> None:
-    """Raise :class:`EnvironmentIncomplete` naming ``HYPERLOOM_RSI_ARCHIVE`` when ``env`` does not set it, and unless
-    the archive it names is a writable directory. There is no default: the archive is the deployment's shared folder."""
-
-    if not env.get(ARCHIVE_ENV, "").strip():
-        raise EnvironmentIncomplete(
-            f"{ARCHIVE_ENV} is not set: name the writable shared directory the session archives its search tree in"
-        )
-    archive = Path(env[ARCHIVE_ENV].strip())
-    if not (archive.is_dir() and os.access(archive, os.W_OK)):
-        raise EnvironmentIncomplete(
-            f"the RSI archive {archive} is not a writable directory: mount it, or set {ARCHIVE_ENV} to one"
-        )
 
 
 def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
@@ -925,25 +952,22 @@ async def _final_only(persisted: PersistedRun, peer_factory: PeerFactory, servic
     clock = Clock()
     layout = persisted.layout
     print(layout.root, flush=True)
-    logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
-    host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
-    session = Session(persisted.settings, peer_factory, host, services)
-    return (await session.finish(persisted.ended)).exit_code
+    handler = _file_handler(layout.scheduler_log)
+    logging.getLogger().addHandler(handler)
+    try:  # a hosted run that closes this session goes on to start another, which logs to its own directory
+        host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
+        session = Session(persisted.settings, peer_factory, host, services)
+        return (await session.finish(persisted.ended)).exit_code
+    finally:
+        logging.getLogger().removeHandler(handler)
+        handler.close()
 
 
 def _file_handler(path: Path) -> logging.Handler:
-    handler = logging.FileHandler(path, encoding=ENCODING)
+    handler = logging.FileHandler(path, encoding=ENCODING, delay=True)  # writes to the one stream set below
+    handler.stream = os.fdopen(open_shared_append(path), "a", encoding=ENCODING)  # a later leg appends; no link
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
     return handler
-
-
-def require_session_environment(settings: RunSettings, env: Mapping[str, str]) -> None:
-    """Raise ValueError when ``env`` contradicts the workload of ``settings``, cannot price its dollar cap or sets an
-    image check mode there is none of."""
-
-    require_workload_switch(settings.workload, env)
-    require_priced_models(settings.max_llm_usd, env)
-    mode_from_environment(env)
 
 
 @dataclass(frozen=True)
@@ -954,44 +978,24 @@ class ReadySession:
     services: SessionServices
 
 
-def hosted_ready_session(host: HostInfo, workload: Workload) -> ReadySession:
-    """:func:`ready_session` measured in the sandboxes of ``host``'s grant: the one builder of the peers of
-    ``hosted run`` and ``run --measurement hosted``."""
+def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = False) -> ReadySession:
+    """:func:`ready_session` measured in the sandboxes of ``host``'s grant, or this container's cards with ``local``:
+    the one builder of the peers of ``hosted run`` and ``run --measurement hosted``."""
 
-    inputs = PinnedToolboxInputs(host, hosted_runner_cache(os.environ))
-    return ready_session(workload, partial(load_hosted_peers, inputs=inputs))
-
-
-def hosted_runner_cache(env: Mapping[str, str]) -> Path:
-    """This host's runner cache directory, which ``HYPERLOOM_RUNNER_CACHE`` must name as an absolute path; raises
-    :class:`EnvironmentIncomplete` naming the variable otherwise. Hosted sessions take no default: a cache built where
-    the measurement sandboxes do not mount it leaves them with no runner, and a sealed sandbox cannot fetch one."""
-
-    value = env.get(RUNNER_CACHE_ENV, "").strip()
-    if not value or not Path(value).is_absolute():
-        raise EnvironmentIncomplete(
-            f"{RUNNER_CACHE_ENV} is not set to an absolute path: name the directory of the runner cache on the shared"
-            " storage the measurement sandboxes mount"
-        )
-    return Path(value)
+    cache = hosted_runner_cache(os.environ)
+    load = load_peers if local else partial(load_hosted_peers, inputs=PinnedToolboxInputs(host, cache))
+    return ready_session(workload, load, hosted_storage(host, os.environ, cache))
 
 
-def grant_tests_that_fit(host: HostInfo) -> Callable[[int], int]:
-    """How many tests of a TP the grant ``host`` holds runs at once; raises ValueError when one does not fit, and
-    ImportError when the ``hosted`` extra is not installed."""
-
-    # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
-    from hyperloom_multibranch.toolbox.hosted_toolbox import parallel_tests_for
-
-    return partial(parallel_tests_for, toolbox_grant(host.grant_limits))
-
-
-def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory]) -> ReadySession:
-    """The peers ``load`` has for ``workload`` and the services, the Recipe KB and the RSI archive checked first;
-    raises :class:`EnvironmentIncomplete` or :class:`PeersUnavailable` naming what is missing. Creates nothing."""
+def ready_session(
+    workload: Workload, load: Callable[[Workload], PeerFactory], storage: Mapping[str, Path] | None = None
+) -> ReadySession:
+    """The peers ``load`` has for ``workload`` and the services, the Recipe KB checked first, then that this account
+    can write the RSI archive and each of ``storage`` (:func:`require_writable_storage`); raises
+    :class:`EnvironmentIncomplete` or :class:`PeersUnavailable` naming what is missing. Creates nothing."""
 
     recipe_kb = recipe_kb_from_env()
-    require_rsi_archive(os.environ)
+    require_writable_storage({**(storage or {}), **rsi_archive_dir(os.environ)})
     peer_factory = load(workload)
     return ReadySession(peer_factory, session_services(recipe_kb))
 
@@ -1022,7 +1026,7 @@ def hosted_run() -> int:
     _stop_before_grant_ends(start.deadline)
     try:
         returncode = start.run()
-    except (ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:
+    except (PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     root = recorded_session(host.state_dir)
     stop_reason = None if root is None else reported_stop_reason(root)
@@ -1031,37 +1035,55 @@ def hosted_run() -> int:
 
 
 def _hosted_start(host: HostInfo) -> HostedStart:
-    """A new session of the spec, or ``final-only`` over the session ``session.json`` names; raises ValueError when
-    the spec or that session is refused, ImportError when a package of the ``hosted`` extra is missing, and what
-    :func:`ready_session` raises."""
+    """A new session of the spec, or the close or finish of the one ``session.json`` names (:func:`earlier_session`);
+    raises ValueError when the spec or that session is refused, ImportError when a ``hosted`` package is missing,
+    and what :func:`require_hosted_isolation` and :func:`ready_session` raise."""
 
     deadline = grant_deadline(host, datetime.now(timezone.utc))
-    previous = recorded_session(host.state_dir)
-    persisted = None if previous is None else persisted_run(previous)
-    settings = _hosted_settings(host, deadline.session_hours) if persisted is None else persisted.settings
+    spec = campaign_spec(host)
+    require_hosted_isolation(spec, os.environ)
+    require_local_image(spec, os.environ)
+    earlier = earlier_session(host.state_dir)
+    if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
+        return HostedStart(lambda: EXIT_FAILED, deadline)
+    persisted = earlier.finish
+    settings = _hosted_settings(host, spec, deadline.session_hours) if persisted is None else persisted.settings
     require_session_environment(settings, os.environ)
-    ready = hosted_ready_session(host, settings.workload)
+    ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
     if persisted is not None:
         run = partial(final_only, persisted, ready.peer_factory, ready.services)
+    elif earlier.left is not None:
+        run = partial(_start_again, earlier.left, settings, ready, host.state_dir)
     else:
         run = partial(run_session, settings, ready.peer_factory, ready.services, partial(_record_root, host.state_dir))
     return HostedStart(run, deadline)
 
 
+def _start_again(left: PersistedRun, settings: RunSettings, ready: ReadySession, state_dir: Path) -> int:
+    """Close ``left``, which ended before its baseline was recorded, with :func:`final_only`, which ends the sandboxes
+    of the tests it left, then start the spec's session on ``settings`` unless a stop during the close ended the run."""
+
+    log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", left.layout.root)
+    closed = final_only(left, ready.peer_factory, ready.services)
+    if reported_stop_reason(left.layout.root) != left.ended.value:
+        return closed
+    return run_session(settings, ready.peer_factory, ready.services, partial(_record_root, state_dir))
+
+
 def _stop_before_grant_ends(deadline: GrantDeadline) -> None:
-    """Arm the stop of this process one CLOSE grace before ``deadline``'s grant ends, at once when that has passed;
-    nothing when the grant states no runtime."""
+    """Arm this process's stop one CLOSE grace before ``deadline``'s grant ends (at once if passed; never untimed)."""
 
     if deadline.stop_after_sec is not None:
         arm_grant_stop(max(0.0, deadline.stop_after_sec))
 
 
-def _hosted_settings(host: HostInfo, session_hours: Callable[[float], float]) -> RunSettings:
-    spec = campaign_spec(host)
-    tests_that_fit = grant_tests_that_fit(host)
+def _hosted_settings(host: HostInfo, spec: CampaignSpec, session_hours: Callable[[float], float]) -> RunSettings:
+    local = spec.measurement == MEASUREMENT_LOCAL
+    tests_that_fit = machine_parallel_tests if local else grant_tests_that_fit(host)
     argv = run_argv(spec, session_hours(spec.max_hours), tests_that_fit(spec.tp))
     settings = settings_from(_parsed_run(argv), tests_that_fit)
-    refuse_unhosted_branches(settings, host, os.environ)
+    if not local:
+        refuse_unhosted_branches(settings, host, os.environ)
     return settings
 
 
@@ -1083,7 +1105,7 @@ def _record_root(state_dir: Path, root: Path) -> None:
 
 
 def _not_run(state_dir: Path, returncode: int, exc: Exception) -> int:
-    """End a run no session ran in for good: a start of it again would meet what kept this one from running."""
+    """End a run that cannot be served for good: a start of it again would meet what kept this one from running."""
 
     print(f"{PROG}: hosted run: {exc}", file=sys.stderr)
     write_final_exit(state_dir, HostedExit(returncode, error=str(exc)))
@@ -1161,7 +1183,6 @@ __all__ = [
     "MAGPIE_RUNNER_GPU_TYPES",
     "PROG",
     "SEQUENCE_LENGTHS",
-    "EnvironmentIncomplete",
     "HANDED_GRANT",
     "HandedGrant",
     "HostedStart",
@@ -1170,15 +1191,9 @@ __all__ = [
     "final_only",
     "grant_tests_that_fit",
     "hosted_ready_session",
-    "hosted_runner_cache",
     "hosted_run",
     "main",
-    "recipe_kb_from_env",
     "ready_session",
-    "require_priced_models",
-    "require_rsi_archive",
-    "require_session_environment",
-    "require_workload_switch",
     "run_session",
     "session_services",
     "settings_from",

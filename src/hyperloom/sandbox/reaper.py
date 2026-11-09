@@ -5,16 +5,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
 import time
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from hyperloom.common import proctree
+from hyperloom_common import proctree
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
+from hyperloom.sandbox.launcher import runs_launcher
 
 __all__ = ["Leftovers", "kill_launchers", "reap_sandbox_processes", "sweep_tagged", "tag_in_use", "wait_exited"]
 
@@ -34,10 +36,13 @@ class Leftovers:
             nothing the reap was after is left.
         unseen: The reap could not tell what is left: ``/proc`` could not be listed, or processes kept appearing that it
             had not yet signalled.
+        launchers: The launchers whose wait timed out: this process's own children, which only their ``Popen`` waits
+            for, so that the exit status stays where the ``Popen`` reads it.
     """
 
     running: tuple[proctree.ProcessId, ...] = ()
     unseen: bool = False
+    launchers: tuple[subprocess.Popen[bytes], ...] = field(default=(), repr=False)
 
     @property
     def clean(self) -> bool:
@@ -46,7 +51,11 @@ class Leftovers:
 
     def __or__(self, other: Leftovers) -> Leftovers:
         """What either reap left, each process once."""
-        return Leftovers(tuple(dict.fromkeys((*self.running, *other.running))), self.unseen or other.unseen)
+        return Leftovers(
+            tuple(dict.fromkeys((*self.running, *other.running))),
+            self.unseen or other.unseen,
+            tuple(dict.fromkeys((*self.launchers, *other.launchers))),
+        )
 
     def describe(self) -> str:
         """The processes left, by pid, command and state, for a log line."""
@@ -68,12 +77,38 @@ def _described(pid: int) -> str:
     return f"pid {pid} ({command}, state {state[0]})"
 
 
-def _live_descendants(root_pids: Iterable[int]) -> list[proctree.ProcessId]:
-    """Every running descendant of the launchers; zombies are already gone for our purposes."""
+def _live_descendants(root_pids: Iterable[int], held: Collection[int] = ()) -> list[proctree.ProcessId]:
+    """Every running descendant of the launchers but ``held``; zombies are already gone for our purposes."""
     found: list[proctree.ProcessId] = []
     for root in root_pids:
-        found.extend(d for d in proctree.descendants(root) if proctree.running(d[0]))
+        found.extend(d for d in proctree.descendants(root) if d[0] not in held and proctree.running(d[0]))
     return found
+
+
+def _hold_inner_launchers(root_pids: Iterable[int]) -> set[int]:
+    """Freeze every launcher below the started processes (a confined sandbox's runs inside bubblewrap) and return
+    them with the processes between them and the started ones (bubblewrap's own): those only hold the trees.
+
+    A frozen launcher keeps what its command left below it, as a launcher that was started itself does, so a command
+    that stops slowly is still in the trees when its grace ends; and held, they are not what the grace waits for.
+
+    Raises:
+        OSError: When ``/proc`` cannot be listed.
+    """
+    held: set[int] = set()
+    for root in root_pids:
+        for pid, _ in proctree.descendants(root):
+            if not runs_launcher(pid):
+                continue
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGSTOP)
+            while pid != root and pid not in held:
+                held.add(pid)
+                identity = proctree.proc_identity(pid)
+                if identity is None:
+                    break
+                pid = identity[0]
+    return held
 
 
 def _signal_until_gone(find: Callable[[], list[proctree.ProcessId]], sig: int, window_sec: float) -> Leftovers:
@@ -99,12 +134,12 @@ def _signal_until_gone(find: Callable[[], list[proctree.ProcessId]], sig: int, w
         time.sleep(_POLL_SEC)
 
 
-def _drain(root_pids: list[int], sig: int, window_sec: float) -> Leftovers:
-    """Signal descendants of the launchers until none is left, or the window ends.
+def _drain(root_pids: list[int], sig: int, window_sec: float, held: Collection[int] = ()) -> Leftovers:
+    """Signal descendants of the launchers but ``held`` until none is left, or the window ends.
 
     The launchers stay alive throughout and are subreapers, so nothing can leave the tree by detaching.
     """
-    return _signal_until_gone(lambda: _live_descendants(root_pids), sig, window_sec)
+    return _signal_until_gone(lambda: _live_descendants(root_pids, held), sig, window_sec)
 
 
 def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2.0) -> Leftovers:
@@ -112,6 +147,10 @@ def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2
 
     Order: freeze the launchers, SIGTERM the descendants and give them ``grace_sec``, SIGKILL what is
     left until a fresh scan finds nothing, and only then kill and wait for the launchers.
+
+    A launcher may run below the process that was started: a confined sandbox's runs inside bubblewrap. It is frozen
+    too, and neither it nor what lies between it and the started process (bubblewrap's own) is sent SIGTERM or waited
+    for through the grace (:func:`_hold_inner_launchers`); the SIGKILL passes end them with the rest.
 
     A frozen launcher reaps nothing, so the descendants that exited stay zombies below it, and once it is gone they are
     re-parented to its nearest subreaper. When that is this process (a child subreaper) they are waited here, so a
@@ -124,7 +163,8 @@ def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2
         grace_sec: How long descendants get to exit on SIGTERM.
 
     Returns:
-        Leftovers: What is still running; clean when no descendant and no launcher is.
+        Leftovers: What is still running; clean when no descendant and no launcher is. A launcher whose wait timed out
+        is named with its ``Popen``, which alone waits for it later (:func:`wait_exited`).
     """
     procs = [p for p in procs if p.returncode is None]
     roots = [p.pid for p in procs]
@@ -137,9 +177,10 @@ def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2
             continue
     tree: list[proctree.ProcessId] = []
     try:
+        held = _hold_inner_launchers(roots)
         # SIGTERM once, then wait the grace; the SIGKILL passes re-scan until empty.
-        proctree.signal_processes(_live_descendants(roots), signal.SIGTERM)
-        _drain(roots, 0, grace_sec)
+        proctree.signal_processes(_live_descendants(roots, held), signal.SIGTERM)
+        _drain(roots, 0, grace_sec, held)
         left = _drain(roots, signal.SIGKILL, _WINDOW_SEC)
         # The trees as the launchers die, the exited included: the ones to wait for once they are this process's.
         tree = [process for root in roots for process in proctree.descendants(root)]
@@ -151,12 +192,12 @@ def kill_launchers(procs: list[subprocess.Popen[bytes]], *, grace_sec: float = 2
         try:
             proc.kill()
         except ProcessLookupError:
-            pass
+            pass  # the launcher has already ended; the wait below reaps it
         try:
             proc.wait(timeout=_WINDOW_SEC)
         except subprocess.TimeoutExpired:
             stuck = () if launcher is None else ((proc.pid, launcher[1]),)
-            left = left | Leftovers(stuck, unseen=launcher is None)
+            left = left | Leftovers(stuck, unseen=launcher is None, launchers=(proc,))
     proctree.reap_exited_children(tree)
     return left
 
@@ -216,10 +257,18 @@ def wait_exited(left: Leftovers) -> Leftovers:
     """Wait for those of ``left`` that have exited and are now this process's children; return the ones still running.
 
     Each process in ``left`` was sent SIGKILL before it was named and cannot have started another, so the ones still
-    running are all that is left of them.
+    running are all that is left of them. A launcher among them is collected by its ``Popen`` alone; only the others,
+    the processes this one adopted, go to ``proctree.reap_exited_children``.
     """
-    proctree.reap_exited_children(left.running)
-    return Leftovers(tuple(process for process in left.running if _still_running(process)), left.unseen)
+    for launcher in left.launchers:
+        launcher.poll()
+    own = {launcher.pid for launcher in left.launchers}
+    proctree.reap_exited_children(process for process in left.running if process[0] not in own)
+    return Leftovers(
+        tuple(process for process in left.running if _still_running(process)),
+        left.unseen,
+        tuple(launcher for launcher in left.launchers if launcher.returncode is None),
+    )
 
 
 def _still_running(process: proctree.ProcessId) -> bool:

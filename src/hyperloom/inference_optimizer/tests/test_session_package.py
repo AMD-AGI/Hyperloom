@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import zipfile
 from pathlib import Path
 
 import pytest
+from inference_suite.contracts.layout import CONFIG_FILE, LAUNCH_FILE, PHASE_MARKS, REPORT_FILE, RunLayout
 
 from hyperloom.inference_optimizer.breakdown.session_package import (
     ENV_PACKAGE_DEST_ROOT,
@@ -733,3 +736,108 @@ def test_packaging_failure_propagates(tmp_path: Path, monkeypatch: pytest.Monkey
 
     with pytest.raises(RuntimeError):
         package_session_artifacts(sd, session_id="sid")
+
+
+def test_an_inference_suite_run_dir_ships_its_report_launch_config_and_phase_marks(tmp_path: Path) -> None:
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+    layout = RunLayout(sd / "runs" / "measure" / "t1" / "round-000")
+    for path in (layout.report, layout.launch, layout.config, layout.phase_marks, layout.server_log):
+        _write(path, "{}")
+    _write(layout.profile_trace_dirs()[0] / "rank0.trace.json.gz", "BLOB")
+
+    out = package_session_artifacts(sd, session_id="sid-suite")
+
+    assert out is not None
+    run = layout.root.relative_to(sd).as_posix()
+    shipped = {name for name in _zip_names(out) if name.startswith(f"{run}/")}
+    assert shipped == {f"{run}/{name}" for name in (REPORT_FILE, LAUNCH_FILE, CONFIG_FILE, PHASE_MARKS)}
+
+
+# -- a destination the accounts of one group share ----------------------------------------------------------------
+def _group_dest(dest: Path) -> Path:
+    dest.mkdir()
+    dest.chmod(0o2770)
+    if not dest.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    return dest
+
+
+def test_below_a_setgid_root_each_directory_takes_its_mode_and_each_file_is_a_new_one_renamed_into_place(
+    tmp_path: Path, dest: Path
+) -> None:
+    """The hosted archive: the next leg may be another account of the group, which replaces what this one left."""
+    _group_dest(dest)
+    sd = tmp_path / "session"
+    _build_session(sd)
+    package_session_artifacts(sd, session_id="s")
+    loose = dest / "reports" / "final.md"
+    (tmp_path / "earlier-inode").hardlink_to(loose)
+    outside = tmp_path / "outside"
+    outside.write_text("kept")
+    planted = dest / "reports" / "final.json"
+    planted.unlink()
+    planted.symlink_to(outside)  # what a member of the group may put where a file goes
+
+    _write(sd / "reports" / "final.md", "# again")
+    out = package_session_artifacts(sd, session_id="s")
+
+    assert out is not None and stat.S_IMODE(out.stat().st_mode) == 0o660
+    assert outside.read_text() == "kept" and not planted.is_symlink()
+    assert (tmp_path / "earlier-inode").read_text() == "# final" and loose.read_text() == "# again"
+    made = [path for path in dest.rglob("*") if path.is_dir()]
+    assert made and {stat.S_IMODE(path.stat().st_mode) for path in made} == {0o2770}
+    files = [path for path in dest.rglob("*") if path.is_file()]
+    assert {stat.S_IMODE(path.stat().st_mode) for path in files} == {0o660}
+    assert not list(dest.rglob(".*.tmp"))
+
+
+def test_below_a_root_of_one_account_the_package_is_written_as_before(tmp_path: Path, dest: Path) -> None:
+    dest.mkdir()
+    dest.chmod(0o755)
+    sd = tmp_path / "session"
+    _build_session(sd)
+    (sd / "reports" / "final.md").chmod(0o640)
+    package_session_artifacts(sd, session_id="s")
+    assert stat.S_IMODE((dest / "reports").stat().st_mode) & stat.S_ISGID == 0
+    assert stat.S_IMODE((dest / "reports" / "final.md").stat().st_mode) == 0o640, "the source's mode, as copy2 keeps it"
+
+
+@pytest.mark.parametrize(
+    ("root_mode", "umask", "expected"),
+    [
+        (0o2777, 0o022, 0o644),  # setgid, but others write it: not shared, so the umask decides
+        (0o2755, 0o077, 0o600),  # setgid, but the group cannot write it: not shared
+        (0o2777, 0o002, 0o664),  # a directory made below it looks shared, and is given no more than 664 there
+        (0o2775, 0o022, 0o664),  # shared: the group's mode whatever the umask
+        (0o2775, 0o077, 0o664),
+    ],
+    ids=["2777-022", "2755-077", "2777-002", "2775-022", "2775-077"],
+)
+def test_the_zip_takes_the_mode_its_loose_copies_take_and_never_one_others_can_write(
+    tmp_path: Path, dest: Path, root_mode: int, umask: int, expected: int
+) -> None:
+    dest.mkdir()
+    dest.chmod(root_mode)
+    if stat.S_IMODE(dest.stat().st_mode) != root_mode:
+        pytest.skip("this filesystem does not keep the mode for the test user")
+    sd = tmp_path / "session"
+    _build_session(sd)
+    previous = os.umask(umask)
+    try:
+        out = package_session_artifacts(sd, session_id="s")
+    finally:
+        os.umask(previous)
+    assert out is not None
+    loose = {stat.S_IMODE(path.stat().st_mode) for path in dest.rglob("*") if path.is_file() and path != out}
+    assert loose == {expected}
+    assert stat.S_IMODE(out.stat().st_mode) == expected
+    assert not list(dest.rglob(".*.tmp"))
+
+
+def test_below_a_root_of_one_account_the_zip_is_the_accounts_alone(tmp_path: Path, dest: Path) -> None:
+    dest.mkdir(mode=0o755)
+    sd = tmp_path / "session"
+    _build_session(sd)
+    out = package_session_artifacts(sd, session_id="s")
+    assert out is not None and stat.S_IMODE(out.stat().st_mode) == 0o600

@@ -5,14 +5,17 @@
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import hashlib
 import re
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from hyperloom_common.shared_storage import make_shared_dirs, writable_problems
 from hyperloom_common.timeutil import utc_now_compact
 
 log = logging.getLogger(__name__)
@@ -53,6 +56,8 @@ SESSION_FILES: tuple[str, ...] = ("manifest.json", "state.json")
 
 #: The application-private result archive, created by a hosted run beside the skeleton above (not part of it).
 ARCHIVE_DIRNAME = "archive"
+#: The archive's mode: the run's accounts (one group) share it, no one else may even read it.
+ARCHIVE_MODE = 0o2770
 
 #: Top-level session subdirectories that belong to the application alone: never copied into a sandbox, packaged or
 #: shown to a specialist.  Whatever copies a session directory elsewhere must leave these out.
@@ -61,13 +66,13 @@ PRIVATE_SESSION_SUBDIRS: tuple[str, ...] = (ARCHIVE_DIRNAME,)
 # Workspace-shared layout (one copy per $USER_DATA_PATH). mkdir-ed by install.sh + reused for every session_dir
 # launched from this workspace.
 _WORKSPACE_SKELETON: tuple[str, ...] = (
-    "runtime",  # install-generated env files (kernel-agent.env.sh, GEAK litellm config)
+    "runtime",  # install-generated runtime state (GEAK litellm config, source mirrors)
     # Workspace-level KB root; it only coincides with the KB path when session_dir == workspace_root.
     "runtime/recipe_kb",
     "logs",  # launcher stdout (workspace-shared)
 )
 
-# Filename-safety regex for model_basename (ROCm/Magpie/Claude CLI choke on ``:`` / ``/`` / whitespace).
+# Filename-safety regex for model_basename (ROCm/Claude CLI choke on ``:`` / ``/`` / whitespace).
 _MODEL_BASENAME_SANITIZE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -143,22 +148,45 @@ def archive_root(session_dir: Path) -> Path:
 
 
 def ensure_archive_root(session_dir: Path) -> Path:
-    """Create :func:`archive_root` with mode 0700, owned by the calling user, and return it.
+    """Create :func:`archive_root` with mode :data:`ARCHIVE_MODE` (the session directory, when missing, as
+    :func:`ensure_session_skeleton` makes it) and return it.
 
-    An existing directory is tightened to 0700; one owned by another user is refused rather than adopted.
+    A run's legs may be different accounts of one group on shared storage, so an existing directory is accepted, whoever
+    made it, when this account can create and remove a file in it; it is never chmodded. Who owns it is not compared:
+    in a user namespace another account's directory shows as the overflow id.
+
+    Raises:
+        PermissionError: The archive is a link or not a directory, any account outside its group can read, write or
+            enter it, or this one cannot write it.
     """
+    make_shared_dirs(session_dir)
     root = archive_root(session_dir)
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if root.stat().st_uid != os.getuid():
-        raise PermissionError(f"{root} is owned by uid {root.stat().st_uid}, not by this user (uid {os.getuid()})")
-    root.chmod(0o700)
+    try:
+        make_shared_dirs(root, mode=ARCHIVE_MODE)
+    except OSError as exc:
+        if exc.errno not in (errno.EEXIST, errno.ELOOP):
+            raise
+        # what already stands there, a link included, is judged below
+    info = os.lstat(root)
+    if not stat.S_ISDIR(info.st_mode):
+        raise PermissionError(f"the archive {root} is not a directory (a link to one is refused too)")
+    if info.st_mode & stat.S_IRWXO:
+        raise PermissionError(
+            f"the archive {root} is open to accounts outside its group (mode {stat.S_IMODE(info.st_mode):04o}, "
+            f"not {ARCHIVE_MODE:04o})"
+        )
+    problems = writable_problems({"the archive": root})
+    if problems:
+        raise PermissionError(f"this account cannot write {problems[0]}")
     return root
 
 
 def ensure_session_skeleton(session_dir: Path) -> None:
-    """Create ``session_dir`` and its per-session directory skeleton."""
+    """Create ``session_dir`` and its per-session directory skeleton, each missing directory ``2775``
+    (:func:`~hyperloom_common.shared_storage.make_shared_dirs`): the next leg of a hosted run may be another account of
+    the group."""
     for sub in _SESSION_SKELETON:
-        (session_dir / sub).mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(session_dir / sub)
 
 
 def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target: Path | None = None) -> Path:
@@ -220,7 +248,7 @@ def asset_prompt_references_dir() -> Path:
 
 # Workspace-/session-scoped artefact helpers.
 def runtime_dir() -> Path:
-    """``<workspace_root>/runtime/`` — workspace-shared writable runtime (kernel-agent env file, GEAK litellm config)."""
+    """``<workspace_root>/runtime/`` — workspace-shared writable runtime (GEAK litellm config, source mirrors)."""
     return workspace_root() / "runtime"
 
 
@@ -266,11 +294,6 @@ def resolve_dep_dir(name: str, env_var: str | None = None) -> Path:
     return root / name
 
 
-def magpie_dir() -> Path:
-    """Magpie checkout root, via :func:`resolve_dep_dir` (``$MAGPIE_PATH`` else newest ``Magpie@<sha>`` else bare — Magpie is pip-installed, so bare is the common case)."""
-    return resolve_dep_dir("Magpie", "MAGPIE_PATH")
-
-
 def tracelens_root() -> Path:
     """TraceLens checkout root, via :func:`resolve_dep_dir` (``$TRACELENS_ROOT`` else newest ``TraceLens@<sha>`` else bare)."""
     return resolve_dep_dir("TraceLens", "TRACELENS_ROOT")
@@ -295,6 +318,7 @@ def mn_profile_trace_root() -> Path:
 
 __all__ = [
     "ARCHIVE_DIRNAME",
+    "ARCHIVE_MODE",
     "AssetRootNotFound",
     "DEFAULT_SESSION_DIR",
     "ENV_CURRENT_SESSION_DIR",
@@ -312,7 +336,6 @@ __all__ = [
     "ensure_session_skeleton",
     "hosted_session_dir",
     "is_path_within",
-    "magpie_dir",
     "make_session_dir",
     "mn_profile_trace_root",
     "deps_cache_root",

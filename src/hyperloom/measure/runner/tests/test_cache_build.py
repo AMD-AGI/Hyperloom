@@ -112,7 +112,7 @@ def test_a_build_exports_the_commit_with_its_wheels_and_a_manifest_that_checks_o
     assert manifest["source_archive"] == {"size": archive.stat().st_size, "sha256": _digest(archive)}
     with tarfile.open(archive) as members:
         assert {member.name for member in members if member.isfile()} == files
-    assert _names(cache) == {rig.cache.sha, f".{rig.cache.sha}.lock"}
+    assert _names(cache) == {rig.cache.sha, f".{rig.cache.sha}.flock"}
 
 
 def _archive_from_git(repo: Path, sha: str, *settings: str) -> bytes:
@@ -302,7 +302,7 @@ def test_an_entry_that_differs_from_what_a_build_writes_is_refused_and_left_as_i
         ensure_runner_cache(rig.repo, rig.cache.sha, cache.root, rig.build_options())
     assert difference in str(refused.value)
     assert (tree_digest(entry), _digest(entry / MANIFEST_NAME)) == before
-    assert _names(cache.root) == {rig.cache.sha, f".{rig.cache.sha}.lock"}
+    assert _names(cache.root) == {rig.cache.sha, f".{rig.cache.sha}.flock"}
 
 
 #: Runner code of the commit, and code of the same length that an account that can write the cache puts in its place,
@@ -409,17 +409,46 @@ def test_an_entry_built_for_another_target_is_refused_not_overwritten(rig: Rig, 
     assert check_cache(cache.root, rig.cache.sha) == []
 
 
-def test_an_unfinished_entry_is_refused_by_the_check_and_replaced_by_a_build(rig: Rig, tmp_path: Path) -> None:
+def _tree(root: Path) -> dict[str, tuple[int, bytes]]:
+    """Each path below ``root`` with its permission bits and, for a file or a link, its bytes or target."""
+    found: dict[str, tuple[int, bytes]] = {}
+    for path in sorted(root.rglob("*")):
+        info = os.lstat(path)
+        data = os.readlink(path).encode() if path.is_symlink() else path.read_bytes() if path.is_file() else b""
+        found[path.relative_to(root).as_posix()] = (stat.S_IMODE(info.st_mode), data)
+    return found
+
+
+def test_an_entry_without_a_manifest_is_refused_and_left_as_it_was(rig: Rig, tmp_path: Path) -> None:
     cache = copy_cache(rig, tmp_path / "cache")
     entry = cache.root / cache.sha
     (entry / MANIFEST_NAME).unlink()
-    stale = cache.root / f".{cache.sha}.tmp-1-dead"
-    stale.mkdir()
-    (stale / "half").write_text("x")
+    before = _tree(entry)
     assert "has no manifest: an unfinished build" in check_cache(cache.root, cache.sha)[0]
+    with pytest.raises(CacheConflict, match=f"is left alone: it has no {MANIFEST_NAME}, and no builder puts"):
+        ensure_runner_cache(rig.repo, cache.sha, cache.root, rig.build_options())
+    assert _tree(entry) == before
+
+
+def test_what_a_build_of_this_account_killed_while_copying_left_is_removed(rig: Rig, tmp_path: Path) -> None:
+    cache = copy_cache(rig, tmp_path / "cache")
+    (cache.root / cache.sha).rename(tmp_path / "moved")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "kept").write_text("kept\n")
+    # A copy cut short as :func:`_publish` makes one: the directory 0700, a subdirectory already given its mode, a file
+    # still 0600 and a link of the commit's tree, here to a directory outside the cache.
+    stale = cache.root / f".{cache.sha}.tmp-1-dead"
+    stale.mkdir(0o700)
+    (stale / "source").mkdir(0o700)
+    (stale / "source" / "half").write_text("x")
+    (stale / "source" / "half").chmod(0o600)
+    (stale / "source").chmod(0o755)
+    (stale / "outside").symlink_to(outside)
     built = ensure_runner_cache(rig.repo, cache.sha, cache.root, rig.build_options())
-    assert built.reused is False and check_entry(entry, cache.sha, verify_hash=True) == []
-    assert _names(cache.root) == {cache.sha, f".{cache.sha}.lock"}
+    assert built.reused is False and check_entry(cache.root / cache.sha, cache.sha, verify_hash=True) == []
+    assert _names(cache.root) == {cache.sha, f".{cache.sha}.flock"}
+    assert (outside / "kept").read_text() == "kept\n"
 
 
 def _assert_nothing_left(cache: Path, sha: str) -> None:
@@ -541,24 +570,47 @@ def test_wheels_that_do_not_match_the_lock_pin_for_pin_fail_the_build(
     _assert_nothing_left(cache, commit.sha)
 
 
-def test_the_entry_is_built_beside_its_final_place_and_appears_whole_in_one_step(
+def test_the_entry_is_built_out_of_the_cache_and_appears_whole_in_one_step(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cache = tmp_path / "cache"
     final = cache / rig.cache.sha
-    download = cache_build._download_wheels
-    seen: list[tuple[bool, list[str]]] = []
+    download, copy, copy_file = cache_build._download_wheels, cache_build._copy_tree, cache_build._copy_file
+    seen: list[tuple[bool, set[str], bool]] = []
+    copied: list[tuple[set[str], bool]] = []
+    private: list[int] = []
+    filling: set[int] = set()
 
     def watching_download(lock: Path, wheels: Path, pins: list[LockPin], options: BuildOptions) -> dict[str, str]:
-        seen.append((final.exists(), [path.name for path in cache.glob(f".{rig.cache.sha}.tmp-*")]))
+        seen.append((final.exists(), _names(cache), wheels.is_relative_to(cache)))
         assert not (wheels.parent / MANIFEST_NAME).exists()
         return download(lock, wheels, pins, options)
 
+    def watching_copy(source: Path, directory: int, last: str = "", **flags: bool) -> None:
+        copy(source, directory, last, **flags)
+        if last:
+            (pending,) = cache.glob(f".{rig.cache.sha}.tmp-*")
+            copied.append(({path.name for path in pending.iterdir()}, final.exists()))
+            private.append(stat.S_IMODE(pending.stat().st_mode) & 0o777)
+
+    def watching_copy_file(source: Path, directory: int, name: str, mode: int) -> None:
+        filling.add(stat.S_IMODE(os.fstat(directory).st_mode) & 0o077)
+        copy_file(source, directory, name, mode)
+
     monkeypatch.setattr(cache_build, "_download_wheels", watching_download)
+    monkeypatch.setattr(cache_build, "_copy_tree", watching_copy)
+    monkeypatch.setattr(cache_build, "_copy_file", watching_copy_file)
     ensure_runner_cache(rig.repo, rig.cache.sha, cache, rig.build_options())
-    # While it is built the final directory is absent, the work is in a directory of its own with no manifest yet.
-    assert [(exists, len(tmp)) for exists, tmp in seen] == [(False, 1)]
+    # While it is built the final directory is absent and the cache holds nothing but the lock: the work is elsewhere.
+    assert seen == [(False, {f".{rig.cache.sha}.flock"}, False)]
+    # It is copied whole, manifest included, into a directory of its own beside the final one, and renamed into place;
+    # no one but the builder can enter a directory of it while it is filled.
+    ((names, final_existed),) = copied
+    assert filling == {0}
+    assert {MANIFEST_NAME, SOURCE_ARCHIVE} <= names and not final_existed
+    assert private == [0o700], "whole, the copy is still the builder's alone until the rename"
     assert (final / MANIFEST_NAME).is_file()
+    assert _names(cache) == {rig.cache.sha, f".{rig.cache.sha}.flock"}
 
 
 # -- builders of one commit exclude each other ------------------------------------------------------------------------
@@ -573,7 +625,7 @@ def _hold(lock: Path) -> int:
 def test_a_builder_that_cannot_get_the_lock_in_time_fails_and_builds_nothing(rig: Rig, tmp_path: Path) -> None:
     cache = tmp_path / "cache"
     cache.mkdir()
-    descriptor = _hold(cache / f".{rig.cache.sha}.lock")
+    descriptor = _hold(cache / f".{rig.cache.sha}.flock")
     try:
         with pytest.raises(CacheBuildError, match="another build still holds .*after 0 s"):
             ensure_runner_cache(rig.repo, rig.cache.sha, cache, replace(rig.build_options(), lock_timeout_sec=0.3))
@@ -586,7 +638,7 @@ def test_a_builder_that_cannot_get_the_lock_in_time_fails_and_builds_nothing(rig
 def test_a_builder_that_waits_for_another_uses_the_entry_that_one_finished(rig: Rig, tmp_path: Path) -> None:
     cache = tmp_path / "cache"
     cache.mkdir()
-    descriptor = _hold(cache / f".{rig.cache.sha}.lock")
+    descriptor = _hold(cache / f".{rig.cache.sha}.flock")
     # This builder has no wheels to build from: it can only succeed by using what the first one finishes.
     waiting = subprocess.Popen(
         _command(rig, cache, "--no-index"), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
@@ -615,7 +667,7 @@ def test_two_builders_started_together_build_once_and_both_get_a_whole_entry(rig
     assert sorted(answer["reused"] for answer in answers) == [False, True]
     assert {answer["manifest_sha256"] for answer in answers} == {_digest(cache / rig.cache.sha / MANIFEST_NAME)}
     assert check_entry(cache / rig.cache.sha, rig.cache.sha, verify_hash=True) == []
-    assert _names(cache) == {rig.cache.sha, f".{rig.cache.sha}.lock"}
+    assert _names(cache) == {rig.cache.sha, f".{rig.cache.sha}.flock"}
 
 
 # -- the command line --------------------------------------------------------------------------------------------------
@@ -629,7 +681,12 @@ def test_the_command_prints_one_json_line_and_reads_the_cache_from_the_environme
     )
     assert done.returncode == 0, done.stderr
     answer = json.loads(done.stdout)
-    assert answer == {"path": str(cache / rig.cache.sha), "manifest_sha256": answer["manifest_sha256"], "reused": False}
+    assert answer == {
+        "path": str(cache / rig.cache.sha),
+        "manifest_sha256": answer["manifest_sha256"],
+        "reused": False,
+        "inference_suite": str(cache / "inference-suite" / "published"),
+    }
 
 
 def test_the_command_needs_a_cache_directory_and_says_why_a_build_failed(rig: Rig, tmp_path: Path) -> None:

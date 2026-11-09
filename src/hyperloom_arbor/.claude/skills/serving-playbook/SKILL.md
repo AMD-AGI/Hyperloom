@@ -17,13 +17,14 @@ The harness reads it (`arbor/knobs.py`):
   - **`numerics`:** a change to this knob can alter outputs, so it calls for the accuracy gate before a KEEP;
   - **`op_dependent`:** its effect flips with the operating point, so a dead end on it holds at that point only.
 - **`bundles`:** documented sets of settings that pay only together. A declared `BUNDLE:` is gated as one change.
-- **`source`:** the reference page and section the entry was taken from. Neither is carried in this copy; they name the origin for whoever has them.
+- **`source`:** the reference page and section the entry was taken from, and the record ids of the study behind
+  it. Neither is carried in this copy; they name the origin for whoever has them.
 
 ## Rules that hold for every serving change
 
 - **Price every direction on this node.** A gain reported elsewhere was measured on another model, GPU, image or
-  operating point: it is a lead, never this node's number. Use the dossier's part 7 and numbers measured on this
-  node (the `hardware` skill's "Measured, not spec") to price it here.
+  operating point: it is a lead, never this node's number. Use the dossier's part 7 and the `hardware` skill's
+  measured table to price it here.
 - **Prove the arm differed.** Many settings are silent no-ops: a renamed env var, a size gate that keeps a path off,
   a launcher that drops a flag.
   - Check the kernel names in a trace, or the server's own log of what it selected, per arm.
@@ -34,8 +35,8 @@ The harness reads it (`arbor/knobs.py`):
   - Record the image digest, concurrency and lengths with the kill.
 - **"Blocked by the image" is not a dead end.** A feature that fails in the pinned image may work in a newer one.
   Record the blocker and the version that fixes it.
-- **Numerics changes need the accuracy gate before a KEEP** (`numerics` in the catalog). A throughput gate alone has
-  kept broken changes.
+- **Numerics changes need the accuracy gate before a KEEP** (`numerics` in the catalog). A throughput gate alone can
+  keep broken changes.
 - **Re-test workarounds on every image change.** Removing a stale one is a candidate optimization.
 - **Bundles:** some wins are a set of settings whose members fail or sit under the gate alone.
   - Apply the catalogued set in one iteration, name the bundle, and prove each member took effect.

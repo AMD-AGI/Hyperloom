@@ -19,6 +19,9 @@ from typing import Any, Awaitable, Callable, Sequence
 
 from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom_common.timeutil import now_iso
+from hyperloom_common.jsonio import read_json_strict
+from inference_suite.contracts import FailedStep, Report
+from inference_suite.contracts.layout import REPORT_FILE
 from ...phases.machine_state import LifecycleMark, record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
@@ -60,8 +63,8 @@ _CAPTURE_DIAGNOSIS_WORKLOAD_KEYS = (
 #: Per-source cap on the raw text kept in a capture-failure diagnosis. Generous on purpose: this file is the only
 #: record of the failure, since nothing downstream re-runs the arm to reproduce it.
 _CAPTURE_DIAGNOSIS_SOURCE_BYTES = 32768
-#: Suffixes the live trace resolver will consider. One of these already present in a task's own run directory is
-#: a leftover the resolver can pick instead of what this run produces.
+#: Suffixes trace discovery will consider. One of these already present in a task's own run directory is
+#: a leftover discovery can lead with instead of what this run produces.
 _TRACE_SUFFIXES = (".pt.trace.json.gz", ".pt.trace.json", ".trace.json.gz", ".trace.json")
 #: Enough leftovers to establish the pattern; the preflight record is context, not an inventory.
 _PREFLIGHT_STALE_TRACE_LIMIT = 20
@@ -133,6 +136,25 @@ _AUTO_RETRY_WARNING_CODES = frozenset(
         "steady_state_chunk_low_quality",
     }
 )
+
+# trace_analyze warnings that mark its analysis degraded; kernel work still dispatches on it, labelled.
+_DEGRADING_WARNING_CODES = frozenset(
+    {
+        "trace_quality_poor",
+        "kernel_source_unresolved",
+        "trace_split_phase_unconfirmed",
+        "trace_split_manifest_missing",
+        "gpu_arch_json_vendor_peak",
+    }
+)
+
+
+def _analysis_degraded(ta_result: dict[str, Any]) -> bool:
+    """Whether trace_analyze recorded a warning that marks its analysis degraded."""
+    return any(
+        isinstance(w, dict) and w.get("code") in _DEGRADING_WARNING_CODES
+        for w in ta_result.get("trace_health_warnings") or []
+    )
 
 
 def _extract_steady_state_retry_mode(
@@ -320,8 +342,7 @@ def _preflight_probe(session_dir: Path, task_id: str, *, reaped: Sequence[int]) 
     except OSError as exc:
         out["disk"] = {"path": str(session_dir), "error": repr(exc)}
 
-    # A trace already under this task's own run directory is what later surfaces as selfcert's
-    # ``production_pick_probe`` disagreement: the live resolver can pick the leftover instead of what this run
+    # A trace already under this task's own run directory can lead trace discovery instead of what this run
     # produces, and by then there is no way to tell which run the numbers came from.
     stale: list[dict[str, Any]] = []
     try:
@@ -354,48 +375,31 @@ def _drain_instrumentation(executor: Any) -> dict[str, Any] | None:
     return report if isinstance(report, dict) else None
 
 
+_SERVER_DIED_STEPS = frozenset({FailedStep.SERVER_DIED, FailedStep.SERVER_EXITED_BEFORE_READY})
+
+
 def _server_liveness_probe(session_dir: Path, task_id: str) -> dict[str, Any]:
-    """Report, without touching them, whether the servers this task started outlived the profile. Never raises.
+    """Report, from this task's run_dir ``report.json`` files, whose server died and whose outlived its teardown.
 
-    ``dead_with_pidfile`` is the one this exists for: teardown unlinks the pidfile, so a pidfile naming a dead
-    process means the engine died instead of being torn down. That run can still have exported a complete trace,
-    which is exactly why the result dict alone cannot show it.
+    A run whose engine died can still have exported a complete trace, which is exactly why the result dict alone
+    cannot show it.
     """
-    from hyperloom.common.proctree import running
-
-    from ._server_lifecycle import _looks_like_server_process
-
     runs_dir = session_dir / "runs"
     if not runs_dir.is_dir():
         return {}
-    entries: list[dict[str, Any]] = []
-    try:
-        pid_files = sorted(runs_dir.rglob("*.pid"))
-    except OSError as exc:
-        return {"error": repr(exc)}
-    for pid_file in pid_files:
-        if task_id and task_id not in str(pid_file):
-            continue
-        try:
-            pid = int(pid_file.read_text(encoding="utf-8").split()[0])
-        except (OSError, IndexError, ValueError):
-            continue
-        alive = running(pid)
-        entries.append(
-            {
-                "pid_file": str(pid_file.relative_to(session_dir)),
-                "pid": pid,
-                "alive": alive,
-                # A live pid that no longer looks like a server is pid reuse, not a surviving engine.
-                "is_server": _looks_like_server_process(pid) if alive else False,
-            }
-        )
+    reports = [path for path in sorted(runs_dir.rglob(REPORT_FILE)) if task_id in str(path)]
+    steps = {path.parent: Report.from_document(read_json_strict(path)).failed_step for path in reports}
+    entries = [
+        {"run_dir": str(run_dir.relative_to(session_dir)), "failed_step": step.value}
+        for run_dir, step in steps.items()
+        if step in _SERVER_DIED_STEPS or step is FailedStep.TEARDOWN_INCOMPLETE
+    ]
     if not entries:
-        return {"pidfiles": 0}
+        return {"reports": len(reports)}
     return {
-        "pidfiles": len(entries),
-        "alive": sum(1 for e in entries if e["alive"]),
-        "dead_with_pidfile": sum(1 for e in entries if not e["alive"]),
+        "reports": len(reports),
+        "server_died": sum(1 for step in steps.values() if step in _SERVER_DIED_STEPS),
+        "server_outlived_teardown": sum(1 for step in steps.values() if step is FailedStep.TEARDOWN_INCOMPLETE),
         "entries": entries,
     }
 
@@ -1156,6 +1160,7 @@ class RooflineExecutor:
         status = "succeeded" if profile.warning is None else "recovered"
         trace_path = str(analysis.payload["trace_input"])
         hot = _hot_kernels(analysis.result)
+        analysis_degraded = _analysis_degraded(analysis.result)
         self.shared_state.last_profile_trace = trace_path
         self.shared_state.last_profile_launch_evidence_path = str(profile.result.get("launch_evidence_path") or "")
         self.shared_state.last_profile_status = status
@@ -1188,6 +1193,7 @@ class RooflineExecutor:
             # True when trace_analyze produced 0 hot kernels because cuda-graph folding stripped per-kernel
             # attribution.
             "kernel_attribution_degraded": attribution_degraded,
+            "degraded": attribution_degraded or analysis_degraded,
             **({"profile_warning": profile.warning} if profile.warning is not None else {}),
         }
         if recorder is not None:
@@ -1197,6 +1203,7 @@ class RooflineExecutor:
                     snapshot_id=cached.get("roofline_snapshot_id"),
                     hot_kernel_count=len(hot),
                     kernel_attribution_degraded=attribution_degraded,
+                    analysis_degraded=analysis_degraded,
                     cached=cached,
                     trace_path=trace_path,
                     # The snapshot this run just appended. Read here rather than in the recorder because the history is

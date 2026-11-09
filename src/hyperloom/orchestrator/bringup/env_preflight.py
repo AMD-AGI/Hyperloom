@@ -9,11 +9,11 @@ import os
 from dataclasses import dataclass
 
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ENV_FAULT
-from hyperloom.orchestrator.bringup.argv_preflight import OK
+
+OK = "ok"
 
 #: Reserved for a condition no round could change: a checkpoint path that does
-#: not exist on this host. :data:`OK` is the argv preflight's, shared so the two
-#: read alike.
+#: not exist on this host.
 FAULT = "fault"
 
 #: The checkpoint the config names is a filesystem path that resolves to nothing.

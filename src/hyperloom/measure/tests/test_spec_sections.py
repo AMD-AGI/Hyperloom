@@ -5,14 +5,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import replace
 
-from hyperloom.measure.hosted_spec import build_spec
-from hyperloom.measure.socket import SessionFacts
-from hyperloom.measure.tests.hosted_fixtures import make_call, spec_context
+import pytest
+import yaml
 
-OTHER_COMMIT = "b" * 40
+from hyperloom.measure.hosted_spec import SpecRefused, build_spec
+from hyperloom.measure.socket import SessionFacts
+from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
+from hyperloom.measure.tests.hosted_fixtures import make_call, point_yaml, spec_context
+from inference_suite.contracts import Redacted
+from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
+
+OTHER_STAGING = replace(STAGING, interpreter_version="3.12.16")
 
 
 def _tools(tmp_path, **overrides):
@@ -21,18 +28,96 @@ def _tools(tmp_path, **overrides):
     return ctx, build_spec(call, request_id="req-1", ctx=ctx, deadline_unix=time.time() + 60).tools
 
 
-def test_the_sheet_names_the_magpie_commit_of_the_session_facts_over_the_contexts(tmp_path):
-    ctx, tools = _tools(tmp_path, session_facts=SessionFacts(magpie_commit=OTHER_COMMIT))
+def test_the_sheet_names_the_staging_and_the_inferencex_commit_its_carried_base_is_measured_with(tmp_path):
+    base = replace(base_launch(), client=replace(base_launch().client, commit="e" * 40))
+    _, tools = _tools(tmp_path, session_facts=SessionFacts(staging=OTHER_STAGING, base_launch=base))
 
-    assert (tools.magpie, tools.inferencex) == (OTHER_COMMIT, ctx.inferencex_commit)
-    assert OTHER_COMMIT != ctx.magpie_commit
+    assert (tools.staging, tools.inferencex, tools.magpie) == (OTHER_STAGING, "e" * 40, None)
 
 
-def test_the_sheet_names_the_contexts_magpie_commit_when_the_session_facts_name_none(tmp_path):
-    ctx, without_facts = _tools(tmp_path)
-    _, facts_without_commit = _tools(tmp_path, session_facts=SessionFacts())
+def test_a_frozen_base_names_the_inferencex_commit_the_inference_suite_staging_requires(tmp_path):
+    _, tools = _tools(tmp_path)
 
-    assert without_facts.magpie == facts_without_commit.magpie == ctx.magpie_commit
+    assert tools.inferencex == PINNED_TOOLS[INFERENCEX_TOOL]
+
+
+@pytest.mark.parametrize("facts", [None, SessionFacts()])
+def test_a_call_whose_facts_name_no_staging_is_refused_not_sent_with_a_guess(tmp_path, facts):
+    with pytest.raises(SpecRefused, match="tools_unknown"):
+        _tools(tmp_path, session_facts=facts and replace(facts, base_launch=base_launch()))
+
+
+def test_a_call_whose_facts_carry_no_frozen_base_is_refused_naming_the_sheet_version(tmp_path):
+    with pytest.raises(SpecRefused, match="base_launch_missing: a hyperloom.measurement-spec/v2 sheet"):
+        _tools(tmp_path, session_facts=SessionFacts(staging=STAGING))
+
+
+def test_a_scriptable_session_has_no_hosted_sheet(tmp_path):
+    from inference_suite import scriptable_base
+    from inference_suite.contracts import LaunchModel, LaunchQuery, Topology, Workload
+
+    query = LaunchQuery("FLUX.1-dev", "xdit", "mi355x", Workload.SCRIPTABLE, (1,))
+    base = scriptable_base(query, None, LaunchModel("FLUX.1-dev"), Topology(tp=1))
+    with pytest.raises(SpecRefused, match="base_launch_scriptable: .* xdit runs a script"):
+        _tools(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=base))
+
+
+def test_the_sheet_carries_the_frozen_base_whole(tmp_path):
+    procedure = _procedure(tmp_path)
+
+    assert procedure.base_launch == base_launch() and procedure.benchmark_backend is None
+
+
+def test_a_base_launch_over_64_kib_is_refused_when_the_sheet_is_written(tmp_path):
+    big = replace(base_launch(), warnings=("w" * 70_000,))
+
+    with pytest.raises(SpecRefused, match=r"sheet_invalid: .*base_launch too large \(\d+ bytes > 65536\)"):
+        _tools(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=big))
+
+
+_HF_TOKEN = "hf_" + "q" * 34
+
+
+@pytest.mark.parametrize(
+    ("unredacted", "named"),
+    [
+        (lambda base: replace(base, env={**base.env, "HF_TOKEN": _HF_TOKEN}), "env HF_TOKEN"),
+        (lambda base: replace(base, env={**base.env, "SGLANG_EXTRA": "Bearer " + "q" * 20}), "env SGLANG_EXTRA"),
+        (lambda base: replace(base, args=(*base.args, "--api-key=sk-" + "q" * 20)), "credential in arg "),
+        (lambda base: replace(base, client=replace(base.client, env={"OPENAI_API_KEY": "x"})), "client env"),
+        (lambda base: replace(base, env={**base.env, "LLM_GATEWAY_KEY": "x"}), "env LLM_GATEWAY_KEY"),
+        (lambda base: replace(base, env={**base.env, "DB_PASSWD": "x"}), "env DB_PASSWD"),
+        (lambda base: replace(base, args=(*base.args, "--api-key", "qqqqqqqq")), "credential in arg "),
+        (lambda base: replace(base, args=(*base.args, "--hf-token=" + _HF_TOKEN)), "credential in arg "),
+        (lambda base: replace(base, client=replace(base.client, args=("--api-key=qqqqqqqq",))), "client arg "),
+        (lambda base: replace(base, entrypoint=(*base.entrypoint, "--api-key=qqqqqqqq")), "entrypoint word"),
+    ],
+    ids=[
+        "secret-named env",
+        "credential-shaped env value",
+        "credential-shaped arg",
+        "secret-named client env",
+        "gateway key env",
+        "passwd env",
+        "api-key next word",
+        "hf-token joined",
+        "client api-key",
+        "entrypoint api-key",
+    ],
+)
+def test_a_base_carrying_an_unredacted_credential_is_refused_naming_where_never_the_value(tmp_path, unredacted, named):
+    with pytest.raises(SpecRefused, match="sheet_invalid: .*unredacted credential") as refused:
+        _tools(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=unredacted(base_launch())))
+
+    assert named in str(refused.value) and "qqqqqq" not in str(refused.value)
+
+
+def test_a_base_whose_secret_named_env_is_redacted_is_carried(tmp_path):
+    base = replace(base_launch(), env={**base_launch().env, "HF_TOKEN": Redacted(hashlib.sha256(b"t").hexdigest())})
+
+    procedure = _procedure(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=base))
+
+    assert procedure.base_launch == base
 
 
 def _procedure(tmp_path, **overrides):
@@ -51,3 +136,37 @@ def test_a_sheet_carries_the_silence_timeout_and_the_deadline_it_was_given(tmp_p
     procedure = _procedure(tmp_path, silence_timeout_sec=30)
 
     assert (procedure.timeout_sec, procedure.silence_timeout_sec, procedure.deadline_unix) == (90.0, 30.0, 1234.0)
+
+
+def _build(tmp_path, point):
+    call = make_call(tmp_path, point=point)
+    return build_spec(call, request_id="req-1", ctx=spec_context(tmp_path), deadline_unix=1234.0)
+
+
+def test_the_sheet_asks_for_as_many_gpus_as_the_first_point_has_tensor_parallel_ranks(tmp_path):
+    sheet = _build(tmp_path, point_yaml(tmp_path, tp=4))
+
+    assert sheet.hardware.gpu_count == 4
+
+
+@pytest.mark.parametrize("text", ["other: {}\n", "benchmark:\n  envs: [TP]\n", "benchmark:\n  envs:\n    TP: x\n"])
+def test_a_first_point_the_sheet_cannot_read_its_gpus_from_is_refused(tmp_path, text):
+    point = tmp_path / "point.yaml"
+    point.write_text(text, encoding="utf-8")
+
+    with pytest.raises(SpecRefused) as refused:
+        _build(tmp_path, point)
+
+    assert refused.value.reason == "point_unreadable"
+
+
+@pytest.mark.parametrize(("agentx", "warmup"), [(False, 1), (True, 0)], ids=["inferencex", "agentx"])
+def test_the_sheet_plans_a_warmup_round_for_a_fixed_shape_point_and_none_for_an_agentx_one(
+    tmp_path, monkeypatch, agentx, warmup
+):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+    point = tmp_path / "point.yaml"
+    bench = {"agentx": {"enabled": agentx}, "envs": {"TP": "1", "RUN_EVAL": "false"}}
+    point.write_text(yaml.safe_dump({"benchmark": bench}), encoding="utf-8")
+
+    assert _build(tmp_path, point).procedure.warmup_rounds == warmup

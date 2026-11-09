@@ -7,8 +7,8 @@
 //
 // The realtime collector also goes minified: its module docstring, and its
 // comment-only and blank lines outside strings, removed before compressing.
-// They were most of what pushed it toward that limit, and the directions
-// checklist needed room. Nothing else
+// They were most of what pushed it over that limit (7,874 characters at one
+// point), and the directions checklist needed room. Nothing else
 // changes: arbor/tests/test_dashboard.py checks that the minified file parses
 // to the same AST, apart from the module docstring. share_query.py is not
 // minified: its usage message is its docstring.

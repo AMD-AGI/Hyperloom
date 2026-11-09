@@ -77,7 +77,7 @@ _INFRA_CORRECTNESS_MARKERS = (
     "non-json",
     # An eval dataset that cannot be loaded (no egress, an offline cache without it): the
     # Hub's own errors, for a validator that reports lm_eval's log tail as it is. The packs'
-    # scripts say "correctness inconclusive" for it themselves.
+    # scripts say "correctness inconclusive" for it themselves (seen under a host).
     "couldn't reach",
     "offlinemodeisenabled",
     "datasetnotfounderror",
@@ -302,9 +302,9 @@ def run_gate(
     if not correctness_passed:
         err = correctness_result.get("error", "unknown")
         if _correctness_is_infrastructure(err):
-            # The server was never reachable under the name the check used.
-            # A working change can be lost to exactly this: a 404 for the
-            # model path against a frontend that only knows the HF name.
+            # The server was never reachable under the name the check used
+            # (a 404 for a model path against a frontend that only knows the
+            # HF name, say): no evidence about the change.
             return _not_measured(
                 f"correctness could not reach the model ({err}) — harness "
                 f"failure, iteration NOT counted",
@@ -407,10 +407,10 @@ def run_gate(
                        booked=True)
 
     # ── Pareto shape, computed once and shared by every class ───────────────
-    # A serving leaderboard is a throughput-vs-interactivity CURVE. A change
-    # that buys one axis by spending the other is a new point on the
-    # frontier, not a failure — a single-axis gate cannot see that and
-    # reverts it.
+    # The leaderboard this campaign targets is a throughput-vs-interactivity
+    # CURVE. A change that buys one axis by spending the other is a new point
+    # on the frontier, not a failure — a single-axis gate cannot see that and
+    # would revert it.
     both_ok = pri.ok and sec.ok
     is_frontier = (pri.gain and not sec.ok) or (sec.gain and not pri.ok)
     delta_s = f"{pri.delta:+.1f}%{sec.note()}"
@@ -420,9 +420,9 @@ def run_gate(
     # primary clears `threshold_rel`, is_frontier fires and the band is never
     # consulted, so a +1% primary win could be kept at ANY secondary cost.
     # That is the right default for a genuine Pareto curve — the frontier
-    # branch exists because a single-axis gate reverts such trades — but it
-    # is unbounded, and an unbounded trade is indistinguishable from a broken
-    # measurement.
+    # branch exists because a single-axis gate cannot see one — but it is
+    # unbounded, and an unbounded trade is
+    # indistinguishable from a broken measurement.
     #
     # The budget is EARNED, not flat. A trade may spend
     #
@@ -430,10 +430,10 @@ def run_gate(
     #                        secondary_exchange_rate * primary_gain_pct)
     #
     # so the size of the primary win sets how much of the second axis it may
-    # buy, and an absolute ceiling still bounds the whole thing. A flat cap
-    # gets this wrong in both directions at once: set low enough to refuse a
-    # marginal win that spends several times what it gained, it also refuses
-    # a decisive win spending the same, which is a real point on the frontier.
+    # buy, and an absolute ceiling still bounds the whole thing. A flat cap got
+    # this wrong in both directions at once: set low enough to refuse a
+    # marginal +1% win spending 5%, it also refused a decisive +8% win spending
+    # 5%, which is a real point on the frontier.
     #
     # `secondary_exchange_rate` defaults to 1.0 when a cap is set: never give
     # up more percent of the second axis than you gained on the first. Set it

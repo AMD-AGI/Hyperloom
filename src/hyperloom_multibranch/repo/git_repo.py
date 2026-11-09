@@ -47,6 +47,7 @@ from hyperloom_multibranch.repo.stack import ScratchBlobs, stack_files
 
 RECIPE_FILE = "recipe.json"
 _UPDATE_REF = "update-ref"
+_REV_LIST = "rev-list"
 _NO_COMMIT = "0" * 40
 # A re-rooted branch's old head stays under this prefix: its commits are still merge candidates, which a repack must
 # keep.
@@ -111,7 +112,8 @@ class GitExperimentRepo:
 
     async def init_root(self, recipe: Recipe) -> str:
         await asyncio.to_thread(self._path.mkdir, parents=True)
-        await self._git(*INIT, "--bare", "--quiet", f"--initial-branch={INTEGRATION_BRANCH}")
+        # The run's next leg may be another account of the group: git gives the group what it makes there.
+        await self._git(*INIT, "--bare", "--quiet", "--shared=group", f"--initial-branch={INTEGRATION_BRANCH}")
         root = await self._write(recipe, (), "baseline")
         await self._git(_UPDATE_REF, _ref(INTEGRATION_BRANCH), root, _NO_COMMIT)
         return root
@@ -119,6 +121,9 @@ class GitExperimentRepo:
     async def read_recipe(self, commit: str) -> Recipe:
         resolved = await self._commit_of(commit)
         return Recipe.from_document(json.loads(await self._git("show", f"{resolved}:{RECIPE_FILE}")))
+
+    async def root(self) -> str:
+        return await self._git(_REV_LIST, "--max-parents=0", await self.head(INTEGRATION_BRANCH))
 
     async def create_branch(self, branch: str, at_commit: str) -> None:
         resolved = await self._commit_of(at_commit)
@@ -196,7 +201,7 @@ class GitExperimentRepo:
 
     async def _carried(self, commit: str, onto: str) -> tuple[str, ...]:
         """The commits ``commit`` has that ``onto`` lacks, oldest first."""
-        return tuple((await self._git("rev-list", "--topo-order", "--reverse", commit, f"^{onto}")).split())
+        return tuple((await self._git(_REV_LIST, "--topo-order", "--reverse", commit, f"^{onto}")).split())
 
     async def _merge_base(self, candidate: str, onto: str) -> str:
         """The one nearest common ancestor of ``candidate`` and ``onto``; ``RecipeError`` when there are several, since
@@ -216,7 +221,7 @@ class GitExperimentRepo:
         """
         if not merged:
             return frozenset()
-        chain = (await self._git("rev-list", "--first-parent", "--parents", await self._commit_of(onto))).splitlines()
+        chain = (await self._git(_REV_LIST, "--first-parent", "--parents", await self._commit_of(onto))).splitlines()
         paths: set[str] = set()
         for commit, first, *others in (line.split() for line in chain if len(line.split()) > 2):
             if not merged.isdisjoint(others):

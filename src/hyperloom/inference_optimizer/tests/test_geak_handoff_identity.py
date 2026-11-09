@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -13,6 +14,11 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.common.launch_log_evidence import observed_server_identity_from_log
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state.shared_state import SharedState
+from inference_suite.compose import GPU_MASK_ENV
+from inference_suite.contracts import LaunchDelta, RunLayout
+from inference_suite.contracts.base_launch import Redacted
+from inference_suite.contracts.launch import Launch
+from inference_suite.tests.test_compose import _launch as _compose_launch
 
 from ._geak_helpers import stop_geak_before_launch
 
@@ -134,7 +140,7 @@ def test_env_spec_default_removal_controls_preserve_identity(tmp_path: Path) -> 
     state = _verified_current_best(tmp_path)
     writer = _writeback(tmp_path, state)
     identity = writer.build_env_spec()["launch_identity"]
-    assert identity == "sha256:38897e72bfbf92bc52841c087b0fef16a0a9d3df23700b336d30890b6016c516"
+    assert identity == "sha256:c82e20671a08a991c7ca1010caa63801627fdfb875c1e9a7edbc90baf6967d82"
 
     state.current_best.update(remove_args=[], unset_envs=[], args_mode="append")
 
@@ -195,37 +201,100 @@ def test_default_launch_controls_preserve_legacy_handoff_identity(tmp_path: Path
     assert writer._handoff_launch_identity(env_spec) == identity
 
 
-def test_measurement_identity_invalidates_when_recipe_content_changes(tmp_path: Path) -> None:
-    recipe = tmp_path / "baseline.yaml"
-    recipe.write_text("benchmark: {model: /models/a}\n", encoding="utf-8")
-    state = SharedState(
-        baseline_config_path=str(recipe),
-        current_best={"tput": 100.0, "optimization_stack": []},
+def test_the_same_current_best_delta_over_another_base_launch_has_another_identity(tmp_path: Path) -> None:
+    identities = []
+    for digest in ("sha256:" + "1" * 64, "sha256:" + "2" * 64):
+        state = SharedState(
+            base_launch_digest=digest,
+            current_best={"tput": 100.0, "extra_server_args": "--block-size 32", "optimization_stack": []},
+        )
+        writer = _writeback(tmp_path, state)
+        writer._stamp_current_best_measurement()
+        assert writer.build_env_spec()["base_launch_digest"] == digest
+        identities.append(state.current_best_measurement["declared_launch_identity"])
+
+    assert identities[0] != identities[1]
+
+
+def _measured_in(tmp_path: Path, state: SharedState, launch: Launch) -> Path:
+    """Point ``current_best``'s measurement at a run_dir whose ``launch.json`` records ``launch``."""
+    run_dir = tmp_path / "round" / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    RunLayout(run_dir).launch.write_text(json.dumps(launch.to_document()), encoding="utf-8")
+    state.current_best["workspace"] = str(run_dir)
+    state.current_best_measurement = {"tput": 100.0, "benchmark_workspace": str(run_dir)}
+    return RunLayout(run_dir).launch
+
+
+def test_env_spec_reproduces_the_measured_launch_without_the_rounds_own_layers(tmp_path: Path) -> None:
+    launch = _compose_launch(user=LaunchDelta(env_unset=("SGLANG_USE_AITER",), env_set={"ATOM_FORCE_ATTN_TRITON": "1"}))
+    state = SharedState(current_best={"tput": 100.0, "extra_envs": {"ACCEPTED": "1"}, "optimization_stack": []})
+    launch_json = _measured_in(tmp_path, state, launch)
+
+    spec = _writeback(tmp_path, state).build_env_spec()
+
+    assert (spec["launch_json"], spec["launch_digest"]) == (str(launch_json), launch.digest())
+    assert shlex.split(spec["config"]["server_launch_flags"]) == [
+        "--tp", "8", "--cuda-graph-max-bs", "64", "--speculative-algorithm", "EAGLE", "--speculative-num-steps", "3",
+        "--watchdog-timeout", "600", "--enable-metrics",
+    ]  # fmt: skip
+    assert spec["config"]["extra_envs"] == {
+        "ATOM_FORCE_ATTN_TRITON": "1",
+        "SGLANG_SIMULATE_ACC_LEN": "3.48",
+        "ACCEPTED": "1",
+    }
+    assert spec["config"]["unset_envs"] == ["SGLANG_USE_AITER"]
+
+
+def test_env_spec_hands_on_no_structured_flag_and_no_credential_or_loader_env(tmp_path: Path) -> None:
+    """GEAK's native launchers expand args unquoted, and env_safety owns which names may leave the session."""
+    launch = _compose_launch(
+        user=LaunchDelta(env_set={"OPENAI_API_KEY": "sk-secret", "LD_PRELOAD": "/evil.so", "PATH": "/evil/bin"})
     )
+    assert any(arg.flag == "--json-model-override-args" for arg in launch.args)
+    assert isinstance(launch.env["HF_TOKEN"], Redacted)
+    state = SharedState(current_best={"tput": 100.0, "optimization_stack": []})
+    _measured_in(tmp_path, state, launch)
+
+    config = _writeback(tmp_path, state).build_env_spec()["config"]
+
+    assert "--json-model-override-args" not in config["server_launch_flags"]
+    assert (
+        not {"OPENAI_API_KEY", "LD_PRELOAD", "PATH", "HF_TOKEN", "PYTHONPATH", GPU_MASK_ENV}
+        & config["extra_envs"].keys()
+    )
+
+
+def test_a_round_without_launch_json_hands_on_no_launch_record(tmp_path: Path) -> None:
+    spec = _writeback(tmp_path, _verified_current_best(tmp_path)).build_env_spec()
+    assert (spec["launch_json"], spec["launch_digest"]) == ("", "")
+    assert not {"launch_recipe", "base_launch_recipe_digest"} & spec.keys()
+
+
+def test_measurement_identity_invalidates_when_the_measured_launch_changes(tmp_path: Path) -> None:
+    state = SharedState(current_best={"tput": 100.0, "optimization_stack": []})
+    launch_json = _measured_in(tmp_path, state, _compose_launch())
     writer = _writeback(tmp_path, state)
     writer._stamp_current_best_measurement()
     identity = state.current_best_measurement["declared_launch_identity"]
+    assert writer.build_env_spec()["launch_identity"] == identity
 
-    recipe.write_text("benchmark: {model: /models/b}\n", encoding="utf-8")
+    changed = _compose_launch(candidate=LaunchDelta(args_add=("--cuda-graph-max-bs", "128")))
+    launch_json.write_text(json.dumps(changed.to_document()), encoding="utf-8")
 
     assert writer.build_env_spec()["launch_identity"] != identity
 
 
-def test_measurement_identity_survives_recipe_repath_with_identical_content(tmp_path: Path) -> None:
-    first = tmp_path / "baseline.20260901T010101Z.yaml"
-    first.write_text("benchmark: {model: /models/a}\n", encoding="utf-8")
+def test_measurement_identity_ignores_the_point_yaml(tmp_path: Path) -> None:
     state = SharedState(
-        baseline_config_path=str(first),
-        current_best={"tput": 100.0, "optimization_stack": []},
+        baseline_config_path=str(tmp_path / "baseline.yaml"), current_best={"tput": 100.0, "optimization_stack": []}
     )
+    _measured_in(tmp_path, state, _compose_launch())
     writer = _writeback(tmp_path, state)
     writer._stamp_current_best_measurement()
     identity = state.current_best_measurement["declared_launch_identity"]
 
-    # A baseline re-run materializes the same recipe at a fresh timestamped path.
-    second = tmp_path / "baseline.20260901T020202Z.yaml"
-    second.write_text("benchmark: {model: /models/a}\n", encoding="utf-8")
-    state.baseline_config_path = str(second)
+    state.baseline_config_path = str(tmp_path / "baseline.20260901T020202Z.yaml")
 
     assert writer.build_env_spec()["launch_identity"] == identity
 

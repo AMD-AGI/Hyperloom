@@ -17,8 +17,7 @@ class Part:
     title: str
     writer: str
     gpu: bool = False
-    #: Whether a dossier is incomplete without it. Part 9 is not: its writer needs a person's traces and is opt-in, so
-    #: a pack that does not run it still ends with a whole dossier.
+    #: Whether a dossier is incomplete without it.
     required: bool = True
 
     @property
@@ -35,7 +34,6 @@ PARTS: tuple[Part, ...] = (
     Part("06", "baseline", "Baseline and noise floor", "dossier:measure", gpu=True),
     Part("07", "profile", "Profile: plan, then results", "dossier:measure", gpu=True),
     Part("08", "kernels", "Kernel usage", "dossier:measure", gpu=True),
-    Part("09", "reference", "Reference platform (B200)", "dossier:reference", required=False),
     Part("10", "history", "Earlier optimizations", "dossier:discover"),
     Part("11", "directions", "Directions", "dossier:directions"),
 )

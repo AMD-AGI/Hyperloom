@@ -1,16 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A graded test evaluates once, in its warmup round, and the result the rule gate reads is made of that evaluation.
+"""A graded test evaluates once, in a round of its own after its measured bench, and the result the rule gate reads is
+made of that evaluation.
 
 The real local backend runs the test with ``run_grid`` replaced by a stand-in that lays out each round's directory
-the way the old flow does (a report in every round, lm-eval's files where the round evaluated); the toolbox then turns
-the outcome into the rounds and accuracy of its result.
+the way the old flow does (a report in every round that benches, lm-eval's files where the round evaluated); the toolbox
+then turns the outcome into the rounds and accuracy of its result.
 """
 
 from __future__ import annotations
 
-import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -27,45 +28,48 @@ from hyperloom.measure.socket import RoundPlan, TestCall
 from hyperloom.orchestrator.actions.executors import VariantResult
 from hyperloom_multibranch.toolbox.hosted_executor import _measured_values
 from hyperloom_multibranch.toolbox.tests.helpers import req
+from hyperloom.measure.tests.run_dirs import write_run_dir
 
 FLEXIBLE = "exact_match,flexible-extract"
+_BOOT_ONLY = "server_lifecycle_boot_only"
 
 
 class _Grid:
-    """``run_grid``: every call is one round with a report in its directory, and lm-eval's files when it evaluates."""
+    """``run_grid``: every call is one round, whose run_dir report holds its bench when it benches and its scores when it
+    evaluates."""
 
     def __init__(self, root: Path, score: float, throughputs: dict[str, float]) -> None:
         self.root, self.score, self.throughputs = root, score, throughputs
         self.evaluated: list[str] = []
         self.reseeded: dict[str, bool] = {}
+        self.called: list[str] = []
 
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
         name = kwargs["grid"][0].name
+        self.called.append(name)
         self.reseeded[name] = kwargs["launch"].warmup_round
         config = yaml.safe_load(Path(kwargs["recipe"].base_yaml_path).read_text())
         envs = {**config["benchmark"]["envs"], **(kwargs["recipe"].base.extra_envs or {})}
-        workspace = self.root / f"variant_00_{name}" / "benchmark_fake_1"
+        workspace = self.root / f"variant_00_{name}" / f"suite_run_{len(self.called)}"
         workspace.mkdir(parents=True)
-        report = {
-            "success": True,
-            "throughput": {"output_throughput": self.throughputs[name], "completed_requests": 8, "num_prompts": 8},
-        }
-        (workspace / "benchmark_report.json").write_text(json.dumps(report), encoding="utf-8")
+        if kwargs["launch"].lifecycle_boot_only:  # a sweep's boot: run_grid says no round was measured
+            return [VariantResult(name, "", {}, "succeeded", returncode=0, workspace=str(workspace), note=_BOOT_ONLY)]
+        fixed = {}
+        if not is_truthy(envs.get("EVAL_ONLY"), default=False):
+            fixed = {"output_throughput": self.throughputs[name], "completed_requests": 8, "requested_requests": 8}
+        scores = None
         if is_truthy(envs["RUN_EVAL"], default=True):
             self.evaluated.append(name)
-            results = workspace / "eval_output"
-            results.mkdir()
-            document = {"results": {"gsm8k": {FLEXIBLE: self.score}}}
-            (results / "results_2000-01-01T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
+            scores = {FLEXIBLE: self.score}
+        write_run_dir(workspace, fixed, scores, eval_code=None if scores is None else 0)
         return [VariantResult(name, "", {}, "succeeded", returncode=0, workspace=str(workspace))]
 
 
 def _graded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **plan: Any) -> tuple[_Grid, TestCall, Path]:
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
     monkeypatch.setattr(
         local, "resolve_lifecycle_params", lambda path: {"eligible": True, "port": 8123, "framework": "sglang"}
     )
-    monkeypatch.setattr(local, "teardown_lifecycle_server", lambda **kwargs: None)
+    monkeypatch.setattr(local, "teardown_variant_server", lambda slot: [])
     point = tmp_path / "point.yaml"
     envs = {"TP": 1, "CONC": 4, "RUN_EVAL": "true"}
     point.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": envs}}), encoding="utf-8")
@@ -76,7 +80,6 @@ def _graded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **plan: Any) -> tup
         output_dir=tmp_path / "out",
         timeout_sec=900,
         cwd=str(tmp_path),
-        magpie_python="",
         task_id="t-1",
         kind="accuracy",
         accuracy=True,
@@ -96,28 +99,58 @@ def test_a_graded_test_with_a_warmup_runs_one_evaluation_and_its_score_is_the_re
 
     outcome, (rounds, accuracy) = _result_of(call, point)
 
-    assert grid.evaluated == ["warmup"], "one evaluation, in the warmup round, none after the measured bench"
-    assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64),)
+    assert grid.evaluated == ["eval"], "one evaluation, after the measured bench, none before it"
+    assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64, "lm_eval=0.4.9;gsm8k=3"),)
     assert [(r.phase, r.metrics["output_throughput"]) for r in rounds] == [("warmup", 1111.0), ("measure", 2222.0)]
-    assert [r.phase for r in outcome.rounds] == ["warmup", "accuracy", "measure"]
+    assert [r.phase for r in outcome.rounds] == ["warmup", "measure", "accuracy"]
 
 
 def test_the_warmup_round_draws_other_prompts_than_the_measured_round(tmp_path, monkeypatch):
-    """With one seed, the measured round reused the warmup's prompts from the prefix cache whenever the evaluation between
-    them did not evict them, and read high at high concurrency."""
+    """With one seed, the measured round reused the warmup's prompts from the prefix cache, and read high at high
+    concurrency."""
     grid, call, point = _graded(tmp_path, monkeypatch, warmup_rounds=1)
 
     _result_of(call, point)
 
-    assert grid.reseeded == {"warmup": True, "test": False}
+    assert grid.reseeded == {"warmup": True, "test": False, "eval": False}
 
 
-def test_a_graded_test_without_a_warmup_still_evaluates_in_its_one_round(tmp_path, monkeypatch):
+def test_a_graded_test_without_a_warmup_still_evaluates_after_its_measured_bench(tmp_path, monkeypatch):
     grid, call, point = _graded(tmp_path, monkeypatch, warmup_rounds=0)
     grid.throughputs["test"] = 3333.0
 
     _, (rounds, accuracy) = _result_of(call, point)
 
-    assert grid.evaluated == ["test"]
-    assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64),)
+    assert grid.evaluated == ["eval"]
+    assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64, "lm_eval=0.4.9;gsm8k=3"),)
     assert [(r.phase, r.metrics["output_throughput"]) for r in rounds] == [("measure", 3333.0)]
+
+
+def test_a_graded_sweep_benches_every_level_and_its_one_evaluation_after_the_last_is_the_results_accuracy(
+    tmp_path, monkeypatch
+):
+    """A FINAL sweep is graded: each level used to evaluate after its bench, so the next level benched on the KV pool
+    that evaluation left full, and the primary concurrency (the middle level) was read after one."""
+    _, call, _ = _graded(tmp_path, monkeypatch)
+    points = []
+    for level in (16, 8, 4):
+        point = tmp_path / f"c{level}.yaml"
+        envs = {"TP": 1, "CONC": level, "RUN_EVAL": "true"}
+        point.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": envs}}), encoding="utf-8")
+        points.append(point)
+    grid = _Grid(tmp_path / "out", 0.64, {"c16": 1600.0, "c8": 800.0, "c4": 400.0})
+    monkeypatch.setattr(local, "run_grid", grid)
+    sweep = replace(call, points=tuple(points), kind="test", prep="conc_sweep", rounds=RoundPlan())
+    request = req(kind=TestKind.SWEEP, purpose=Purpose.FINAL, accuracy=True, concurrency=(4, 8, 16))
+
+    outcome = LocalMeasurementBackend().run_test(sweep)
+    rounds, accuracy = _measured_values(request, SimpleNamespace(points=tuple(points)), outcome)  # type: ignore[arg-type]
+
+    assert grid.called == ["c16", "c16", "c8", "c4", "eval"], "a boot round, a bench at every level, an evaluation"
+    assert grid.evaluated == ["eval"], "one evaluation, after the last bench, none between two of them"
+    assert accuracy == (AccuracyValue("gsm8k", FLEXIBLE, 0.64, "lm_eval=0.4.9;gsm8k=3"),)
+    assert [(r.phase, r.concurrency, r.metrics["output_throughput"]) for r in rounds] == [
+        ("measure", 16, 1600.0),
+        ("measure", 8, 800.0),
+        ("measure", 4, 400.0),
+    ]

@@ -21,7 +21,7 @@ from hyperloom.contracts.recipe import (
     RecipeDelta,
     apply,
 )
-from hyperloom.measure.compile import LocalBlobStore, kernel_rows_only
+from hyperloom.measure.compile import LocalBlobStore, PackageBase, kernel_rows_only
 from hyperloom.sandbox import SandboxGone
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
@@ -32,7 +32,7 @@ from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, T
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.blackboard.tests.factories import result
-from hyperloom_multibranch.specialist import autonomous_session
+from hyperloom_multibranch.specialist import autonomous_session, worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_onboarding import OnboardingSetup
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
@@ -40,7 +40,6 @@ from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
 from hyperloom_multibranch.specialist.autonomous_session import (
     AGENT_DIR,
     MANIFEST_FILE,
-    STALL_SECONDS,
     AutonomousSession,
     AutonomousSetup,
     collection_margin,
@@ -48,6 +47,7 @@ from hyperloom_multibranch.specialist.autonomous_session import (
 )
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, transcript_dir
+from hyperloom_multibranch.specialist.arbor_adapter import host_rules
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import (
     PreflightFailed,
@@ -56,6 +56,7 @@ from hyperloom_multibranch.specialist.runtime import (
     SessionRefused,
     SessionStart,
 )
+from hyperloom_multibranch.specialist.worktree import Upstream
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 from hyperloom_multibranch.tests.agent_rig import (
     BRANCH,
@@ -226,6 +227,15 @@ def _component_manifest(workspace: str, agent: Component) -> str:
     )
 
 
+@pytest.fixture(autouse=True)
+def fast_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The session's waits, short enough for a test to see an agent through."""
+
+    waits = {"POLL_SECONDS": 0.05, "SETTLE_SECONDS": 0.3, "CUTOFF_SECONDS": 0.5, "LEASE_POLL_SECONDS": 0.05}
+    for name, seconds in waits.items():
+        monkeypatch.setattr(autonomous_session, name, seconds)
+
+
 @dataclass
 class Rig:
     session: AutonomousSession
@@ -249,11 +259,9 @@ async def _rig(
     tmp_path: Path,
     agent: Agent | Component = Agent(),
     *,
-    poll: float = 0.05,
     clock=time.time,
     start: Recipe | None = None,
     deadline: float = 0.0,
-    stall: float = STALL_SECONDS,
     spend: type[AgentSpend] = AgentSpend,
     start_seconds: float = 5.0,
     aiter: Path | None = None,
@@ -296,13 +304,8 @@ async def _rig(
         rig.repo,
         "vllm",
         spend_of,
-        poll_seconds=poll,
-        settle_seconds=0.3,
-        cutoff_seconds=0.5,
-        stall_seconds=stall,
         clock=clock,
         least_run_seconds=least_run,
-        lease_poll_seconds=0.05,
     )
     if aiter is not None:
         setup = replace(setup, aiter_configs=aiter)
@@ -343,6 +346,182 @@ async def test_an_agent_s_keeps_are_imported_one_at_a_time_against_the_branch_he
     notices = await rig.notices()
     assert any(note.startswith(f"{NOTICE} keep 2") and "seqs 512" in note for note in notices)
     assert notices[-1] == f"{NOTICE} the agent finished its run"
+
+
+#: vLLM as the image installs it from a wheel: its version names an abbreviated commit, and no checkout holds it.
+WHEEL = PackageBase("vllm", Path("/usr/lib/python3/site-packages/vllm"), "vllm", "0.33.0rc1.dev711+gdd4e40142.rocm100")
+
+
+@pytest.mark.parametrize(
+    ("start", "upstream", "unkept"),
+    [
+        (Recipe(ROOT.base_image_digest, ROOT.launch), None, True),
+        (
+            Recipe(ROOT.base_image_digest, ROOT.launch),
+            Upstream("https://github.com/vllm-project/vllm", "d" * 40),
+            False,
+        ),
+        (ROOT, None, False),
+    ],
+    ids=["new-component-from-a-wheel", "new-component-with-its-upstream", "component-in-the-recipe"],
+)
+async def test_an_agent_whose_source_changes_cannot_land_is_told_so_and_the_branch_log_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start: Recipe, upstream: Upstream | None, unkept: bool
+) -> None:
+    specs: list[AgentSpec] = []
+    make_ready = autonomous_session.make_ready
+
+    async def recorded(source: str, spec: AgentSpec, *args):
+        specs.append(spec)
+        return await make_ready(source, spec, *args)
+
+    monkeypatch.setattr(autonomous_session, "make_ready", recorded)
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: WHEEL)
+    monkeypatch.setattr(worktree_module, "installed_upstream", lambda package: upstream if package == WHEEL else None)
+    rig = await _rig(tmp_path, start=start)
+
+    await rig.session.preflight()
+    await rig.session.stop()
+
+    told = [rule for rule in host_rules(specs[0]) if "cannot be kept" in rule]
+    noted = [note for note in await rig.notices() if "only launch and env changes can" in note]
+    assert bool(specs[0].source_unkept) is bool(told) is bool(noted) is unkept
+    if unkept:
+        assert "0.33.0rc1.dev711+gdd4e40142.rocm100" in specs[0].source_unkept and "wheel" in specs[0].source_unkept
+        assert specs[0].source_unkept in noted[0]
+
+
+#: The toolbox's refusal of a source change to vLLM on a recipe that does not carry it, given without its upstream.
+UNLABELLED = RequestRejected(
+    "the delta does not fit the parent recipe: vllm is a new component; give its upstream repository and commit",
+    "delta_not_applicable",
+)
+#: A start commit that does not carry vLLM, whose source changes then add it to the recipe.
+WITHOUT_VLLM = Recipe(ROOT.base_image_digest, ROOT.launch)
+
+
+def _from_a_wheel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """vLLM installed from a wheel whose upstream commit nothing resolves."""
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: WHEEL)
+    monkeypatch.setattr(worktree_module, "installed_upstream", lambda _package: None)
+    monkeypatch.setattr(autonomous_session, "installed_component_upstream", lambda _component: None)
+
+
+def _told(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent made ready as Arbor is: told why no change to its component's source can be kept."""
+    make_ready = autonomous_session.make_ready
+
+    async def told(source: str, spec: AgentSpec, *args):
+        return replace(await make_ready(source, spec, *args), source_unkept=spec.source_unkept)
+
+    monkeypatch.setattr(autonomous_session, "make_ready", told)
+
+
+async def test_an_agent_told_its_source_changes_cannot_land_that_keeps_one_ends_its_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _from_a_wheel(monkeypatch)
+    _told(monkeypatch)
+    rig = await _rig(tmp_path, Agent(tail=30.0), start=WITHOUT_VLLM)
+    rig.toolbox.refusals = [UNLABELLED]
+
+    await rig.session.preflight()
+    with pytest.raises(SessionRefused, match="kept a source change to vllm after being told it cannot land"):
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+    await rig.session.release()
+
+    notices = await rig.notices()
+    assert notices[-1].startswith(f"{NOTICE} keep 1 was refused: the delta does not fit the parent recipe")
+    assert "the agent kept a source change to vllm after being told it cannot land" in notices[-1]
+    assert rig.toolbox.requests == [] and rig.toolbox.released == ["L1"]
+
+
+async def test_an_agent_not_told_its_source_changes_cannot_land_goes_on_past_their_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _from_a_wheel(monkeypatch)
+    monkeypatch.setattr(autonomous_session, "source_unkept", lambda _component, _recipe: "")
+    rig = await _rig(tmp_path, start=WITHOUT_VLLM)
+    rig.toolbox.refusals = [UNLABELLED]
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the keep after the refused one")
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionFinished) as finished:
+        await asyncio.wait_for(running, 10)
+
+    assert not isinstance(finished.value, SessionRefused)
+    notices = await rig.notices()
+    assert any(note.startswith(f"{NOTICE} keep 1 was refused: the delta does not fit") for note in notices)
+    assert not any("after being told" in note for note in notices)
+
+
+async def test_an_onboarded_agent_never_told_its_source_changes_cannot_land_goes_on_past_their_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _from_a_wheel(monkeypatch)
+    rig = await _rig(tmp_path, start=WITHOUT_VLLM)
+    rig.toolbox.refusals = [UNLABELLED]
+
+    await rig.session.preflight()
+    watch = json.loads((tmp_path / BRANCH / "session" / "agent-watch.json").read_text())
+    assert watch["source_unkept"] == "", "a run after a crash holds the agent to what it was told"
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the keep after the refused one")
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionFinished) as finished:
+        await asyncio.wait_for(running, 10)
+
+    assert not isinstance(finished.value, SessionRefused)
+    notices = await rig.notices()
+    assert any("only launch and env changes can" in note for note in notices)
+    assert any(note.startswith(f"{NOTICE} keep 1 was refused: the delta does not fit") for note in notices)
+    assert not any("after being told" in note for note in notices)
+
+
+async def test_a_launch_keep_of_an_agent_told_its_source_changes_cannot_land_is_imported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _from_a_wheel(monkeypatch)
+    _told(monkeypatch)
+    rig = await _rig(
+        tmp_path, Agent(keeps=(128,), args="--max-num-seqs 64", config_source=CONFIG_SOURCE), start=WITHOUT_VLLM
+    )
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the launch keep")
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionFinished) as finished:
+        await asyncio.wait_for(running, 10)
+
+    assert not isinstance(finished.value, SessionRefused)
+    [request] = rig.toolbox.requests
+    assert request.delta.components == () and "--max-num-seqs 64" in request.delta.config.server_args
+
+
+async def test_an_agent_told_its_source_changes_cannot_land_is_held_to_it_after_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _from_a_wheel(monkeypatch)
+    _told(monkeypatch)
+    rig = await _rig(tmp_path, Agent(exit=3, resume="sleep 30"), start=WITHOUT_VLLM)
+
+    await rig.session.preflight()
+    with pytest.raises(SessionCrashed):
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+    rig.toolbox.refusals = [UNLABELLED]
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionRefused, match="after being told it cannot land"):
+        await asyncio.wait_for(running, 10)
+    await resumed.stop()
+
+    assert len(rig.toolbox.requests) == 1
 
 
 async def test_a_keep_after_one_the_branch_committed_imports_only_its_own_change_on_top(tmp_path: Path) -> None:
@@ -397,9 +576,10 @@ async def test_an_agent_that_exits_non_zero_is_a_crash_with_its_last_output(tmp_
 
 
 async def test_an_agent_that_goes_silent_is_a_lost_session_once_it_wrote_nothing_for_the_stall_bound(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    rig = await _rig(tmp_path, Agent(keeps=(256, 512, 768), gap=0.5, tail=30.0), stall=1.0)
+    monkeypatch.setattr(autonomous_session, "STALL_SECONDS", 1.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256, 512, 768), gap=0.5, tail=30.0))
     await rig.session.preflight()
     started = time.monotonic()
 
@@ -411,8 +591,11 @@ async def test_an_agent_that_goes_silent_is_a_lost_session_once_it_wrote_nothing
     assert time.monotonic() - started > 2.0
 
 
-async def test_an_agent_silent_on_its_console_while_it_writes_its_workspace_is_not_lost(tmp_path: Path) -> None:
-    rig = await _rig(tmp_path, Agent(keeps=(256,), gap=0.1, tail=30.0, busy=True), stall=1.0)
+async def test_an_agent_silent_on_its_console_while_it_writes_its_workspace_is_not_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(autonomous_session, "STALL_SECONDS", 1.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256,), gap=0.1, tail=30.0, busy=True))
     await rig.session.preflight()
     running = asyncio.create_task(rig.session.run())
 
@@ -429,8 +612,11 @@ class _HungSpend(AgentSpend):
         await asyncio.Event().wait()
 
 
-async def test_a_run_stuck_in_one_of_its_steps_is_a_lost_session_while_the_agent_still_writes(tmp_path: Path) -> None:
-    rig = await _rig(tmp_path, Agent(keeps=tuple(range(1, 30)), gap=0.1), stall=0.5, spend=_HungSpend)
+async def test_a_run_stuck_in_one_of_its_steps_is_a_lost_session_while_the_agent_still_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(autonomous_session, "STALL_SECONDS", 0.5)
+    rig = await _rig(tmp_path, Agent(keeps=tuple(range(1, 30)), gap=0.1), spend=_HungSpend)
     await rig.session.preflight()
 
     with pytest.raises(SessionCrashed, match="polled") as crashed:
@@ -484,6 +670,35 @@ async def test_an_agent_whose_sandbox_ended_is_installed_in_the_sandbox_of_a_new
     await asyncio.wait_for(running, 10)
 
 
+async def test_a_new_sandbox_whose_install_failed_is_not_resumed_in_but_leased_and_installed_again(
+    tmp_path: Path,
+) -> None:
+    count = tmp_path / "installs"
+    # The second install, the first in the new sandbox, fails.
+    command = f"n=$(cat {count} 2>/dev/null || echo 0); echo $((n + 1)) > {count}; test $n -ne 1"
+    rig = await _rig(tmp_path, Agent(exit=3, resume="sleep 30", install=(command,)), deadline=time.time() + 600)
+
+    await rig.session.preflight()
+    with pytest.raises(SessionCrashed):
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+    rig.sandbox.gone.add("L1")
+    failed = rig.restart()
+    with pytest.raises(SessionCrashed, match="install in its new sandbox failed"):
+        await asyncio.wait_for(failed.run(), 10)
+    await failed.stop()
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await _until(lambda: rig.sandbox.started[-1] == "sleep 30", "the agent resumed")
+
+    assert count.read_text().strip() == "3"
+    assert rig.toolbox.released == ["L1", "L2"] and len(rig.toolbox.leases) == 3
+    await resumed.stop()
+    await asyncio.wait_for(running, 10)
+    await resumed.release()
+    assert rig.toolbox.released == ["L1", "L2", "L3"]
+
+
 async def test_a_keep_file_with_no_counter_is_one_keep_at_each_change(tmp_path: Path) -> None:
     rig = await _rig(tmp_path, Agent(keeps=(256,), keep={"path": "run/state.json"}, tail=30.0))
 
@@ -517,8 +732,11 @@ async def test_a_keep_that_cannot_be_imported_is_noted_once_and_the_run_goes_on(
     assert len([note for note in await rig.notices() if f"keep 1 {why}" in note]) == 1
 
 
-async def test_a_keep_made_just_before_the_agent_exits_is_imported(tmp_path: Path) -> None:
-    rig = await _rig(tmp_path, Agent(keeps=(256,), gap=0.2, tail=0.0), poll=1.0)
+async def test_a_keep_made_just_before_the_agent_exits_is_imported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(autonomous_session, "POLL_SECONDS", 1.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256,), gap=0.2, tail=0.0))
 
     await rig.session.preflight()
     running = asyncio.create_task(rig.session.run())

@@ -31,6 +31,7 @@ root_packages =
     hyperloom_kb
     kernelforge
     hyperloom_multibranch
+    inference_suite
 include_external_packages = False
 exclude_type_checking_imports = True
 
@@ -56,8 +57,7 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._partition_shape
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._workload_envs
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.benchmark_backend
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.bypass_scriptable
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.bus.resource_lock
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.collaborator
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.loop.coordinator
@@ -97,11 +97,9 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors.benchmark_backend
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_request_handlers
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_schemes
 unmatched_ignore_imports_alerting = error
@@ -130,6 +128,7 @@ forbidden_modules =
     hyperloom_kb
     kernelforge
     hyperloom_multibranch
+    inference_suite
 ignore_imports =
     hyperloom_common.tests.** -> **
     hyperloom_common.llm.tests.** -> **
@@ -240,6 +239,7 @@ type = independence
 modules =
     kernelforge.kernel_backends.aiter
     kernelforge.kernel_backends.assembly
+    kernelforge.kernel_backends.ave
     kernelforge.kernel_backends.ck
     kernelforge.kernel_backends.flydsl
     kernelforge.kernel_backends.fusion
@@ -323,6 +323,79 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
+[importlinter:contract:is-only-common]
+name = inference_suite builds on hyperloom_common and nothing else from the project
+type = forbidden
+source_modules = inference_suite
+forbidden_modules =
+    hyperloom
+    hyperloom_kb
+    kernelforge
+    hyperloom_multibranch
+ignore_imports =
+    inference_suite.tests.** -> **
+    inference_suite.**.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:is-public-interface]
+name = hyperloom uses inference_suite only through its public modules
+type = forbidden
+# The public surface is the package root, contracts, argv, golden, server_log and frameworks.
+# Every other module can move without breaking an importer. Plain names, not `.**`: a forbidden
+# module covers its descendants, and `.**` would leave the package module itself importable.
+source_modules =
+    hyperloom
+    hyperloom_multibranch
+forbidden_modules =
+    inference_suite.__main__
+    inference_suite.aiperf_patch
+    inference_suite.cli
+    inference_suite.client_env
+    inference_suite.compose
+    inference_suite.eval
+    inference_suite.framework_probe
+    inference_suite.framework_version
+    inference_suite.load
+    inference_suite.parser_check
+    inference_suite.pins
+    inference_suite.profile
+    inference_suite.recipe
+    inference_suite.run
+    inference_suite.runtime
+    inference_suite.staging
+    inference_suite.telemetry
+allow_indirect_imports = True
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    hyperloom_multibranch.tests.** -> **
+    hyperloom_multibranch.**.tests.** -> **
+    # The AgentX checkpoint reads aiperf's per-request export with the parser the suite's timeline owns.
+    hyperloom.orchestrator.actions.executors._agentx_checkpoint -> inference_suite.telemetry.agentx_timeline
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:is-layers]
+name = inference_suite modules depend downward only, and modules of one layer not on each other
+type = layers
+# Full module names rather than `containers`, so each layer is also a package unit of the
+# code-metrics design checks. A parenthesised layer is optional: it is not on main yet.
+layers =
+    (inference_suite.__main__)
+    (inference_suite.cli)
+    (inference_suite.run)
+    (inference_suite.load) | (inference_suite.eval) | (inference_suite.profile)
+    (inference_suite.runtime)
+    (inference_suite.telemetry)
+    (inference_suite.compose)
+    (inference_suite.recipe) | (inference_suite.parser_check) | (inference_suite.framework_version)
+    (inference_suite.framework_probe) | (inference_suite.staging)
+    (inference_suite.client_env)
+    (inference_suite.contracts) | (inference_suite.aiperf_patch)
+    (inference_suite.golden) | (inference_suite.frameworks) | (inference_suite.pins) | (inference_suite.server_log)
+    (inference_suite.argv)
+
+
 [importlinter:contract:acyclic]
 name = no cycles between sibling packages (baseline may only shrink)
 type = acyclic_siblings
@@ -331,6 +404,7 @@ ancestors =
     hyperloom_common
     kernelforge
     hyperloom_multibranch
+    inference_suite
 # Baseline: the exact imports import-linter nominates as cycle breakers on
 # main today. Removing one of these imports means deleting its line here.
 ignore_imports =
@@ -343,8 +417,7 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._partition_shape
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._workload_envs
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.benchmark_backend
-    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.bypass_scriptable
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors.explore_prefilter.declared_levers
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.bus.resource_lock
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.collaborator
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.loop.coordinator
@@ -384,11 +457,9 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
+    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._subprocess_kill
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors.benchmark_backend
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_request_handlers
     hyperloom.inference_optimizer.cli.quantization -> hyperloom.orchestrator.phases.quantization_schemes
     hyperloom.inference_optimizer.multi_node.commands.infera -> hyperloom.inference_optimizer.multi_node.cli
@@ -414,7 +485,6 @@ ignore_imports =
     hyperloom.orchestrator.actions.executors.target_analysis -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.actions.executors.targeted_build_executor -> hyperloom.orchestrator.loop.build_lifecycle
     hyperloom.orchestrator.actions.executors.targeted_build_executor -> hyperloom.orchestrator.loop.sub_agent_runner
-    hyperloom.orchestrator.bringup.argv_preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
     hyperloom.orchestrator.bus.resource_lock -> hyperloom.orchestrator.state.task_states
     hyperloom.orchestrator.enablement.build -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.orchestrator.enablement.lane -> hyperloom.orchestrator.actions.executors._accuracy_gate
@@ -424,7 +494,6 @@ ignore_imports =
     hyperloom.orchestrator.enablement.params -> hyperloom.orchestrator.actions.executors._apply_feedback
     hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
     hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors._server_argv
-    hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors.benchmark_backend
     hyperloom.orchestrator.enablement.revalidation -> hyperloom.orchestrator.actions.executors._accuracy_gate
     hyperloom.orchestrator.enablement.setup_script -> hyperloom.orchestrator.enablement.recipe.projections
     hyperloom.orchestrator.gpu_lanes -> hyperloom.orchestrator.specialists.profile

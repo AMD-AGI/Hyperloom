@@ -9,7 +9,6 @@ import sys
 import asyncio
 import json
 import os
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -30,7 +29,6 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     BenchmarkRunExecutor,
 )
-from hyperloom.orchestrator.actions.executors.benchmark_run.records import _BenchmarkRound
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     default_baseline_config,
     materialize_benchmark_config,
@@ -39,12 +37,14 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
+    _record_workspace_traces,
     _sanitize_profile_server_args,
-    _trace_rank,
     _trace_files_for_dir,
     _trace_size_bytes,
 )
 from hyperloom.orchestrator.trace_analysis._trace_rank import select_primary_trace
+from hyperloom.orchestrator.trace_analysis._trace_rank import trace_rank as _trace_rank
+from inference_suite.contracts import RunLayout
 from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
@@ -87,15 +87,13 @@ def _backends_silent() -> dict[str, object]:
     return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic")}
 
 
-def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
+def test_mi325x_session_records_the_real_gpu_type(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "sglang")
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
     monkeypatch.setenv("TARGET_GPU_TYPE", "mi325x")
     args = cli_parser._build_parser().parse_args(
         ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi325x"]
     )
 
-    assert gpu_types.gpu_runner_type("mi325x") == "mi300x"
     assert gpu_types.reference_gpu_type_for_gfx("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
     state = cli_bootstrap._seed_shared_state(
@@ -103,37 +101,33 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         args,
         session_id="mi325x-session",
         framework="sglang",
-        platform=cli_bootstrap.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        settled=cli_bootstrap.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
 
     assert manifest["gpu_type"] == "mi325x"
     assert state.gpu_type == "mi325x"
     assert os.environ["TARGET_GPU_TYPE"] == "mi325x"
-    assert os.environ["GPU_TYPE"] == "mi300x"
 
 
-def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
+def test_mi308x_session_records_the_real_gpu_type(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "sglang")
-    monkeypatch.setenv("GPU_TYPE", "mi300x")
     monkeypatch.setenv("TARGET_GPU_TYPE", "mi308x")
     args = cli_parser._build_parser().parse_args(
         ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi308x"]
     )
 
-    assert gpu_types.gpu_runner_type("mi308x") == "mi300x"
     manifest = build_manifest(tmp_path, args=args, session_id="mi308x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,
         args,
         session_id="mi308x-session",
         framework="sglang",
-        platform=cli_bootstrap.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        settled=cli_bootstrap.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
 
     assert manifest["gpu_type"] == "mi308x"
     assert state.gpu_type == "mi308x"
     assert os.environ["TARGET_GPU_TYPE"] == "mi308x"
-    assert os.environ["GPU_TYPE"] == "mi300x"
 
 
 def test_cli_parser_accepts_mi308x():
@@ -210,94 +204,34 @@ def test_materialize_config_injects_model_with_other_overrides(tmp_path):
     assert rendered["benchmark"]["envs"]["BENCH_FOO"] == "bar"
 
 
-def test_materialize_config_injects_runner_type(tmp_path):
-    """gpu_type kwarg must land in benchmark.runner_type as-is."""
-    import yaml
-
-    out = materialize_benchmark_config(
-        _PROFILE_SGLANG_CONFIG,
-        tmp_path,
-        target=BenchmarkTarget(gpu_type="mi355x"),
-    )
-    with out.open() as f:
-        rendered = yaml.safe_load(f)
-    assert rendered["benchmark"]["runner_type"] == "mi355x"
-
-
-def test_r9700_baseline_and_profile_use_vllm_gfx12_runner(tmp_path, monkeypatch):
+def test_shipped_points_materialize_without_a_runner_label_or_script(tmp_path, monkeypatch):
     import yaml
 
     monkeypatch.setenv("FRAMEWORK", "vllm")
-    for config_path in (default_baseline_config(), _PROFILE_VLLM_CONFIG):
+    for config_path in (default_baseline_config(), _PROFILE_VLLM_CONFIG, _PROFILE_SGLANG_CONFIG):
         out = materialize_benchmark_config(
             config_path,
             tmp_path / config_path.stem,
             target=BenchmarkTarget(gpu_type="r9700"),
         )
         rendered = yaml.safe_load(out.read_text())["benchmark"]
-        assert rendered["runner_type"] == "gfx12"
-        assert rendered["benchmark_script"] == "vllm_gfx12.sh"
+        assert "runner_type" not in rendered
+        assert "benchmark_script" not in rendered
 
 
-def test_materialize_config_forces_generic_benchmark_script(tmp_path):
-    """`gpu_type` pins `benchmark_script` to the generic `{framework}_{gpu_type}.sh` (Magpie priority 1)."""
+@pytest.mark.parametrize("script", [None, "sglang_custom.sh"])
+def test_the_board_leaves_the_point_script_as_written(tmp_path, script):
     import yaml
 
+    bench = {"framework": "sglang", "model": "/m", **({"benchmark_script": script} if script else {})}
     src_yaml = tmp_path / "src.yaml"
-    src_yaml.write_text(
-        yaml.safe_dump(
-            {
-                "benchmark": {
-                    "framework": "sglang",
-                    "model": "/m",
-                    "benchmark_script": "sglang_mi300x.sh",  # legacy field
-                },
-            }
-        )
-    )
+    src_yaml.write_text(yaml.safe_dump({"benchmark": bench}))
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    out = materialize_benchmark_config(
-        src_yaml,
-        out_dir,
-        target=BenchmarkTarget(gpu_type="mi355x"),
-    )
-    with out.open() as f:
-        rendered = yaml.safe_load(f)
-    assert rendered["benchmark"]["runner_type"] == "mi355x"
-    assert rendered["benchmark"]["benchmark_script"] == "sglang_mi355x.sh", (
-        "gpu_type must pin the generic {framework}_{gpu_type}.sh"
-    )
-
-
-def test_materialize_config_forces_generic_when_source_yaml_has_no_script(
-    tmp_path,
-):
-    """Even with no source `benchmark_script`, the renderer must write one explicitly."""
-    import yaml
-
-    src_yaml = tmp_path / "src.yaml"
-    src_yaml.write_text(
-        yaml.safe_dump(
-            {
-                "benchmark": {
-                    "framework": "vllm",
-                    "model": "/m",
-                    # No benchmark_script field at all.
-                },
-            }
-        )
-    )
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-    out = materialize_benchmark_config(
-        src_yaml,
-        out_dir,
-        target=BenchmarkTarget(gpu_type="mi300x"),
-    )
-    with out.open() as f:
-        rendered = yaml.safe_load(f)
-    assert rendered["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
+    out = materialize_benchmark_config(src_yaml, out_dir, target=BenchmarkTarget(gpu_type="mi325x"))
+    rendered = yaml.safe_load(out.read_text())["benchmark"]
+    assert "runner_type" not in rendered
+    assert rendered.get("benchmark_script") == script
 
 
 # TP / CONC env must override yaml hardcode.
@@ -306,7 +240,6 @@ def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch
     import yaml
 
     monkeypatch.setenv("TP", "8")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     out = materialize_benchmark_config(_PROFILE_SGLANG_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -335,7 +268,6 @@ def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden
     import yaml
 
     monkeypatch.setenv("TP", "8")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     out = materialize_benchmark_config(_PROFILE_SGLANG_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -360,20 +292,19 @@ def test_materialize_config_rocr_visible_devices_explicit_env_wins_when_enough(
     assert envs["ROCR_VISIBLE_DEVICES"] == "4,5,6,7"
 
 
-def test_materialize_config_rocr_visible_devices_expands_when_under_tp(
+def test_materialize_config_rocr_visible_devices_stays_on_session_cards_when_under_tp(
     tmp_path,
     monkeypatch,
 ):
-    """When explicit ROCR_VISIBLE_DEVICES has fewer devices than TP requires, `_workload_envs` auto-expands to 0..TP-1."""
+    """A process mask narrower than TP is not widened onto cards outside it."""
     import yaml
 
     monkeypatch.setenv("TP", "8")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
     out = materialize_benchmark_config(_PROFILE_SGLANG_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
-    assert envs["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
+    assert envs["ROCR_VISIBLE_DEVICES"] == "4,5,6,7"
 
 
 def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
@@ -407,7 +338,7 @@ def test_materialize_config_rocr_unchanged_when_tp1(tmp_path, monkeypatch):
     assert envs.get("ROCR_VISIBLE_DEVICES") == "1"
 
 
-# steady-state window follows the TraceLens magpie skill formulas.
+# steady-state window follows the TraceLens skill formulas.
 def _profile_yaml(tmp_path, framework: str, envs: dict) -> Path:
     """Synthesize a minimal profile YAML the materializer recognises as PROFILE=1 + torch_profiler.enabled=True."""
     import yaml as _yaml
@@ -458,7 +389,7 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
     # ``profiler=torch`` belongs in the launched fragment; do not add
-    # ``torch_profiler_dir`` here (Magpie emits ``<workspace>/torch_trace`` before
+    # ``torch_profiler_dir`` here (the round emits its own trace directory before
     # ``EXTRA_VLLM_ARGS`` on the server argv; a duplicate dir in ``EXTRA_VLLM_ARGS``
     # would win last-wins). Argv-preflight probes use dirs in ``baseline.py`` only.
     assert "--profiler-config.profiler torch" in extra, extra
@@ -923,11 +854,11 @@ def test_materialize_profile_max_iters_override_is_quiet_without_agentx(
     assert not any("AgentX capture bound" in r.message for r in caplog.records)
 
 
-def test_materialize_persists_inferencex_path_for_magpie(
+def test_materialize_persists_inferencex_path(
     tmp_path,
     monkeypatch,
 ):
-    """$INFERENCEX_PATH must be written into benchmark.inferencex_path so Magpie uses the patched checkout."""
+    """$INFERENCEX_PATH must be written into benchmark.inferencex_path so the round uses that checkout."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -1192,9 +1123,9 @@ def test_instrumentation_preflight_names_the_checks_it_dooms(tmp_path, monkeypat
     _mock_patchers(monkeypatch, vllm=False, sglang=False)
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = materialize_benchmark_config(src, tmp_path)
-    bench = yaml.safe_load(out.read_text())["benchmark"]
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
 
-    row = _instrumentation_preflight_row(bench)
+    row = _instrumentation_preflight_row(envs)
 
     assert row["check_id"] == CHECK_INSTRUMENTATION_PREFLIGHT
     assert row["status"] == "failed"
@@ -1222,22 +1153,13 @@ def test_instrumentation_preflight_passes_on_a_healthy_patch(tmp_path, monkeypat
     src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = materialize_benchmark_config(src, tmp_path)
 
-    row = _instrumentation_preflight_row(yaml.safe_load(out.read_text())["benchmark"])
+    row = _instrumentation_preflight_row(yaml.safe_load(out.read_text())["benchmark"]["envs"])
 
     assert row["status"] == "passed"
     assert row["detail"]["degraded_reason"] == ""
     assert row["detail"]["shape_discovery"] is True
     assert row["detail"]["shape_discovery_flag_present"] is True
     assert row["detail"]["predicts_failure_of"] == []
-
-
-def test_instrumentation_preflight_skips_without_an_envs_block(tmp_path):
-    from hyperloom.orchestrator.actions.executors.profile import _instrumentation_preflight_row
-
-    row = _instrumentation_preflight_row({"framework": "sglang"})
-
-    assert row["status"] == "skipped"
-    assert "benchmark.envs" in row["skip_reason"]
 
 
 def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
@@ -1248,7 +1170,8 @@ def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
     size fallback over a small trace.
     """
     from hyperloom.orchestrator.actions.executors.profile import _write_trace_certificate
-    from hyperloom.orchestrator.trace_analysis._trace_reader import _trace_candidates, resolve_trace_file
+    from hyperloom.orchestrator.trace_analysis._trace_inputs import discover_trace_inputs
+    from hyperloom.orchestrator.trace_analysis._trace_reader import _trace_candidates
 
     # A lone unranked trace: the certificate must not become a second candidate beside it.
     single = tmp_path / "single" / "torch_trace"
@@ -1274,7 +1197,7 @@ def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
 
     assert Path(tiny_cert).stat().st_size > tiny.stat().st_size
     assert _trace_candidates(tiny_dir) == [tiny]
-    assert resolve_trace_file(tiny_dir) == tiny
+    assert discover_trace_inputs(tiny_dir).files == [tiny]
 
     # One workspace can certify more than one trace dir; the names must not collide.
     other = tmp_path / "single" / "capture_traces"
@@ -1598,29 +1521,6 @@ def test_materialize_profile_sglang_force_overrides_gemma2_gate(
     assert json.loads(envs["PROFILE_EXTRA_BODY"])["shape_discovery"] is True
 
 
-def test_profile_executor_calls_benchmark_lib_patcher():
-    """ProfileExecutor must patch the materialized InferenceX checkout before launching Magpie (else the computed profile window is stomped and the trace is empty)."""
-    from hyperloom.orchestrator.actions.executors import profile as profile_mod
-
-    # The symbols must be re-exportable for monkey-patching.
-    assert profile_mod.ensure_benchmark_lib_patched is not None
-    assert profile_mod.ensure_benchmark_serving_patched is not None
-    # The hook source must reference both patchers (regression guard against silent removal).
-    import inspect
-
-    src = inspect.getsource(profile_mod.ProfileExecutor._after_materialize_config)
-    assert "ensure_benchmark_lib_patched" in src, (
-        "ProfileExecutor._after_materialize_config must invoke "
-        "ensure_benchmark_lib_patched on the materialized InferenceX path — "
-        "otherwise issue #194 §2 regresses."
-    )
-    assert "ensure_benchmark_serving_patched" in src, (
-        "ProfileExecutor._after_materialize_config must invoke "
-        "ensure_benchmark_serving_patched so PROFILE_EXTRA_BODY reaches "
-        "SGLang's /start_profile request."
-    )
-
-
 def test_profile_server_args_sanitizer_drops_torch_compile_flags():
     raw = "--enable-torch-compile --torch-compile-max-bs 32 --quantization fp8 --foo=bar --torch-compile-max-bs=64"
 
@@ -1699,67 +1599,6 @@ def test_baseline_executor_picks_framework_yaml_at_call_time(tmp_path, monkeypat
     assert pe._resolve_default_config().name == "baseline_vllm.yaml"
 
 
-def test_profile_argv_preflight_includes_inferencex_vllm_profiler_args(tmp_path, monkeypatch):
-    import yaml
-
-    from hyperloom.orchestrator.bringup.argv_preflight import OK
-
-    config_path = tmp_path / "profile.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "benchmark": {
-                    "framework": "vllm",
-                    "envs": {
-                        "PROFILE": "1",
-                        "EXTRA_VLLM_ARGS": "--profiler-config.capture_torch_profiler True",
-                    },
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    seen = {}
-
-    def _capture(**kwargs):
-        seen.update(kwargs)
-        return SimpleNamespace(status=OK, reason="parsed", detail="", argv=tuple(kwargs["argv"]), dropped=())
-
-    monkeypatch.setattr("hyperloom.orchestrator.bringup.check_server_argv", _capture)
-    state = SimpleNamespace(enablement=SimpleNamespace(argv_repairs=[]))
-    executor = BaselineExecutor(session_dir=tmp_path, shared_state=state)
-
-    round_ = _BenchmarkRound(
-        config_path=config_path,
-        materialized_config_path=config_path,
-        output_dir=tmp_path / "round",
-        result_dir=tmp_path / "round",
-        ctx=None,
-        ctx_extra={},
-        cmd=[],
-        env={},
-        framework="vllm",
-        watchdog_server_log=None,
-        capture_meta={},
-        timeout_sec=0,
-        silence_timeout_sec=None,
-        session_deadline_sec=None,
-        serving_lease=None,
-        server_already_ready=False,
-        run_eval_disabled=False,
-    )
-
-    result = executor._preflight_server_argv(round_, 1)
-
-    assert result is None
-    assert seen["argv"][:4] == (
-        "--profiler-config.profiler",
-        "torch",
-        "--profiler-config.torch_profiler_dir",
-        str(tmp_path / "round" / "torch_trace"),
-    )
-
-
 def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "vllm")
     pe = ProfileExecutor()
@@ -1769,12 +1608,12 @@ def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_profile_executor_skips_when_framework_atom(monkeypatch, tmp_path):
-    """FRAMEWORK=atom falls through to the normal profile path (the atom Magpie wrapper bridges PROFILE=1 to atom's torch profiler)."""
+    """FRAMEWORK=atom falls through to the normal profile path (the round bridges PROFILE=1 to atom's torch profiler)."""
     monkeypatch.setenv("FRAMEWORK", "atom")
     # Anchor session/runs paths under the test tmp dir.
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     pe = ProfileExecutor()
-    # Sentinel-patch the parent __call__ so we can prove the normal path is reached without launching Magpie in this
+    # Sentinel-patch the parent __call__ so we can prove the normal path is reached without launching a round in this
     # unit test.
     called = {"parent": False}
 
@@ -1919,62 +1758,8 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch, tmp_path
     assert "profile_executor raised" in result["error"]
 
 
-@pytest.mark.asyncio
-async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(tmp_path):
-    """A parseable measurement must not launder a non-zero process exit into success."""
-    db = SqliteConnection(tmp_path / "baseline.db")
-    locks = SqliteLeaseBackend(db)
-    tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
-
-    output_dir = tmp_path / "out"
-    output_dir.mkdir(parents=True)
-
-    # The workspace must be created inside the fake to count as this run's output.
-    report_body = json.dumps(
-        {
-            "success": False,
-            "framework": "sglang",
-            "model": "/path/models/Qwen-Qwen3-8B",
-            "throughput": {
-                "request_throughput": 1.8,
-                "output_throughput": 1872.0,
-                "total_token_throughput": 3744.0,
-                "completed_requests": 320,
-                "duration_seconds": 177.0,
-            },
-            "latency": {"ttft": {"mean_ms": 140}, "e2el": {"mean_ms": 2500}},
-        }
-    )
-
-    def fake_run(cmd, *args, **kwargs):
-        ws = output_dir / "benchmark_sglang_20260501_001122"
-        ws.mkdir(parents=True, exist_ok=True)
-        (ws / "benchmark_report.json").write_text(report_body)
-        return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="cleanup failed")
-
-    task, _ = await tr.create_or_return_existing(
-        TaskSpec(
-            kind="baseline",
-            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-            idempotency_key="baseline-valid-warning",
-        ),
-    )
-    sub.register_executor("baseline", BaselineExecutor(session_dir=tmp_path))
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
-        res = await sub.run_task(task)
-
-    assert res.result["status"] == "failed"
-    assert res.result["error_class"] == "magpie_nonzero_after_valid_measurement"
-    assert res.result["returncode"] == 1
-    assert "cleanup failed" in res.result["error"]
-    assert res.result["reported_success"] is False
-    assert "output_throughput" not in res.result
-    db.close()
-
-
 def _native_profile_result(trace: Path) -> dict:
-    """What ``ProfileExecutor`` returns for a Magpie-owned profiling round."""
+    """What ``ProfileExecutor`` returns for a profiled AgentX round, read by the archived v1 AgentX report reader."""
     from hyperloom.inference_optimizer.agentx.report import agentx_measurement
 
     measurement = agentx_measurement(
@@ -2007,7 +1792,7 @@ def _native_profile_result(trace: Path) -> dict:
 
 @pytest.mark.asyncio
 async def test_native_agentx_profile_promotes_its_trace(session_dir, tmp_path):
-    """Magpie stamps a profiled replay diagnostic_only, so the profile lane cannot gate on measurement validity."""
+    """A profiled replay is diagnostic_only, so the profile lane cannot gate on measurement validity."""
     trace = tmp_path / "rank0.pt.trace.json.gz"
     trace.write_bytes(b"")
     result = _native_profile_result(trace)
@@ -2056,7 +1841,7 @@ async def test_coordinator_promotes_valid_baseline_even_with_failed_status(sessi
 
 @pytest.mark.asyncio
 async def test_profile_executor_extracts_trace_dir(tmp_path):
-    """When the workspace has torch_trace/*.trace.json.gz, the runner surfaces them in the result."""
+    """When the run_dir has profile/torch_trace/*.trace.json.gz, the runner surfaces them in the result."""
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
@@ -2066,7 +1851,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     output_dir.mkdir(parents=True)
 
     # The workspace must be created inside the fake to count as this run's output.
-    ws_name = "benchmark_sglang_20260501_001122"
+    ws_name = "run-1"
 
     async def _fake_baseline(_self, _ctx):
         workspace = output_dir / ws_name
@@ -2089,8 +1874,8 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
                 }
             )
         )
-        trace_dir = workspace / "torch_trace"
-        trace_dir.mkdir()
+        trace_dir = RunLayout(workspace).profile_trace_dirs()[0]
+        trace_dir.mkdir(parents=True)
         (trace_dir / "177-TP-0-DECODE.trace.json.gz").write_bytes(b"fake-trace")
         (trace_dir / "merged-177.trace.json.gz").write_bytes(b"fake-trace")
         return {
@@ -2115,7 +1900,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
         res = await sub.run_task(task)
 
     workspace = output_dir / ws_name
-    trace_dir = workspace / "torch_trace"
+    trace_dir = RunLayout(workspace).profile_trace_dirs()[0]
     merged_trace = trace_dir / "merged-177.trace.json.gz"
     assert res.state == "succeeded"
     assert res.result["framework"] == "sglang"
@@ -2123,139 +1908,6 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     assert len(res.result["trace_files"]) == 2
     assert res.result["main_trace_path"] == str(merged_trace)
     assert res.result["profile_trace_selection_reason"] == "merged_trace_preferred"
-    db.close()
-
-
-@pytest.mark.asyncio
-async def test_profile_executor_patches_configured_inferencex_path(
-    tmp_path,
-    monkeypatch,
-):
-    """ProfileExecutor must patch the InferenceX checkout Magpie will use (Qwen3-32B regression: empty benchmark.inferencex_path lost NUM_PROMPTS)."""
-    fake_ix = tmp_path / "InferenceX"
-    (fake_ix / "benchmarks").mkdir(parents=True)
-    (fake_ix / "utils" / "bench_serving").mkdir(parents=True)
-    (fake_ix / "benchmarks" / "benchmark_lib.sh").write_text(
-        'num_prompts="${NUM_PROMPTS:-$max_concurrency}"\n',
-        encoding="utf-8",
-    )
-    (fake_ix / "utils" / "bench_serving" / "benchmark_serving.py").write_text(
-        "# already patched\nPROFILE_EXTRA_BODY\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("INFERENCEX_PATH", str(fake_ix))
-
-    db = SqliteConnection(tmp_path / "x.db")
-    locks = SqliteLeaseBackend(db)
-    tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
-
-    output_dir = tmp_path / "out"
-    output_dir.mkdir(parents=True)
-
-    report_body = json.dumps(
-        {
-            "success": True,
-            "framework": "sglang",
-            "model": "/path/models/Qwen-Qwen3-8B",
-            "throughput": {
-                "request_throughput": 3.2,
-                "output_throughput": 800.0,
-                "total_token_throughput": 1600.0,
-                "completed_requests": 80,
-                "duration_seconds": 25.0,
-            },
-            "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
-        }
-    )
-
-    def _fake_run_ix(cmd, *args, **kwargs):
-        ws = output_dir / "benchmark_sglang_20260501_001122"
-        ws.mkdir(parents=True, exist_ok=True)
-        (ws / "benchmark_report.json").write_text(report_body)
-        return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
-
-    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    task, _ = await tr.create_or_return_existing(
-        TaskSpec(
-            kind="profile",
-            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-            idempotency_key="prof-inferencex-path",
-        ),
-    )
-    sub.register_executor("profile", pe)
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run_ix):
-        res = await sub.run_task(task)
-
-    assert res.state == "succeeded"
-    materialized = Path(res.result["materialized_config"])
-    import yaml
-
-    rendered = yaml.safe_load(materialized.read_text())
-    assert rendered["benchmark"]["inferencex_path"] == str(fake_ix)
-    db.close()
-
-
-@pytest.mark.asyncio
-async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp_path):
-    db = SqliteConnection(tmp_path / "x.db")
-    locks = SqliteLeaseBackend(db)
-    tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
-
-    output_dir = tmp_path / "out"
-    output_dir.mkdir(parents=True)
-
-    def _fake_run(cmd, *args, **kwargs):
-        workspace = output_dir / "benchmark_vllm_20260501_001122"
-        workspace.mkdir(parents=True, exist_ok=True)
-        (workspace / "benchmark_report.json").write_text(
-            json.dumps(
-                {
-                    "success": True,
-                    "framework": "vllm",
-                    "model": "/path/models/Qwen-Qwen3-8B",
-                    "throughput": {
-                        "request_throughput": 3.2,
-                        "output_throughput": 800.0,
-                        "total_token_throughput": 1600.0,
-                        "completed_requests": 80,
-                        "duration_seconds": 25.0,
-                    },
-                    "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
-                }
-            )
-        )
-        trace_dir = workspace / "torch_trace"
-        trace_dir.mkdir(exist_ok=True)
-        _gz_trace(trace_dir / "rank0.177.pt.trace.json.gz", 128)
-        capture_dir = workspace / "capture_traces"
-        capture_dir.mkdir(exist_ok=True)
-        _gz_trace(capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz", 32)
-        return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
-
-    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    task, _ = await tr.create_or_return_existing(
-        TaskSpec(
-            kind="profile",
-            params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
-            idempotency_key="prof-capture",
-        ),
-    )
-    sub.register_executor("profile", pe)
-    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
-        res = await sub.run_task(task)
-
-    workspace = output_dir / "benchmark_vllm_20260501_001122"
-    torch_trace = workspace / "torch_trace"
-    complete_trace = torch_trace / "rank0.177.pt.trace.json.gz"
-    assert res.state == "succeeded"
-    assert res.result["framework"] == "vllm"
-    assert res.result["trace_dir"] == str(torch_trace)
-    assert res.result["trace_files"] == [str(complete_trace)]
-    assert res.result["main_trace_path"] == str(torch_trace)
-    assert res.result["profile_trace_selection_reason"] == "trace_dir_preferred"
-    assert res.result["profile_trace_selection_reason"] != "capture_only_fallback"
     db.close()
 
 
@@ -2942,7 +2594,7 @@ async def test_trace_analyze_handler_backfills_runtime_metadata_from_config(
     tmp_path,
     monkeypatch,
 ):
-    """GEAK candidates must inherit the materialized Magpie workload config."""
+    """GEAK candidates must inherit the materialized workload config."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     config_path = tmp_path / "profile_config.with_envs.yaml"
@@ -3591,10 +3243,6 @@ def test_handlers_dispatch_table():
 
 
 # _batch_kernel_candidates collapses task_group members.
-def _write_candidates_json(tmp_path, payload):
-    p = tmp_path / "kernel_candidates.json"
-    p.write_text(json.dumps(payload), encoding="utf-8")
-    return p
 
 
 # Coordinator — REQUEST programmatic handler integration
@@ -3900,6 +3548,16 @@ def test_trace_files_for_dir_excludes_split_chunks_and_leads_with_the_capture(tm
     assert chunk not in found, "trace_split chunks must be excluded"
     assert sidecar not in found, "capture_traces sidecars must stay excluded"
     assert found[0] == capture
+
+
+def test_certificate_selects_the_trace_profile_hands_the_analysis(tmp_path):
+    trace_dir = RunLayout(tmp_path).profile_trace_dirs()[0]
+    _gz_trace(trace_dir / "merged-a.trace.json.gz", 32)
+    _gz_trace(trace_dir / "merged-b.trace.json.gz", 40_000)
+    result: dict = {}
+    _record_workspace_traces(result, str(tmp_path), "sglang", None)
+
+    assert result["trace_validate"]["trace_dir_level"]["selected_path"] == result["main_trace_path"]
 
 
 def test_trace_files_for_dir_orders_by_size_not_name(tmp_path):

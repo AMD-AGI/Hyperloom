@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import sys
 
 import pytest
 
@@ -18,5 +17,5 @@ def test_rebaseline_task_cannot_shrink_or_expand_round_cap(monkeypatch, tmp_path
     monkeypatch.setenv("AGENTX_DURATION", "50000")
     monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "50000")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "7800")
-    executor = BaselineExecutor(magpie_python=sys.executable, session_dir=tmp_path)
+    executor = BaselineExecutor(session_dir=tmp_path)
     assert executor._resolve_timeout({"timeout_sec": task_cap, "accuracy_timeout_sec": task_cap}) == 7800

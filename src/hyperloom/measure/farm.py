@@ -43,7 +43,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.aiter_layout import image_aiter_meta
-from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.benchmark_config import BenchmarkPoint, is_agentx
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_MARKER_DIR, AITER_META_WHEEL_DIR
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.jit.key import AITER_PACKAGE
@@ -57,7 +57,7 @@ from hyperloom.orchestrator.actions.executors import (
     is_patched_copy,
     lay_tracelens_patch,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
+from hyperloom.orchestrator.actions.executors.agentx_point import apply_native_runtime
 
 __all__ = [
     "BuiltRoot",
@@ -132,7 +132,8 @@ class Farm:
     server inherits no meta directory of its own, the image's, which the server is told to read aiter's sources from.
 
     When the sheet patches aiter's ``csrc`` or ``hsa`` (``meta_patched``), ``aiter_meta`` is the farm's own copy of the
-    meta directory instead, and the server must read that one."""
+    meta directory instead, and the server must read that one. ``mirrored`` are the image's directories the farm mirrors
+    (each package's, and the meta directory's where the farm lays one): its untouched files are links into them."""
 
     site: Path
     packages: tuple[str, ...]
@@ -140,6 +141,7 @@ class Farm:
     aiter_meta: Path | None = None
     meta_patched: bool = False
     native: tuple[NativeModule, ...] = ()
+    mirrored: tuple[Path, ...] = ()
 
 
 def locate_package(import_name: str, python: str, cwd: Path) -> Path:
@@ -308,8 +310,10 @@ def build_farm(
     meta_root = next((root for root in roots if root.import_name == AITER_META_WHEEL_DIR), None)
     packages = [root for root in roots if root is not meta_root]
     native: list[NativeModule] = []
+    mirrored: list[Path] = []
     for root in packages:
         base = locate_package(root.import_name, python, farm_dir.parent)
+        mirrored.append(base)
         if isinstance(root, BuiltRoot):
             native += _build_runtime_root(root, base, site, read_blob)
         elif root.kind == _RUNTIME_KIND:
@@ -320,11 +324,14 @@ def build_farm(
     if meta_root is not None or any(root.import_name == AITER_PACKAGE for root in packages):
         aiter = locate_package(AITER_PACKAGE, python, farm_dir.parent)
         meta = _build_meta_root(meta_root, aiter, site, os.environ if inherited is None else inherited, read_blob)
+        if meta is not None:
+            mirrored.append(image_aiter_meta(aiter))
     rebuilt = tuple(_plain(root) for root in packages) + (() if meta_root is None else (_plain(meta_root),))
     if not rebuilt:
         return None
     names = tuple(root.import_name for root in packages)
-    return Farm(site, names, rebuilt, meta, meta_patched=meta_root is not None, native=tuple(native))
+    patched = meta_root is not None
+    return Farm(site, names, rebuilt, meta, patched, tuple(native), tuple(dict.fromkeys(mirrored)))
 
 
 def _build_runtime_root(
@@ -400,19 +407,17 @@ def prepend_pythonpath(envs: MutableMapping[str, Any], site: Path) -> None:
     envs["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(part for part in parts if part))
 
 
-def _agentx_launch(bench: Mapping[str, Any]) -> Mapping[str, Any]:
-    agentx = bench.get("agentx")
-    return (agentx.get("launch_overrides") if isinstance(agentx, Mapping) else None) or {}
+def _server_envs(point: BenchmarkPoint) -> Mapping[str, Any]:
+    return point.agentx_launch.env if point.agentx else point.envs
 
 
 def server_environment(config: Mapping[str, Any]) -> Mapping[str, Any]:
-    """The variables the framework server of ``config`` is launched with.
+    """The variables the framework server of ``config`` is launched with, read-only (:func:`launch_environment` writes).
 
-    Magpie launches an AgentX server from ``agentx.launch_overrides.env`` and never reads ``benchmark.envs`` for it;
+    An AgentX server is launched from ``agentx.launch_overrides.env``, never from ``benchmark.envs``;
     any other server gets ``benchmark.envs``.
     """
-    bench = config.get("benchmark") or {}
-    return (_agentx_launch(bench).get("env") if is_magpie_agentx(bench) else bench.get("envs")) or {}
+    return _server_envs(BenchmarkPoint.from_document(config))
 
 
 def named_python(config: Mapping[str, Any]) -> str:
@@ -420,19 +425,18 @@ def named_python(config: Mapping[str, Any]) -> str:
 
     An AgentX server's interpreter can also be the ``executable`` its launch already carries.
     """
-    named = server_environment(config).get("HYPERLOOM_FRAMEWORK_PYTHON")
-    if not named and is_magpie_agentx(config.get("benchmark") or {}):
-        named = _agentx_launch(config["benchmark"]).get("executable")
-    return str(named or "")
+    point = BenchmarkPoint.from_document(config)
+    named = _server_envs(point).get("HYPERLOOM_FRAMEWORK_PYTHON")
+    return str(named or (point.agentx_launch.executable if point.agentx else ""))
 
 
 def server_python(config: Mapping[str, Any], *, default: str) -> str:
     """The interpreter the server of ``config`` runs with: the one it names, else its launcher's default.
 
-    Magpie starts an AgentX server with ``python3`` unless the launch names an executable; any other server uses
+    An AgentX server starts with ``python3`` unless the launch names an executable; any other server uses
     ``default``.
     """
-    agentx = is_magpie_agentx(config.get("benchmark") or {})
+    agentx = BenchmarkPoint.from_document(config).agentx
     return named_python(config) or (_AGENTX_DEFAULT_PYTHON if agentx else default)
 
 
@@ -440,13 +444,16 @@ def _loaded(config_path: Path) -> dict[str, Any]:
     return yaml.safe_load(config_path.read_text(encoding=_UTF8)) or {}
 
 
-def _launch_environment(config: dict[str, Any]) -> dict[str, Any]:
+def launch_environment(config: dict[str, Any]) -> dict[str, Any]:
     """The mapping the server of ``config`` takes its variables from, created when it has none: what :func:`server_environment`
     reads, for a caller that writes."""
     bench = config.setdefault("benchmark", {})
-    if is_magpie_agentx(bench):
-        return bench["agentx"].setdefault("launch_overrides", {}).setdefault("env", {})
-    return bench.setdefault("envs", {})
+    if not is_agentx(bench):
+        return bench.setdefault("envs", {})
+    if not isinstance(bench["agentx"], dict):
+        # ``agentx: true`` or an enabling word carries no launch to write into; the mapping it becomes stays enabled.
+        bench["agentx"] = {"enabled": True}
+    return bench["agentx"].setdefault("launch_overrides", {}).setdefault("env", {})
 
 
 def patched_configs(farm: Farm | None) -> dict[str, Path | None]:
@@ -477,12 +484,12 @@ def place_farm(config_path: Path, farm: Farm) -> Mapping[str, Any]:
     the rebuilt aiter sits in the farm, where it finds no ``csrc`` around it.
     """
     config = _loaded(config_path)
-    agentx = is_magpie_agentx(config.get("benchmark") or {})
+    agentx = BenchmarkPoint.from_document(config, source=str(config_path)).agentx
     if agentx:
         python = named_python(config)
         apply_native_runtime(config_path, {"runtime_python_exe": python} if python else {}, str(farm.site))
         config = _loaded(config_path)
-    envs = _launch_environment(config)
+    envs = launch_environment(config)
     if not agentx:
         prepend_pythonpath(envs, farm.site)
     if farm.aiter_meta is not None:
@@ -562,7 +569,7 @@ PATCH_NOT_LAID = "profile_patch_not_laid"
 
 
 def _rendered_envs(config: Mapping[str, Any]) -> Mapping[str, Any]:
-    return (config.get("benchmark") or {}).get("envs") or {}
+    return BenchmarkPoint.from_document(config).envs
 
 
 def _patch_only_flags(config: Mapping[str, Any]) -> list[str]:
@@ -582,7 +589,7 @@ def _profiled_package(config: Mapping[str, Any]) -> str | None:
     TraceLens's patch or passing its server a flag only the patch adds; ``None`` for any other point."""
     if _rendered_envs(config).get(_PATCH_STATUS_ENV) != _PATCH_LAID and not _patch_only_flags(config):
         return None
-    framework = str((config.get("benchmark") or {}).get("framework") or "")
+    framework = BenchmarkPoint.from_document(config).framework
     return framework_registry.python_package(framework) if framework_registry.is_supported(framework) else None
 
 
@@ -648,7 +655,7 @@ def _place_host_copy(config: dict[str, Any]) -> bool:
     package = _profiled_package(config)
     if package is None:
         return False
-    envs = _launch_environment(config)
+    envs = launch_environment(config)
     current = str((envs.get(_PYTHONPATH) if _PYTHONPATH in envs else os.environ.get(_PYTHONPATH, "")) or "")
     checkout = str(envs.get(_VLLM_CHECKOUT_ENV) or "") if package == "vllm" else ""
     on_path = bool(checkout) and checkout in current.split(os.pathsep)

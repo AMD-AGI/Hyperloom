@@ -1,16 +1,15 @@
 """Rolling chunks: a campaign longer than one job hands off to the next node.
 
-Cluster A's rules: never hold a node,
-each job's work is capped at 4 hours, and longer work rolls from node to node:
+For a cluster with these rules: never hold a node, each job's work is capped
+at 4 hours, and longer work rolls from node to node:
 the running job submits its successor at the 3-hour mark, on another node and
 with no dependency, and the work switches to it at 4 hours. The switch happens
 at the last iteration boundary before then: an iteration starts only if it can
 finish before the switch, so none is lost.
 
-This is Cluster A's rule, not a universal one: it lives on Arbor ``main`` only (it
-began on Arbor's ``<old branch>``). It is off unless the launcher sets ``ARBOR_ROLL=1``
-(``scripts/cluster/chunk_lib.sh``); without that the driver never imports this
-module and behaves as before.
+This is one cluster's rule, not a universal one. It is off unless the launcher
+sets ``ARBOR_ROLL=1`` (from its chunk library); without that the driver never
+imports this module and behaves as before.
 
 The split: this module owns the rule (the clock, when the successor is due,
 the switch deadline, the iteration estimate, the session lease and the
@@ -427,9 +426,9 @@ class Roll:
 
 
 # -- the flag KEEPs across containers, rolling or not ------------------------------------
-# A driver that does not roll calls these too (arbor/driver.py): a campaign moved to a held
-# job with roll mode off gets a fresh container seeded from the config, and without the
-# mirrored flag KEEPs its next iteration runs without a kept launch flag, a regression.
+# A driver that does not roll calls these too (arbor/driver.py): a campaign moved to a job
+# with roll mode off got a fresh container seeded from the config, and its first iteration
+# there ran without its kept --enable-expert-parallel, measurably slower.
 
 
 def mirror_workspace_config(config: dict, session: Path, job: str = "", clock=time.time) -> None:
@@ -521,7 +520,7 @@ def wait(chain: Path, pred: str, timeout_min: float, poll_s: float = 20,
 
 
 def _selftest(args) -> int:
-    """The driver's loop with sleeps for iterations (the Cluster A smoke test)."""
+    """The driver's loop with sleeps for iterations (the roll smoke test)."""
     session = Path(args.session)
     roll, rc = start({}, session)
     if rc is not None:

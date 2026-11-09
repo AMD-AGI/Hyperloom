@@ -86,7 +86,7 @@ from hyperloom_multibranch.contracts.repo import (
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard.knowledge.warm_start import ChampionOutcome, PreparedReplay
 from hyperloom_multibranch.blackboard.rsi.stranded import StrandedLead
-from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD
+from hyperloom_multibranch.rulegate.agentx import BELOW_THRESHOLD
 from hyperloom_multibranch.rulegate.inferencex import GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED
 from hyperloom_multibranch.scheduling.candidates import Candidates
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -371,7 +371,7 @@ class LlmPatchResolver:
 FOUNDATION_FIX_VERDICTS = frozenset({Verdict.IMPROVED, Verdict.FLAT, Verdict.REGRESSED})
 # A settled verdict refused only for want of a gain; any other refusal (a broken guard, extra failed requests, a pair
 # that did not measure the same work) is a defect a foundation fix may not carry onto the integration branch.
-GAIN_ONLY_REFUSALS = frozenset({GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED, P50_BELOW_THRESHOLD})
+GAIN_ONLY_REFUSALS = frozenset({GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED, *BELOW_THRESHOLD})
 
 
 def defects_beyond_gain(judgement: Judgement) -> tuple[str, ...]:

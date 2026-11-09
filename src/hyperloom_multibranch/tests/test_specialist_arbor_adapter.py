@@ -6,12 +6,15 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 from collections.abc import Mapping
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import pytest
 
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT
 from hyperloom.measure.compile import (
     ComponentLayout,
     PackageBase,
@@ -23,6 +26,11 @@ from hyperloom_multibranch.specialist import arbor_adapter
 from hyperloom_multibranch.specialist.agent_manifest import REFUSED_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, make_ready, root_profile
 from hyperloom_multibranch.specialist.arbor_adapter import (
+    ARBOR_OBJECTIVES,
+    ARBOR_PYTHON,
+    OBJECTIVE_KEY,
+    OBJECTIVE_MODULE,
+    OBJECTIVE_SINCE,
     BRANCH_RUN,
     DOSSIER_DIR,
     DOSSIER_PASS,
@@ -39,8 +47,10 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     carry_dossier,
     dossier_notes,
     generate_directions,
+    host_rules,
     is_arbor,
     link_built,
+    exit_reason,
     mapped,
     read_launch,
     refusals,
@@ -71,6 +81,8 @@ from hyperloom_multibranch.tests.agent_rig import (
     _spec,
     _write,
 )
+from hyperloom_multibranch.tests.base_records import base_record, write_record
+from inference_suite.contracts import Workload as LaunchWorkload
 
 
 def _filled(command: str, port: int, out: str) -> str:
@@ -201,14 +213,15 @@ def test_empty_server_flags_are_refused_with_why(tmp_path: Path) -> None:
 
 
 def test_the_gate_s_client_is_arbor_s_bench_command_with_only_its_port_and_result_dir_left_to_fill() -> None:
-    client = CLIENT.command(PORT, Path("/mb/a1/agent/mb-bench"))
+    client = CLIENT.stage(PORT, Path("/mb/a1/agent/mb-bench"))
 
     command = bench_command(client)
 
-    assert "--base-url http://0.0.0.0:{port} " in command and "--result-dir {out} " in command
-    assert "--num-warmups 16" in command, "the client's warm-up requests are kept"
-    words = shlex.split(client)
-    words[words.index("--base-url") + 1] = "http://0.0.0.0:8123"
+    warmup, measured = command.split(" && ")
+    assert "--base-url http://0.0.0.0:{port} " in warmup and "--base-url http://0.0.0.0:{port} " in measured
+    assert "--result-dir {out} " in measured
+    assert "--num-prompts 16 " in warmup, "the client's warm-up requests are kept"
+    words = shlex.split(client.replace("http://0.0.0.0:31110", "http://0.0.0.0:8123"))
     words[words.index("--result-dir") + 1] = "/s/iter_3/host bench"
     assert shlex.split(_filled(command, 8123, "/s/iter_3/host bench")) == words
 
@@ -241,6 +254,7 @@ def test_a_client_s_port_and_result_dir_are_templated_in_every_form_it_gives_the
     ("client", "said"),
     [
         ("python3 bench.py --base-url http://0.0.0.0:31110", "names no --result-dir"),
+        ("python3 -m inference_suite run --config /mb/c.yaml", "names no --result-dir or --run-dir"),
         ("python3 bench.py --result-dir /mb/out", "names no port"),
         ("python3 bench.py --base-url http://0.0.0.0 --result-dir /mb/out", "names no port"),
         ("python3 bench.py --base-url http://0.0.0.0:31110 --result-dir $OUT", "expands variables"),
@@ -251,6 +265,69 @@ def test_a_client_s_port_and_result_dir_are_templated_in_every_form_it_gives_the
 def test_a_client_arbor_could_not_fill_is_refused_with_why(client: str, said: str) -> None:
     with pytest.raises(ArborRefused, match=said):
         bench_command(client)
+
+
+def _agentx_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """The gate's AgentX client staged for an agent on :data:`PORT`, as MB gives it to an AgentX session's Arbor."""
+
+    from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
+    from hyperloom_multibranch.specialist.gate_client import read_gate_client
+    from hyperloom_multibranch.tests.test_specialist_gate_client import _agentx_session
+
+    monkeypatch.setenv(TOOL_CACHE_ENV, str(tmp_path / "tools"))
+    canonical, _ = _agentx_session(tmp_path, tmp_path / "tools")
+    return read_gate_client(canonical, canonical.parent.parent, 4800).stage(PORT, tmp_path / "agent" / "mb-bench")
+
+
+def test_the_gate_s_agentx_round_is_arbor_s_bench_command_with_only_its_run_dir_left_to_fill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _agentx_client(tmp_path, monkeypatch)
+
+    command = bench_command(client)
+
+    assert command.endswith(" --run-dir {out}") and "{port}" not in command
+    words = shlex.split(client)
+    words[words.index("--run-dir") + 1] = "/s/iter_3/host bench"
+    assert shlex.split(_filled(command, PORT, "/s/iter_3/host bench")) == words
+
+
+def _arbor_config_errors(config: Mapping[str, object]) -> list[str]:
+    """What the vendored Arbor's own config check (arbor/component.py's ``config_errors``) refuses ``config`` for."""
+
+    script = "import json, sys; from arbor import component; print(json.dumps(component.config_errors(json.load(sys.stdin))))"
+    run = subprocess.run(
+        [sys.executable, "-c", script], input=json.dumps(config), cwd=VENDORED_ARBOR, capture_output=True, text=True
+    )
+    assert run.returncode == 0, run.stderr
+    return json.loads(run.stdout)
+
+
+def test_an_agentx_arbor_on_the_session_s_base_measures_with_the_gate_s_round_and_needs_no_bench_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = write_record(tmp_path / "record" / "base_launch.json")
+    client = _agentx_client(tmp_path, monkeypatch)
+    spec = replace(
+        _spec(tmp_path, launch=str(record), workload=AGENTX_WORKLOAD, metric=GRADED_INTVTY_P50),
+        server_args="",
+        envs={},
+        client=client,
+        client_seconds=4800.0,
+    )
+
+    config = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
+
+    component = config["component"]
+    assert component["bench_command"] == bench_command(client)
+    assert component["phase_minutes"] == {"bench": 80}
+    assert config["server_env"] == {arbor_adapter.ACCURACY_FLOOR_ENV: "0.5", **read_launch(record).server_env}
+    assert _arbor_config_errors(config) == [] and _arbor_start_check(config) == []
+    assert "report.json" in " ".join(config["directives"])
+
+
+def test_a_client_bounded_by_the_agent_s_own_cap_leaves_arbor_s_phase_minutes_alone(tmp_path: Path) -> None:
+    assert "phase_minutes" not in arbor_config(_spec(tmp_path), tmp_path / "checkout", BRANCH_RUN)["component"]
 
 
 def test_arbor_s_session_is_the_directory_its_manifest_s_snapshots_name(tmp_path: Path) -> None:
@@ -349,12 +426,33 @@ def test_a_framework_not_installed_or_with_no_layout_links_nothing(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_arbor_s_install_checks_each_import_it_needs_before_installing_it() -> None:
+def test_arbor_s_install_checks_each_import_it_needs_as_arbor_before_installing_it() -> None:
+    """Each import is checked after Arbor's own, with ``ARBOR_SITE`` set as Arbor's commands have it, so a module pip
+    installed out of the interpreter's reach counts as there only for an Arbor that reads it."""
+    assert ARBOR_PYTHON == 'env ARBOR_SETTINGS=/dev/null ${PIP_TARGET:+"ARBOR_SITE=$PIP_TARGET"} python3'
     assert INSTALL[1:3] == (
-        "python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet pyyaml",
-        "python3 -c 'import claude_agent_sdk' 2>/dev/null || python3 -m pip install --quiet claude-agent-sdk",
+        f"{ARBOR_PYTHON} -c 'import arbor, yaml' 2>/dev/null || python3 -m pip install --quiet pyyaml",
+        f"{ARBOR_PYTHON} -c 'import arbor, claude_agent_sdk' 2>/dev/null"
+        " || python3 -m pip install --quiet claude-agent-sdk",
     )
-    assert "(3, 11)" in INSTALL[0] and INSTALL[-1] == "python3 -c 'import yaml, claude_agent_sdk'"
+    assert "(3, 11)" in INSTALL[0] and INSTALL[-1].startswith(
+        f"{ARBOR_PYTHON} -c 'import arbor, yaml, claude_agent_sdk' ||"
+    )
+
+
+def test_arbor_s_commands_read_no_settings_file_of_the_user_running_them(tmp_path: Path) -> None:
+    """A user's ``~/.arbor/settings.env`` would set ``ARBOR_*`` values MB's preflight refuses in the environment (a
+    roll, a review gate, another agent backend); Arbor's commands point the file at an empty one, which Arbor reads as
+    no settings, where an empty value would fall back to the user's file."""
+    shown = subprocess.run(
+        ["sh", "-c", ARBOR_PYTHON.replace(" python3", " sh -c 'echo \"$ARBOR_SETTINGS\"'")],
+        env={"PATH": os.environ["PATH"], "HOME": str(tmp_path), "ARBOR_SETTINGS": str(tmp_path / "user.env")},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert shown.stdout.strip() == "/dev/null"
 
 
 async def test_the_root_s_op_shares_reach_arbor_s_profile_as_mb_writes_them_beside_the_adapter_s_config(
@@ -409,7 +507,109 @@ def test_arbor_runs_the_pack_the_spec_names_and_one_its_checkout_lacks_is_refuse
     assert arbor_config(spec, checkout, BRANCH_RUN)["pack"] == "serving"
 
 
-#: A launch Magpie resolves from an InferenceX AgentX recipe, as a launch file.
+#: Arbor's arbor/objective.py as far as the adapter reads it: the metric keys it optimizes on opt_objective.
+OBJECTIVE_9C455DF = 'KNOWN = {"e2e_norm_intvty_p50": ("max", ""), "total_throughput": ("max", "")}\n'
+OBJECTIVE_E8D31B7 = 'KNOWN = {"p50_interactivity": ("max", ""), "total_throughput": ("max", "")}\n'
+OBJECTIVE_DF9B55A = (
+    'KNOWN = {"e2e_norm_intvty_p50": ("max", ""), "total_throughput": ("max", ""), '
+    '"total_token_throughput": ("max", "")}\n'
+)
+
+
+@pytest.mark.parametrize(
+    ("metric", "written"),
+    [
+        (GRADED_INTVTY_P50, "e2e_norm_intvty_p50"),
+        (TOTAL_TOKEN_THROUGHPUT, "total_token_throughput"),
+        ("output_throughput", None),
+    ],
+)
+def test_arbor_optimizes_the_metric_the_session_keeps_on(tmp_path: Path, metric: str, written: str | None) -> None:
+    config = arbor_config(replace(_spec(tmp_path), metric=metric), tmp_path / "checkout", BRANCH_RUN)
+
+    assert config.get(OBJECTIVE_KEY) == written
+
+
+@pytest.mark.parametrize(
+    ("objective", "metric", "refused"),
+    [
+        (OBJECTIVE_DF9B55A, GRADED_INTVTY_P50, False),
+        (OBJECTIVE_DF9B55A, TOTAL_TOKEN_THROUGHPUT, False),
+        (OBJECTIVE_9C455DF, GRADED_INTVTY_P50, False),
+        (OBJECTIVE_9C455DF, TOTAL_TOKEN_THROUGHPUT, True),
+        (OBJECTIVE_E8D31B7, GRADED_INTVTY_P50, True),
+        (OBJECTIVE_E8D31B7, TOTAL_TOKEN_THROUGHPUT, True),
+        (None, GRADED_INTVTY_P50, False),
+        (None, TOTAL_TOKEN_THROUGHPUT, True),
+    ],
+    ids=[
+        "df9b55a-p50",
+        "df9b55a-total",
+        "9c455df-p50",
+        "9c455df-total",
+        "e8d31b7-p50",
+        "e8d31b7-total",
+        "older-p50",
+        "older-total",
+    ],
+)
+def test_an_arbor_that_cannot_optimize_the_session_s_objective_is_refused_naming_the_commit(
+    tmp_path: Path, objective: str | None, metric: str, refused: bool
+) -> None:
+    files = {**CHECKOUT_FILES, **({OBJECTIVE_MODULE: objective} if objective else {})}
+    checkout = _write(tmp_path / "checkout", files)
+    run = partial(
+        arbor_manifest, replace(_spec(tmp_path), metric=metric), ArborCheckout("arbor", "abc", checkout), BRANCH_RUN
+    )
+
+    if refused:
+        since = OBJECTIVE_SINCE[ARBOR_OBJECTIVES[metric]]
+        with pytest.raises(ArborRefused, match=f"cannot optimize .*pin Arbor {since} or later"):
+            run()
+    else:
+        assert run().config.get(OBJECTIVE_KEY) == ARBOR_OBJECTIVES[metric]
+
+
+def test_arbor_runs_the_validator_scripts_its_pack_names(tmp_path: Path) -> None:
+    """Arbor's agentx pack names validator/bench_agentx.sh; a config naming validator/bench.sh was refused as no file."""
+    own = {
+        "packs/agentx/pack.yaml": "name: agentx\nvalidator:\n  bench: validator/bench_agentx.sh\n"
+        "  correctness: validator/correctness.sh\n",
+        "packs/agentx/validator/bench_agentx.sh": "#!/usr/bin/env bash\n",
+        "packs/agentx/validator/correctness.sh": "#!/usr/bin/env bash\n",
+    }
+    checkout = _write(tmp_path / "checkout", {**CHECKOUT_FILES, **own})
+
+    config = arbor_config(replace(_spec(tmp_path), pack="agentx"), checkout, BRANCH_RUN)
+
+    validator = checkout / "packs" / "agentx" / "validator"
+    assert config["bench_script"] == str(validator / "bench_agentx.sh")
+    assert config["correctness_script"] == str(validator / "correctness.sh")
+    assert not [reason for reason in refusals(config) if "pack" in reason or "script" in reason]
+    unread = _write(tmp_path / "other", {"packs/x/pack.yaml": "validator: [\n"})
+    assert arbor_adapter.validator_script(unread / "packs" / "x", "bench", "validator/bench.sh") == "validator/bench.sh"
+
+
+def test_the_python_arbor_needs_is_the_one_its_checkout_names(tmp_path: Path) -> None:
+    """A checkout from Arbor 6126676 names 3.10 (serving images ship it); one without the name needs 3.11."""
+    import subprocess
+    import sys
+
+    check = next(command for command in arbor_adapter.INSTALL if "PYTHON_MIN" in command)
+    code = check.split(" -c ", 1)[1].strip("'")
+    named = _write(tmp_path / "named", {"arbor/version.py": "PYTHON_MIN: tuple[int, int] = (3, 10)\n"})
+    later = _write(tmp_path / "later", {"arbor/version.py": "PYTHON_MIN: tuple[int, int] = (9, 0)\n"})
+    older = _write(tmp_path / "older", {"arbor/__init__.py": ""})
+
+    def run(cwd: Path) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, "-c", code], cwd=cwd, capture_output=True, text=True)
+
+    assert run(named).returncode == 0
+    assert "Arbor needs Python 9.0 or newer" in run(later).stderr
+    assert (run(older).returncode == 0) == (sys.version_info[:2] >= (3, 11))
+
+
+#: A launch resolved from an InferenceX AgentX recipe, as a launch file.
 RESOLVED = {
     "server_flags": "--mem-fraction-static 0.8 --chunked-prefill-size 16384",
     "server_env": {"SGLANG_SIMULATE_ACC_LEN": "3", "VLLM_ROCM_USE_AITER": "0"},
@@ -466,10 +666,13 @@ def test_arbor_is_held_to_mb_s_accuracy_floor_unless_the_launch_or_the_recipe_se
     assert [config["server_env"][floor] for config in configs] == ["0.5", "0.85", "0.8"]
 
 
-def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Path) -> None:
+def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # The benchmark's rules are considered in validation, and are part of the dossier.
+    monkeypatch.delenv("HYPERLOOM_PERF_NOISE_PCT", raising=False)
     spec = _spec(tmp_path)
-    agentx = replace(spec, workload={"kind": "agentx", "conc": 8})
+    agentx = replace(spec, workload={"kind": "agentx", "conc": 8}, metric=GRADED_INTVTY_P50)
 
     rules = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)["directives"]
     agentx_rules = arbor_config(agentx, tmp_path / "checkout", BRANCH_RUN)["directives"]
@@ -477,10 +680,36 @@ def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Pa
     assert all(rule.startswith(arbor_adapter.HOST_RULE) for rule in (*rules, *agentx_rules))
     fixed, kept, accuracy = rules
     assert "inferencex at concurrency 8, isl 1024, osl 1024" in fixed and "ISL" in fixed and "CONC" in fixed
-    assert "output_throughput" in kept
+    assert "output_throughput" in kept and "a second measurement confirms" in kept
+    agentx_kept = agentx_rules[1]
+    assert "in one measurement, which is final unless a guard" in agentx_kept and "second" not in agentx_kept
+    assert "bar of +2%" in agentx_kept and "output" not in agentx_kept
+    assert "e2e_norm_intvty_p90 and total_token_throughput within 5%" in agentx_kept
     assert "at least 0.5" in accuracy and "at most 0.05" in accuracy
     assert "the root it measures itself" in accuracy
-    assert "error rate stays at or under 10%" in agentx_rules[-1]
+    assert "error rate stays at or under 10%" in agentx_rules[2]
+    assert "agentx.e2e_norm_intvty.p50" in agentx_rules[3] and "report.json" in agentx_rules[3]
+    total = host_rules(replace(agentx, metric=TOTAL_TOKEN_THROUGHPUT))
+    assert (
+        "agentx.e2e_norm_intvty.p90" in agentx_rules[3]
+        and "agentx.throughput.total_tokens_per_second" in agentx_rules[3]
+    )
+    assert "output_tokens_per_second" not in agentx_rules[3]
+    assert "agentx.throughput.total_tokens_per_second is the total_token_throughput" in total[3]
+    assert "e2e_norm_intvty_p90 and e2e_norm_intvty_p50 within 5%" in total[1] and "output" not in total[1]
+    unmeasured = host_rules(replace(agentx, client=""))
+    assert len(unmeasured) == 3 and "error rate stays at or under 10%" in unmeasured[-1]
+
+
+def test_arbor_is_told_its_source_changes_cannot_be_kept_when_the_spec_says_why(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    unkept = replace(spec, source_unkept="vllm is installed from a wheel")
+
+    rules = arbor_config(unkept, tmp_path / "checkout", BRANCH_RUN)["directives"]
+
+    assert rules[:-1] == host_rules(spec)
+    assert rules[-1].startswith(arbor_adapter.HOST_RULE)
+    assert "vllm is installed from a wheel" in rules[-1] and "launch flags" in rules[-1]
 
 
 def test_arbor_s_accuracy_tolerance_is_the_drop_mb_s_rule_allows(tmp_path: Path) -> None:
@@ -504,7 +733,7 @@ def test_a_launch_file_s_client_measures_arbor_only_when_mb_gives_none(tmp_path:
 
 def test_an_agentx_branch_is_refused_before_arbor_starts_unless_it_is_given_the_resolved_launch(tmp_path: Path) -> None:
     checkout = _write(tmp_path / "checkout", CHECKOUT_FILES)
-    spec = _spec(tmp_path, framework="sglang", server_args="", workload=AGENTX_WORKLOAD)
+    spec = _spec(tmp_path, framework="sglang", server_args="", workload=AGENTX_WORKLOAD, metric=GRADED_INTVTY_P50)
 
     with pytest.raises(ArborRefused, match="--agent-launch"):
         arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
@@ -537,11 +766,89 @@ def test_a_launch_file_the_adapter_cannot_use_is_refused_with_why(tmp_path: Path
     assert said.split("; ")[0] in str(refused.value) and said.split("; ")[-1] in str(refused.value)
 
 
-def test_the_repository_s_launch_template_is_a_launch_file_the_adapter_reads() -> None:
-    launch = read_launch(TEMPLATE)
+def test_the_repository_s_launch_template_has_a_launch_file_s_keys_and_is_refused_until_filled(tmp_path: Path) -> None:
+    template = json.loads(TEMPLATE.read_text(encoding="utf-8"))
+    filled = {**RESOLVED, "client": "", "server_flags": f"{RESOLVED['server_flags']} --reasoning-start-str <think>"}
 
-    assert set(json.loads(TEMPLATE.read_text(encoding="utf-8"))) == set(LAUNCH_KEYS)
-    assert launch.server_flags and launch.server_env and launch.client == ""
+    with pytest.raises(ArborRefused) as refused:
+        read_launch(TEMPLATE)
+
+    assert set(template) == set(LAUNCH_KEYS)
+    assert "server_flags, server_env, model_name still hold the template's placeholders" in str(refused.value)
+    assert read_launch(Path(_launch_file(tmp_path, filled))).server_flags == filled["server_flags"]
+
+
+#: Where the repository vendors Arbor, whose start check a record's config must pass.
+VENDORED_ARBOR = Path(__file__).parents[2] / "hyperloom_arbor"
+
+
+def _arbor_start_check(config: Mapping[str, object]) -> list[str]:
+    """What the vendored Arbor's own start check (arbor/base_launch.py) refuses ``config`` for."""
+
+    script = (
+        "import json, sys; from arbor import base_launch; print(json.dumps(base_launch.check(json.load(sys.stdin))[1]))"
+    )
+    run = subprocess.run(
+        [sys.executable, "-c", script],
+        input=json.dumps(config),
+        cwd=VENDORED_ARBOR,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(run.stdout)
+
+
+def test_a_base_launch_record_is_served_as_the_gate_seeds_its_launch_with_its_golden_layer(tmp_path: Path) -> None:
+    record = write_record(tmp_path / "record" / "base_launch.json")
+
+    launch = read_launch(record)
+
+    assert launch.server_flags == (
+        "--tensor-parallel-size 2 --max-num-seqs 128 --chat-template 'a b'"
+        ' --speculative-config {"method":"mtp","num_speculative_tokens":3}'
+    )
+    assert launch.server_env == {"VLLM_ROCM_USE_AITER": "1", "VLLM_SIMULATE_ACC": "3"}
+    assert (launch.record, launch.digest, launch.entrypoint) == (str(record), base_record().digest(), ("vllm", "serve"))
+    assert (launch.model_name, launch.client) == ("", "")
+
+
+def test_arbor_s_own_start_check_passes_a_branch_served_a_record_on_the_base_and_refuses_another(
+    tmp_path: Path,
+) -> None:
+    # The record names no served model and no client: the gate's client gives both.
+    record = write_record(tmp_path / "record" / "base_launch.json")
+    spec = replace(_spec(tmp_path, launch=str(record)), server_args="", envs={})
+
+    config = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
+    differs = arbor_config(replace(spec, envs={"VLLM_ROCM_USE_AITER": "0"}), tmp_path / "checkout", BRANCH_RUN)
+
+    assert config["model_name"] == "Qwen/Qwen3-14B-FP8"
+    assert config["component"]["bench_command"] == bench_command(spec.client)
+    assert _arbor_start_check(config) == []
+    assert _arbor_start_check(differs) == [
+        "the launch differs from the host's base launch: the variable VLLM_ROCM_USE_AITER is 0 in Arbor's environment"
+        " and 1 in the host's"
+    ]
+
+
+def test_a_base_launch_record_that_cannot_be_used_is_refused_with_why(tmp_path: Path) -> None:
+    tampered = write_record(tmp_path / "tampered.json", args=["--max-num-seqs", "64"])
+    scriptable = base_record(
+        query=replace(base_record().query, workload=LaunchWorkload.SCRIPTABLE, concurrencies=(8,), tp=None),
+        entrypoint=("bash", "bench.sh"),
+        source=replace(base_record().source, files={"bench.sh": "c" * 64}),
+        args=(),
+        env={},
+        golden_al=None,
+        client=None,
+    )
+    script = write_record(tmp_path / "script.json", scriptable)
+
+    with pytest.raises(ArborRefused, match="base_digest_mismatch"):
+        read_launch(tampered)
+    with pytest.raises(ArborRefused, match="runs a script and launches no server"):
+        read_launch(script)
 
 
 @pytest.mark.parametrize(
@@ -641,6 +948,20 @@ async def test_an_arbor_checkout_is_made_ready_by_the_adapter_without_the_onboar
     assert all(cwd == ready.source_dir for _command, cwd, _env in sandbox.ran)
 
 
+async def test_an_arbor_given_why_no_source_change_can_be_kept_is_told_so_and_made_ready_as_told(
+    tmp_path: Path,
+) -> None:
+    spec = replace(_spec(tmp_path), source_unkept="the image's vllm names no upstream commit")
+
+    ready = await make_ready(
+        str(_arbor_repo(tmp_path)), spec, tmp_path / "agent", _setup(Sandbox([Process(None)]), None)
+    )
+
+    directives = json.loads((ready.source_dir / CONFIG_FILE).read_text())["directives"]
+    assert any(spec.source_unkept in rule for rule in directives)
+    assert ready.source_unkept == spec.source_unkept
+
+
 async def test_a_config_the_adapter_refuses_fails_the_preflight_in_one_attempt_with_every_reason(
     tmp_path: Path,
 ) -> None:
@@ -707,6 +1028,25 @@ def test_a_dossier_pass_ended_mapped_only_when_its_exit_file_says_so(
     assert mapped(tmp_path) is ended
 
 
+@pytest.mark.parametrize(
+    ("content", "said"),
+    [
+        (None, "it wrote no exit reason"),
+        ("{", "its exit reason cannot be read: "),
+        (json.dumps({"reason": ""}), "its exit file names no reason: {'reason': ''}"),
+        (json.dumps({"reason": "deadline"}), "deadline"),
+    ],
+)
+def test_arbor_s_exit_reason_is_its_exit_file_s_or_what_is_wrong_with_the_file(
+    tmp_path: Path, content: str | None, said: str
+) -> None:
+    path = tmp_path / "component_exit.json"
+    if content is not None:
+        path.write_text(content)
+
+    assert exit_reason(path).startswith(said)
+
+
 async def test_a_map_is_split_into_one_plan_per_share_by_arbor_s_command_line(tmp_path: Path) -> None:
     checkout = _write(tmp_path / "checkout", CHECKOUT_FILES)
     map_file = _write(tmp_path / "pass", {"directions.json": json.dumps(MAP)}) / "directions.json"
@@ -718,6 +1058,22 @@ async def test_a_map_is_split_into_one_plan_per_share_by_arbor_s_command_line(tm
     assert dealt == [["m-attn", "m-allreduce"], ["m-moe"]]
     with pytest.raises(SplitFailed, match="3 independent groups for 4 shares"):
         await split_directions(checkout, map_file, 4, tmp_path / "four")
+
+
+async def test_arbor_s_directions_command_reads_no_settings_file_of_the_user_running_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arbor reads its settings file on import (``arbor/__init__.py``); this one refuses any but the empty one.
+    reads = (
+        'import os, sys\nif os.environ.get("ARBOR_SETTINGS") != "/dev/null":\n    sys.exit("read a settings file")\n'
+    )
+    checkout = _write(tmp_path / "checkout", {**CHECKOUT_FILES, "arbor/__init__.py": reads})
+    map_file = _write(tmp_path / "pass", {"directions.json": json.dumps(MAP)}) / "directions.json"
+    monkeypatch.setenv("ARBOR_SETTINGS", str(tmp_path / "user.env"))
+
+    shares = await split_directions(checkout, map_file, 2, tmp_path / "shares")
+
+    assert len(shares) == 2
 
 
 #: A real Arbor checkout to split with, when the environment names one; its split runs offline, on the standard
@@ -776,3 +1132,25 @@ def test_a_real_arbor_launches_sglang_at_the_workload_s_tp_and_ep(tmp_path: Path
     words = shlex.split(done.stdout)
     assert words[:3] == ["python3", "-m", "sglang.launch_server"]
     assert (words[words.index("--tp-size") + 1], words[words.index("--ep-size") + 1]) == ("4", "4")
+
+
+def test_a_workspace_its_agent_made_a_partial_clone_fetches_nothing_as_its_root_is_checked(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    workspace, ran, transport = Path(spec.workspace), tmp_path / "ran", tmp_path / "transport"
+    transport.write_text(f"#!/bin/sh\necho ran >> {ran}\nexit 1\n")
+    transport.chmod(0o755)
+    with (workspace / ".git" / "config").open("a") as config:
+        config.write(
+            f"[core]\n\trepositoryformatversion = 1\n\tsshCommand = {transport}\n"
+            '[extensions]\n\tpartialClone = promisor\n[remote "promisor"]\n\turl = ssh://example.invalid/r\n'
+            "\tpromisor = true\n"
+        )
+    missing = "f" * 40
+
+    assert arbor_adapter._has_commit(workspace, spec.root)
+    assert not arbor_adapter._has_commit(workspace, missing)
+    assert arbor_adapter._shipped(workspace) == frozenset()
+
+    assert not ran.exists(), ran.read_text()
+    subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{missing}^{{commit}}"], cwd=workspace, check=False)
+    assert ran.exists(), "plain git fetches the missing object through the configured transport, so the plant is live"

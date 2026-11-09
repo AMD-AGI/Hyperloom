@@ -93,7 +93,6 @@ def test_framework_registry_surface() -> None:
     assert fr.is_supported("nope") is False
     spec = fr.FRAMEWORKS["sglang"]
     assert spec.name == "sglang"
-    assert fr.FRAMEWORKS["xdit"].kind == fr.SCRIPTABLE
     assert fr.is_scriptable("xdit") is True
     assert fr.is_scriptable("sglang") is False
     assert fr.extra_args_env("vllm") == "EXTRA_VLLM_ARGS"

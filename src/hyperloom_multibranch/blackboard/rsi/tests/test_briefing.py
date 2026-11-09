@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from hyperloom_kb import RemoteReadResult
 
+from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
 from hyperloom.contracts.measurement import REPRODUCED, AttachmentRef, Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import (
     ComponentChange,
@@ -43,6 +44,7 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.knowledge.recall import (
     INTERACTIVITY_OBJECTIVE,
     THROUGHPUT_OBJECTIVE,
+    TOTAL_THROUGHPUT_OBJECTIVE,
     IdentityIndex,
 )
 from hyperloom_multibranch.blackboard.knowledge.tests.fakes import (
@@ -346,6 +348,35 @@ async def test_an_experience_of_the_other_kind_of_session_is_only_a_lesson_to_re
     assert brief.leads == ("prior: --block-size 16: keep +10.00% [exp-faster]",)
     assert brief.lessons[-1] == (
         "to re-verify: --block-size 16: keep +12.00% on e2e_interactivity@v1 (objective differ) [exp-agentx]"
+    )
+
+
+async def test_an_agentx_briefing_graded_on_total_throughput_reads_that_objective_and_its_baseline(
+    tmp_path: Path,
+) -> None:
+    class _AgentX(_WithExtraFailure):
+        async def snapshot(self) -> BlackboardSnapshot:
+            snapshot = await self.blackboard.snapshot()
+            assert snapshot.baseline is not None
+            baseline = dataclasses.replace(snapshot.baseline, values={TOTAL_TOKEN_THROUGHPUT: 9000.0})
+            return dataclasses.replace(snapshot, profile=profile(isl=None, osl=None), baselines=(baseline,))
+
+    blackboard = _AgentX(await scripted_session(tmp_path / "blackboard", FakeClock()))
+    reader = _reader()
+
+    await CrossSessionBriefing(
+        blackboard,
+        recalls=RecallCache(),
+        champions={},
+        refused={},
+        experiences=reader,
+        metric=TOTAL_TOKEN_THROUGHPUT,
+    ).startup_brief("c0")
+
+    ((_, context, _),) = reader.calls
+    assert (context["objective"]["id"], context["benchmark_baseline"]["total_throughput"]) == (
+        TOTAL_THROUGHPUT_OBJECTIVE,
+        9000.0,
     )
 
 
@@ -927,6 +958,25 @@ def test_arbors_map_in_the_brief_keeps_to_the_line_and_list_caps_and_a_long_titl
     shown = render_brief(StartupBrief("c1", (), agent_map=aside)).splitlines()
 
     listed = shown[shown.index(MAP_TITLE) + 1 :]
-    assert len(listed) == MAX_LINES + 1 and listed[-1] == f"... {MAX_LINES} more"
+    kept = (MAX_LINES - 1) // 2
+    assert len(listed) == 2 * kept + 1 and listed[-1] == f"... {MAX_LINES - kept} more directions of the map"
     assert listed[0].startswith("- m-0 (set aside, killed): Retune every") and len(listed[0]) == LINE_CHARS
-    assert listed[1] == "  why: reason 0"
+    assert listed[1:-1:2] == [f"  why: reason {n}" for n in range(kept)]
+
+
+def test_arbors_map_in_the_brief_puts_the_held_directions_first_and_cuts_only_between_directions() -> None:
+    aside = tuple(MapDirection(f"m-{n}", f"direction {n}", "done", f"reason {n}") for n in range(MAX_LINES))
+    held = (
+        MapDirection("m-gemm", "Dense GEMMs", "open", holder="b7"),
+        MapDirection("m-moe", "MoE routing", "open", holder="b8"),
+    )
+    brief = StartupBrief("c1", (), agent_map=(*aside, *held), map_holders={"m-gemm": "b7", "m-moe": "b8"})
+
+    shown = render_brief(brief).splitlines()
+
+    listed = shown[shown.index(MAP_TITLE) + 1 :]
+    kept = (MAX_LINES - 1 - len(held)) // 2
+    assert listed[: len(held)] == ["- m-gemm (held by b7): Dense GEMMs", "- m-moe (held by b8): MoE routing"]
+    assert listed[len(held) : -1 : 2] == [f"- m-{n} (set aside, done): direction {n}" for n in range(kept)]
+    assert listed[len(held) + 1 : -1 : 2] == [f"  why: reason {n}" for n in range(kept)]
+    assert listed[-1] == f"... {MAX_LINES - kept} more directions of the map"
