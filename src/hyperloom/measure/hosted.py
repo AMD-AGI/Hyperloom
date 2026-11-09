@@ -78,6 +78,7 @@ from hyperloom.measure.sandboxes import (
     DEFAULT_TIMEOUT_SLACK_SEC,
     AcquireTimedOut,
     AttemptTag,
+    Handover,
     NoRunnerTemplate,
     PoolClosed,
     PoolLimits,
@@ -132,6 +133,9 @@ _VERIFIED, _ROUNDS_READ, _ARCHIVED, _MATERIALIZED, _JIT_PUBLISHED = (
     "jit_published",
 )
 _LANDING_SEC = "landing_sec"
+#: How long a test whose result landed waits for its runner to exit, where the sandbox can tell, before its sandbox is
+#: handed over to the next test; one whose runner is still there is released instead.
+_RUNNER_EXIT_WAIT_SEC = 30.0
 _LOG_SUFFIX = ".log"
 
 
@@ -167,7 +171,9 @@ class HostedConfig:
     (``rule_pack_mismatch``); ``None`` accepts any pack. ``create_envs`` is the environment every authoritative sandbox is
     created with; the service's sealed runner template must accept those names (``accepted_envs``). ``jit_store`` is the
     shared compiled-code cache: the compiled files a signed result says its test added are published to it
-    after the result is accepted; ``None`` publishes nothing.
+    after the result is accepted; ``None`` publishes nothing. ``handover`` keeps the sandbox of a test whose result
+    landed until the next test's sandbox runs (:class:`~.sandboxes.Handover`), so that the cluster's queue does not
+    give its node to another job between two tests; ``None`` closes every sandbox when its test ends.
     """
 
     session_dir: Path
@@ -187,6 +193,7 @@ class HostedConfig:
     create_envs: Mapping[str, str] = field(default_factory=dict)
     staging_root: Path | None = None
     jit_store: DirJitStore | None = None
+    handover: Handover | None = None
     should_stop: Callable[[], bool] = field(default=lambda: False, compare=False)
 
     def __post_init__(self) -> None:
@@ -263,6 +270,7 @@ class _Attempt:
     started_unix: float
     stop: threading.Event
     timeline: HostTimeline
+    landed: bool = False  # the verified result is in the output directory
 
 
 def _outcome(
@@ -324,6 +332,7 @@ class HostedMeasurementBackend:
                 max_parallel_tests=config.max_parallel_tests,
                 timeout_slack_sec=config.timeout_slack_sec,
                 request_timeout_sec=config.runner_start_timeout_sec,
+                handover=config.handover,
             ),
             create_envs=config.create_envs,
         )
@@ -420,6 +429,7 @@ class HostedMeasurementBackend:
             return acquired
         runner = acquired
         timeline.mark(ACQUIRED)
+        done_with_cards = False
         try:
             if stop.is_set():  # told to stop while it waited for the sandbox: nothing is sent to it
                 return _refusal(call, STOPPED_RETURNCODE, STOPPED_REASON, "the test was stopped before it started")
@@ -429,11 +439,45 @@ class HostedMeasurementBackend:
                 )
             attempt = _Attempt(call, call.task_id, number, spec, spec.to_bytes(), runner, self._clock(), stop, timeline)
             self._submit(attempt)
-            return self._finish(attempt)
+            outcome = self._finish(attempt)
+            done_with_cards = self._cards_given_back(attempt)
+            return outcome
         except SandboxError as exc:
             return self._lost(call, runner, f"{type(exc).__name__}: {exc}")
         finally:
-            self._pool.release(runner)
+            if done_with_cards:
+                self._pool.hand_over(runner)
+            else:
+                self._pool.release(runner)
+
+    def _cards_given_back(self, attempt: _Attempt) -> bool:
+        """Whether the test no longer uses its sandbox's GPUs, so the sandbox may wait for the next test's to run: its
+        result landed and its runner has exited where the sandbox can tell. The runner writes ``status.json`` last,
+        after the test's server was torn down; a sandbox that cannot tell when the runner exits is taken at that word.
+        A test that is stopping, or a runner that does not exit within :data:`_RUNNER_EXIT_WAIT_SEC`, gives its
+        sandbox back at once (logged)."""
+        if not attempt.landed or attempt.stop.is_set() or self._config.should_stop():
+            return False
+        handle = attempt.runner.handle
+        if handle is None or not isinstance(handle, _WatchesStartup):
+            return True
+        waited, step = 0.0, min(1.0, self._config.poll_interval_sec)
+        while True:
+            try:
+                if handle.startup_exit_code() is not None:
+                    return True
+            except SandboxError:
+                return False
+            if waited >= _RUNNER_EXIT_WAIT_SEC:
+                log.info(
+                    "test %s: its runner has not exited %.0fs after its result landed; sandbox %s is released",
+                    attempt.request_id,
+                    waited,
+                    attempt.runner.sandbox_id,
+                )
+                return False
+            self._sleep(step)
+            waited += step
 
     def _build(self, call: TestCall) -> MeasurementSpec:
         remaining = None if call.session_deadline_sec is None else call.session_deadline_sec - time.monotonic()
@@ -670,6 +714,7 @@ class HostedMeasurementBackend:
             location = self._archive(attempt, verified, staging)
             step(_ARCHIVED)
             self._land(attempt, verified)
+            attempt.landed = True
             step(_MATERIALIZED)
             self._publish_jit(attempt, verified, staging)
             step(_JIT_PUBLISHED)

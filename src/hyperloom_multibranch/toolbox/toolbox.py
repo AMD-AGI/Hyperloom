@@ -668,6 +668,13 @@ class RealToolbox:
         while (item := self._queue.take(self._parallel_limit())) is not None:
             item.started_at = self._clock()
             self._tasks[item.request_id] = asyncio.create_task(self._run(item))
+        self._note_upcoming(
+            frozenset(item.request_id for item in self._queue.items() if item.state in (State.QUEUED, State.RUNNING))
+        )
+
+    def _note_upcoming(self, request_ids: frozenset[str]) -> None:
+        """Hear which tests are waiting to start or running, after every change of the queue; the hosted toolbox tells
+        its sandbox pool, which keeps a finished test's sandbox only while another test will ask for one."""
 
     async def _run(self, item: QueuedTest) -> None:
         try:

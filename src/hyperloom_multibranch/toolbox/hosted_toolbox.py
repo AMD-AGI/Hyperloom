@@ -28,7 +28,7 @@ from hyperloom.measure.framework.base import SESSION_SNAPSHOT_DIR, framework_env
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
-from hyperloom.measure.sandboxes import DEFAULT_MAX_PARALLEL_TESTS, MEASUREMENT_ROLE
+from hyperloom.measure.sandboxes import DEFAULT_MAX_PARALLEL_TESTS, MEASUREMENT_ROLE, Handover
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy
 from hyperloom.sandbox.socket import Role, SandboxProvider
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -68,6 +68,7 @@ __all__ = [
     "HostedToolbox",
     "HostedToolboxInputs",
     "build_hosted_toolbox",
+    "handover_for",
     "parallel_tests_for",
 ]
 
@@ -264,6 +265,9 @@ class HostedToolbox(LeasedToolbox):
 
         return await asyncio.to_thread(self.backend.live_output, request_id)
 
+    def _note_upcoming(self, request_ids: frozenset[str]) -> None:
+        self.backend.pool.note_upcoming(request_ids)
+
     async def start(self) -> None:
         """End the lease sandboxes an earlier process of this run left behind, then start as :class:`LeasedToolbox`
         does, which closes their records ``toolbox_lost``."""
@@ -360,6 +364,20 @@ def _leases(provider: SandboxProvider, inputs: HostedToolboxInputs, tuning: Leas
     return HostedBranchLeases(provider, grant, DevSession(inputs.run_id, inputs.tp, dev), tuning)
 
 
+def handover_for(grant: GrantLimits | None, leases: HostedBranchLeases | None) -> Handover | None:
+    """Make-before-break between two tests (:class:`~hyperloom.measure.sandboxes.Handover`): the sandbox of a test
+    whose result landed is kept until the next test's sandbox runs, while the grant has room for both beside what the
+    branch leases hold; without grant limits the room cannot be counted, and every sandbox is closed when its test ends.
+    """
+    if grant is None:
+        return None
+    return Handover(grant.max_sandboxes, grant.max_gpus, reserved=leases.reserved if leases is not None else _none)
+
+
+def _none() -> tuple[int, int]:
+    return 0, 0
+
+
 def parallel_tests_for(grant: GrantLimits | None, tp: int) -> int:
     """How many tests of TP=``tp`` may run at once under ``grant``: ``min(max_gpus // tp, max_sandboxes)``, at least 1.
 
@@ -440,11 +458,14 @@ def build_hosted_toolbox(
     acceptance = with_native_plan(acceptance, native)
     grant = inputs.grant()
     parallel = parallel_tests_for(grant, inputs.tp)
+    runner = _runner_template(inputs)  # refused before the lease templates are read
+    provider = _service_provider(inputs, options.retry)
+    leases = _leases(provider, inputs, options.lease_tuning)
     config = HostedConfig(
         session_dir=directory,
         run_id=inputs.run_id,
         spec=spec,
-        runner_templates={inputs.tp: _runner_template(inputs)},
+        runner_templates={inputs.tp: runner},
         rule_pack_digest=rule_pack_identity()["digest"],
         create_envs={
             **inputs.create_envs(),
@@ -454,9 +475,8 @@ def build_hosted_toolbox(
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,
+        handover=handover_for(grant, leases),
     )
-    provider = _service_provider(inputs, options.retry)
-    leases = _leases(provider, inputs, options.lease_tuning)
     backend = started_backend(provider, config)
     executor = HostedExecutor(
         backend, directory, timeout_sec=options.timeout_sec, workload_kind=acceptance.workload_kind
