@@ -86,5 +86,8 @@ def test_pinned_git_runs_no_driver_program_the_repository_s_config_names(tmp_pat
 
     assert done.returncode == 0, done.stderr
     assert not tree.canary.exists()
+    # The pinned add indexed the file with its stat: once its index lands in a later timestamp tick than the write, the
+    # entry is not racy and plain git would trust the stat and read nothing. Another size has git read and clean it.
+    (tree.base / "added.py").write_text("fresh = 33\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(tree.base), "add", "-A"], env=cases._plain_env(), capture_output=True, check=False)
     assert tree.canary.exists(), "plain git runs the filter, so the plant is live"
