@@ -391,9 +391,14 @@ async def _explore_denials(c) -> list[dict]:
     ]
 
 
+async def _queued_grids(c) -> list[list[str]]:
+    """The variant names of each queued explore round, oldest first."""
+    return [[v["name"] for v in t.params["grid"]] for t in await c.tasks.by_state("queued") if t.kind == "explore"]
+
+
 @pytest.mark.asyncio
-async def test_delegate_explore_grid_already_queued_under_another_key_is_denied(session_dir):
-    """A second grid with the same launches under a different key is not queued again."""
+async def test_delegate_explore_grid_already_queued_under_other_names_is_denied(session_dir):
+    """A second grid with the same launches under different variant names is not queued again."""
     c = _silent_coordinator(session_dir)
     try:
         c.shared_state.phase = "FRAMEWORK_AGENT"  # the phase that proposes explore
@@ -402,22 +407,19 @@ async def test_delegate_explore_grid_already_queued_under_another_key_is_denied(
         await c.router.handle_delegate(
             "orchestration", _explore("round-b", ("folded_again", "--folded 2"), ("k2", "--k 0"))
         )
-        queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
-        assert [t.idempotency_key for t in queued] == ["round-a"]
+        assert await _queued_grids(c) == [["folded", "k"]]
         assert len(await _explore_denials(c)) == 1
 
         # One genuinely new variant admits the grid.
         await c.router.handle_delegate(
             "orchestration", _explore("round-c", ("folded", "--folded 2"), ("new", "--new 1"))
         )
-        queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
-        assert [t.idempotency_key for t in queued] == ["round-a", "round-c"]
+        assert await _queued_grids(c) == [["folded", "k"], ["folded", "new"]]
 
         # A grid queued on an older stack does not cover the same launches on the current one.
         c.shared_state.baseline_tput = 820.0
         await c.router.handle_delegate("orchestration", _explore("round-d", ("folded", "--folded 2"), ("k", "--k 0")))
-        queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
-        assert [t.idempotency_key for t in queued] == ["round-a", "round-c", "round-d"]
+        assert await _queued_grids(c) == [["folded", "k"], ["folded", "new"], ["folded", "k"]]
     finally:
         await c.stop()
 
@@ -433,7 +435,7 @@ async def test_delegate_explore_kernel_overlay_grid_is_never_counted_as_queued(s
             grid = [{"name": "patched", "extra_args": "--k 0", "overlay_pythonpath": overlay}]
             await c.router.handle_delegate("orchestration", _delegate(action="explore", key=key, params={"grid": grid}))
         queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
-        assert [t.idempotency_key for t in queued] == ["overlay-a", "overlay-b"]
+        assert [t.params["grid"][0]["overlay_pythonpath"] for t in queued] == ["/overlays/a", "/overlays/b"]
         assert await _explore_denials(c) == []
     finally:
         await c.stop()
@@ -475,7 +477,7 @@ async def test_delegate_explore_grid_already_measured_on_this_stack_is_denied(se
 
         c.shared_state.baseline_tput = 820.0  # the anchor moved: the old verdict no longer speaks for this stack
         await c.router.handle_delegate("orchestration", _explore("moved", ("mrr_48", "--max-running-requests 48")))
-        assert [t.idempotency_key for t in await c.tasks.by_state("queued") if t.kind == "explore"] == ["moved"]
+        assert await _queued_grids(c) == [["mrr_48"]]
     finally:
         await c.stop()
 
@@ -519,29 +521,33 @@ async def test_delegate_explore_grid_refused_on_throughput_is_admitted_once_the_
 
         c.shared_state.macro_cycle = 1
         await c.router.handle_delegate("orchestration", _explore("cycle-1", ("mrr_48", "--max-running-requests 48")))
-        assert [t.idempotency_key for t in await c.tasks.by_state("queued") if t.kind == "explore"] == ["cycle-1"]
+        assert await _queued_grids(c) == [["mrr_48"]]
     finally:
         await c.stop()
 
 
 @pytest.mark.asyncio
-async def test_delegate_explore_same_key_resend_is_a_duplicate_not_a_covered_grid(session_dir):
-    """Re-sending a key whose grid is still queued is answered by the key rule, which tells the model to wait."""
+async def test_delegate_explore_round_is_judged_by_its_grid_not_by_the_key_it_names(session_dir):
+    """The name the model gives a round decides nothing: a new grid under a queued round's name is a new round."""
     c = _silent_coordinator(session_dir)
     try:
         c.shared_state.phase = "FRAMEWORK_AGENT"  # the phase that proposes explore
         c.shared_state.baseline_tput = 800.0
-        await c.router.handle_delegate("orchestration", _explore("round-a", ("folded", "--folded 2")))
-        await c.router.handle_delegate("orchestration", _explore("round-a", ("folded", "--folded 2")))
-        assert [t.idempotency_key for t in await c.tasks.by_state("queued") if t.kind == "explore"] == ["round-a"]
-        assert await _explore_denials(c) == []
-        obs = await c.bus.tail(topic="observation")
-        rules = [m.payload.get("rule") for m in obs if m.payload.get("kind") == "policy_denied"]
-        assert rules == ["duplicate_idempotency_key_running"]
+        await c.router.handle_delegate("orchestration", _explore("explore-round-2", ("folded", "--folded 2")))
+        await c.router.handle_delegate("orchestration", _explore("explore-round-2", ("mem_090", "--mem 0.90")))
+        assert await _queued_grids(c) == [["folded"], ["mem_090"]]
 
-        # A different key for the same launches is still refused as covered.
-        await c.router.handle_delegate("orchestration", _explore("round-b", ("folded", "--folded 2")))
-        assert len(await _explore_denials(c)) == 1
+        # The same grid again, under any name, adds nothing and is refused naming its variants.
+        await c.router.handle_delegate("orchestration", _explore("explore-round-3", ("folded", "--folded 2")))
+        assert await _queued_grids(c) == [["folded"], ["mem_090"]]
+        assert [d["reason"] for d in await _explore_denials(c)] == [
+            "delegate{action_name='explore'} adds nothing new: folded already measured, queued or running on the "
+            "current stack"
+        ]
+        obs = await c.bus.tail(topic="observation")
+        assert [m.payload.get("rule") for m in obs if m.payload.get("kind") == "policy_denied"] == [
+            "explore_grid_already_covered"
+        ]
     finally:
         await c.stop()
 
@@ -558,12 +564,17 @@ async def test_delegate_explore_grid_is_admitted_while_rewrite_levers_await_attr
             "hyperloom.orchestrator.actions.executors.explore.framework_lever_grid",
             lambda _state: [{"name": "lever_off", "extra_envs": {"HL_X": "0"}}],
         )
-        await c.router.handle_delegate("orchestration", _explore("round-b", ("folded", "--folded 2")))
-        assert [t.idempotency_key for t in await c.tasks.by_state("queued") if t.kind == "explore"] == [
-            "round-a",
-            "round-b",
-        ]
+        await c.router.handle_delegate("orchestration", _explore("round-b", ("folded_again", "--folded 2")))
+        assert await _queued_grids(c) == [["folded"], ["folded_again"]]
         assert await _explore_denials(c) == []
+
+        # The identical request is still the round already queued.
+        await c.router.handle_delegate("orchestration", _explore("round-c", ("folded_again", "--folded 2")))
+        assert await _queued_grids(c) == [["folded"], ["folded_again"]]
+        obs = await c.bus.tail(topic="observation")
+        assert [m.payload.get("rule") for m in obs if m.payload.get("kind") == "policy_denied"] == [
+            "duplicate_idempotency_key_running"
+        ]
     finally:
         await c.stop()
 
