@@ -38,3 +38,14 @@ regexes = [
   '''Authorization: Bearer secret-token-value''',
   '''OPENAI_API_KEY=sk-live-abcdef''',
 ]
+
+[[allowlists]]
+description = "bwrap sandbox test canary -- a fixture token, not a credential"
+# test_bwrap_launch.py's masking tests once wrote a Hugging Face-shaped token
+# under a SECRET name (cbb8f684e) before renaming it to the key-free CANARY
+# (1e33dd280); a push-event scan diffs every commit in range, so the old
+# literal still surfaces from history even though no current tree has it.
+regexTarget = "line"
+regexes = [
+  '''SECRET = "hf_CANARY_SECRET_7f3a"''',
+]
