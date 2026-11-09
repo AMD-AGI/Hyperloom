@@ -16,6 +16,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.long_context.build import DEFAULT_SEED, build_entry
+from hyperloom.measure.long_context.plan import LENGTH_BOUND
 from hyperloom.measure.long_context.tests.support import LENGTH, encode
 from hyperloom_multibranch.toolbox import long_context as long_context_module
 from hyperloom_multibranch.toolbox import short_prompts
@@ -132,7 +133,7 @@ def _environ(cache: Path, **values: str) -> dict[str, str]:
 
 def _staged(model: Path, cache: Path, length: int = LENGTH, seed: int = DEFAULT_SEED) -> LongContextSetup:
     entry = build_entry(model, cache, length=length, seed=seed, encode=encode)
-    return LongContextSetup(entry.key, entry.prompts_sha256, length)
+    return LongContextSetup(entry.key, entry.prompts_sha256, length, LENGTH_BOUND)
 
 
 def _default_at(environ: dict[str, str], model: Path | None = None, served: int | None = None) -> object:

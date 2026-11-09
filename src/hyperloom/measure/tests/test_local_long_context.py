@@ -22,7 +22,7 @@ from hyperloom.measure import local
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.long_context.outputs import read_outputs
 from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR
-from hyperloom.measure.long_context.tests.support import FakeServer, staged_plan
+from hyperloom.measure.long_context.tests.support import PROMPTS, FakeServer, staged_plan
 from hyperloom.measure.phases import LONG_CONTEXT, SHORT_PROMPTS
 from hyperloom.measure.short_prompts.tests.support import staged_plan as short_plan
 from hyperloom.measure.tests.test_local_backend import _call, _point
@@ -73,7 +73,7 @@ def test_a_planned_test_asks_its_own_server_after_its_measured_round_and_boots_n
     assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "Magpie leaves the server up for the check"
     assert (grid.servers.started, grid.servers.teardowns) == (["test"], 1), "one server, torn down after the check"
     found = read_outputs(tmp_path / "out")
-    assert [e.status for e in found.prompts] == [PROMPT_OK] * 64 and found.served_context == 4096
+    assert [e.status for e in found.prompts] == [PROMPT_OK] * PROMPTS and found.served_context == 4096
     assert found.boot_seconds == pytest.approx(0.0, abs=0.5), "no server was booted for the check"
     assert grid.servers.flushes == 1, "the prefix cache was flushed before the check"
     assert (outcome.returncode, outcome.failure_class) == (0, None)
@@ -110,7 +110,7 @@ def test_both_checks_share_the_held_server_and_one_flush(monkeypatch, tmp_path, 
     assert [kwargs["grid"][0].name for kwargs in grid.calls] == ["test"] and grid.servers.flushes == 1
     names = [p.name for p in outcome.phases]
     assert names.index(SHORT_PROMPTS) < names.index(LONG_CONTEXT) < names.index("teardown")
-    assert [e.status for e in read_outputs(tmp_path / "out").prompts] == [PROMPT_OK] * 64
+    assert [e.status for e in read_outputs(tmp_path / "out").prompts] == [PROMPT_OK] * PROMPTS
 
 
 def test_a_test_whose_round_failed_runs_no_check(monkeypatch, tmp_path, cache):
