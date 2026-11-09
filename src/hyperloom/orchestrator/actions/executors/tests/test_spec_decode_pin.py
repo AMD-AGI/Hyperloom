@@ -15,12 +15,14 @@ from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, _build_variant_yaml, run_grid
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack, apply_compatibility_filter
 from hyperloom.orchestrator.actions.executors._launch_evidence import persist_launch_evidence
 from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer, materialize_benchmark_config
 from hyperloom.orchestrator.actions.executors._spec_decode_pin import (
     SPECULATIVE_DECODING_PINNED,
     SpeculativeDecodingPinnedError,
     refuse_unpinned_speculative_change,
+    speculative_pin_reason,
 )
 
 
@@ -243,6 +245,125 @@ def test_the_refusal_names_what_changed():
             SGLANG_EAGLE, SGLANG_SYNTHETIC_ENV, SGLANG_EAGLE + " --speculative-num-steps 3", SGLANG_SYNTHETIC_ENV
         )
     assert "--speculative-num-steps ('5' -> '3')" in str(refused.value)
+
+
+def _admission(variant: GridVariant, *, framework: str, base_args: str, base_envs: dict | None = None):
+    """What a round's pre-flight filter makes of one proposal, on a base launch of ``base_args``/``base_envs``."""
+    return apply_compatibility_filter(
+        [variant],
+        serving=ServingStack(framework, ""),
+        base_server_args=base_args,
+        base_envs=base_envs or {},
+    )
+
+
+@pytest.mark.parametrize(
+    ("framework", "base_args", "base_envs", "variant"),
+    [
+        pytest.param(
+            "vllm",
+            VLLM_SYNTHETIC,
+            {},
+            GridVariant("v", extra_server_args=_spec_config(num_speculative_tokens=5)),
+            id="changes-the-draft",
+        ),
+        pytest.param(
+            "vllm",
+            VLLM_SYNTHETIC,
+            {},
+            GridVariant("v", extra_server_args=_spec_config(synthetic_acceptance_length=2.0), args_mode="replace"),
+            id="replace-restates-another-acceptance",
+        ),
+        pytest.param(
+            "vllm", VLLM_SYNTHETIC, {}, GridVariant("v", remove_args=["--speculative-config"]), id="removes-the-draft"
+        ),
+        pytest.param(
+            "sglang",
+            SGLANG_EAGLE,
+            SGLANG_SYNTHETIC_ENV,
+            GridVariant("v", extra_server_args="--speculative-num-steps 3"),
+            id="changes-steps",
+        ),
+        pytest.param(
+            "sglang",
+            SGLANG_EAGLE,
+            SGLANG_SYNTHETIC_ENV,
+            GridVariant("v", unset_envs=["SGLANG_SIMULATE_ACC_LEN"]),
+            id="unsets-acc-len",
+        ),
+        pytest.param(
+            "sglang",
+            SGLANG_EAGLE,
+            SGLANG_SYNTHETIC_ENV,
+            GridVariant("v", extra_envs={"SGLANG_SIMULATE_ACC_LEN": "2.99"}),
+            id="retunes-acc-len",
+        ),
+        pytest.param(
+            "sglang",
+            SGLANG_EAGLE,
+            {"SGLANG_SIMULATE_ACC_TOKEN_MODE": "real-draft-token"},
+            GridVariant("v", extra_envs={"SGLANG_SIMULATE_ACC_LEN": "4.0"}),
+            id="declares-the-acceptance-a-real-draft-measures",
+        ),
+    ],
+)
+def test_a_round_does_not_admit_a_variant_that_moves_a_lever_the_base_pins(framework, base_args, base_envs, variant):
+    """The proposal is refused where it is admitted, so the round keeps the slot rather than losing it at launch."""
+    kept, dropped = _admission(variant, framework=framework, base_args=base_args, base_envs=base_envs)
+    assert not kept
+    assert [(d["name"], d["source"]) for d in dropped] == [("v", SPECULATIVE_DECODING_PINNED)]
+    assert SPECULATIVE_DECODING_PINNED in dropped[0]["reason"]
+
+
+@pytest.mark.parametrize(
+    ("framework", "base_args", "base_envs", "variant"),
+    [
+        pytest.param(
+            "vllm", VLLM_SYNTHETIC, {}, GridVariant("v", extra_server_args="--max-num-seqs 256"), id="vllm-other-knobs"
+        ),
+        pytest.param(
+            "vllm",
+            VLLM_SYNTHETIC,
+            {},
+            GridVariant("v", extra_server_args="--max-num-seqs 64", args_mode="replace"),
+            id="replace-keeps-the-base-draft",
+        ),
+        pytest.param(
+            "sglang",
+            SGLANG_EAGLE,
+            SGLANG_SYNTHETIC_ENV,
+            GridVariant("v", extra_envs={"SGLANG_USE_AITER": "1"}),
+            id="sglang-other-knobs",
+        ),
+        pytest.param(
+            "sglang",
+            SGLANG_EAGLE,
+            {"SGLANG_SIMULATE_ACC_TOKEN_MODE": "real-draft-token"},
+            GridVariant("v", extra_server_args="--speculative-num-steps 3"),
+            id="real-draft-base-leaves-the-draft-open",
+        ),
+    ],
+)
+def test_a_round_admits_a_variant_that_leaves_the_pin_where_the_base_set_it(framework, base_args, base_envs, variant):
+    kept, dropped = _admission(variant, framework=framework, base_args=base_args, base_envs=base_envs)
+    assert [v.name for v in kept] == ["v"] and dropped == []
+
+
+def test_admission_and_the_launch_state_one_rule():
+    """The filter asks the rule of a proposal and the launch states it as a refusal: same words, same verdict."""
+    moved = GridVariant("v", extra_server_args="--speculative-num-steps 3")
+    _, dropped = _admission(moved, framework="sglang", base_args=SGLANG_EAGLE, base_envs=SGLANG_SYNTHETIC_ENV)
+    with pytest.raises(SpeculativeDecodingPinnedError) as refused:
+        refuse_unpinned_speculative_change(
+            SGLANG_EAGLE, SGLANG_SYNTHETIC_ENV, SGLANG_EAGLE + " --speculative-num-steps 3", SGLANG_SYNTHETIC_ENV
+        )
+    assert dropped[0]["reason"] == str(refused.value)
+    assert (
+        speculative_pin_reason(
+            SGLANG_EAGLE, SGLANG_SYNTHETIC_ENV, SGLANG_EAGLE + " --cuda-graph-max-bs 128", SGLANG_SYNTHETIC_ENV
+        )
+        is None
+    )
 
 
 def _base_yaml(tmp_path: Path, framework: str, args: str, envs: dict[str, str]) -> Path:

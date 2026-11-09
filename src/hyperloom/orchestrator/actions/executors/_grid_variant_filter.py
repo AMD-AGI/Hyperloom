@@ -21,7 +21,9 @@ from hyperloom_common.gpu_identity import is_gfx_arch
 
 from ._grid_base import (
     GridVariant,
+    apply_variant_env,
 )
+from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, speculative_pin_reason
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 from hyperloom.inference_optimizer.speculative_capability import CAPABILITY_UNSUPPORTED, speculative_capability_reason
 
@@ -357,6 +359,31 @@ def _speculative_capability_reason(
     )
 
 
+def _speculative_pin_reason(
+    variant: "GridVariant", *, base_server_args: str, base_envs: Mapping[str, Any]
+) -> str | None:
+    """Why this variant moves a lever its base launch pins -- the draft, or how acceptance is simulated -- else
+    ``None``.
+
+    Composed the way the launch would be, since the pin is a property of the launch the variant would become: the
+    arguments merged or replaced as ``args_mode`` says, the environment carrying the variant's unsets and sets the
+    way :func:`apply_variant_env` applies them at launch.
+    """
+    candidate_envs = dict(base_envs)
+    apply_variant_env(candidate_envs, variant, None, None)
+    return speculative_pin_reason(
+        base_server_args,
+        base_envs,
+        compose_server_args(
+            base_extra_args=base_server_args,
+            variant_extra_args=variant.extra_server_args,
+            remove_args=variant.remove_args,
+            args_mode=variant.args_mode,
+        ),
+        candidate_envs,
+    )
+
+
 def _model_class_flag_reason(args: str, *, model_path: str, is_mla: bool, is_moe: bool) -> str | None:
     """Why a flag in ``args`` asks for a model class this model is not recognised as, else ``None``."""
     for flag, required_class in _COMPATIBILITY_FLAG_RULES:
@@ -409,6 +436,12 @@ def apply_compatibility_filter(
         )
         if skip_reason:
             dropped.append({"name": v.name, "source": CAPABILITY_UNSUPPORTED, "reason": skip_reason})
+            continue
+        # A lever the base launch pins: the round would score it against an acceptance length that no longer
+        # describes it, so it is not a variant this base can own.
+        skip_reason = _speculative_pin_reason(v, base_server_args=base_server_args, base_envs=base_envs or {})
+        if skip_reason:
+            dropped.append({"name": v.name, "source": SPECULATIVE_DECODING_PINNED, "reason": skip_reason})
             continue
         # xDiT do-not-set blacklist (env-keyed; precision lock + known crashes).
         if is_xdit:
