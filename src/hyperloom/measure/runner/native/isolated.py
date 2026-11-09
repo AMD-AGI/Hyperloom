@@ -316,14 +316,14 @@ class IsolatedBuilds:
     """``runner(inputs) -> Build`` for :class:`~hyperloom_multibranch.toolbox.store_builds.StoreBuildDriver` (see the
     module). ``isolation`` is how every compile is isolated, or what chooses it at each build (such as
     :func:`local_isolation` for a session that found none at its start: a bubblewrap whose probe gave no answer in time
-    may answer later); :class:`Unisolated` or ``None`` refuses every build; ``factories`` name each component's recipe factory as ``module:function``; ``child`` says what
+    may answer later); :class:`Unisolated` refuses every build, naming its reasons; ``factories`` name each component's recipe factory as ``module:function``; ``child`` says what
     runs the child."""
 
     def __init__(
         self,
         planner: NativePlanner,
         blobs: BlobStore,
-        isolation: Isolation | Unisolated | Callable[[], Isolation | Unisolated] | None,
+        isolation: Isolation | Unisolated | Callable[[], Isolation | Unisolated],
         factories: Mapping[str, str],
         child: ChildInterpreter = ChildInterpreter(),
     ) -> None:
@@ -335,9 +335,8 @@ class IsolatedBuilds:
 
     def _build(self, planned: PlannedBuild, scratch: Path) -> Staged:
         isolation = self._isolation() if callable(self._isolation) else self._isolation
-        if not isinstance(isolation, Isolation):
-            why = isolation.why if isinstance(isolation, Unisolated) else "the build runner was given no isolation"
-            raise BuildInfraError(f"this host cannot isolate a native build: {why}; nothing was compiled")
+        if isinstance(isolation, Unisolated):
+            raise BuildInfraError(f"this host cannot isolate a native build: {isolation.why}; nothing was compiled")
         work = Path(scratch) / _WORK
         work.mkdir()
         laid = planned.lay(self._blobs, work)

@@ -36,7 +36,7 @@ from hyperloom.measure.jit.native.trust import Signer, Trust, TrustedKey
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.runner.native.aiter_modules import AiterModules
 from hyperloom.measure.runner.native.builder import BuildMachine
-from hyperloom.measure.runner.native.isolated import STAGED_FILE, IsolatedBuilds, Isolation
+from hyperloom.measure.runner.native.isolated import STAGED_FILE, IsolatedBuilds, Isolation, Unisolated
 from hyperloom.measure.runner.native.isolated import staged_record
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.runner.native.service import Ensured
@@ -93,7 +93,9 @@ class Rig:
     ``kit`` is the stand-in component (:mod:`native_support`'s ``fakepkg`` by default): its ``COMPONENT``, ``LAYOUT``,
     ``FACTORY``, ``ACT_CU`` and ``BASE_CU``, its ``image``, ``upstream`` and ``stand_in_recipe``."""
 
-    def __init__(self, tmp: Path, isolation: Isolation | None = SAME_PROCESS_USER, kit: ModuleType = fake) -> None:
+    def __init__(
+        self, tmp: Path, isolation: Isolation | Unisolated = SAME_PROCESS_USER, kit: ModuleType = fake
+    ) -> None:
         self.tmp, self.blobs, self.kit, self._isolation = tmp, LocalBlobStore(tmp / "blobs"), kit, isolation
         self.image = kit.image(tmp / "image")
         kit.upstream(tmp / "sources" / kit.COMPONENT / COMMIT)
@@ -212,7 +214,7 @@ async def test_a_broken_cu_is_the_candidates_compile_error_naming_the_cu_line(ri
 
 
 async def test_a_host_that_cannot_isolate_the_compile_builds_nothing_and_fails_as_the_machine(tmp_path: Path) -> None:
-    rig = Rig(tmp_path, isolation=None)
+    rig = Rig(tmp_path, isolation=Unisolated("no tier answered"))
     compiled = rig.compiler.compile(rig.recipe(rig.patch({fake.ACT_CU: EDITED_CU})), RecipeDelta())
 
     hooks = Hooks()
