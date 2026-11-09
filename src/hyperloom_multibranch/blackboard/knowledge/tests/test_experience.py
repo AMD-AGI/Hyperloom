@@ -56,6 +56,7 @@ from hyperloom_multibranch.blackboard.knowledge.experience import (
 from hyperloom_multibranch.blackboard.knowledge.tests.kb_service import experience_service
 from hyperloom_multibranch.blackboard.tests.factories import profile, result
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC
+from hyperloom_multibranch.rulegate.agentx import CHECKPOINT_TRAILED
 
 NO_REASONING = "decision reasoning is missing or non-specific"
 
@@ -331,6 +332,27 @@ def test_a_test_whose_measurement_failed_or_did_not_re_verify_is_never_published
     assert snapshot.profile is not None
     assert candidate_row(unmeasured, snapshot, snapshot.profile, METRIC) is None
     assert candidate_row(unverified, snapshot, snapshot.profile, METRIC) is None
+
+
+def test_a_test_the_agentx_checkpoint_stopped_is_a_revert_without_a_value_that_is_not_published(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    (record,) = [record for record in snapshot.records if record.request_id == "r2"]
+    assert record.judgement is not None
+    stopped = dataclasses.replace(
+        record,
+        result=result("r2", validity=Validity.CANDIDATE_FAILED),
+        judgement=dataclasses.replace(record.judgement, refused_by=(CHECKPOINT_TRAILED,)),
+    )
+    records = tuple(stopped if item.request_id == "r2" else item for item in snapshot.records)
+    agentx = dataclasses.replace(snapshot, profile=profile(isl=None, osl=None), records=records)
+
+    row = _rows(agentx)["r2"]
+
+    assert (row["decision"], row["outcome_value"], row["interval"]) == ("revert", None, None)
+    assert {item.unit_id: item.reason for item in _own(agentx).skipped}["r2"] == (
+        "measured candidate has no valid outcome value"
+    )
 
 
 @pytest.mark.parametrize(
