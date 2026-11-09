@@ -20,6 +20,14 @@
 # The environment records the installed commit, so a restart in the same container installs nothing; a new container
 # builds the wheel again.
 #
+# A source on this machine (a path or a file:// URL, such as the host's mirror) may belong to another account: in a
+# container that maps one id, a mirror the host's root owns shows as 65534. git refuses to fetch from a repository
+# another account owns ("detected dubious ownership") unless safe.directory names it in the system or global config,
+# and a -c does not reach the git-upload-pack the local transport starts (git drops it from that environment). So that
+# fetch, and only it, runs with a global config in the container's temporary directory that trusts the source's
+# resolved directory (and its .git) by exact path and nothing else, and names the source by that path; every other
+# repository keeps git's ownership check.
+#
 # Nothing of the checkout stays behind: the wheel carries no .git, so a restart sees the same code version. An input the
 # script cannot work with (no commit, a bad one) ends the run with a final exit.json; a failure that may be
 # transient (the network, the disk) exits without one, and the host restarts the run.
@@ -35,15 +43,20 @@ json_text() {
   printf '%s' "${text//[[:cntrl:]]/?}"
 }
 
-# exit.json is written beside its place under a name of this process's own and renamed over it: a file another leg's
-# account left there can be replaced, never rewritten. When the directory takes no file, stderr is all there is.
+# exit.json is written beside its place, made new (set -C) under a name of this process's own that no one can guess
+# (mktemp -u) with mode 0664 (umask 002, as the entry writes it), and renamed over it (mv -T, never into a directory
+# of that name): a file another leg's account left there can be replaced, never rewritten. When the directory takes no
+# file, stderr is all there is.
 fail_final() {
-  local written
+  local written=""
   echo "hosted bootstrap: $1" >&2
   if [[ -n "$state_dir" && -d "$state_dir" ]]; then
-    written="$state_dir/.exit.json.$$.$RANDOM"
-    { (set -C && printf '{"final": true, "returncode": 2, "error": "%s"}\n' "$(json_text "$1")" >"$written") &&
-      mv -f "$written" "$state_dir/exit.json"; } 2>/dev/null || echo "hosted bootstrap: cannot write $state_dir/exit.json" >&2
+    { written="$(mktemp -u "$state_dir/.exit.json.XXXXXXXXXX")" &&
+      (umask 002 && set -C && printf '{"final": true, "returncode": 2, "error": "%s"}\n' "$(json_text "$1")" >"$written") &&
+      mv -fT -- "$written" "$state_dir/exit.json"; } 2>/dev/null || {
+      [[ -z "$written" ]] || rm -f -- "$written"
+      echo "hosted bootstrap: cannot write $state_dir/exit.json" >&2
+    }
   fi
   exit 2
 }
@@ -105,11 +118,33 @@ if [[ "$in_venv" == "0" ]] && "$framework_py" -m pip install --break-system-pack
 fi
 
 work=""
+trusted=""
 cleanup() {
   [[ -z "$work" ]] || rm -rf "$work"
+  [[ -z "$trusted" ]] || rm -f "$trusted"
   work=""
+  trusted=""
 }
 trap cleanup EXIT
+
+# For a source directory on this machine: a global config that trusts exactly that directory by its resolved path, and
+# that path as the URL the fetch names. Any other source is fetched as it stands, with no config of ours.
+fetch_url="$url"
+trust_local_source() {
+  local git_dir="$1" path="$url" scheme="" resolved
+  if [[ "$path" == file://* ]]; then
+    scheme="file://"
+    path="${path#file://}"
+  fi
+  [[ "$path" == /* ]] || return 0
+  # A source that is not a directory here is left to the fetch, which fails as it did before.
+  resolved="$(cd -- "$path" 2>/dev/null && pwd -P)" || return 0
+  trusted="$(mktemp "${TMPDIR:-/tmp}/hyperloom-source-trust.XXXXXX")"
+  # Written through the new clone's git dir, so git looks for no repository in the working directory.
+  git --git-dir="$git_dir" config --file "$trusted" --add safe.directory "$resolved"
+  git --git-dir="$git_dir" config --file "$trusted" --add safe.directory "$resolved/.git"
+  fetch_url="$scheme$resolved"
+}
 
 # The wheel of the commit, built in a new directory of this account's (mode 0700) on the container's own disk.
 build_wheel() {
@@ -117,7 +152,10 @@ build_wheel() {
   work="$(mktemp -d "${TMPDIR:-/tmp}/hyperloom-wheel.XXXXXX")" || fail "cannot make a build directory"
   src="$work/src"
   git init -q "$src"
-  git -C "$src" fetch -q --depth 1 "$url" "$sha" || git -C "$src" fetch -q "$url" || fail "cannot fetch the source commit"
+  trust_local_source "$src/.git"
+  local fetch=(git -C "$src" fetch -q)
+  [[ -z "$trusted" ]] || fetch=(env "GIT_CONFIG_GLOBAL=$trusted" "${fetch[@]}")
+  "${fetch[@]}" --depth 1 "$fetch_url" "$sha" || "${fetch[@]}" "$fetch_url" || fail "cannot fetch the source commit"
   # The repository answered (the fetch above succeeded) and has no such commit: nothing a restart can fix.
   git -C "$src" checkout -q --detach "$sha" || fail_final "the source repository has no such commit"
   mkdir "$work/out"

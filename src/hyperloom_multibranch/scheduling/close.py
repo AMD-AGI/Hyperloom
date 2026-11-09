@@ -6,8 +6,8 @@
 The stop comes first: from then on no fork is admitted, no test runs and no process the scheduler started is left,
 and the exports (:mod:`~hyperloom_multibranch.scheduling.exports`) read a blackboard that no longer changes. Stopping
 and exporting are each bounded by the hard stop. ``MB-report.json`` and ``MB-report.md`` record the outcome whatever
-became of the exports, including what outlived the stop; a CLOSE cut short by a second stop signal is reported by the
-session through :meth:`Closer.write_report`.
+became of the exports, including what outlived the stop, and how the session's agents were isolated; a CLOSE cut short
+by a second stop signal is reported by the session through :meth:`Closer.write_report`.
 ``MB-report.json`` is read back by one caller, :func:`ended_before_final`, which says how a session ended and
 whether FINAL may still be run over its directory; it lives here so the format has one reader beside its writer.
 Whether FINAL may run is not the report's to answer alone: what the session recorded as its processes says whether
@@ -28,6 +28,7 @@ from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.exports import CloseExports, SessionExports, step_lines
 from hyperloom_multibranch.scheduling.final import FinalChoice
+from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import live_processes
 from hyperloom_multibranch.scheduling.stops import SessionStopper, SessionStopReason, StopReport
@@ -53,8 +54,11 @@ class CloseReport:
     error: str
 
 
-def report_document(report: CloseReport, session_id: str, closed_at: float) -> dict[str, object]:
-    """``MB-report.json``: the session's ending, its final choice, the exports and what outlived the stop."""
+def report_document(
+    report: CloseReport, session_id: str, closed_at: float, agent_isolation: LaunchIsolation | None
+) -> dict[str, object]:
+    """``MB-report.json``: the session's ending, its final choice, the exports, what outlived the stop and how its
+    agents were isolated (``None`` when its manifest did not record it)."""
 
     exports = report.exports
     return {
@@ -62,6 +66,7 @@ def report_document(report: CloseReport, session_id: str, closed_at: float) -> d
         "closed_at": closed_at,
         "stop_reason": report.stop_reason.value,
         "error": report.error,
+        "agent_isolation": None if agent_isolation is None else agent_isolation.to_dict(),
         "final": encode(report.final),
         "exports": None
         if exports is None
@@ -136,7 +141,7 @@ def _final_lines(final: FinalChoice | None) -> list[str]:
     return lines
 
 
-def report_markdown(report: CloseReport, session_id: str) -> str:
+def report_markdown(report: CloseReport, session_id: str, agent_isolation: LaunchIsolation | None) -> str:
     """``MB-report.md``: the same outcome for people."""
 
     lines = [
@@ -144,6 +149,7 @@ def report_markdown(report: CloseReport, session_id: str) -> str:
         "",
         f"Stop reason: {report.stop_reason.value}",
         f"Error: {report.error or 'none'}",
+        _isolation_line(agent_isolation),
         "",
         "## Final selection",
         "",
@@ -155,6 +161,13 @@ def report_markdown(report: CloseReport, session_id: str) -> str:
         *_stop_lines(report.stop),
     ]
     return "\n".join(lines) + "\n"
+
+
+def _isolation_line(agent_isolation: LaunchIsolation | None) -> str:
+    if agent_isolation is None:
+        return "Agent isolation: not recorded"
+    line = agent_isolation.line()
+    return line[:1].upper() + line[1:]
 
 
 def _export_lines(exports: CloseExports | None) -> list[str]:
@@ -181,13 +194,21 @@ def _stop_lines(stop: StopReport) -> list[str]:
 
 
 class Closer:
-    """Runs CLOSE once."""
+    """Runs CLOSE once; its report says how the session's agents were isolated, as ``agent_isolation`` has it."""
 
-    def __init__(self, layout: SessionLayout, stopper: SessionStopper, exports: SessionExports, clock: Clock) -> None:
+    def __init__(
+        self,
+        layout: SessionLayout,
+        stopper: SessionStopper,
+        exports: SessionExports,
+        clock: Clock,
+        agent_isolation: LaunchIsolation | None,
+    ) -> None:
         self._layout = layout
         self._stopper = stopper
         self._exports = exports
         self._clock = clock
+        self._agent_isolation = agent_isolation
 
     async def close(
         self, stop_reason: SessionStopReason, final: FinalChoice | None, error: str, hard_stop_at: float
@@ -210,9 +231,10 @@ class Closer:
     def write_report(self, report: CloseReport) -> None:
         """Write ``MB-report.json`` and ``MB-report.md``; the session writes a CLOSE it cut short through here."""
 
-        session_id = self._layout.session_id
-        atomic_write_json(self._layout.report, report_document(report, session_id, self._clock.now()), options=SHARED)
-        atomic_write_text(self._layout.report_markdown, report_markdown(report, session_id), options=SHARED)
+        session_id, isolation = self._layout.session_id, self._agent_isolation
+        document = report_document(report, session_id, self._clock.now(), isolation)
+        atomic_write_json(self._layout.report, document, options=SHARED)
+        atomic_write_text(self._layout.report_markdown, report_markdown(report, session_id, isolation), options=SHARED)
 
 
 __all__ = ["EXPORT_FAILURES", "CloseReport", "Closer", "ended_before_final", "report_document", "report_markdown"]

@@ -8,7 +8,7 @@ A round's GPUs are the server's ``HIP_VISIBLE_DEVICES`` numbers, which ROCm assi
 another process holds would make the server fail, or worse, measure beside a foreign workload, so the round refuses
 before it spawns anything. amd-smi lists a process on every GPU it opened, and a ROCm process opens every GPU whatever
 its device mask, keeping its page tables and runtime context resident on each; so a process holds a GPU only when the
-VRAM amd-smi reports for it on that card (read per card from the process's DRM fdinfo) exceeds that footprint.
+VRAM amd-smi reports for it on that card (read per card from the process's DRM fdinfo) exceeds 1 GiB.
 """
 
 from __future__ import annotations
@@ -18,9 +18,10 @@ from typing import Any
 
 from hyperloom_common.amd_smi import AmdSmiError, gpu_rows, gpus_in_rocm_order, metric_value, read_amd_smi_json
 
-#: Above the VRAM a process keeps on a card it opened but runs nothing on: 36-52 KiB of page tables, up to 1.7 MiB
-#: once ROCr has initialised the card (recorded on MI355X), while a server holds gigabytes.
-_OPENED_ONLY_VRAM_BYTES = 64 << 20
+#: A process that opened a card but runs nothing on it keeps 36-52 KiB of page tables there, up to 1.7 MiB once ROCr has
+#: initialised the card (recorded on MI355X); a server or a compute job holds gigabytes. 1 GiB leaves room for a runtime
+#: that maps larger staging buffers on every card it opens.
+_OPENED_ONLY_VRAM_BYTES = 1 << 30
 
 
 def _holder(entry: object) -> str | None:

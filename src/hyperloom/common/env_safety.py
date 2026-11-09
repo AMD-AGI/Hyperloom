@@ -39,6 +39,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping
+from types import MappingProxyType
 
 log = logging.getLogger(__name__)
 
@@ -166,6 +167,12 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
 )
 
+# Route this account's traffic: allowed from a private .env, never from an untrusted source or a shared .env.
+_PROXY_ENV_NAMES: tuple[str, ...] = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
+# Where this account's runtime dir and kernel-agent env file are: read from a private .env and the kernel-agent env
+# file, never from a shared .env.
+_RUNTIME_PATH_ENV_NAMES: tuple[str, ...] = ("HYPERLOOM_RUNTIME_DIR", "KERNEL_AGENT_ENV")
+
 DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -192,23 +199,18 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "HF_HUB_CACHE",
         "HF_HUB_OFFLINE",
         "HF_TOKEN",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
         "HYPERLOOM_DOCKER_TARGET_HOST",
         "HYPERLOOM_FRAMEWORK_ENV",
         "HYPERLOOM_LLM_MODE",
         "HYPERLOOM_RUN_MODE",
-        "HYPERLOOM_RUNTIME_DIR",
         "HYPERLOOM_SKILL_PATH",
         "HYPERLOOM_WHEEL_REPO",
         "HYPERLOOM_WHEEL_TAG",
         "INFERENCE_OPTIMIZER_FORCE_PYTHON",
-        "KERNEL_AGENT_ENV",
         "KERNEL_OPT_BACKEND_ORDER",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENAI_CUSTOM_HEADERS",
-        "NO_PROXY",
         "ROCM_PATH",
         "SGLANG_ROCM_EXTRA",
         "SGLANG_ROCM_INDEX_URL",
@@ -217,6 +219,8 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "VIRTUAL_ENV",
         "VLLM_PYTHON",
         "VLLM_VENV_ROOT",
+        *_PROXY_ENV_NAMES,
+        *_RUNTIME_PATH_ENV_NAMES,
     }
 )
 
@@ -233,6 +237,25 @@ DOTENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "KERNEL_OPT_",
     "SGLANG_",
     "VLLM_",
+)
+
+# What a ``.env`` another account can write (a checkout on shared storage) lends: each name with the values it may carry,
+# choices among what this account ships, none naming a program, package, path, host, model or credential. Every other
+# allowed name picks what an install fetches or runs (GEAK_REPO, VLLM_ROCM_INDEX, *_ROOT), where this account's traffic
+# or key goes (the proxies, OPENAI_BASE_URL, GEAK_BASE_URL) or is written unquoted into a file this account sources
+# (model names), so only a private ``.env`` lends it. A listed name with an unlisted value is refused too (FRAMEWORK
+# names a script path); each value is compared whole. The shell's copy is RUNTIME_ENV_DOTENV_NOT_PRIVATE_LENT in
+# assets/runtime_env.sh; test_dotenv_allow_list.py holds the two equal and FRAMEWORK's values to the registry.
+DOTENV_NOT_PRIVATE_LENT_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "FRAMEWORK": frozenset({"atom", "custom", "sglang", "vllm", "xdit"}),
+        "HF_DATASETS_OFFLINE": frozenset({"0", "1"}),
+        "HF_HUB_OFFLINE": frozenset({"0", "1"}),
+        "HYPERLOOM_DOTENV_CREDENTIALS": frozenset({"kernel-agent-env"}),
+        "HYPERLOOM_FRAMEWORK_ENV": frozenset({"isolated", "shared"}),
+        "HYPERLOOM_LLM_MODE": frozenset({"anthropic", "deepseek", "openai"}),
+        "HYPERLOOM_RUN_MODE": frozenset({"baremetal", "docker"}),
+    }
 )
 
 KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
@@ -253,11 +276,9 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "GEAK_SCORE_TARGET",
         "GEAK_SKIP_PROFILE",
         "HYPERLOOM_ROOT",
-        "HYPERLOOM_RUNTIME_DIR",
         "HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV",
         "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
         "INFERENCEX_PATH",
-        "KERNEL_AGENT_ENV",
         "KERNEL_AGENT_LOG_LEVEL",
         # KernelForge's writable-state root.
         "KERNELFORGE_PROJECT_ROOT",
@@ -270,6 +291,7 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "TRACELENS_INTERNAL_ROOT",
         "TRACELENS_ROOT",
         "USER_DATA_PATH",
+        *_RUNTIME_PATH_ENV_NAMES,
     }
 )
 
@@ -306,9 +328,7 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
             # Reroute traffic, model downloads or TLS trust.
             "CURL_CA_BUNDLE",
             "HF_ENDPOINT",
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "NO_PROXY",
+            *_PROXY_ENV_NAMES,
             "REQUESTS_CA_BUNDLE",
             "SSL_CERT_DIR",
             "SSL_CERT_FILE",
@@ -495,6 +515,19 @@ def is_allowed_dotenv_key(key: object) -> bool:
     if not valid_env_key(upper) or upper in BLOCKED_UNTRUSTED_ENV_NAMES:
         return False
     return upper in DOTENV_EXACT_ALLOWLIST or any(upper.startswith(prefix) for prefix in DOTENV_PREFIX_ALLOWLIST)
+
+
+def is_allowed_not_private_dotenv_key(key: object) -> bool:
+    """True when a ``.env`` another account can write may lend ``key``, with one of the values
+    DOTENV_NOT_PRIVATE_LENT_VALUES gives it (is_lent_not_private_dotenv_assignment)."""
+    upper = str(key or "").strip().upper()
+    return is_allowed_dotenv_key(upper) and upper in DOTENV_NOT_PRIVATE_LENT_VALUES
+
+
+def is_lent_not_private_dotenv_assignment(key: object, value: object) -> bool:
+    """True when a ``.env`` another account can write lends ``key=value``: the name and that value are both listed."""
+    upper = str(key or "").strip().upper()
+    return is_allowed_not_private_dotenv_key(upper) and str(value) in DOTENV_NOT_PRIVATE_LENT_VALUES[upper]
 
 
 def is_allowed_kernel_agent_env_key(key: object) -> bool:

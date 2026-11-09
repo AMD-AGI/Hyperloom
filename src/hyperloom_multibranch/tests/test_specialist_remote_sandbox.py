@@ -216,6 +216,7 @@ def _umask() -> int:
 
 async def test_the_root_its_directories_and_the_files_made_for_the_launcher_are_the_groups_whatever_the_umask(tmp_path):
     assert _umask() & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     remote = _remote(tmp_path)
 
     process = await remote.start("true", tmp_path, {})

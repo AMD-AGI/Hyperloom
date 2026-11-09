@@ -458,12 +458,12 @@ def _rebuilt_environment(call: TestCall, notes: list[str]) -> Iterator[TestCall]
         return
     work = Path(tempfile.mkdtemp(prefix="hl-farm-"))
     try:
-        yield dataclasses.replace(call, points=_rebuilt_points(call, environment, work, notes))
+        yield _rebuilt_call(call, environment, work, notes)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path, notes: list[str]) -> tuple[Path, ...]:
+def _rebuilt_call(call: TestCall, environment: CompiledEnvironment, work: Path, notes: list[str]) -> TestCall:
     if call.jit is None and patches_aiter_sources(environment.roots):
         raise TestCallRefused(
             "the patch changes aiter's csrc or hsa, which is measured only by building the modules it touches in the "
@@ -476,11 +476,8 @@ def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path
         return store.get(address.removeprefix("sha256:"))
 
     try:
-        placed = place_attachments(
-            [Attachment(a.id, a.kind, f"sha256:{a.sha256}", "0" * 64) for a in environment.attachments],
-            work / "attach",
-            read_blob,
-        )
+        attachments = [Attachment(a.id, a.kind, f"sha256:{a.sha256}", "0" * 64) for a in environment.attachments]
+        placed = place_attachments(attachments, work / "attach", read_blob)
         python = server_python(_point_config(call.points[0]), default=sys.executable)
         roots = [SpecEnvRoot.parse(root.to_document(), "environment.roots") for root in environment.roots]
         inherited = inherited_environment(os.environ, call.env_overrides, call.unset_envs)
@@ -501,7 +498,7 @@ def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path
             points.append(target)
     except (AttachmentError, FarmError, NativeLayError, OSError, ValueError) as exc:
         raise TestCallRefused(f"the compiled environment cannot be rebuilt here: {exc}") from exc
-    return tuple(points)
+    return dataclasses.replace(call, points=tuple(points), framework_changed=farm is not None)
 
 
 def _builds(environment: CompiledEnvironment) -> SheetBuilds | None:
@@ -1232,6 +1229,7 @@ def _ended(run: _Run) -> _Ended:
         detail=detail,
         step_failure=_step_failure(failing),
         unrun=_unrun(failing),
+        framework_changed=run.call.framework_changed,
     )
     verdict = classify_test_failure(returncode=returncode, evidence=evidence)
     return _Ended(rounds, returncode, stderr, verdict)

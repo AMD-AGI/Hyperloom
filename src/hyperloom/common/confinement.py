@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import pwd
+import re
 import shutil
 import subprocess
 import threading
@@ -78,8 +79,11 @@ LOGIN_LOCATION_VARIABLES = frozenset(
 #: A variable ending so names a file holding a credential.
 CREDENTIAL_FILE_SUFFIXES = ("_KEY_FILE", "_KEY_PATH", "_TOKEN_FILE", "_TOKEN_PATH", "_CREDENTIALS_FILE")
 XDG_VARIABLES = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
-#: Hugging Face's login files under its config directory (``HF_HOME``, else ``$XDG_CACHE_HOME/huggingface``).
-HF_LOGIN_FILES = ("token", "stored_tokens")
+#: Hugging Face's token file in its directory (``HF_HOME``), and the file of stored tokens beside the token file.
+HF_TOKEN = "token"
+HF_STORED_TOKENS = "stored_tokens"
+#: A variable in a path setting, as :func:`os.path.expandvars` reads one.
+_VARIABLE = re.compile(r"\$(\w+|\{[^}]*\})")
 #: Where tools keep their logins in a home, relative to it: a path a search-path or data variable names that is one of
 #: these, or holds one, is never bound whole (:func:`_around_logins`), though no variable names it (``~/.config`` is
 #: the XDG configuration directory when ``XDG_CONFIG_HOME`` is unset).
@@ -459,12 +463,12 @@ def _app_home(environ: Mapping[str, str]) -> Path | None:
     return Path(home) if home and os.path.isabs(home) else _passwd_home()
 
 
-def _hf_home(environ: Mapping[str, str], home: Path | None) -> Path | None:
-    if environ.get("HF_HOME"):
-        return Path(environ["HF_HOME"])
-    if environ.get("XDG_CACHE_HOME"):
-        return Path(environ["XDG_CACHE_HOME"], "huggingface")
-    return None if home is None else home / ".cache" / "huggingface"
+def _expanded(value: str, environ: Mapping[str, str], home: Path | None) -> str:
+    """``value`` as ``huggingface_hub`` reads a path setting (:func:`os.path.expanduser`, then
+    :func:`os.path.expandvars`), from ``environ`` and its ``home``: a variable it does not set is kept as written."""
+    if home is not None and (value == "~" or value.startswith("~/")):
+        value = str(home) + value[1:]
+    return _VARIABLE.sub(lambda found: environ.get(found.group(1).strip("{}"), found.group(0)), value)
 
 
 def _sources(environ: Mapping[str, str], home: Path | None, registered: Iterable[Path]) -> Iterator[Path]:
@@ -482,9 +486,33 @@ def _sources(environ: Mapping[str, str], home: Path | None, registered: Iterable
 
 
 def _hf_logins(environ: Mapping[str, str], home: Path | None) -> tuple[Path, ...]:
-    """Hugging Face's login files, there or not: ``huggingface-cli login`` writes them whenever it is run."""
-    hf_home = _hf_home(environ, home)
-    return () if hf_home is None else tuple(hf_home / login for login in HF_LOGIN_FILES)
+    """Where Hugging Face keeps a login, made yet or not (``hf auth login`` writes it whenever it is run), as
+    ``huggingface_hub`` resolves it: the token file (``HF_TOKEN_PATH``, else ``$HF_HOME/token``; ``HF_HOME`` defaults
+    to ``$XDG_CACHE_HOME/huggingface``, that to ``~/.cache``) and the stored tokens beside it; and ``HF_HOME``'s pair
+    too, where a login made without ``HF_TOKEN_PATH`` set goes."""
+
+    def setting(name: str, default: str | None) -> str | None:
+        value = environ.get(name)
+        return _expanded(value, environ, home) if value else default
+
+    cache = setting("XDG_CACHE_HOME", None if home is None else str(home / ".cache"))
+    hf_home = setting("HF_HOME", None if cache is None else os.path.join(cache, "huggingface"))
+    tokens = [setting("HF_TOKEN_PATH", None), None if hf_home is None else os.path.join(hf_home, HF_TOKEN)]
+    found = [
+        login
+        for token in tokens
+        if token and os.path.isabs(token)
+        for login in (Path(token), Path(os.path.dirname(token), HF_STORED_TOKENS))
+    ]
+    return tuple(dict.fromkeys(found))
+
+
+def _first_missing(path: Path) -> Path | None:
+    """The first path missing on the way to ``path`` (resolved, not there): where a tool making it starts, in a
+    directory that is there; ``None`` when what is there on the way is not a directory, so nothing can be made."""
+    while not os.path.exists(path.parent):
+        path = path.parent
+    return path if os.path.isdir(path.parent) else None
 
 
 def _opened_up(directory: Path, visible: tuple[Path, ...], depth: int) -> list[Path]:
@@ -506,14 +534,15 @@ def _opened_up(directory: Path, visible: tuple[Path, ...], depth: int) -> list[P
 
 def _masks_for(path: Path, visible: tuple[Path, ...], later: frozenset[Path]) -> list[Path]:
     """``path`` itself when nothing of ``visible`` is at or below it; else its entries, opened up around them. A path
-    of ``later`` (a login file a tool writes when it logs in) counts while nothing is there yet, in a directory that
-    is. None for any other path this process cannot look at (below a directory it cannot search): no bind of its shows
-    it either."""
+    of ``later`` (a login file a tool writes when it logs in) counts while nothing is there yet: the first path
+    missing on the way to it, which the tool makes, is hidden (:func:`_first_missing`). None for any other path this
+    process cannot look at (below a directory it cannot search): no bind of its shows it either."""
     real = _real(path)
     if real == _ROOT:
         return []
     if not os.path.exists(real):
-        return [real] if path in later and os.path.isdir(real.parent) else []
+        missing = _first_missing(real) if path in later else None
+        return [] if missing is None else [missing]
     if not any(_at_or_under(shown, real) for shown in visible):
         return [real]
     if real in visible or not real.is_dir():
@@ -524,7 +553,6 @@ def _masks_for(path: Path, visible: tuple[Path, ...], later: frozenset[Path]) ->
 def credential_paths(
     environ: Mapping[str, str],
     *,
-    app_environ: Mapping[str, str] | None = None,
     given: Iterable[Path] = (),
     allowed: Iterable[Path] = (),
     writable: Iterable[Path] = (),
@@ -532,11 +560,11 @@ def credential_paths(
     """The paths to mask in a child of this process, from this process's configuration and the child's: the home
     (``HOME``, else the passwd entry's; and this process's passwd entry's either way), the XDG directories, the value
     of every variable that names a credential location (``:``-separated entries split, only absolute existing paths)
-    and Hugging Face's login files (made yet or not, in its directory), each read from ``app_environ`` (default: this
-    process's environment) and from ``environ`` (the child's), and the files registered in :data:`PRIVATE_PATHS`. A
-    location of the child's in a tree it writes (``writable``, its scratch too when that is on the host: a home or
-    tool directory re-pointed there) is its own, and is not masked; one in a tree only in doubt (:func:`_agent_trees`,
-    not bound) is.
+    and where Hugging Face keeps a login (:func:`_hf_logins`; one not made yet hidden at the first path missing on the
+    way to it), each read from this process's environment and from ``environ`` (the child's), and the files
+    registered in :data:`PRIVATE_PATHS`. A location of the child's in a tree it writes (``writable``, its scratch too
+    when that is on the host: a home or tool directory re-pointed there) is its own, and is not masked; one in a tree
+    only in doubt (:func:`_agent_trees`, not bound) is.
 
     A source that holds an ``allowed`` path (the policy's writable and readable paths) or a ``given`` one (handed to
     the child on purpose, so it stays readable) is not masked whole: its other entries are, down to :data:`HOME_DEPTH`
@@ -545,7 +573,7 @@ def credential_paths(
     counts for nothing here: the agent decides where it points (a link to a credential in a readable tree, left for
     the next launch), and the tree shows it already.
     """
-    app = os.environ if app_environ is None else app_environ
+    app = os.environ
     own, agent = _agent_trees(writable, None)
     written = _resolved_trees(own)
     sources = [*_sources(app, _app_home(app), PRIVATE_PATHS.paths()), _passwd_home()]

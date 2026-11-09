@@ -184,6 +184,14 @@ def after_iteration(state, campaign, *, container: str, workspace: str, session_
         except (Conflict, RuntimeError) as e:
             write_conflict(session_dir, retracts, str(e))
             break
+        # The same iteration's commits in the other editable trees (arbor/execute/trees.py), from each one's baseline.
+        from arbor.execute import trees as _trees
+        for tree, base in _trees.baselines(session_dir).items():
+            if tree in _trees.paths(campaign.config):
+                try:
+                    revert(container, tree, n, base)
+                except (Conflict, RuntimeError) as e:
+                    print(f"[arbor] WARNING: retraction of iteration {n} in {tree}: {e}", file=sys.stderr)
         change = f"retract iteration {n} (KEEP {retracts['keep']}): {finding.id}"
         try:
             save_landed_patch(container, workspace, str(Path(session_dir) / "landed.patch"), campaign.config)

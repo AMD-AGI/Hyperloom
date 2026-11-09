@@ -1108,7 +1108,8 @@ async def test_a_sandboxed_codex_runs_with_its_own_sandbox_off_in_a_single_node_
     else:
         assert result.exit_code == 0 and result.error == ""
     assert cmd[:2] == ["/bin/sh", "-c"] and cmd[4] == "/opt/fake/bwrap"
-    assert cmd[cmd.index("--json-status-fd") + 1] == "3" and "--die-with-parent" not in cmd
+    assert cmd[cmd.index("--json-status-fd") + 1] == "3" and "--die-with-parent" in cmd
+    codex = codex[codex.index("/usr/bin/codex") :]  # after the relay of the sandbox's network
     assert codex[0] == "/usr/bin/codex" and "--dangerously-bypass-approvals-and-sandbox" in codex
     assert "--sandbox" not in codex and REAP_MARK_ENV not in lease.started["env"]
     assert lease.started["env"]["CODEX_HOME"] == str(workspace / ".codex")

@@ -35,7 +35,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from hyperloom_common.fs_utils import read_text_nofollow
-from hyperloom_common.shared_storage import SHARED_CHILD_UMASK
+from hyperloom_common.shared_storage import child_umask
 
 
 _GITFILE = ".git"
@@ -306,7 +306,7 @@ def app_git(
         argv,
         cwd=worktree,
         env=env,
-        umask=SHARED_CHILD_UMASK if _shared_group(admin.parent.parent) is not None else -1,
+        umask=child_umask(admin.parent.parent),
         capture_output=True,
         encoding="utf-8",
         errors="surrogateescape",

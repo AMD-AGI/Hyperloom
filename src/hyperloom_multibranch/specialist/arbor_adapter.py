@@ -44,6 +44,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import math
 import os
 import re
 import shlex
@@ -56,10 +57,17 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
+import yaml
+
 from hyperloom.common.gain_math import (
     ACCURACY_THRESHOLD,
     AGENTX_ERROR_RATE_THRESHOLD_PCT,
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+)
+from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    TOTAL_TOKEN_THROUGHPUT,
 )
 from hyperloom.inference_optimizer.framework_registry import expert_parallel_flag
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
@@ -70,18 +78,21 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS, SURFACE_ENV_KEYS
 from hyperloom_multibranch.repo.isolated_git import pinned_git
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.worktree import SKIPPED
 from inference_suite.argv import remove_server_args, tokenize_server_args_preserving_json
-from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunch, BaseLaunchError
+from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunch, BaseLaunchError, RunStatus
+from inference_suite.contracts.layout import REPORT_FILE
 
 
 #: What makes a checkout Arbor's, run as a component: the mode, the entry point and the host's contract.
 MARKERS = ("arbor/component.py", "arbor/__main__.py", "docs/hosts.md")
 HOST = "hyperloom-mb"
-#: Arbor's serving template, the pack a host runs it on unless the spec names another, and the validator scripts every
-#: pack the adapter runs has.
+#: Arbor's serving template, the pack a host runs it on unless the spec names another, and the validator scripts a pack
+#: has when its pack.yaml names none (``validator.bench`` and ``validator.correctness`` name its own: the agentx pack's
+#: is ``validator/bench_agentx.sh``).
 PACK = "serving"
 BENCH_SCRIPT = "validator/bench.sh"
 CORRECTNESS_SCRIPT = "validator/correctness.sh"
@@ -118,6 +129,23 @@ EVAL_ENVS = (ACCURACY_FLOOR_ENV, "GSM8K_LIMIT")
 HOST_RULE = "Host rule (MB)"
 #: The workload kind whose recipe the round resolves, the root's launch holding only what is added to it.
 AGENTX = "agentx"
+#: The config key Arbor optimizes a metric by in place of its pack's (``arbor/objective.py``), and the key it reads as
+#: each AgentX objective MB keeps on: ``e2e_norm_intvty_p50`` as MB reads it, and the total token throughput per GPU,
+#: which ranks a change as MB's per-server figure does at a session's fixed TP. Another session's metric is its pack's.
+OBJECTIVE_KEY = "opt_objective"
+ARBOR_OBJECTIVES = {GRADED_INTVTY_P50: "e2e_norm_intvty_p50", TOTAL_TOKEN_THROUGHPUT: "total_token_throughput"}
+#: Where an Arbor checkout lists the metrics it optimizes on :data:`OBJECTIVE_KEY` (``KNOWN``), and the commit from
+#: which it knows each: ``e8d31b7`` added the key but read P50 interactivity as decode alone until ``9c455df``, and
+#: ``df9b55a`` added the total token throughput.
+OBJECTIVE_MODULE = "arbor/objective.py"
+OBJECTIVE_SINCE = {"e2e_norm_intvty_p50": "9c455df", "total_token_throughput": "df9b55a"}
+#: Where the gate's AgentX round report (``report.json``) holds each metric an AgentX session keeps on or guards;
+#: throughput is the server's, not per GPU.
+REPORT_PATHS = {
+    GRADED_INTVTY_P50: "agentx.e2e_norm_intvty.p50",
+    GRADED_INTVTY: "agentx.e2e_norm_intvty.p90",
+    TOTAL_TOKEN_THROUGHPUT: "agentx.throughput.total_tokens_per_second",
+}
 #: SGLang reads its TP from these flags only. Arbor gives vLLM its TP itself, but MB names it too, so a vLLM branch's
 #: server_flags are never empty, which Arbor refuses (a plain baseline root has no launch of its own).
 SGLANG = "sglang"
@@ -150,11 +178,19 @@ _SITE_UNREAD = (
     f'f"this Arbor does not read {SITE_ENV}, so it cannot import what pip installed in {{site}}: '
     f'pin Arbor {SITE_SINCE} or later")'
 )
+#: The oldest Python the checkout runs on: its ``arbor/version.py`` ``PYTHON_MIN`` (3.10 from Arbor ``6126676``), read
+#: without importing Arbor, since nothing is installed yet; 3.11, what Arbor needed before it named one, without it.
+_PYTHON_MIN = (
+    'import os, re, sys; p = "arbor/version.py"; t = open(p).read() if os.path.exists(p) else ""; '
+    'm = re.search(r"PYTHON_MIN[^=]*=\\s*\\((\\d+),\\s*(\\d+)\\)", t); '
+    "need = tuple(int(g) for g in m.groups()) if m else (3, 11); "
+    'sys.exit(sys.version_info[:2] < need and "Arbor needs Python %d.%d or newer" % need)'
+)
 #: What Arbor needs beyond the image (its docs/getting-started.md, and the third-party modules arbor/ imports outside
-#: its tests): Python 3.11, PyYAML and the Claude agent SDK, which brings its CLI. Each is installed only when Arbor
-#: cannot import it, and the last command checks that Arbor imports both.
+#: its tests): the Python its checkout names, PyYAML and the Claude agent SDK, which brings its CLI. Each is installed
+#: only when Arbor cannot import it, and the last command checks that Arbor imports both.
 INSTALL = (
-    f"{PYTHON} -c 'import sys; sys.exit(sys.version_info < (3, 11) and \"Arbor needs Python 3.11 or newer\")'",
+    f"{PYTHON} -c '{_PYTHON_MIN}'",
     f"{ARBOR_PYTHON} -c 'import arbor, yaml' 2>/dev/null || {PYTHON} -m pip install --quiet pyyaml",
     f"{ARBOR_PYTHON} -c 'import arbor, claude_agent_sdk' 2>/dev/null"
     f" || {PYTHON} -m pip install --quiet claude-agent-sdk",
@@ -213,8 +249,13 @@ OPTIONAL_KEYS = ("profile", "base_launch")
 #: Arbor's ledger: FACT and DEAD_END records are what it measured and ruled out.
 LEDGER = {"id": "id", "kind": "type", "text": "claim", "kinds": {"FACT": "insight", "DEAD_END": "pitfall"}}
 ENCODING = "utf-8"
-#: The client's flags Arbor fills: its server's port and an empty directory per replay.
-BASE_URL, PORT, RESULT_DIR, MODEL = "--base-url", "--port", "--result-dir", "--model"
+#: The client's flags Arbor fills: its server's port and an empty directory per replay, ``--run-dir`` an
+#: inference_suite round's, whose config names its server.
+BASE_URL, PORT, RESULT_DIR, RUN_DIR, MODEL = "--base-url", "--port", "--result-dir", "--run-dir", "--model"
+RESULT_DIRS = (RESULT_DIR, RUN_DIR)
+#: Arbor's phase that runs the bench command, whose cap (``component.phase_minutes``) MB sets when its client is
+#: bounded otherwise than by Arbor's default.
+BENCH_PHASE = "bench"
 _SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 #: A word of nothing but these is a shell operator, carried as it stands.
 _OPERATORS = frozenset("();<>|&")
@@ -405,7 +446,11 @@ def arbor_manifest(spec: AgentSpec, checkout: ArborCheckout, run: ArborRun) -> A
     if spec.dossier:
         carry_dossier(path, Path(spec.dossier))
     config = arbor_config(spec, path, run)
-    reasons = [*_launch_refusals(spec), *refusals(config, declared_keys(path))]
+    reasons = [
+        *_launch_refusals(spec),
+        *_objective_refusals(config, path),
+        *refusals(config, declared_keys(path)),
+    ]
     if reasons:
         raise ArborRefused(reasons)
     (path / run.session_dir).mkdir(parents=True, exist_ok=True)
@@ -518,13 +563,26 @@ def _written(root: Path, shipped: frozenset[str]) -> list[Path]:
     return [path for path in root.iterdir() if path.name not in shipped and (path / DOSSIER_INDEX).is_file()]
 
 
+def validator_script(pack: Path, key: str, default: str) -> str:
+    """The script ``pack``'s pack.yaml names for ``key`` under ``validator:`` (``bench``, ``correctness``), relative to
+    the pack; ``default`` when it names none, or the file does not read (Arbor then refuses the pack itself)."""
+
+    try:
+        manifest = yaml.safe_load((pack / "pack.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return default
+    validator = manifest.get("validator") if isinstance(manifest, dict) else None
+    named = validator.get(key) if isinstance(validator, dict) else None
+    return named.strip() if isinstance(named, str) and named.strip() else default
+
+
 def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, Any]:
     """Arbor's config for ``run`` of ``spec``: in component mode on the host, the recipe's launch on the pack the spec
     names in ``checkout`` (the serving template by default), ending by the spec's deadline, its patches made against
     its root, the integration notes read every iteration, every measurement by the gate's client when the spec has
-    one, and the host's plan when it gives one, which a run that stops at its map does not take. A spec with a launch
-    file is served the file's launch with the recipe's added to it, and measured by the file's client when the spec
-    has none.
+    one, its bench phase as long as one measurement by that client may take, and the host's plan when it gives one,
+    which a run that stops at its map does not take. A spec with a launch file is served the file's launch with the
+    recipe's added to it, and measured by the file's client when the spec has none.
 
     The cards are numbered from 0, as the sandbox shows them; Arbor never masks them itself in this mode."""
 
@@ -537,6 +595,8 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
         component["notes"] = spec.knowledge
     if client:
         component["bench_command"] = bench_command(client)
+    if spec.client_seconds:
+        component["phase_minutes"] = {BENCH_PHASE: math.ceil(spec.client_seconds / 60)}
     if run.stop_at:
         component["stop_at"] = run.stop_at
     elif spec.plan:
@@ -548,8 +608,10 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
         component["base_launch"] = {"path": launch.record, "digest": launch.digest}
     if launch.entrypoint and launch.entrypoint != ENTRYPOINTS.get(spec.framework):
         component["entrypoint"] = list(launch.entrypoint)
+    objective = ARBOR_OBJECTIVES.get(spec.metric)
     return {
         **({REVIEW_GATE_KEY: False} if gate == REVIEW_OFF else {}),
+        **({OBJECTIVE_KEY: objective} if objective else {}),
         "pack": name,
         "identity": f"{HOST} {Path(spec.model).name}",
         "goal": f"{spec.metric} of {spec.model} on {spec.framework} at TP{spec.tp} on {spec.gpu_type}, as MB measures it",
@@ -561,8 +623,8 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
         "tp": spec.tp,
         "server_flags": server_flags(spec, launch.server_flags),
         "server_env": {ACCURACY_FLOOR_ENV: str(DEFAULT_ENABLEMENT_ACCURACY_FLOOR), **launch.server_env, **spec.envs},
-        "bench_script": str(pack / BENCH_SCRIPT),
-        "correctness_script": str(pack / CORRECTNESS_SCRIPT),
+        "bench_script": str(pack / validator_script(pack, "bench", BENCH_SCRIPT)),
+        "correctness_script": str(pack / validator_script(pack, "correctness", CORRECTNESS_SCRIPT)),
         "workspace_root": spec.workspace,
         "session_root": str(checkout / run.session_dir),
         "port": spec.port,
@@ -600,8 +662,8 @@ def _launch_refusals(spec: AgentSpec) -> list[str]:
         return []
     return [
         "an AgentX recipe's launch holds only what the round adds to the one it resolves from InferenceX, so Arbor would"
-        " serve defaults MB does not measure: give the resolved launch with --agent-launch"
-        " (examples/multibranch-arbor-launch)"
+        " serve defaults MB does not measure: give the resolved launch with --agent-launch, or the session's base"
+        " with --reference-script (examples/multibranch-arbor-launch)"
     ]
 
 
@@ -627,12 +689,8 @@ def host_rules(spec: AgentSpec) -> list[str]:
     point = ", ".join(f"{key} {value}" for key, value in _operating_point(spec.workload).items())
     owned = ", ".join(sorted({*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}))
     kind = str(spec.workload.get("kind") or "the session's workload")
-    kept = (
-        "in one measurement, which is final unless a guard (p90 interactivity, output throughput, failed requests)"
-        " holds it for a retest"
-        if kind == AGENTX
-        else "that a second measurement confirms"
-    )
+    objective = _agentx_objective(spec.metric) if kind == AGENTX else None
+    kept = _agentx_kept(objective) if objective is not None else "that a second measurement confirms"
     rules = [
         f"{HOST_RULE}: the workload is fixed: {kind}{f' at {point}' if point else ''}, measured by MB's client, the"
         f" only bench of record. A change never sets {owned}: MB owns them and refuses a launch that does.",
@@ -650,6 +708,14 @@ def host_rules(spec: AgentSpec) -> list[str]:
             f" Arbor's GSM8K reads on another scale, so Arbor holds the change to the same drop against the root it"
             f" measures itself, and to {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:g} when it could not."
         )
+    if objective is not None and spec.client:
+        guards = ", ".join(f"{REPORT_PATHS[guard.metric]} the {guard.metric}" for guard in objective.guards)
+        rules.append(
+            f"{HOST_RULE}: MB's client is its own AgentX round, a replay of the workload's trace window: each run"
+            f" writes {REPORT_FILE} in its output directory. Its {REPORT_PATHS[spec.metric]} is the {spec.metric} MB"
+            f" keeps a change on, and {guards} it guards; a run whose run_status is not {RunStatus.COMPLETED.value}"
+            " measured nothing."
+        )
     if spec.source_unkept:
         rules.append(
             f"{HOST_RULE}: a change to {spec.framework}'s source cannot be kept on this image: {spec.source_unkept}."
@@ -658,11 +724,24 @@ def host_rules(spec: AgentSpec) -> list[str]:
     return rules
 
 
+def _agentx_objective(metric: str) -> AgentXObjective:
+    return {objective.metric: objective for objective in AgentXObjective}[metric]
+
+
+def _agentx_kept(objective: AgentXObjective) -> str:
+    guards = " and ".join(guard.metric for guard in objective.guards)
+    return (
+        f"of +{objective.bar_pct:g}% in one measurement, which is final unless a guard holds it for a retest: {guards}"
+        f" within {objective.guard_band_pct:g}% of the parent, and no more failed requests"
+    )
+
+
 def bench_command(client: str) -> str:
     """The gate's ``client`` as Arbor's ``component.bench_command``: the port it measures, in ``--base-url`` or
-    ``--port``, as ``{port}``, and its ``--result-dir`` as ``{out}``, which Arbor quotes as it fills it; every other
-    word as it was, the client's warm-up requests among them. Raise :class:`ArborRefused` when the client names no
-    port or no result directory, or cannot be read word by word."""
+    ``--port``, as ``{port}``, and its ``--result-dir`` or ``--run-dir`` as ``{out}``, which Arbor quotes as it fills
+    it; every other word as it was, the client's warm-up requests among them. Raise :class:`ArborRefused` when the
+    client names no result directory, no port beside a ``--result-dir`` (a ``--run-dir`` is an inference_suite
+    round's, whose config names its server), or cannot be read word by word."""
 
     words = _words(client)
     templated: list[str] = []
@@ -675,7 +754,7 @@ def bench_command(client: str) -> str:
             pending = ""
             continue
         flag, joined, value = word.partition("=")
-        if flag in (BASE_URL, PORT, RESULT_DIR):
+        if flag in (BASE_URL, PORT, *RESULT_DIRS):
             if joined:
                 templated.append(f"{flag}={_filled(flag, value)}")
                 found.add(flag)
@@ -685,10 +764,10 @@ def bench_command(client: str) -> str:
             continue
         templated.append(word if set(word) <= _OPERATORS else shlex.quote(word))
     reasons = [f"the gate's client ends at {pending}, which takes a value"] if pending else []
-    if not found & {BASE_URL, PORT}:
+    if RUN_DIR not in found and not found & {BASE_URL, PORT}:
         reasons.append(f"the gate's client names no port to measure Arbor's server on ({BASE_URL} or {PORT})")
-    if RESULT_DIR not in found:
-        reasons.append(f"the gate's client names no {RESULT_DIR} for Arbor to read each replay from")
+    if not found & set(RESULT_DIRS):
+        reasons.append(f"the gate's client names no {RESULT_DIR} or {RUN_DIR} for Arbor to read each replay from")
     if reasons:
         raise ArborRefused([f"{reason}: {client}" for reason in reasons])
     return " ".join(templated)
@@ -711,7 +790,7 @@ def _words(client: str) -> list[str]:
 def _filled(flag: str, value: str) -> str:
     """The value of ``flag`` as Arbor fills it: a placeholder, or the base URL with its port one."""
 
-    if flag == RESULT_DIR:
+    if flag in RESULT_DIRS:
         return "{out}"
     if flag == PORT:
         return "{port}"
@@ -790,6 +869,42 @@ def _pin_refusals(component: Mapping[str, Any], declared: frozenset[str] | None)
         f"the pinned Arbor has no component.{key}: pin Arbor {KEY_SINCE.get(key, COMPONENT_SINCE)} or later"
         for key in lacking
     ]
+
+
+def _objective_refusals(config: Mapping[str, Any], checkout: Path) -> list[str]:
+    """An :data:`OBJECTIVE_KEY` the Arbor in ``checkout`` cannot optimize: one whose :data:`OBJECTIVE_MODULE` does not
+    list it (``e8d31b7`` read P50 interactivity as decode alone), or, from an Arbor without that module, which ignores
+    the key and climbs its pack's metric, any but P50 interactivity, which a session ran on such pins before the key
+    existed (the vendored v0.9.3 among them)."""
+
+    wanted = config.get(OBJECTIVE_KEY)
+    known = _known_objectives(checkout)
+    if not wanted or (wanted in known if known is not None else wanted == ARBOR_OBJECTIVES[GRADED_INTVTY_P50]):
+        return []
+    return [
+        f"the pinned Arbor cannot optimize {wanted} ({OBJECTIVE_KEY}): pin Arbor {OBJECTIVE_SINCE[wanted]} or later"
+    ]
+
+
+def _known_objectives(checkout: Path) -> frozenset[str] | None:
+    """The metric keys :data:`OBJECTIVE_MODULE` lists as ``KNOWN``, read without importing Arbor; ``None`` for a
+    checkout without that module, empty when it does not read."""
+
+    try:
+        text = (checkout / OBJECTIVE_MODULE).read_text(encoding=ENCODING)
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError):
+        return frozenset()
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return frozenset()
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "KNOWN" for t in node.targets):
+            if isinstance(node.value, ast.Dict):
+                return frozenset(k.value for k in node.value.keys if isinstance(k, ast.Constant))
+    return frozenset()
 
 
 def _host_refusals(config: Mapping[str, Any]) -> list[str]:

@@ -26,6 +26,10 @@ from pathlib import Path
 TURN_ENV = "ARBOR_TURN"
 #: The turns whose processes outlive them on purpose: the server turn's server.
 KEPT = ("server",)
+#: The container a standalone campaign's turns reach through ``docker exec`` (set by the loop), or None. The tag does
+#: not follow a process into it: ``docker exec`` starts it from the daemon, with the container's environment. So the
+#: container's processes are listed when such a turn starts, and what is new when it ends is stopped there.
+CONTAINER: str | None = None
 
 
 def new_tag(label: str) -> str:
@@ -116,3 +120,69 @@ def end_kept(label: str = "server", grace: float = 30.0) -> tuple[list[int], lis
     those still running."""
     pids = leftovers(f"{os.getpid()}-{label}-", prefix=True)
     return stop(pids, grace) if pids else ([], [])
+
+
+# ── Inside the container (standalone): what a turn's `docker exec` started ──────────────────────────────────────
+
+# pid, parent, state, start time (five fields), command: the start time tells a new process from a reused pid, and a
+# zombie (state Z) is already gone.
+_PS = ["ps", "-eo", "pid=,ppid=,stat=,lstart=,args="]
+
+
+def _docker(container: str, argv: list[str], timeout: int = 60):
+    import subprocess
+    try:
+        return subprocess.run(["docker", "exec", container, *argv], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def container_procs(container: str) -> dict[tuple[int, str], tuple[int, str]] | None:
+    """``{(pid, start): (parent, command)}`` of every process in ``container``, or None when it cannot be read."""
+    r = _docker(container, _PS)
+    if r is None or r.returncode != 0:
+        return None
+    out = {}
+    for line in r.stdout.splitlines():
+        parts = line.split(None, 8)
+        if len(parts) < 8 or not parts[0].isdigit() or not parts[1].isdigit() or parts[2].startswith("Z"):
+            continue
+        out[(int(parts[0]), " ".join(parts[3:8]))] = (int(parts[1]), parts[8] if len(parts) > 8 else "")
+    return out
+
+
+def _new(before: dict, now: dict) -> dict[int, tuple[int, str]]:
+    """The processes in ``now`` that were not in ``before``, but for the listing itself: ``{pid: (parent, command)}``."""
+    return {pid: (ppid, cmd) for (pid, start), (ppid, cmd) in now.items()
+            if (pid, start) not in before and not cmd.startswith(" ".join(_PS))}
+
+
+def end_container_turn(before: dict | None, container: str | None, label: str,
+                       grace: float = 30.0) -> tuple[list[int], list[int]]:
+    """Stop, inside ``container``, what started there during the turn whose start listing is ``before``: SIGTERM to the
+    roots (whose parent is not new too) first, then to the rest after up to ``grace`` seconds; never SIGKILL. The
+    container's pids stopped, and those still running. Nothing for a kept turn, or one that could not be listed."""
+    if before is None or not container or label in KEPT:
+        return [], []
+    now = container_procs(container)
+    if now is None:
+        return [], []
+    new = _new(before, now)
+    if not new:
+        return [], []
+    roots = sorted(p for p, (ppid, _) in new.items() if ppid not in new)
+    rest = sorted(p for p in new if p not in roots)
+    _docker(container, ["kill", "-TERM", *map(str, roots)])
+    deadline = time.time() + grace
+    while time.time() < deadline:
+        left = container_procs(container)
+        if left is None or not _new(before, left):
+            break
+        time.sleep(1)
+    left = container_procs(container) or {}
+    alive = sorted(_new(before, left))
+    if alive:
+        _docker(container, ["kill", "-TERM", *map(str, alive)])
+        time.sleep(min(grace, 5))
+        alive = sorted(_new(before, container_procs(container) or {}))
+    return roots + rest, alive

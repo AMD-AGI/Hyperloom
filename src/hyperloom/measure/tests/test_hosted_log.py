@@ -70,6 +70,7 @@ def test_the_stop_code_is_the_one_the_local_flow_uses() -> None:
 
 
 def test_the_journal_a_restarted_leg_re_attaches_from_is_the_group_s(tmp_path) -> None:
+    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     journal = MeasurementJournal(tmp_path / "hosted")
     journal.append(_record("a", 1))
 

@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import errno
 import importlib
+import shlex
+import sys
 import time
+from pathlib import Path
 
 import pytest
-from inference_suite.contracts import FailedStep
 
 from hyperloom.common import failure_signature
 from hyperloom.measure import failures, returncodes
@@ -22,6 +24,11 @@ from hyperloom.measure.failures import (
     classify_test_failure,
     decides_test,
 )
+from inference_suite import framework_version
+from inference_suite.contracts import FailedStep
+from inference_suite.framework_probe import FrameworkProbeError, probe_install, run_probe
+from inference_suite.frameworks import Framework
+from inference_suite.recipe.image_version import recipe_image_facts
 
 IMPORT_ERROR_LOG = (
     "Traceback (most recent call last):\n  File \"x.py\", line 1\nModuleNotFoundError: No module named 'sglang_patch'\n"
@@ -388,6 +395,78 @@ def test_a_flag_refusal_without_a_detail_is_still_a_candidate_serve_flag() -> No
         returncode=1, evidence=FailureEvidence(step_failure=StepFailure(FailedStep.FLAG_UNKNOWN))
     )
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, "serve_flag")
+
+
+def _unknown_framework(detail: str, framework_changed: bool, logs: tuple[str, ...] = ()) -> FailureClassification:
+    return classify_test_failure(
+        returncode=1,
+        evidence=FailureEvidence(
+            logs=logs,
+            step_failure=StepFailure(FailedStep.FRAMEWORK_VERSION_UNKNOWN, detail),
+            framework_changed=framework_changed,
+        ),
+    )
+
+
+def _bare_interpreter(tmp_path: Path) -> str:
+    """An interpreter that sees the standard library only, so no framework package is importable from it."""
+    script = tmp_path / "bare-python"
+    script.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -S "$@"\n')
+    script.chmod(0o755)
+    return str(script)
+
+
+#: A framework the serving interpreter cannot import is the image's unless the test laid a rebuilt framework.
+_UNIMPORTABLE_VERDICTS = pytest.mark.parametrize(
+    ("framework_changed", "failure_class", "reason", "decides"),
+    [
+        (False, FailureClass.INFRA, "framework_unimportable", False),
+        (True, FailureClass.CANDIDATE, failure_signature.IMPORT_ERROR, True),
+    ],
+    ids=["image", "farm"],
+)
+
+
+@_UNIMPORTABLE_VERDICTS
+def test_a_serving_interpreter_without_the_framework_is_the_image_unless_the_test_changed_the_framework(
+    tmp_path: Path, framework_changed, failure_class, reason, decides
+) -> None:
+    """The suite probes the install before boot, so no server log says it; the probe's detail is quoted over the log's."""
+    with pytest.raises(FrameworkProbeError) as refused:
+        probe_install(_bare_interpreter(tmp_path), Framework.SGLANG, {}, cwd=tmp_path)
+    detail = str(refused.value)
+    verdict = _unknown_framework(detail, framework_changed, logs=(TRACEBACK_LOG,))
+    assert detail.endswith("cannot import sglang")
+    assert (verdict.failure_class, verdict.failure_reason) == (failure_class, f"{reason}: {detail}")
+    assert decides_test(verdict) is decides
+
+
+@_UNIMPORTABLE_VERDICTS
+def test_a_framework_whose_import_raised_in_the_probe_is_classified_quoting_the_import_line(
+    tmp_path: Path, framework_changed, failure_class, reason, decides
+) -> None:
+    with pytest.raises(FrameworkProbeError) as refused:
+        run_probe(_bare_interpreter(tmp_path), "import sglang_patch", (), {}, cwd=tmp_path)
+    verdict = _unknown_framework(str(refused.value), framework_changed)
+    line = "ModuleNotFoundError: No module named 'sglang_patch'"
+    assert (verdict.failure_class, verdict.failure_reason) == (failure_class, f"{reason}: {line}")
+    assert decides_test(verdict) is decides
+
+
+@pytest.mark.parametrize("framework_changed", [False, True], ids=["image", "farm"])
+def test_a_probe_that_says_nothing_of_the_framework_leaves_the_verdict_to_the_log(
+    tmp_path: Path, framework_changed: bool
+) -> None:
+    """A probe that could not start or that failed for another reason, or a version that cannot be read, says nothing
+    of the install: it is left to the logs as if no step were named, so the test is run again."""
+    details = [framework_version.check(None, recipe_image_facts("lmsysorg/sglang:v0.5.0-rocm700", None)).detail]  # type: ignore[union-attr]
+    for python, program in ((str(tmp_path / "no-such-python"), "pass"), (_bare_interpreter(tmp_path), "1/0")):
+        with pytest.raises(FrameworkProbeError) as refused:
+            run_probe(python, program, (), {}, cwd=tmp_path)
+        details.append(str(refused.value))
+    for detail in details:
+        verdict = _unknown_framework(detail, framework_changed)
+        assert verdict == classify_test_failure(returncode=1, evidence=FailureEvidence()), detail
 
 
 def test_a_stalled_server_is_unclear_and_does_not_settle_the_test_whatever_its_log_says() -> None:

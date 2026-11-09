@@ -32,6 +32,7 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS, DROPPED_REQUESTS, GAIN_BELOW_THRESHOLD
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.final import (
@@ -209,7 +210,7 @@ class AgentXRefusingGate(GateService):
     the accuracy gate passes every test."""
 
     def __init__(self, blackboard: LocalBlackboard, toolbox: RecordingToolbox, refused_by: tuple[str, ...]) -> None:
-        super().__init__(blackboard, toolbox, AgentXRule(), toolbox)
+        super().__init__(blackboard, toolbox, AgentXRule(AgentXObjective.P50_INTERACTIVITY), toolbox)
         self.refused_by = refused_by
 
     async def compare(self, request_id: str) -> Judgement:

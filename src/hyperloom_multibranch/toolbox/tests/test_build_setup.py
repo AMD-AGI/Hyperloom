@@ -18,6 +18,7 @@ import pytest
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.jit.native.config import trust_from_file
 from hyperloom.measure.jit.native.trust import Signer
+from hyperloom.measure.runner.native.isolated import Unisolated
 from hyperloom_multibranch.toolbox import build_preflight as preflight
 from hyperloom_multibranch.toolbox import build_setup
 from hyperloom_multibranch.toolbox.build_preflight import IMAGE_CHECKOUTS, git_head
@@ -270,7 +271,9 @@ def test_a_short_ref_is_set_up_at_its_full_commit_the_toolbox_accepts_and_settin
     monkeypatch.setattr(preflight, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(preflight, "account_problem", lambda: None)
     monkeypatch.setattr(preflight, "tracelens_problem", lambda: None)
-    native = native_builds(environ, LocalBlobStore(tmp_path / "blobs"), "sha256:" + "a" * 64, isolation=lambda: None)
+    native = native_builds(
+        environ, LocalBlobStore(tmp_path / "blobs"), "sha256:" + "a" * 64, isolation=lambda: Unisolated("a stand-in")
+    )
     assert native is not None
 
     written = (root / "build.env").read_bytes()

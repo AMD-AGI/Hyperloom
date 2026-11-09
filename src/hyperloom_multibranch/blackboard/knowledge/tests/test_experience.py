@@ -14,6 +14,7 @@ import pytest
 from hyperloom_kb import Experience, RemoteExperienceKB
 from hyperloom_kb.collect import CollectReport, collect, load_mapping
 
+from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
 from hyperloom.contracts.recipe import (
     ComponentChange,
     ConfigDelta,
@@ -41,9 +42,12 @@ from hyperloom_multibranch.contracts.blackboard.records import (
 )
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LearningKind
 from hyperloom_multibranch.blackboard.knowledge.experience import (
+    AGENTX_INTERACTIVITY_OBJECTIVE,
+    AGENTX_TOTAL_OBJECTIVE,
     EXPORT_FORMAT,
     MAPPING_PATH,
     MULTIBRANCH_MAPPING_PATH,
+    THROUGHPUT_OBJECTIVE,
     candidate_row,
     change_document,
     export_document,
@@ -277,6 +281,35 @@ def test_an_agentx_session_records_every_change_on_interactivity_in_the_same_rep
     assert sorted(own) == sorted(shared) == ["r1", "r2"]
     assert {experience.objective for experience in own.values()} == {"e2e_interactivity@v1"}
     assert [_change_group(own[unit]) for unit in ("r1", "r2")] == [_change_group(shared[unit]) for unit in ("r1", "r2")]
+
+
+def _objective(snapshot: BlackboardSnapshot, metric: str) -> object:
+    metadata = export_document(snapshot, metric)["metadata"]
+    assert isinstance(metadata, dict)
+    return metadata["objective"]
+
+
+def test_an_agentx_session_graded_on_total_throughput_records_every_change_on_that_objective(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    agentx = dataclasses.replace(snapshot, profile=profile(isl=None, osl=None))
+    # The scripted session measures METRIC only, so its rows carry values under that metric alone.
+    document = export_document(agentx, METRIC)
+    metadata = document["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["objective"] = _objective(agentx, TOTAL_TOKEN_THROUGHPUT)
+
+    own = {
+        item.unit_id: item.experience for item in collect(MULTIBRANCH_MAPPING_PATH, document, dry_run=True).collected
+    }
+
+    assert [
+        _objective(agentx, METRIC),
+        _objective(agentx, TOTAL_TOKEN_THROUGHPUT),
+        _objective(snapshot, TOTAL_TOKEN_THROUGHPUT),
+    ] == [AGENTX_INTERACTIVITY_OBJECTIVE, AGENTX_TOTAL_OBJECTIVE, THROUGHPUT_OBJECTIVE]
+    assert sorted(own) == ["r1", "r2"]
+    assert {experience.objective for experience in own.values()} == {"e2e_total_throughput@v1"}
 
 
 def test_a_judgement_waiting_on_its_split_or_its_diagnosis_waits_to_be_published(snapshot: BlackboardSnapshot) -> None:

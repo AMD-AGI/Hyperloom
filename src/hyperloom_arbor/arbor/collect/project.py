@@ -6,11 +6,15 @@ model many ways (pack ``dsr1-fp4``, session ``dsr1-c32-run2``, model
 ``deepseek-ai/DeepSeek-R1``); ``projects.json`` maps them to one name. A name it does not know becomes a slug
 of itself, and the collector says so, so a new family shows up as its own
 project until someone adds it to the table.
+
+The table here holds public model families. A site's own (a model not yet public, a customer's) go in a file of the
+same form that ``ARBOR_PROJECTS`` names, in the environment or in ``~/.arbor/settings.env``; it is read first.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -31,8 +35,17 @@ def slug(text: str) -> str:
 
 
 def load_table(path: str | Path | None = None) -> list[tuple[str, re.Pattern]]:
-    data = json.loads(Path(path or PROJECTS_FILE).read_text())
-    return [(p["project"], re.compile(p["match"])) for p in data["projects"]]
+    """The table: a site's own projects first (the file ``ARBOR_PROJECTS`` names, in ``projects.json``'s form), then
+    the public model families of ``projects.json``. ``path`` reads that one file alone."""
+    if path:
+        files = [Path(path)]
+    else:
+        site = Path(os.environ.get("ARBOR_PROJECTS", "").strip()).expanduser()
+        files = ([site] if str(site) not in ("", ".") and site.is_file() else []) + [PROJECTS_FILE]
+    table = []
+    for f in files:
+        table += [(p["project"], re.compile(p["match"])) for p in json.loads(f.read_text())["projects"]]
+    return table
 
 
 def match_project(text: str, table: list[tuple[str, re.Pattern]]) -> str | None:

@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from hyperloom.common.gain_math import AGENTX_ERROR_RATE_THRESHOLD_PCT
+from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
 from hyperloom_common.coerce import to_float, to_int
 from inference_suite.contracts import (
     FIXED_METRIC_KEYS,
@@ -36,7 +37,6 @@ _COMPLETED_REQUESTS = "completed_requests"
 _OUTPUT_THROUGHPUT = "output_throughput"
 _REQUEST_THROUGHPUT = "request_throughput"
 _DURATION_SECONDS = "duration_seconds"
-_TOTAL_TOKEN_THROUGHPUT = "total_token_throughput"
 _REQUEST_ERROR_RATE = "request_error_rate"
 
 #: Each AgentX throughput figure, by the measurement key it fills.
@@ -44,7 +44,7 @@ _AGENTX_THROUGHPUT = {
     _REQUEST_THROUGHPUT: _REQUEST_THROUGHPUT,
     _OUTPUT_THROUGHPUT: "output_tokens_per_second",
     "input_throughput": "input_tokens_per_second",
-    _TOTAL_TOKEN_THROUGHPUT: "total_tokens_per_second",
+    TOTAL_TOKEN_THROUGHPUT: "total_tokens_per_second",
     _DURATION_SECONDS: _DURATION_SECONDS,
 }
 
@@ -113,7 +113,7 @@ def _agentx_valid(result: AgentxResult, measurement: Mapping[str, Any]) -> bool:
         and rate is not None
         and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
         and _positive(measurement[_DURATION_SECONDS])
-        and _positive(measurement[_TOTAL_TOKEN_THROUGHPUT])
+        and _positive(measurement[TOTAL_TOKEN_THROUGHPUT])
     )
 
 

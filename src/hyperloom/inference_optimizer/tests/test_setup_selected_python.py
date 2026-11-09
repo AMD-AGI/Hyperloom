@@ -131,6 +131,8 @@ def _run_setup(
     marker = '\nmain "$@"\n'
     assert marker in text
     library = _write(tmp_path / "installer-lib.sh", text.replace(marker, "\n"))
+    # The installer sources the runtime_env.sh beside it.
+    _write(tmp_path / "runtime_env.sh", (_INSTALLER.parent / "runtime_env.sh").read_text(encoding="utf-8"))
     runner = _write(
         tmp_path / "runner.sh",
         (f"{before}\n" if before else "") + f"source {shlex.quote(library.as_posix())}\n"

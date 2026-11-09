@@ -78,6 +78,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     MergeReport,
     _decision,
 )
+from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.manifest import CodeVersion, SessionManifest
 from hyperloom_multibranch.scheduling.roster import RosterCaps
@@ -90,6 +91,10 @@ __all__ = ["final"]
 
 NOW = 1_800_000_000.0
 CLOCK = Clock(now=lambda: NOW)
+#: How the session's agents were isolated, as its manifest recorded.
+#: Why the agent sandboxes ran unconfined, as the record says it.
+UNCONFINED = "bubblewrap: not found"
+ISOLATION = LaunchIsolation("account", "none", "bwrap", True, (UNCONFINED,))
 HARD_STOP = NOW + 60.0
 #: Real seconds the clock in these tests lets the exports run before the hard stop passes.
 SHORT_GRACE = 0.3
@@ -249,7 +254,7 @@ def _closer(
     sources = ExportSources(blackboard, ChosenRepo(recipe), blobs, dashboard, image_check, warm_leads)
     services = ExportServices(kb_client, CloseAuthoring(author, AUTHOR_MODEL), CloseAuthoring(curator, AUTHOR_MODEL))
     exports = SessionExports(layout, sources, METRIC, BUDGET_SECONDS, services)  # type: ignore[arg-type]
-    return Closer(layout, stopper, exports, CLOCK)  # type: ignore[arg-type]
+    return Closer(layout, stopper, exports, CLOCK, ISOLATION)  # type: ignore[arg-type]
 
 
 def _clean() -> RecordingStopper:
@@ -308,8 +313,18 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     written = json.loads(layout.report.read_text())
     assert (written["stop_reason"], written["stop"]["clean"]) == ("time_exhausted", True)
     assert written["final"]["chosen"]["commit"] == CHOSEN and written["exports"]["knowledge"] == knowledge
+    assert written["agent_isolation"] == {
+        "specialists": "account",
+        "sandboxes": "none",
+        "tests": "bwrap",
+        "required": True,
+        "reasons": [UNCONFINED],
+    }
     assert all(check["regression_cases"] == 0 for check in breakdown["close"]["selection"]["checks"])
     markdown = layout.report_markdown.read_text()
+    assert (
+        markdown.splitlines()[4] == f"Agent isolation: specialists account, sandboxes none, tests bwrap: {UNCONFINED}"
+    )
     assert "Chosen: integration `i1`" in markdown
     header = (
         "| candidate | commit | eligible | reproduced | gain % | refused by | waived for the root "
@@ -555,7 +570,7 @@ def _written(layout: SessionLayout, stop_reason: SessionStopReason, final: Final
     """``MB-report.json`` as CLOSE writes it for a session that ended for ``stop_reason`` with ``final``."""
 
     report = CloseReport(stop_reason, final, None, StopReport((), QueueState()), "")
-    atomic_write_json(layout.report, report_document(report, layout.session_id, NOW))
+    atomic_write_json(layout.report, report_document(report, layout.session_id, NOW, ISOLATION))
     return layout
 
 
@@ -625,13 +640,20 @@ def test_the_report_says_how_each_candidate_reproduced_and_how_many_regression_c
     final = FinalChoice(chosen, checks, "the higher value", METRIC, 64)
     report = CloseReport(SessionStopReason.TIME_EXHAUSTED, final, None, StopReport((), QueueState()), "")
 
-    lines = report_markdown(report, "s").splitlines()
+    lines = report_markdown(report, "s", ISOLATION).splitlines()
 
     assert "| integration | `i1` | True | True |  |  | p90_regressed | 2 |  |  |" in lines
     assert (
         "| best branch | `c7` | False | False | -6.4 | below_reproduction_tolerance, extra_failed_requests |  | 0 |  |  |"
         in lines
     )
+
+
+def test_the_report_of_a_session_whose_manifest_recorded_no_isolation_says_so() -> None:
+    report = CloseReport(SessionStopReason.TIME_EXHAUSTED, None, None, StopReport((), QueueState()), "")
+
+    assert report_document(report, "s", NOW, None)["agent_isolation"] is None
+    assert "Agent isolation: not recorded" in report_markdown(report, "s", None).splitlines()
 
 
 def test_a_final_that_chose_nothing_may_be_run_again(layout: SessionLayout) -> None:

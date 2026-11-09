@@ -241,7 +241,7 @@ def add_pd_role_arguments(opt: argparse.ArgumentParser) -> None:
 
 
 def add_workload_arguments(opt: argparse.ArgumentParser) -> None:
-    """Add the profile OSL, reference-recipe, precision and framework-version flags of ``optimize``."""
+    """Add the profile OSL, precision and framework-version flags of ``optimize``."""
     opt.add_argument(
         "--profile-osl",
         dest="profile_osl",
@@ -254,23 +254,6 @@ def add_workload_arguments(opt: argparse.ArgumentParser) -> None:
             "--osl. When unset the profile phase uses "
             "min(--osl, 1024) and is auto-lowered further if needed to keep the "
             "capture window within the serialization cap."
-        ),
-    )
-    opt.add_argument(
-        "--reference-script",
-        dest="reference_script",
-        type=str,
-        default=None,
-        help=(
-            "The session's base launch (path or http(s) URL): a shell launch "
-            "script, or a base_launch.json frozen by an earlier session. It "
-            "wins over every recipe source; omitted, the base comes from "
-            "InferenceX, then the framework's cookbook, then the default "
-            "table. A script must fix every flag in its text: a flag set from "
-            "a shell variable, or a '# hyperloom-launch-controls:' line, exits "
-            "2, as does a file that cannot be read or does not launch the "
-            "session's framework. The base is resolved once, at launch, and "
-            "frozen as <session>/base_launch.json; a resume reads that file."
         ),
     )
     opt.add_argument("--precision", type=str, default=None, help=f"Model precision (default {DEFAULT_PRECISION})")
@@ -289,6 +272,46 @@ def add_workload_arguments(opt: argparse.ArgumentParser) -> None:
             "reading ``__version__`` (sglang/vllm/atom supported); auto-detect "
             "failure degrades to 'unknown_version'. Override with "
             "--framework-version=0.4.5 to pin a specific tag for the run."
+        ),
+    )
+
+
+def add_base_launch_arguments(opt: argparse.ArgumentParser) -> None:
+    """Add the flags of ``optimize`` that say where a fresh session's base launch is resolved from."""
+    opt.add_argument(
+        "--reference-script",
+        dest="reference_script",
+        type=str,
+        default=None,
+        help=(
+            "The session's base launch (path or http(s) URL): a shell launch "
+            "script, or a base_launch.json frozen by an earlier session. It "
+            "wins over every recipe source; omitted, the base comes from "
+            "InferenceX, then the framework's cookbook, then the default "
+            "table. A script must fix every flag in its text: a flag set from "
+            "a shell variable, or a '# hyperloom-launch-controls:' line, exits "
+            "2, as does a file that cannot be read or does not launch the "
+            "session's framework. The base is resolved once, at launch, and "
+            "frozen as <session>/base_launch.json; a resume reads that file."
+        ),
+    )
+    opt.add_argument(
+        "--inferencex-commit",
+        dest="inferencex_commit",
+        type=str,
+        default="",
+        metavar="SHA",
+        help=(
+            "Resolve the base from InferenceX at this commit (a full sha, or "
+            "a prefix of 7 or more hex digits) instead of the head of its "
+            "main, e.g. to match a CI run; the full sha is recorded in "
+            "base_launch.json. The cookbooks, vLLM recipes and ATOM catalog "
+            "are still read at main. Exits 2 when InferenceX has no such "
+            "commit, the commit lacks code the resolver runs, any source "
+            "cannot be read, or no recipe serves the session (no default "
+            "table is taken); resolve such "
+            "a base elsewhere and pass it as --reference-script. A resume "
+            "keeps its frozen base."
         ),
     )
 

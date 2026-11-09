@@ -9,7 +9,8 @@ myst:
 `hyperloom-multibranch` (also `python -m hyperloom_multibranch`) is installed with Hyperloom. `run` starts one
 session: PRELUDE, EXPLORE, FINAL and CLOSE. The other subcommands are `review` (see
 [Review the agent map](multibranch-review-gate.md)), `final-only SESSION_DIR` (emergency FINAL and CLOSE over a
-session that ended before FINAL) and `hosted run` (a session a host injects; see
+session that ended before FINAL) and `hosted run` (a session a host injects, measured in the grant's sandboxes or, when
+its spec says `placement.measurement: local`, on the app container's own cards; see
 [Run hosted multi-branch on a new cluster](hosted-multibranch-new-cluster.md)).
 
 ```bash
@@ -49,8 +50,27 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
 `hyperloom-multibranch run --help` has the full text of each option.
 
 - **Workload:** `--model`, `--framework`, `--gpu-type`, `--workload` (`inferencex` or `agentx`), `--tp`, `--conc`,
-  `--precision`; `--isl`/`--osl` for `inferencex` only, `--ep` and `--agentx-duration-sec` (the trace window each
-  test replays, the harness's default when not given) for `agentx` only; `--kernel-optimizer`.
+  `--precision`; `--isl`/`--osl` for `inferencex` only, `--ep`, `--agentx-duration-sec` (the trace window each
+  test replays, the harness's default when not given) and `--agentx-objective` for `agentx` only; `--kernel-optimizer`;
+  `--inferencex-commit SHA` to resolve the session's base launch from InferenceX at that commit instead of `main`
+  (see [Base launch](../reference/inference-suite.md#base-launch)).
+- **AgentX objective:** `--agentx-objective p50_interactivity|total_token_throughput` (default
+  `p50_interactivity`) names the round metric an AgentX session keeps on: `e2e_norm_intvty_p50`, or
+  `total_token_throughput` (per server; a session's TP is fixed, so it ranks changes as the per-GPU figure does). A
+  change is kept on a 2% gain on that metric in one measurement, while P90 interactivity and the other axis hold
+  within the noise band (`HYPERLOOM_PERF_NOISE_PCT`, default 5%): total token throughput under `p50_interactivity`
+  (refusal `total_regressed`), P50 interactivity under `total_token_throughput` (`p50_regressed`); P90 refuses as
+  `p90_regressed`. Output throughput is recorded but guards neither, as it follows the trace window's output-length
+  mix. A gain a guard holds back is retested once; the error-rate threshold holds under both. `total_token_throughput`
+  suits a high `--conc` only: at a low one the trace's tool and think time paces the lanes, so a server gain barely
+  moves it (the same stack on GLM-5.3 TP4/EP4 gained +1.8% total per GPU at conc 4 and +7–14% at conc 8–16). The
+  bar and guards are read from the code, so a resumed session judges by the current rule. The manifest records the
+  objective, so a resumed session keeps it; the frontier, FINAL, the dashboard, `MB-report.md` and the Recipe KB record
+  (`total_throughput_gain_pct`) all read that metric. Each Arbor is told to optimize it (`opt_objective`); a
+  P50 session needs Arbor `9c455df` or later, a `total_token_throughput` one `df9b55a` or later.
+- **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for
+  `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source, and every
+  Arbor is served the frozen base. Without it the base comes from the recipe sources.
 - **Limits:** `--max-hours` (default 2, 0 for none), `--max-gpu-hours` and `--max-llm-usd` (0 for none),
   `--max-branches` (default 4). A negative or non-finite limit is a usage error.
 - **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2),
@@ -59,6 +79,8 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
 - **Third-party agents:** `--autonomous-agent SOURCE` (repeatable; a URL carrying credentials is refused),
   `--agent-directions`, `--agent-dossier-minutes`, `--agent-share-minutes`, `--agent-pack`, `--agent-launch`,
   `--agent-port`, `--stop-after-map`, `--agent-dossier`, `--no-review-gate`.
+  Each agent measures with the gate's own client: on `agentx`, the gate's replay run by
+  `python -m inference_suite run` against the agent's server, so an Arbor needs no bench variables in its launch.
 - **Scheduling playbook:** `--playbook auto|champion|challenger` (default `auto`).
 
 ## Exit codes

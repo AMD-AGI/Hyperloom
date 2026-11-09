@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
 import stat
 import time
@@ -29,7 +30,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.measure.runner.cache_layout import CACHE_ENV
-from hyperloom.measure.tests.bundle_factory import base_launch, stage_into
+from hyperloom.measure.tests.bundle_factory import base_launch, lm_eval_at_its_pin, stage_into
 from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
 from hyperloom.orchestrator.state import base_launch as state_base_launch
 from hyperloom.orchestrator.state.base_launch import freeze_base
@@ -312,5 +313,8 @@ def pinned_runner_python(directory: Path, commit: str) -> str:
 def stage_runner_cache(tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Name, as this host's runner cache, one below ``tmp`` that already holds a staging that verifies: a local toolbox
     tells its runners this host's cache, and the stand-in InferenceX repository is not at the commit the staging pins,
-    so a runner that staged from it would refuse the staging."""
+    so a runner that staged from it would refuse the staging. The runners also report lm-eval at its pin, which the
+    staging names and CI does not install: a local sandbox passes ``PYTHONPATH`` on to the runner it starts."""
     monkeypatch.setenv(CACHE_ENV, str(stage_into(tmp / "runner-cache").parents[1]))
+    pin = str(lm_eval_at_its_pin(tmp / "lm-eval-pin"))
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, (pin, os.environ.get("PYTHONPATH")))))

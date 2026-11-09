@@ -14,7 +14,7 @@ from inference_suite.compose import compose
 from inference_suite.contracts import FixedWorkload, ProfileConfig, RunLayout, RunPaths, WorkloadKind
 from inference_suite.contracts.base_launch import Workload
 from inference_suite.contracts.launch import Launch, LaunchError, LayerSource
-from inference_suite.frameworks import Framework
+from inference_suite.frameworks import Framework, framework_facts
 from inference_suite.profile.inject import (
     SGLANG_PROFILER_DIR_ENV,
     make_trace_dirs,
@@ -27,11 +27,6 @@ from inference_suite.tests.test_compose import _FACTS
 from inference_suite.tests.test_config_contract import _FIXED, _SHA, _config
 
 _WINDOW = ProfileConfig(enabled=True, start_body={"record_shapes": True}, num_prompts=64, delay_iters=40, max_iters=8)
-_ENTRYPOINTS = {
-    Framework.SGLANG: ("python3", "-m", "sglang.launch_server"),
-    Framework.VLLM: ("python3", "-m", "vllm.entrypoints.openai.api_server"),
-    Framework.ATOM: ("python3", "-m", "atom.entrypoints.openai_server"),
-}
 
 
 def _fixed_config(tmp_path: Path, profile: ProfileConfig = _WINDOW, workload: FixedWorkload = _FIXED):
@@ -43,7 +38,7 @@ def _launch(tmp_path: Path, framework: Framework, base_args: tuple[str, ...] = (
     base = _base(
         query=replace(_base().query, framework=framework.value, workload=Workload.FIXED, isl=1024, osl=1024),
         framework=framework.value,
-        entrypoint=_ENTRYPOINTS[framework],
+        entrypoint=framework_facts(framework).server_command.entrypoint,
         args=base_args,
         golden_al=None,
     )

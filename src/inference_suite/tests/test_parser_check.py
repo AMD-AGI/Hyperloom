@@ -26,6 +26,9 @@ from inference_suite.parser_check import (
 )
 from inference_suite.tests.test_compose import _launch
 
+#: A directory that holds no package, for the interpreter to start in.
+_NEUTRAL = Path("/")
+
 #: The installed sglang's argument surface: every flag the composed test launch carries, plus a choice-checked one.
 _SERVER_ARGS = """
 class ServerArgs:
@@ -71,13 +74,19 @@ def env(tmp_path: Path) -> dict[str, str]:
 
 def test_a_launch_the_parser_accepts_passes(env):
     assert (
-        check(_launch(candidate=LaunchDelta(args_add=("--chunked-prefill-size", "8192"))), sys.executable, env) is None
+        check(
+            _launch(candidate=LaunchDelta(args_add=("--chunked-prefill-size", "8192"))),
+            sys.executable,
+            env,
+            cwd=_NEUTRAL,
+        )
+        is None
     )
 
 
 def test_an_unknown_candidate_flag_is_flag_unknown_from_the_candidate(env):
     launch = _launch(candidate=LaunchDelta(args_add=("--moe-backend", "triton")))
-    refusal = check(launch, sys.executable, env)
+    refusal = check(launch, sys.executable, env, cwd=_NEUTRAL)
 
     assert refusal is not None
     assert refusal.step is FailedStep.FLAG_UNKNOWN
@@ -92,7 +101,7 @@ def test_an_unknown_user_flag_beside_a_candidate_one_is_charged_to_the_user(env)
         user=LaunchDelta(args_add=("--max-model-len", "8192")),
         candidate=LaunchDelta(args_add=("--moe-backend", "triton")),
     )
-    refusal = check(launch, sys.executable, env)
+    refusal = check(launch, sys.executable, env, cwd=_NEUTRAL)
 
     assert refusal is not None
     assert set(refusal.flags) == {
@@ -103,7 +112,9 @@ def test_an_unknown_user_flag_beside_a_candidate_one_is_charged_to_the_user(env)
 
 
 def test_a_rejected_value_is_refused_and_names_the_layer_that_set_it(env):
-    refusal = check(_launch(candidate=LaunchDelta(args_add=("--attention-backend", "fa4"))), sys.executable, env)
+    refusal = check(
+        _launch(candidate=LaunchDelta(args_add=("--attention-backend", "fa4"))), sys.executable, env, cwd=_NEUTRAL
+    )
 
     assert refusal is not None
     assert refusal.step is FailedStep.FLAG_UNKNOWN
@@ -113,7 +124,7 @@ def test_a_rejected_value_is_refused_and_names_the_layer_that_set_it(env):
 
 def test_an_interpreter_without_the_framework_is_a_probe_error(tmp_path):
     with pytest.raises(FrameworkProbeError, match="no answer"):
-        check(_launch(), sys.executable, {"PYTHONPATH": str(tmp_path)})
+        check(_launch(), sys.executable, {"PYTHONPATH": str(tmp_path)}, cwd=_NEUTRAL)
 
 
 def test_a_parser_that_raises_is_a_probe_error_carrying_where_it_raised(env):
@@ -121,7 +132,7 @@ def test_a_parser_that_raises_is_a_probe_error_carrying_where_it_raised(env):
     server_args.write_text(_RAISING_SERVER_ARGS)
 
     with pytest.raises(FrameworkProbeError, match="RuntimeError: config expansion failed") as raised:
-        check(_launch(candidate=LaunchDelta(args_add=("--config", "x.yaml"))), sys.executable, env)
+        check(_launch(candidate=LaunchDelta(args_add=("--config", "x.yaml"))), sys.executable, env, cwd=_NEUTRAL)
     assert f'File "{server_args}", line 6, in __call__' in str(raised.value)
 
 

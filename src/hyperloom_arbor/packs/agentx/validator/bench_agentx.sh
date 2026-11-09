@@ -107,6 +107,8 @@ output_throughput = per_gpu.get("output_tput_tps", 0.0)
 total_throughput  = per_gpu.get("total_tput_tps",  0.0)
 
 result = {
+    # The pack's objective: the dashboard's tput/GPU, (input + output tokens) / span / GPUs.
+    "total_throughput":            total_throughput,
     "output_throughput":           output_throughput,
     "total_throughput_per_gpu":    total_throughput,
     "conc":                        agg.get("conc", 0),

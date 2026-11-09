@@ -43,7 +43,7 @@ people.
 | `identity` | | a label for the campaign |
 | `goal` | | one line, the title of the program the agent reads |
 | `target` | none | a number (the metric to reach), or a dict; reaching it ends a round |
-| `time_budget_minutes` | none | a wall clock for the run (ignored in component mode) |
+| `time_budget_minutes` | none | a wall clock for the session (ignored in component mode). A resume counts what the session already spent (`<session>/clock.json`, written at each iteration's start), so a session that dies and resumes still ends at its budget; to give it more, raise the budget |
 | `review_gate` | `true` | a new session waits for a human's approval before it runs anything; `ARBOR_REVIEW_GATE` and `run --[no-]review-gate` override it |
 | `baseline_record` | none | a JSON file `{mean, runs, mean_secondary}` with a measured baseline |
 | `directives` | `[]` | lines rendered into the program, for the agent |
@@ -59,9 +59,9 @@ people.
 | `docker_container` | | the container the server and tools run in; `"@host"` runs them where Arbor runs |
 | `workspace_root` | | the served tree (a git repository) the agent edits, as the container sees it |
 | `session_root` | the current directory | where the session's files go ([below](#the-session-directory)) |
-| `session_mount` | `/workspace/sessions` | where the container sees the sessions |
+| `session_mount` | `/workspace/sessions` | where the container sees the sessions: the container's path of `session_root`'s **parent** directory, so a session is at `<session_mount>/<session name>` |
 | `scratch_paths` | `[]` | paths that hold the agent's probes, kept out of `landed.patch` (`arbor/eval`, `eval` and `*.log` always are) |
-| `editable_packages` | `[]` | `[{name, path}]`: other installed packages whose edits a KEEP saves |
+| `editable_packages` | `[]` | `[{name, path}]`: other installed packages the agent may edit. Standalone, each is a git tree from the start (a baseline in `<session>/trees.json`; bytecode and JIT outputs excluded), committed and reverted with every iteration and shown to the critic; a KEEP saves every file it changed there |
 
 **Server**
 | Key | Default | Meaning |
@@ -84,6 +84,7 @@ people.
 | `bench_timeout` | 600 | seconds, for the bench and the correctness script |
 | `concurrency`, `num_prompts`, `isl`, `osl` | 14, 640, 1024, 1024 | passed to the bench script |
 | `bench_repeats` | 1 | measured replays per iteration; the pack's `measurement.bench_repeats` wins |
+| `bench_metric_from_agent` | `false` | book the bench agent's `METRIC:` line when the bench wrote no `bench_output.json`. Off, such an iteration is NOT_MEASURED: the file carries the pack's failure checks and `duration_seconds`, and a missing file is usually a `session_mount` that is not the container's path of the session's parent. Under a host's bench command, the agent's number is always taken |
 
 **Rounds, rolling and component mode**
 | Key | Meaning |
@@ -104,8 +105,10 @@ Parallel mode reads a separate run config ([operations.md](operations.md)).
 | `ARBOR_ROUND_AB` | the round-end A/B hook (over the config's `round_ab.command`) |
 | `ARBOR_SPLIT` | `processes` makes `arbor run` run the master and each worker as commands of their own, in turn (`--split processes`), so a host that launches `arbor run` needs no other change; `loop` (the default) runs both in one process |
 | `ARBOR_REVIEW_GATE` | `0` starts new campaigns without the review gate, `1` with it; over the config's `review_gate`, under `run --[no-]review-gate` |
-| `ARBOR_SHARE_HOST`, `ARBOR_SHARE_ROOT`, `ARBOR_PROJECT`, `ARBOR_USER` | where the collectors push: the shared directory's host and path, the project and the user; set them for your site |
+| `ARBOR_SHARE_HOST`, `ARBOR_SHARE_ROOT`, `ARBOR_PROJECT`, `ARBOR_USER` | where the collectors push: the shared directory's host and path, the project and the user. The root has no default: a site sets it (here or in `~/.arbor/settings.env`), and without one the collectors write locally and push nothing |
 | `ARBOR_AGENT_BACKEND` | leave unset. Its non-Claude value imports a module that is not in the tree |
+| `ARBOR_PROJECTS` | a file of the site's own collector projects, in `arbor/collect/projects.json`'s form, read before the public ones (models not yet public, a customer's); `~` is expanded |
+| `ARBOR_SETTINGS` | a file of the site's own `ARBOR_*` values (default `~/.arbor/settings.env`): one `KEY=VALUE` per line, read when Arbor is imported, for each key the environment does not set. Arbor carries no site's values (a share root, a site's projects); a site keeps them here |
 | `ARBOR_SITE` | a directory of packages for Arbor alone (`pip install --target`), for a host that cannot install into the interpreter's site-packages. Arbor puts it on its own `sys.path` when imported, after its checkout. Never put it on `PYTHONPATH`: a server the agent starts inherits Arbor's environment, and the directory's pydantic, starlette and uvicorn would shadow the image's |
 | `SLURM_JOB_ID` | read to label rows and rounds |
 

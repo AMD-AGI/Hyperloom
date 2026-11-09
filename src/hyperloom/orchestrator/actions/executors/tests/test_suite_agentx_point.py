@@ -331,3 +331,60 @@ def test_a_slot_running_the_base_unchanged_replays_it_with_no_layer_of_its_own()
     point["benchmark"]["timeout_seconds"] = 7200
 
     assert suite_config(point, _base(), _settings()).server.user == LaunchDelta()
+
+
+def test_a_replay_against_a_server_it_does_not_hold_sends_the_points_replay_and_samples_no_local_gpu() -> None:
+    from hyperloom.orchestrator.actions.executors._suite.config import agentx_client_config
+
+    point, base = _point(envs={"DURATION": "1200"}), _base()
+    del point["benchmark"]["timeout_seconds"]
+    settings = replace(_settings(), server_url="http://0.0.0.0:31100")
+
+    config = agentx_client_config(point, base, settings, 4800.0)
+
+    point["benchmark"]["timeout_seconds"] = 4800.0
+    assert config.agentx == suite_config(point, base, _settings()).agentx
+    assert (config.server.host, config.server.port, config.server.model_path) == ("0.0.0.0", 31100, "/models/glm")
+    assert config.lifecycle == Lifecycle(LifecycleMode.EXTERNAL)
+    assert (config.telemetry.gpu.enabled, config.profile.enabled) == (False, False)
+    assert config.deadlines.round_sec == 4800.0
+    assert SuiteConfig.from_document(json.loads(json.dumps(config.to_document()))) == config
+
+
+@pytest.mark.parametrize(
+    ("point", "server_url", "message"),
+    [
+        (lambda: _point(), None, "names no server"),
+        (lambda: {"benchmark": {**_point()["benchmark"], "agentx": {"enabled": False}}}, "http://h:1", "AgentX point"),
+        (lambda: _profiled(), "http://h:1", "a profile round owns its server"),
+    ],
+    ids=["no-server", "not-agentx", "profiled"],
+)
+def test_a_replay_against_a_server_it_does_not_hold_is_refused_when_it_cannot_measure_it(
+    point, server_url: str | None, message: str
+) -> None:
+    from hyperloom.orchestrator.actions.executors._suite.config import agentx_client_config
+
+    with pytest.raises(ConfigError, match=message):
+        agentx_client_config(point(), _base(), replace(_settings(), server_url=server_url), 4800.0)
+
+
+def test_the_replay_against_an_agents_server_runs_on_the_sessions_frozen_base_and_staged_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hyperloom.orchestrator.actions.executors._suite.rounds import SuiteRoundRefused, external_agentx_config
+
+    session = tmp_path / "session"
+    session.mkdir()
+    _stage(tmp_path, monkeypatch)
+    with pytest.raises(SuiteRoundRefused, match="froze no base launch"):
+        external_agentx_config(session, _point(), "http://0.0.0.0:31100", tmp_path / "out", 4800.0)
+    freeze_base(session, _base())
+    route = suite_route(session)
+
+    config = external_agentx_config(session, _point(), "http://0.0.0.0:31100", tmp_path / "out", 4800.0)
+
+    assert (config.server.base.path, config.server.base.digest) == (str(route.base_path), _base().digest())
+    assert (config.paths.run_dir, config.paths.tool_cache) == (str(tmp_path / "out"), str(tmp_path / "tools"))
+    assert config.paths.tool_manifest_sha256 == route.manifest_sha256
+    assert (config.server.port, config.lifecycle.mode) == (31100, LifecycleMode.EXTERNAL)
