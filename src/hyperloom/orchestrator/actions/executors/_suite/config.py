@@ -19,7 +19,8 @@ A scriptable point (xDiT, or a custom session's own benchmark and eval scripts) 
 with the point's environment (:func:`scriptable_workload`); the quality gate the script writes is its eval, so it
 runs no GSM8K.
 
-:func:`accuracy_config` builds the D9 accuracy round of an AgentX point. :mod:`.rounds` runs the configs built here.
+:func:`accuracy_config` builds the D9 accuracy round of an AgentX point, and :func:`agentx_client_config` its replay
+against a server that serves a launch of its own (an agent's). :mod:`.rounds` runs the configs built here.
 """
 
 from __future__ import annotations
@@ -312,6 +313,12 @@ def _external_address(url: str) -> _Address:
     return _Address(parts.hostname, port)
 
 
+def _measuring_external(settings: RoundSettings) -> RoundSettings:
+    """``settings`` for a round that measures a server something else holds: its GPUs are not this host's to sample."""
+    telemetry = replace(settings.telemetry, gpu=replace(settings.telemetry.gpu, enabled=False))
+    return replace(settings, lifecycle=Lifecycle(LifecycleMode.EXTERNAL), telemetry=telemetry)
+
+
 def _user_layer(point: _Point) -> LaunchDelta:
     args_add, args_remove = _user_args(point)
     env = {name: value for name, value in point.envs.items() if name not in _CONSUMED_ENV}
@@ -517,10 +524,12 @@ def _agentx_server_env(point: _Point) -> dict[str, str]:
 
 
 def _agentx_server(point: _Point, bench: Mapping[str, Any], base: BaseLaunch, settings: RoundSettings) -> ServerConfig:
-    """The AgentX point's server: its launch over the base, on the interpreter and source files the launch names."""
+    """The AgentX point's server: its launch over the base, on the interpreter and source files the launch names, at
+    ``settings.server_url`` when something else holds it."""
     launch = BenchmarkPoint.from_block(bench).agentx_launch
     layer = _layer_over_base(launch, base, _agentx_server_env(point))
-    server = _server(point, base, settings, None, layer)
+    external = None if settings.server_url is None else _external_address(settings.server_url)
+    server = _server(point, base, settings, external, layer)
     overrides = _agentx_block(bench).get("launch_overrides") or {}
     return replace(
         server,
@@ -533,10 +542,13 @@ def _agentx_server(point: _Point, bench: Mapping[str, Any], base: BaseLaunch, se
 def _agentx_config(
     bench: Mapping[str, Any], point: _Point, base: BaseLaunch, settings: RoundSettings, boot_only: bool
 ) -> SuiteConfig:
+    """The AgentX point's round, measuring the server at ``settings.server_url`` when something else holds it."""
     _check_agentx_block(_agentx_block(bench), point)
     _check_agentx_envs(point, base)
     point = replace(point, model=point.text(_MODEL_PATH_ENV) or point.model)
     measures = not boot_only
+    if settings.server_url is not None:
+        settings = _measuring_external(settings)
     server = _agentx_server(point, bench, base, settings)
     return SuiteConfig(
         server=profiled_server(server, bench, base) if measures else server,
@@ -689,7 +701,8 @@ def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: Rou
     Raises:
         ConfigError: When the point is one this translation does not carry (an AgentX, MLPerf or profile setting no
             round has), names another framework or topology than ``base``, lacks a knob its load needs, or names an
-            external server that is not plain HTTP or serves an AgentX, MLPerf or scriptable point.
+            external server that is not plain HTTP or serves an AgentX, MLPerf or scriptable point (an AgentX
+            replay against a server serving its own launch is :func:`agentx_client_config`'s).
     """
     point = _point(document)
     _check_base(point, base)
@@ -709,20 +722,43 @@ def suite_config(document: Mapping[str, object], base: BaseLaunch, settings: Rou
         return _mlperf_config(bench, point, base, settings, boot_only)
     external = None if url is None else _external_address(url)
     unloaded = boot_only or point.flag(ENV_EVAL_ONLY, default=False)
+    held = settings if external is None else _measuring_external(settings)
     return SuiteConfig(
         server=_server(point, base, settings, external, _user_layer(point)),
         workload=WorkloadKind.NONE if unloaded else WorkloadKind.FIXED,
         fixed=None if unloaded else _fixed(point),
         profile=ProfileConfig(enabled=False) if unloaded else _fixed_profile(bench, point),
         eval=_eval(point, enabled=not boot_only and point.flag(ENV_RUN_EVAL, default=False)),
-        # An external server's GPUs are not this host's to sample.
-        telemetry=settings.telemetry
-        if external is None
-        else replace(settings.telemetry, gpu=replace(settings.telemetry.gpu, enabled=False)),
-        lifecycle=settings.lifecycle if external is None else Lifecycle(LifecycleMode.EXTERNAL),
+        telemetry=held.telemetry,
+        lifecycle=held.lifecycle,
         deadlines=_deadlines(point, settings),
         paths=settings.paths,
     )
+
+
+def agentx_client_config(
+    document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings, timeout_sec: float
+) -> SuiteConfig:
+    """The replay a round of the AgentX point ``document`` sends, against the server at ``settings.server_url``, which
+    serves a launch of its own: an agent's server, measured as the gate measures its rounds. ``timeout_sec`` bounds
+    the round.
+
+    :func:`suite_config` refuses an AgentX point an external server, since its round measures the launch the point
+    composes. Here the launch is the server's: the config still names the point's, on ``base``, and the round, which
+    never starts it, records it unheld.
+
+    Raises:
+        ConfigError: When the settings name no server, the point is not AgentX or is one no round carries, names
+            another framework or topology than ``base``, or asks for a profile, which owns its server.
+    """
+    if settings.server_url is None:
+        raise ConfigError("a replay against a server it does not hold names no server")
+    bench = _bench(document)
+    if not is_agentx(bench):
+        raise ConfigError("a replay against a server it does not hold sends an AgentX point's replay")
+    point = _point_of(bench, timeout_sec, timeout_sec)
+    _check_base(point, base)
+    return _agentx_config(bench, point, base, settings, False)
 
 
 def _deadlines(point: _Point, settings: RoundSettings) -> Deadlines:
@@ -813,6 +849,7 @@ __all__ = [
     "SERVER_HOST",
     "WARMUP_SEED",
     "accuracy_config",
+    "agentx_client_config",
     "RoundSettings",
     "fixed_workload",
     "suite_config",

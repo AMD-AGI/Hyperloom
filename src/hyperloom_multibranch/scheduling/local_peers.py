@@ -80,6 +80,7 @@ from hyperloom_multibranch.specialist.runtime import RuntimePacing, SpecialistRu
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
+    from hyperloom_multibranch.specialist.gate_client import GateClient
     from pathlib import Path
 
     from hyperloom.hosted.mcp_server import McpServer
@@ -642,8 +643,8 @@ AITER = "aiter"
 def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     """Sessions that run ``command`` for every branch's specialist, in a worktree of the workload's framework, and
     each branch's third-party agent in a sandbox leased from the session's toolbox (``wiring.agent_sandboxes``), given
-    the gate's benchmark client when the session's canonical configuration names one; a session that runs no agent
-    reads no canonical.
+    the gate's benchmark client of the session's canonical configuration; a session that runs no agent reads no
+    canonical.
 
     The CLI runs on the main flow's allowlisted specialist environment, through a local AI work socket whose resource
     log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
@@ -654,7 +655,6 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         from hyperloom.orchestrator.specialists.agent_runner import Liveness, LocalAgentRunner, build_specialist_env
         from hyperloom_multibranch.specialist.agent_session import SPECIALIST_LOST_AFTER_S, AgentSetup
         from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
-        from hyperloom_multibranch.specialist.gate_client import GateClient
         from hyperloom_multibranch.specialist.model_sessions import model_sessions
         from hyperloom_multibranch.specialist.prompts import role_prompt
         from hyperloom_multibranch.specialist.worktree import SourceBase
@@ -698,7 +698,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             wiring.toolbox,
             wiring.repo,
             wiring.agent_sandboxes,
-            client=GateClient.read(wiring.canonical) if wiring.setup.agents else None,
+            client=_gate_client(wiring) if wiring.setup.agents else None,
             dossier=wiring.setup.agent_dossier or None,
             maps=wiring.setup.agent_maps,
             least_run_seconds=wiring.setup.agent_share_minutes * 60.0,
@@ -706,6 +706,21 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         return with_agents(sessions, agents, branch_dir=layout.branch_dir, blackboard_for=wiring.blackboards)
 
     return build
+
+
+def _gate_client(wiring: SessionWiring) -> GateClient:
+    """The gate's client of the session's rendered canonical configuration, an AgentX replay bounded as one attempt of
+    a test is; raises :class:`PeersUnavailable` when the session's base or staged tools cannot run one."""
+
+    from hyperloom.orchestrator.actions.executors import SuiteRoundRefused
+    from hyperloom_multibranch.specialist.gate_client import read_gate_client
+
+    try:
+        return read_gate_client(
+            wiring.canonical, wiring.setup.layout.toolbox, attempt_timeout_sec(wiring.setup.workload)
+        )
+    except SuiteRoundRefused as exc:
+        raise PeersUnavailable(f"the gate's client cannot be given to the session's agents: {exc}") from exc
 
 
 def specialist_readable(references: Mapping[str, Path], workload: Workload) -> tuple[Path, ...]:

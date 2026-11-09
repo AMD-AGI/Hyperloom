@@ -42,6 +42,17 @@ it.
   The gate now records `total_token_throughput` on each AgentX judgement, so
   `total_throughput` and `baseline_total_throughput` are written beside the
   interactivity gain; before, they were always left out.
+- **An Arbor agent on an AgentX session measures with the gate's own round.**
+  Its `component.bench_command` is now `python -m inference_suite run`
+  against its server, on the session's frozen base, trace corpus, seed,
+  concurrency and trace window, writing `report.json` per run; its bench phase
+  is capped at the trace window plus an hour. Before, MB gave it no client,
+  so Arbor ran its pack's `bench_agentx.sh`, which installs its own aiperf,
+  downloads the trace itself and needs bench variables (`MODEL_PREFIX`,
+  `DURATION`, `INFMAX_CONTAINER_WORKSPACE`, ...) that only a hand-written
+  `--agent-launch` file carried; with `--reference-script` it could not run at
+  all. A session whose base or staged tools cannot run that round now refuses
+  to start, naming why.
 - **A recipe image whose tag names no framework version no longer refuses an
   older install.** For an untagged image such as
   `lmsysorg/sglang-rocm:muse-spark-open`, the version InferenceSuite assumes

@@ -44,6 +44,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import math
 import os
 import re
 import shlex
@@ -77,7 +78,8 @@ from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentMani
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.worktree import SKIPPED
 from inference_suite.argv import remove_server_args, tokenize_server_args_preserving_json
-from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunch, BaseLaunchError
+from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunch, BaseLaunchError, RunStatus
+from inference_suite.contracts.layout import REPORT_FILE
 
 
 #: What makes a checkout Arbor's, run as a component: the mode, the entry point and the host's contract.
@@ -235,8 +237,13 @@ OPTIONAL_KEYS = ("profile", "base_launch")
 #: Arbor's ledger: FACT and DEAD_END records are what it measured and ruled out.
 LEDGER = {"id": "id", "kind": "type", "text": "claim", "kinds": {"FACT": "insight", "DEAD_END": "pitfall"}}
 ENCODING = "utf-8"
-#: The client's flags Arbor fills: its server's port and an empty directory per replay.
-BASE_URL, PORT, RESULT_DIR, MODEL = "--base-url", "--port", "--result-dir", "--model"
+#: The client's flags Arbor fills: its server's port and an empty directory per replay, ``--run-dir`` an
+#: inference_suite round's, whose config names its server.
+BASE_URL, PORT, RESULT_DIR, RUN_DIR, MODEL = "--base-url", "--port", "--result-dir", "--run-dir", "--model"
+RESULT_DIRS = (RESULT_DIR, RUN_DIR)
+#: Arbor's phase that runs the bench command, whose cap (``component.phase_minutes``) MB sets when its client is
+#: bounded otherwise than by Arbor's default.
+BENCH_PHASE = "bench"
 _SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 #: A word of nothing but these is a shell operator, carried as it stands.
 _OPERATORS = frozenset("();<>|&")
@@ -561,9 +568,9 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
     """Arbor's config for ``run`` of ``spec``: in component mode on the host, the recipe's launch on the pack the spec
     names in ``checkout`` (the serving template by default), ending by the spec's deadline, its patches made against
     its root, the integration notes read every iteration, every measurement by the gate's client when the spec has
-    one, and the host's plan when it gives one, which a run that stops at its map does not take. A spec with a launch
-    file is served the file's launch with the recipe's added to it, and measured by the file's client when the spec
-    has none.
+    one, its bench phase as long as one measurement by that client may take, and the host's plan when it gives one,
+    which a run that stops at its map does not take. A spec with a launch file is served the file's launch with the
+    recipe's added to it, and measured by the file's client when the spec has none.
 
     The cards are numbered from 0, as the sandbox shows them; Arbor never masks them itself in this mode."""
 
@@ -576,6 +583,8 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
         component["notes"] = spec.knowledge
     if client:
         component["bench_command"] = bench_command(client)
+    if spec.client_seconds:
+        component["phase_minutes"] = {BENCH_PHASE: math.ceil(spec.client_seconds / 60)}
     if run.stop_at:
         component["stop_at"] = run.stop_at
     elif spec.plan:
@@ -691,6 +700,13 @@ def host_rules(spec: AgentSpec) -> list[str]:
             f" Arbor's GSM8K reads on another scale, so Arbor holds the change to the same drop against the root it"
             f" measures itself, and to {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:g} when it could not."
         )
+    if kind == AGENTX and spec.client:
+        rules.append(
+            f"{HOST_RULE}: MB's client is its own AgentX round, a replay of the workload's trace window: each run"
+            f" writes {REPORT_FILE} in its output directory. Its agentx.throughput.output_tokens_per_second is the output"
+            " throughput and agentx.e2e_norm_intvty.p50 the p50 interactivity MB keeps a change on; a run whose"
+            f" run_status is not {RunStatus.COMPLETED.value} measured nothing."
+        )
     if spec.source_unkept:
         rules.append(
             f"{HOST_RULE}: a change to {spec.framework}'s source cannot be kept on this image: {spec.source_unkept}."
@@ -701,9 +717,10 @@ def host_rules(spec: AgentSpec) -> list[str]:
 
 def bench_command(client: str) -> str:
     """The gate's ``client`` as Arbor's ``component.bench_command``: the port it measures, in ``--base-url`` or
-    ``--port``, as ``{port}``, and its ``--result-dir`` as ``{out}``, which Arbor quotes as it fills it; every other
-    word as it was, the client's warm-up requests among them. Raise :class:`ArborRefused` when the client names no
-    port or no result directory, or cannot be read word by word."""
+    ``--port``, as ``{port}``, and its ``--result-dir`` or ``--run-dir`` as ``{out}``, which Arbor quotes as it fills
+    it; every other word as it was, the client's warm-up requests among them. Raise :class:`ArborRefused` when the
+    client names no result directory, no port beside a ``--result-dir`` (a ``--run-dir`` is an inference_suite
+    round's, whose config names its server), or cannot be read word by word."""
 
     words = _words(client)
     templated: list[str] = []
@@ -716,7 +733,7 @@ def bench_command(client: str) -> str:
             pending = ""
             continue
         flag, joined, value = word.partition("=")
-        if flag in (BASE_URL, PORT, RESULT_DIR):
+        if flag in (BASE_URL, PORT, *RESULT_DIRS):
             if joined:
                 templated.append(f"{flag}={_filled(flag, value)}")
                 found.add(flag)
@@ -726,10 +743,10 @@ def bench_command(client: str) -> str:
             continue
         templated.append(word if set(word) <= _OPERATORS else shlex.quote(word))
     reasons = [f"the gate's client ends at {pending}, which takes a value"] if pending else []
-    if not found & {BASE_URL, PORT}:
+    if RUN_DIR not in found and not found & {BASE_URL, PORT}:
         reasons.append(f"the gate's client names no port to measure Arbor's server on ({BASE_URL} or {PORT})")
-    if RESULT_DIR not in found:
-        reasons.append(f"the gate's client names no {RESULT_DIR} for Arbor to read each replay from")
+    if not found & set(RESULT_DIRS):
+        reasons.append(f"the gate's client names no {RESULT_DIR} or {RUN_DIR} for Arbor to read each replay from")
     if reasons:
         raise ArborRefused([f"{reason}: {client}" for reason in reasons])
     return " ".join(templated)
@@ -752,7 +769,7 @@ def _words(client: str) -> list[str]:
 def _filled(flag: str, value: str) -> str:
     """The value of ``flag`` as Arbor fills it: a placeholder, or the base URL with its port one."""
 
-    if flag == RESULT_DIR:
+    if flag in RESULT_DIRS:
         return "{out}"
     if flag == PORT:
         return "{port}"

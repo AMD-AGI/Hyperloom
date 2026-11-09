@@ -73,6 +73,8 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
 - **Third-party agents:** `--autonomous-agent SOURCE` (repeatable; a URL carrying credentials is refused),
   `--agent-directions`, `--agent-dossier-minutes`, `--agent-share-minutes`, `--agent-pack`, `--agent-launch`,
   `--agent-port`, `--stop-after-map`, `--agent-dossier`, `--no-review-gate`.
+  Each agent measures with the gate's own client: on `agentx`, the gate's replay run by
+  `python -m inference_suite run` against the agent's server, so an Arbor needs no bench variables in its launch.
 - **Scheduling playbook:** `--playbook auto|champion|challenger` (default `auto`).
 
 ## Exit codes
