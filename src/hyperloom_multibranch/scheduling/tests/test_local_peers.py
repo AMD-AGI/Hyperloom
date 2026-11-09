@@ -463,6 +463,7 @@ async def _peers(
     host: MeasurementHost = HOST,
     dev_leases: int = 0,
     freeze: bool = True,
+    inferencex_commit: str = "",
 ) -> AsyncIterator[_Built]:
     """The real peers of a session of ``workload`` on ``host`` in ``tmp_path`` lending ``dev_leases`` dev sandboxes,
     with the wiring their specialist sessions were built on; a branch's worktree, holding no component, is served
@@ -489,6 +490,7 @@ async def _peers(
         {"geak": layout.reference / "geak"},
         dev_leases,
         (),
+        inferencex_commit=inferencex_commit,
     )
     wired: list[SessionWiring] = []
 
@@ -712,6 +714,22 @@ async def test_a_fresh_session_freezes_its_base_launch_in_the_toolbox_directory_
         frozen = frozen_base(built.layout.toolbox)
         assert frozen is not None and [frozen.launch.query] == queries
         assert frozen.launch.topology.tp == WORKLOAD.tp
+
+
+async def test_a_fresh_session_reads_inferencex_at_the_commit_its_setup_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    commits: list[str] = []
+
+    def offline(query: object, *, user_file: object = None, inferencex_commit: str = "") -> SourceSnapshot:
+        commits.append(inferencex_commit)
+        return SourceSnapshot(None, 1_793_000_000, user_file=user_file, unread=UnreadSource("InferenceX", "offline"))
+
+    monkeypatch.setattr(cli_base_launch, "fetch_sources", offline)
+
+    async with _peers(tmp_path, monkeypatch, WORKLOAD, freeze=False, inferencex_commit="8a76a78e41"):
+        assert commits == ["8a76a78e41"]
 
 
 async def test_the_specialists_are_wired_the_frozen_base_launch_s_server_half(built: _Built) -> None:

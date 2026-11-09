@@ -959,7 +959,7 @@ def hosted_run() -> int:
     _stop_before_grant_ends(start.deadline)
     try:
         returncode = start.run()
-    except (ImageCheckFailed, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
+    except (PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     root = recorded_session(host.state_dir)
     stop_reason = None if root is None else reported_stop_reason(root)

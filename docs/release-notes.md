@@ -22,8 +22,9 @@ it.
 
 - **The base launch can be resolved from InferenceX at a given commit.**
   `--inferencex-commit SHA` on `hyperloom optimize`, `hyperloom-multibranch
-  run` and `python -m inference_suite resolve` reads InferenceX at that
-  commit (a full sha, or a prefix of 7 or more hex digits; a pull request's
+  run` and `python -m inference_suite resolve`, and
+  `multibranch.inferencex_commit` in a hosted run's campaign spec, read
+  InferenceX at that commit (a full sha, or a prefix of 7 or more hex digits; a pull request's
   head commit included) instead of the head of `main`, so a session can match
   a CI run; `base_launch.json` records the full sha. Before, InferenceX was
   always read at `main`. The cookbooks, vLLM recipes and ATOM catalog are
@@ -32,7 +33,10 @@ it.
   (such as `acceptance_length`), is refused before the session starts,
   naming what it lacks; resolve that
   base elsewhere and pass the frozen `base_launch.json` as
-  `--reference-script`. While a commit is pinned, a fixed session never falls
+  `--reference-script`. A hosted run whose spec value is no commit ends for
+  good with exit 2, and one whose commit is refused with exit 1, as `run`
+  does; before, a hosted session that could not resolve its base crashed and
+  was started again. While a commit is pinned, a fixed session never falls
   back to the default table: a source that cannot be read (InferenceX, the
   model card, a release list, a cookbook) refuses it, naming the source and its
   error, and so does no recipe serving it, naming why each source missed. See
