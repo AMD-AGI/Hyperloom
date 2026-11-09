@@ -833,14 +833,18 @@ def test_a_link_at_the_final_name_is_refused_or_replaced_never_followed(tmp_path
     assert not (tmp_path / "nowhere").exists()
 
 
+def _write_half_then_fail(handle):
+    handle.write(b"half")
+    raise RuntimeError("writer failed")
+
+
 @pytest.mark.parametrize("shared", [True, False], ids=["shared", "private"])
 def test_a_replacement_whose_block_raises_leaves_the_file_there_and_no_new_one(tmp_path, shared):
     parent = _setgid_parent(tmp_path / "parent") if shared else tmp_path
     target = parent / "archive.zip"
     target.write_bytes(b"earlier")
     with pytest.raises(RuntimeError, match="writer failed"), shared_storage.replace_shared_file(target) as handle:
-        handle.write(b"half")
-        raise RuntimeError("writer failed")
+        _write_half_then_fail(handle)
     assert target.read_bytes() == b"earlier"
     assert sorted(path.name for path in parent.iterdir()) == ["archive.zip"]
 
