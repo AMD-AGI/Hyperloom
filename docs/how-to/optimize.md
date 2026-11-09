@@ -143,17 +143,18 @@ first source that serves the model on your GPU board:
 `--inferencex-commit SHA` resolves from InferenceX at that commit, a full sha
 or a prefix of 7 or more hex digits, for example to match a CI run; the full
 sha is recorded in `base_launch.json`. Only InferenceX is pinned: the
-cookbooks are still read at `main`. The launch exits 2, with git's error, when
-InferenceX cannot be read at that commit (unreachable, or no such commit; it
-never falls back to the default table), or when the commit lacks a function the resolver runs from
-InferenceX's own code, naming what it lacks. To use such a commit, resolve the
+cookbooks are still read at `main`. The launch exits 2 when InferenceX has no
+such commit, when the commit lacks a function the resolver runs from
+InferenceX's own code (naming what it lacks), or when any source cannot be read
+(naming the source and its error, git's included): a pinned session never runs
+on the default table. To use such a commit, resolve the
 base where its code was run and pass that `base_launch.json` as
 `--reference-script`. A resume keeps its frozen base.
 
-When another source cannot be read, a fixed session runs on the default table
-and the warning names that source; when InferenceX itself cannot be read, the
-launch exits 2. An AgentX session that no source serves, or whose sources
-cannot be read, exits 2 and names why each source missed. When `--tp` or `--ep`
+Without `--inferencex-commit`, when a source cannot be read, InferenceX
+included, a fixed session runs on the default table and the warning names that
+source; an AgentX session exits 2. An AgentX session that no source serves
+exits 2 and names why each source missed. When `--tp` or `--ep`
 is omitted, the session runs at the
 topology the base chose. The base is frozen as `$SESSION_DIR/base_launch.json`
 and its warnings print in the startup banner; `--resume-from` reads that file
