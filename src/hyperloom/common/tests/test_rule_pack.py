@@ -113,6 +113,7 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "CONTEXT_LENGTH_FLAGS": ["--context-length", "--max-model-len"],
     "ENV_CONC": "CONC",
     "ENV_EP": "EP",
+    "ENV_EVAL_ONLY": "EVAL_ONLY",
     "ENV_ISL": "ISL",
     "ENV_MAGPIE_EVAL_LIMIT": "MAGPIE_EVAL_LIMIT",
     "ENV_MAGPIE_EVAL_TASKS": "MAGPIE_EVAL_TASKS",

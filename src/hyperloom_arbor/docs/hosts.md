@@ -155,8 +155,8 @@ the file it gives Arbor as `component.profile`, `{"unit": "percent", "shares": {
 - **Kernel names map too,** for a host whose profile has no op decomposition (MB's, when TraceLens
   degrades on a CUDA-graph trace, gives its kernel shares): hipBLASLt's `Cijk_` GEMMs, vLLM's
   `wvSplitK`, `reshape_and_cache` and `_fwd_kernel` are placed as well; copies and memcpys are not.
-- **Each is framed by the v2 pack's roadmap** (`packs/agentx-dsv41-2`), its title naming the gap that
-  roadmap names, model-independent.
+- **Each is framed by a hand-written serving roadmap** (`arbor/mapgen.py`), its title naming the gap
+  that roadmap names, model-independent.
 - **Rank** follows the family's share, largest first. **Ceiling** is its Amdahl ceiling, the most
   the run could gain with the family's time at zero. A family under `--min-share` percent is left
   out.
