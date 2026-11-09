@@ -1003,6 +1003,17 @@ def _finalize_iteration(
               + (f"; its own run shows one ({stability['own'][0]})" if stability.get("own") else ""),
               file=sys.stderr, flush=True)
 
+    # ── A host's guards (arbor/measure/guards.py) ───────────────────────────
+    # Checked against the kept tree's readings; the row carries what held, broke or went unchecked.
+    from arbor.measure import guards as _guards
+    measurement_block = campaign.pack.objective.get("measurement", {})
+    guard_check = (_guards.check(measurement_block, bench_output, state.guard_ref)
+                   if bench_output.get("status") == "ok" else None)
+    if guard_check:
+        state.iteration_notes["guards"] = guard_check
+        print("[arbor] Guards: " + "; ".join(
+            f"{kind} {', '.join(lines)}" for kind, lines in guard_check.items() if lines), file=sys.stderr, flush=True)
+
     def decide(acc: dict | None):
         return run_gate(
             campaign.pack.objective, state.best_metric,
@@ -1013,6 +1024,7 @@ def _finalize_iteration(
             bundle=claimed_bundle,
             accuracy=acc,
             stability=stability,
+            guards=guard_check,
         )
 
     # ── Accuracy (arbor/measure/accuracy.py) ────────────────────────────────
@@ -1256,6 +1268,8 @@ def _finalize_iteration(
         # resets the escalation counter — a change kept for clearing the noise
         # band, or kept as a frontier trade, is retained but is not a claimed
         # advance.
+        # The kept tree's readings of a host's guards (arbor/measure/guards.py), for the next candidate.
+        state.guard_ref = {**state.guard_ref, **_guards.reading(measurement_block, bench_output)}
         state.record_keep(
             iteration=iteration, metric=metric_value,
             change=change, tier=state.tier,
@@ -1267,6 +1281,8 @@ def _finalize_iteration(
     elif decision == "PROBE":
         # The tree is NOT reverted. A probe's deliverable — a new evaluator, an
         # instrument, a ledger entry — is exactly what we want to keep.
+        if bench_output.get("status") == "ok":
+            state.guard_ref = {**state.guard_ref, **_guards.reading(measurement_block, bench_output)}
         state.record_probe(
             iteration=iteration, change=change, tier=state.tier,
             findings=finding_ids, reason=reason, metric=metric_value,
@@ -2041,25 +2057,36 @@ SECONDARY_FROM_LATENCY = {
 
 
 # component.bench_read's fixed block: the metrics from the host client's report, by dotted path, into a bench output
-# file; a report that does not read, or a path that is not a number there, writes a failed one (NOT_MEASURED). The
-# objective's metric must be among the keys.
+# file; a report that does not read, a path that is not a number there, or a ``require`` path that is not its value (a
+# round the client did not complete keeps its numbers) writes a failed one (NOT_MEASURED). The objective's metric must
+# be among the keys.
 _READ_BLOCK = r"""   python3 - <<'READ'
 import json
 from pathlib import Path
 out, dest = Path(__OUT__), __DEST__
 name, keys, need = __FILE__, __KEYS__, __NEED__
+require = json.loads(__REQUIRE__)
 
 def fail(why):
     json.dump({"status": "failed", "error": "bench_read: " + why}, open(dest, "w"))
     print("[bench_read] NOT MEASURED:", why)
+
+def at(doc, path):
+    for part in path.split("."):
+        doc = doc.get(part) if isinstance(doc, dict) else None
+    return doc
 
 missing = [k for k in need if k not in keys]
 try:
     doc = None if missing else json.loads((out / name).read_text())
 except (OSError, ValueError) as exc:
     doc, why = None, f"{name} under {out} did not read: {exc}"
+unmet = [] if doc is None else [(p, want, at(doc, p)) for p, want in require.items()
+                                if at(doc, p) != want or isinstance(at(doc, p), bool) != isinstance(want, bool)]
 if missing:
     fail(f"no path for {', '.join(missing)}")
+elif unmet:
+    fail("; ".join(f"{p} is {json.dumps(got)}, not {json.dumps(want)}" for p, want, got in unmet))
 elif doc is not None:
     rec, bad = {"status": "ok", "source": "bench_command"}, None
     for key, path in keys.items():
@@ -2084,7 +2111,8 @@ READ
 def _read_block(out_dir, dest: str, read: dict, need: list[str]) -> str:
     return (_READ_BLOCK.replace("__OUT__", json.dumps(str(out_dir))).replace("__DEST__", json.dumps(dest))
             .replace("__FILE__", json.dumps(read["file"])).replace("__KEYS__", json.dumps(read["keys"]))
-            .replace("__NEED__", json.dumps(need)))
+            .replace("__NEED__", json.dumps(need))
+            .replace("__REQUIRE__", json.dumps(json.dumps(read.get("require") or {}))))
 
 
 def _host_bench_steps(command: str, port, iter_dir, bench_output_path: str,

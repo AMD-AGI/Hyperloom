@@ -84,7 +84,8 @@ def info(root: Path = ROOT) -> dict:
         "events": list(lifecycle.EVENT_NAMES),
         "roles": {side: list(chapters) for side, chapters in lifecycle.ROLES.items()},
         "objective": {"config_key": objective.CONFIG_KEY, "flag": "--opt-objective", "env": objective.ENV,
-                      "record": objective.FILE, "keys": list(objective.KNOWN), "names": dict(objective.NAMES)},
+                      "record": objective.FILE, "keys": list(objective.KNOWN), "names": dict(objective.NAMES),
+                      "forms": list(objective.FORMS)},
         "payload": {"version": payload.VERSION, "formats": list(payload.FORMATS), "flag": payload.FLAG,
                     "commands": list(payload.COMMANDS), "schema": payload.SCHEMA_ID, "record": payload.RECORD},
     }

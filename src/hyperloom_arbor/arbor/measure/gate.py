@@ -234,6 +234,7 @@ def run_gate(
     bundle: dict | None = None,
     accuracy: dict | None = None,
     stability: dict | None = None,
+    guards: dict | None = None,
 ) -> GateResult:
     """Pure gate logic. Callers provide the raw results; this decides the outcome.
 
@@ -248,7 +249,8 @@ def run_gate(
     numerics change (arbor/measure/accuracy.py), passed only when the pack's
     accuracy gate is on; absent, the gate is what it was. ``stability`` is a
     FIX-STABILITY candidate's evidence (arbor/measure/stability.py): without a
-    failure on record before it, the candidate is gated as a FIX.
+    failure on record before it, the candidate is gated as a FIX. ``guards`` is a host's guards checked against the
+    kept tree (arbor/measure/guards.py): one broken is a REVERT.
     """
     metric_key = objective["metric"]
     direction = objective["direction"]
@@ -269,7 +271,7 @@ def run_gate(
         why = (stability or {}).get("why") or "the harness's check did not run"
         res = run_gate(objective, best, bench_result, correctness_result, integrity_ok,
                        secondary_best=secondary_best, intent=resolve("FIX"), arm=arm, bundle=bundle,
-                       accuracy=accuracy)
+                       accuracy=accuracy, guards=guards)
         res.reason = f"{res.reason} [FIX-STABILITY with no failure on record ({why}): gated as a FIX]"
         return res
     # How far THIS intent may regress. For a correctness fix that is the
@@ -429,6 +431,11 @@ def run_gate(
     both_ok = pri.ok and sec.ok
     is_frontier = (pri.gain and not sec.ok) or (sec.gain and not pri.ok)
     delta_s = f"{pri.delta:+.1f}%{sec.note()}"
+
+    # A host's guards (arbor/measure/guards.py): a KEEP the host would refuse on one of them is a REVERT here,
+    # whatever the intent, with no retest.
+    if guards and guards.get("broken"):
+        return _result(REVERT, f"{delta_s} — a host's guard broke: {guards['broken'][0]}")
 
     # ── Cap on what a frontier trade may spend ──────────────────────────────
     # `secondary_noise_band_pct` does NOT bound a frontier point: once the

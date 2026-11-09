@@ -42,7 +42,7 @@ with:
 | `component.seconds` | or a duration in seconds from the first launch; a resume does not restart it. With both, the earlier wins; `0` means none, so `deadline` decides. |
 | `component.notes` | a file of what the host has already measured and merged. Read at every iteration; the agent never redoes what it lists (the first 20 KB go into its prompt). |
 | `component.bench_command` | the host's benchmark client, run unchanged for every measurement, with `{port}` (Arbor's server) and `{out}` (an empty directory per replay, for its results) filled in. Without it, the pack's bench. Warm the server first: the first reading after a start reads low. The agent reads the pack's metric from the client's results, and its second metric too when the pack names one (`p90_interactivity` as 1000 / p90 TPOT in ms if the client reports latencies): without it Arbor's gate is one-axis. |
-| `component.bench_read` | where the client puts each metric: `{"file": "report.json", "keys": {"e2e_norm_intvty_p50": "agentx.e2e_norm_intvty.p50", ...}}`. With it the harness reads every key by its dotted path after each replay (a fixed block the bench agent runs as given), and the agent reads nothing. A report that does not read, a path that is not a number, or no path for the objective's metric makes the iteration NOT_MEASURED; so does a missing value for a guard the map names. Needs `bench_command`. From interface `component` 4. |
+| `component.bench_read` | where the client puts each metric: `{"file": "report.json", "keys": {"e2e_norm_intvty_p50": "agentx.e2e_norm_intvty.p50", ...}}`. With it the harness reads every key by its dotted path after each replay (a fixed block the bench agent runs as given), and the agent reads nothing. A report that does not read, a path that is not a number, or no path for the objective's metric makes the iteration NOT_MEASURED; so does a missing value for a guard the map names. `require`, optional, maps dotted paths to the value each must equal, for a round the client did not complete but kept numbers for (`{"run_status": "completed", "agentx.stopped_by_threshold": false}`): a path that is not its value makes the replay NOT_MEASURED, naming what it found (`true` never equals 1). Needs `bench_command`. From interface `component` 4; `require` from Arbor `v0.9.6`. |
 | `component.outbox` | where the KEEP snapshots go, relative to the session (default `keeps`). |
 | `component.root` | the commit the host gave the worktree (a sha): every patch and snapshot is measured against it. Without it, the repository's first commit. A `root` the workspace lacks is refused. |
 | `component.plan` | optional: this campaign's share of the host's directions, when the host runs several Arbors from one set ([below](#the-hosts-plan)). A list of directions, `{"directions": [...]}`, or the path of a JSON file holding either. |
@@ -217,10 +217,28 @@ axis, and Arbor optimizes that in place of the pack's (`arbor/objective.py`):
   `request_metrics.latency.e2e_norm_intvty` from the harness's aggregate as is; a host's client is read for the key, or
   for the latencies it is made from), the gate and the bars. The pack's second metric, when it is the one asked, changes
   places with the first.
+- **The host's whole rule, in the config only:** the structured form carries the bar and the guards.
+
+  ```json
+  "opt_objective": {"metric": "e2e_norm_intvty_p50", "bar_pct": 2.0,
+                    "guards": [{"metric": "e2e_norm_intvty_p90", "band_pct": 5.0},
+                               {"metric": "total_token_throughput", "band_pct": 5.0},
+                               {"metric": "request_error_rate", "max_pct": 10.0}]}
+  ```
+
+  - `bar_pct` replaces the pack's `threshold_rel`: the gain a WIN must clear.
+  - A band guard holds against the kept tree's reading: at least kept x (1 - band / 100), the other way for a metric
+    to minimize. A cap `max_pct` is absolute; `request_error_rate` comes from the request counts when the bench
+    reports those alone.
+  - **A broken guard is a REVERT,** whatever the intent, with no retest (`arbor/measure/guards.py`). The host's gate
+    still decides what it merges. The guards replace the pack's second axis, and the program names them.
+  - **A guard the bench did not report** is not checked, and the row says so.
 - **Before writing it:** `python3 -m arbor version --json` has `objective` (the config key, the flag, the keys and
-  names Arbor knows) from interface `cli` 4. A pin without it ignores the key, so a host refuses such a pin.
-- **After the start:** `<session>/objective.json`, written at every start: `metric`, `direction`, `source`
-  (`opt_objective` or `pack`), `asked`, `pack_metric`. A host that asked for an axis and finds another refuses the run.
+  names Arbor knows, and its `forms`) from interface `cli` 4; `forms` lists `structured` once this form is there. A pin
+  without it ignores the key, so a host refuses such a pin.
+- **After the start:** `<session>/objective.json`, written at every start: `metric`, `direction`, `threshold_rel`,
+  `guards`, `source` (`opt_objective` or `pack`), `asked`, `pack_metric`. A host that asked for an axis and finds
+  another refuses the run.
 - **What Arbor refuses at the start:** a name it cannot read, and a resume under another objective than the session
   started on (exit 2, in `component_refused.json`).
 

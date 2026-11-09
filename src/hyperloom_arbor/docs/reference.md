@@ -49,7 +49,7 @@ people.
 | `identity` | | a label for the campaign |
 | `goal` | | one line, the title of the program the agent reads |
 | `target` | none | a number (the metric to reach), or a dict; reaching it ends a round |
-| `opt_objective` | none | the metric to optimize in place of the pack's, as `--opt-objective` takes it; a host writes it here. The flag and `ARBOR_OPT_OBJECTIVE` win over it |
+| `opt_objective` | none | the metric to optimize in place of the pack's, as `--opt-objective` takes it; a host writes it here. Or the structured form, `{metric, direction, bar_pct, guards: [{metric, band_pct} or {metric, max_pct}]}`: the bar replaces `threshold_rel`, and a broken guard is a REVERT ([hosts.md](hosts.md#the-hosts-objective)). The flag and `ARBOR_OPT_OBJECTIVE` win over it |
 | `time_budget_minutes` | none | a wall clock for the session (ignored in component mode). A resume counts what the session already spent (`<session>/clock.json`, written at each iteration's start), so a session that dies and resumes still ends at its budget; to give it more, raise the budget |
 | `review_gate` | `true` | a new session waits for a human's approval before it runs anything; `ARBOR_REVIEW_GATE` and `run --[no-]review-gate` override it |
 | `baseline_record` | none | a JSON file `{mean, runs, mean_secondary}` with a measured baseline |

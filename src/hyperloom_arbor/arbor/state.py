@@ -169,6 +169,9 @@ class CampaignState:
     # no secondary metric, in which case every gate path is single-axis.
     baseline_secondary: float | None = None
     best_secondary: float | None = None
+    # The kept tree's readings of a host's band guards (arbor/measure/guards.py), taken at every measured KEEP and
+    # PROBE; empty without guards. An older session.json loads without it.
+    guard_ref: dict[str, float] = field(default_factory=dict)
     iteration: int = 0
     tier: str = "config"
     null_streak: int = 0

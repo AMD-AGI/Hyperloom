@@ -437,9 +437,17 @@ def render_program(campaign, state, arbor_root: str | Path,
     unit_s = f" {unit}" if unit else ""
     # An objective asked in place of the pack's (arbor/objective.py): the pack's own text still names its metric.
     over = obj.get("opt_objective") or {}
-    asked_s = (f"- Asked for this campaign (\"{over.get('asked')}\") in place of the pack's {over.get('pack_metric')}: "
+    shown = over.get("asked") if isinstance(over.get("asked"), str) else obj["metric"]
+    asked_s = (f"- Asked for this campaign (\"{shown}\") in place of the pack's {over.get('pack_metric')}: "
                f"where the pack's text names its own metric, read this one. A change is kept for what it does to "
                f"{obj['metric']}.\n") if over and over.get("pack_metric") != obj["metric"] else ""
+    # A host's guards (arbor/measure/guards.py): what a KEEP must not give up.
+    guards = (obj.get("measurement") or {}).get("guards") or []
+    if guards:
+        held = "; ".join(f"{g['metric']} at most {g['max_pct']:g} %" if "max_pct" in g else
+                         f"{g['metric']} within {g['band_pct']:g} % of the kept tree" for g in guards)
+        asked_s += (f"- Guards: {held}. A change that breaks one is reverted, whatever its gain: buy {obj['metric']} "
+                    f"without them.\n")
     sections.append(
         f"## Objective\n\n"
         f"- Kind: {obj['kind']}\n"
