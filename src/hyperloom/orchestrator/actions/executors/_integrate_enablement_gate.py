@@ -10,7 +10,7 @@ import logging
 import os
 import subprocess
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,7 @@ from ...bringup import (
 from ...bringup.persist import LoadedObservation
 from ...enablement.recipe import keep_probe, keep_records
 from ...enablement.recipe.projections import project_launch_evidence
+from ...knowledge.kb_writeback import OUTCOME_INTEGRATED, OUTCOME_REVERTED_SMOKE_FAIL
 from . import _framework_switch_manifest as _switch_manifest
 from ._accuracy_gate import enablement_correctness
 from ._enablement_config import _FRAMEWORK_KB_PROVENANCE_PREFIX
@@ -201,7 +202,7 @@ class EnablementGateMixin:
         # timestamp, so it stays correct as the gate progresses.
         try:
             bench_result, gate_evidence = await self._bench_patch(
-                _PatchBench.for_attempt(attempt, params),
+                replace(_PatchBench.for_attempt(attempt, params), launch_controls=attempt.launch_controls),
                 extra_server_args_applied=attempt.extra_server_args_applied,
                 extra_envs_applied=attempt.extra_envs_applied,
             )
@@ -322,7 +323,7 @@ class EnablementGateMixin:
         )
         if not runs and not advanced:
             await self._maybe_write_framework_kb_record(
-                _KbLesson("reverted_smoke_fail", 0.0), attempt=attempt, params=params
+                _KbLesson(OUTCOME_REVERTED_SMOKE_FAIL, 0.0), attempt=attempt, params=params
             )
             return _reverted_enablement_verdict(attempt, grade)
 
@@ -341,7 +342,9 @@ class EnablementGateMixin:
             )
 
         if advanced:
-            await self._maybe_write_framework_kb_record(_KbLesson("integrated", 0.0), attempt=attempt, params=params)
+            await self._maybe_write_framework_kb_record(
+                _KbLesson(OUTCOME_INTEGRATED, 0.0), attempt=attempt, params=params
+            )
             return _advanced_enablement_verdict(attempt, grade)
         return await self._keep_enablement(attempt, params, grade)
 
@@ -356,7 +359,7 @@ class EnablementGateMixin:
         reason = f"enablement runnable: {grade.run_reason}"
         if provisional:
             reason += " (provisional: served but eval produced no accuracy; correctness not verified)"
-        await self._maybe_write_framework_kb_record(_KbLesson("integrated", 0.0), attempt=attempt, params=params)
+        await self._maybe_write_framework_kb_record(_KbLesson(OUTCOME_INTEGRATED, 0.0), attempt=attempt, params=params)
         kept_result: dict[str, Any] = {
             "status": "kept",
             "specialist_task_id": specialist_task_id,

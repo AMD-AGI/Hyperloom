@@ -89,7 +89,7 @@ def test_materializer_does_not_turn_native_workload_into_synthetic(source, tmp_p
     assert bench["envs"] == {"TP": "1", "EP_SIZE": "1", "CONC": "8", "RUN_EVAL": "false"}
     launch = bench["agentx"]["launch_overrides"]
     assert launch["append_args"] == ["--disable-cuda-graph"]
-    assert launch["env"] == {"SGLANG_TEST": "1"}
+    assert launch["env"] == {"SGLANG_TEST": "1", "AITER_LOG_TUNED_CONFIG": "1"}
 
 
 def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
@@ -102,16 +102,52 @@ def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
     candidate = _build_variant_yaml(GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "candidate")
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
     assert launch["append_args"] == ["--chunked-prefill-size", "2048"]
-    assert launch["env"] == {"SGLANG_NEXT": "1"}
+    assert launch["env"] == {"AITER_LOG_TUNED_CONFIG": "1", "SGLANG_NEXT": "1"}
     assert launch["unset_env"] == ["SGLANG_TEST"]
-    assert load_benchmark(base)["agentx"]["launch_overrides"]["env"] == {"SGLANG_TEST": "1"}
+    base_env = load_benchmark(base)["agentx"]["launch_overrides"]["env"]
+    assert base_env == {"SGLANG_TEST": "1", "AITER_LOG_TUNED_CONFIG": "1"}
+
+
+def test_a_candidate_that_unsets_hit_logging_runs_without_it(source, tmp_path):
+    """Every round logs aiter's tuned-config hits unless a candidate removes the flag itself."""
+    base = materialize_benchmark_config(source, tmp_path / "base")
+    variant = GridVariant("quiet", "", {}, unset_envs=["AITER_LOG_TUNED_CONFIG"])
+    candidate = _build_variant_yaml(GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "candidate")
+    launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
+    assert (launch["env"], launch["unset_env"]) == ({}, ["AITER_LOG_TUNED_CONFIG"])
+
+
+def test_a_native_round_with_no_tuned_hit_is_graded_zero_hit(source, tmp_path):
+    """The candidate env does not name the flag; the server the round launches logs hits, so no hit is a zero hit."""
+    from hyperloom.orchestrator.kernel.gemm_shape_coverage import aiter_log_tuned_config_enabled
+    from hyperloom.orchestrator.measurement.apply_verification import verify_applied
+
+    tuned = "/work/bf16_tuned_gemm.csv"
+    candidate_env = {"AITER_CONFIG_GEMM_BF16": tuned}
+    rendered = materialize_benchmark_config(source, tmp_path / "round", launch=LaunchLayer(extra_envs=candidate_env))
+    assert load_benchmark(rendered)["agentx"]["launch_overrides"]["env"]["AITER_LOG_TUNED_CONFIG"] == "1"
+    miss = (
+        "[aiter] shape is M:15, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, "
+        f"scaleAB=False, bpreshuffle=False, not found tuned config in {tuned}"
+    )
+    server_log = tmp_path / "server.log"
+    server_log.write_text(miss + "\n", encoding="utf-8")
+
+    verdict = verify_applied(
+        server_log,
+        [tuned],
+        hit_logging=aiter_log_tuned_config_enabled(candidate_env),
+        runtime_table_names=["bf16_tuned_gemm.csv"],
+    )
+
+    assert verdict.verdict == "zero_hit" and verdict.blocks_keep
 
 
 @pytest.mark.parametrize("seeded", [False, True], ids=["no-overrides", "cli-generated"])
 def test_pre_baseline_candidate_carries_operator_server_args(source, tmp_path, monkeypatch, seeded):
     if seeded:
         config = yaml.safe_load(source.read_text())
-        # The shape _generated_agentx_benchmark writes for a session driven by workload flags.
+        # The shape write_agentx_benchmark writes for a session driven by workload flags.
         config["benchmark"]["agentx"]["launch_overrides"] = {"version": 1}
         source.write_text(yaml.safe_dump(config))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", "--max-num-seqs 16")

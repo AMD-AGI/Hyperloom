@@ -157,6 +157,20 @@ async def test_a_lane_carries_the_record_its_session_returned(tmp_path, record):
     assert LaneResult.from_dict(entry).lesson == record
 
 
+def test_a_queued_lane_keeps_the_round_and_commit_it_was_built_on():
+    """Its diff only means something against that commit, so a later process must still know it."""
+    lane = LaneResult(
+        lane_id="2", plan="stage A in LDS", diff="--- a\n+++ b\n", round_iteration=4, base_commit="abc123"
+    )
+
+    restored = LaneResult.from_dict(lane.to_dict())
+
+    assert (restored.round_iteration, restored.base_commit) == (4, "abc123")
+    queued_before_this_change = {"lane_id": "2", "plan": "stage A in LDS", "diff": "--- a\n+++ b\n"}
+    old = LaneResult.from_dict(queued_before_this_change)
+    assert (old.round_iteration, old.base_commit) == (0, "")
+
+
 async def test_a_lane_of_a_detached_worktree_diffs_against_the_same_commit(tmp_path):
     """A forge worktree is often checked out detached rather than on a branch."""
     workspace = _worktree_workspace(tmp_path, detached=True)

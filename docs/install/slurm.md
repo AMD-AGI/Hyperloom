@@ -139,6 +139,16 @@ missing `src/hyperloom/inference_optimizer/cli/` causes `ModuleNotFoundError`
 (see [Troubleshooting](#troubleshooting)). If `--source-dir` is omitted, the job
 clones `main` from GitHub at runtime, which requires GitHub egress on the node.
 
+A checkout on the shared mount is one another account can write when its
+directory or its `.env` is writable by a group or others, belongs to another
+account, or its `.env` is a link. The installer then keeps the Anthropic-side credentials it
+would persist there out of that `.env`, where those accounts could read or rewrite
+them: each job's `install.sh` writes the ones it gets from the job's environment
+(`proxy.env`) into the container's own `kernel-agent.env.sh` (`KERNEL_AGENT_ENV`)
+alone, and removes any an earlier install left in `.env`, with every other line
+that `.env` does not lend. Keep them in
+`proxy.env`, which every job exports. See [Credential precedence](../reference/authentication.md#credential-precedence).
+
 ## Step 4: Submit a job
 
 ```bash
@@ -202,7 +212,7 @@ The artifact directory `<data-root>/<model_key>/<CLAW_SESSION_ID>/` contains:
 - `manifest.json`: Session manifest;
 - `ci_metrics.json`: Baseline/optimized throughput plus `gain_pct`;
 - `optimizer_runs/`: `launch_<sid>.json` and logs;
-- `runtime/`: `kernel-agent.env.sh` and other files produced by the installer.
+- `runtime/`: files produced by the installer. The `kernel-agent.env.sh` it writes, which carries credentials, stays in the job container's own temporary directory (`KERNEL_AGENT_ENV`) and is not copied here.
 
 A healthy run logs in this order:
 

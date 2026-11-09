@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 from hyperloom.orchestrator.state.failure_evidence import (
     FAILURE_ATTRIBUTION_CANDIDATE,
     FAILURE_ATTRIBUTION_ENVIRONMENT,
@@ -30,6 +33,9 @@ class TestClassifyFailureAttribution:
     def test_explicit_candidate_class_is_publishable(self):
         assert classify_failure_attribution(error_class="capability_unsupported") == FAILURE_ATTRIBUTION_CANDIDATE
 
+    def test_an_argv_the_server_refused_is_the_candidates(self):
+        assert classify_failure_attribution(error_class=ARGV_INVALID) == FAILURE_ATTRIBUTION_CANDIDATE
+
     def test_candidate_specific_cli_error_is_publishable(self):
         assert (
             classify_failure_attribution(
@@ -46,6 +52,30 @@ class TestClassifyFailureAttribution:
                 error_excerpt="memory reservation failed because a concurrent GPU holder remained",
             )
             == FAILURE_ATTRIBUTION_ENVIRONMENT
+        )
+
+    def test_a_taken_server_port_is_the_environments(self):
+        assert (
+            classify_failure_attribution(
+                error_class="magpie_nonzero_invalid_measurement",
+                error_excerpt="AgentX server port 8888 is unavailable; existing servers are not reused",
+            )
+            == FAILURE_ATTRIBUTION_ENVIRONMENT
+        )
+
+    @pytest.mark.parametrize(
+        "excerpt",
+        [
+            "AgentX server exited before becoming healthy (-9)",
+            "AgentX server exited during its health check (1)",
+            "Memory access fault by GPU node-2 (Agent handle: 0x5d0) on address 0x7f00. Reason: Unknown.",
+            "ray_actor_error: The actor died unexpectedly before finishing this task.",
+        ],
+    )
+    def test_a_server_that_died_is_not_the_harnesss(self, excerpt):
+        assert (
+            classify_failure_attribution(error_class="magpie_nonzero_invalid_measurement", error_excerpt=excerpt)
+            == FAILURE_ATTRIBUTION_UNKNOWN
         )
 
     def test_ambiguous_failure_remains_unknown(self):

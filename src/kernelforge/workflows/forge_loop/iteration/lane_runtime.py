@@ -36,6 +36,8 @@ from kernelforge.workflows.forge_loop.iteration.merge_candidates import (
     select_merge_pair,
 )
 from kernelforge.workflows.forge_loop.campaign.run_state import make_event
+from kernelforge.workflows.forge_loop.campaign.unmeasured_lanes import UnmeasuredLane, UnmeasuredLaneArchive
+from kernelforge.workflows.forge_loop.roles.summary_line import read_summary
 from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json, atomic_write_text
 from kernelforge.utils.git import git
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
@@ -182,8 +184,11 @@ class LaneRuntimeMixin:
             if result.error:
                 print(f"  [lane {result.lane_id}] session lost: {result.error}")
         active_profile_id = self.run_state.agent_relay.active_profile_id
+        base_commit = self._canonical_commit()
         self._lane_queue = [
-            replace(item, agent_profile_id=active_profile_id) for item in results if item.produced_candidate
+            replace(item, agent_profile_id=active_profile_id, round_iteration=iteration, base_commit=base_commit)
+            for item in results
+            if item.produced_candidate
         ]
         print(f"  [lanes] {len(self._lane_queue)} of {len(results)} lanes produced a candidate")
         self._persist_lane_queue()
@@ -245,23 +250,23 @@ class LaneRuntimeMixin:
             return "it changes the measurement surface: " + ", ".join(protected)
         return ""
 
-    def _take_lane_candidate(self) -> LaneResult | None:
+    def _take_lane_candidate(self, iteration: int) -> LaneResult | None:
         """Apply the next queued lane candidate to the canonical tree."""
         try:
-            return self._next_lane_candidate()
+            return self._next_lane_candidate(iteration)
         finally:
             self._persist_lane_queue()
 
-    def _next_lane_candidate(self) -> LaneResult | None:
+    def _next_lane_candidate(self, iteration: int) -> LaneResult | None:
         while self._lane_queue:
             lane = self._lane_queue.pop(0)
             rejection = self._lane_rejection(lane.diff)
             if rejection:
-                print(f"  [lane {lane.lane_id}] candidate rejected: {rejection}")
+                self._reject_lane_candidate(lane, iteration, rejection)
                 continue
             if not self._git_apply_patch(lane.diff):
                 self._git_discard_worktree()
-                print(f"  [lane {lane.lane_id}] candidate no longer applies; dropped")
+                self._file_unmeasured_lane(lane, iteration)
                 continue
             try:
                 # The driver is the measurement boundary and must remain byte-for-byte canonical.
@@ -271,10 +276,51 @@ class LaneRuntimeMixin:
                 # it.
                 self._git_discard_worktree()
                 self._validate_driver_integrity(self.run_state)
-                print(f"  [lane {lane.lane_id}] candidate rejected: {error}")
+                self._reject_lane_candidate(lane, iteration, str(error))
                 continue
             return lane
         return None
+
+    def _reject_lane_candidate(self, lane: LaneResult, iteration: int, reason: str) -> None:
+        """Log a candidate that must not reach the canonical tree; it is no planning evidence, so nothing is kept."""
+        print(f"  [lane {lane.lane_id}] candidate rejected: {reason}")
+        self.state_store.append_event(
+            make_event(
+                "lane_candidate_rejected",
+                iteration,
+                lane=lane.lane_id,
+                round_iteration=lane.round_iteration,
+                reason=reason,
+            )
+        )
+
+    def _file_unmeasured_lane(self, lane: LaneResult, iteration: int) -> None:
+        """Keep a candidate the tree moved past where later rounds' planners can read it."""
+        filed = UnmeasuredLaneArchive(self.ic.workspace_dir).record(
+            UnmeasuredLane(
+                round_iteration=lane.round_iteration,
+                lane_id=lane.lane_id,
+                base_commit=lane.base_commit,
+                dropped_iteration=iteration,
+                canonical_commit=self._canonical_commit(),
+                plan=lane.plan,
+                summary=read_summary(lane.plan) or "",
+                diff=lane.diff,
+                lesson=lane.lesson.text,
+                lesson_reason=lane.lesson.reason,
+            )
+        )
+        where = f"; filed under {filed}" if filed is not None else ""
+        print(f"  [lane {lane.lane_id}] candidate no longer applies; dropped unmeasured{where}")
+        self.state_store.append_event(
+            make_event(
+                "lane_candidate_unmeasured",
+                iteration,
+                lane=lane.lane_id,
+                round_iteration=lane.round_iteration,
+                path=str(filed or ""),
+            )
+        )
 
     def _select_merge_attempt(
         self,

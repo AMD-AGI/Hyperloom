@@ -10,7 +10,9 @@ import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import CancelledError
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -21,7 +23,10 @@ import pytest
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 
+from hyperloom.common.agent_isolation import AccountIsolation
+from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss
+from hyperloom.orchestrator.specialists.launch_env import PreparedLaunch
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessDispatcher,
     SpecialistSpawn,
@@ -172,11 +177,11 @@ def test_demoted_reap_signals_only_pids_the_specialist_account_owns(monkeypatch)
 
     own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     roots: list[list[int]] = []
-    monkeypatch.setattr(ss, "_LIST_MARKED_SCRIPT", f"echo 1; echo {own.pid}")
+    monkeypatch.setattr(launch_env, "LIST_MARKED_SCRIPT", f"echo 1; echo {own.pid}")
     monkeypatch.setattr(ss, "collect_tree", lambda pids: roots.append(list(pids)) or Tree((), (), frozenset()))
     monkeypatch.setattr(ss, "kill_tree", lambda tree: True)
     try:
-        SpecialistSubprocessDispatcher._reap_marked("mark", _SameUidRunAs())
+        SpecialistSubprocessDispatcher._reap_marked("mark", PreparedLaunch(AccountIsolation(_SameUidRunAs())))
     finally:
         own.kill()
         own.wait(timeout=5)
@@ -219,10 +224,10 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, dem
 
     monkeypatch.setattr(ss.subprocess, "Popen", spawn)
     if demoted:
-        monkeypatch.setattr(ss, "resolve_launch_user", lambda lease: _SameUidRunAs())
-        monkeypatch.setattr(ss, "prepare_demote", lambda *args: {})
+        monkeypatch.setattr(ss, "resolve_launch_isolation", lambda lease: AccountIsolation(_SameUidRunAs()))
+        monkeypatch.setattr(launch_env, "_demote", lambda *args: {})
         # The app's uid cannot read a demoted child's environ.
-        monkeypatch.setattr(ss, "marked_pids", lambda key, value: [])
+        monkeypatch.setattr(launch_env, "marked_pids", lambda key, value: [])
     dispatcher = SpecialistSubprocessDispatcher(
         ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
     )
@@ -322,6 +327,39 @@ def test_kill_missing_process_identity_cannot_confirm_tree(monkeypatch):
     kill.assert_not_called()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["deadline", "silence"])
+async def test_reap_loop_kill_left_unconfirmed_raises_the_kills_error_carrying_the_decision(
+    monkeypatch, tmp_path, ending
+):
+    """A caller of the base class sees the kill's own message and group; the loop's decision rides on the raise."""
+
+    def doubt(proc):
+        raise ExecutionCleanupUnconfirmed(f"specialist pid={proc.pid}: tree cleanup unconfirmed", tree_pgid=proc.pid)
+
+    monkeypatch.setattr(SpecialistSubprocessDispatcher, "_kill", staticmethod(doubt))
+    monkeypatch.setattr(ss, "cli_alive", lambda *args, **kwargs: ending == "deadline")
+    dispatcher = SpecialistSubprocessDispatcher(
+        ss.SpecialistSubprocessConfig(
+            poll_interval_seconds=0.01, heartbeat_stale_seconds=0.0 if ending == "silence" else 300.0
+        )
+    )
+    proc = Mock(pid=4242, returncode=None)
+    proc.poll.return_value = None
+    with pytest.raises(ExecutionCleanupUnconfirmed, match=r"^specialist pid=4242: tree cleanup unconfirmed$") as caught:
+        await dispatcher._reap_loop(
+            proc,
+            ss.ReapWatch(workspace=tmp_path, done_files=()),
+            deadline=Deadline.after(0.0 if ending == "deadline" else 600.0),
+            started=time.monotonic(),
+        )
+    assert isinstance(caught.value, ss.ReapKillUnconfirmed)
+    assert caught.value.tree_pgid == 4242
+    outcome = caught.value.outcome
+    assert (outcome["timed_out"], outcome["stale_heartbeat"]) == (ending == "deadline", ending == "silence")
+    assert ("at its deadline" if ending == "deadline" else "heartbeat stale") in outcome["error"]
+
+
 @pytest.mark.parametrize("confirmed_dead", [True, False])
 def test_kill_ray_process_requires_cleanup_ack(confirmed_dead):
     lease = Mock()
@@ -377,6 +415,16 @@ async def test_ray_followup_ack_preserves_reap_outcome(monkeypatch, tmp_path, ph
         clock.now += 31.0
 
     monkeypatch.setattr(ss.asyncio, "sleep", advance)
+    real_create = ss.create_nofollow
+
+    def created_long_ago(base, rel):
+        """The launch's log, made fresh as the dispatcher makes it; this test's wall clock never moves, so it is dated
+        before it, as the empty log of a CLI that never wrote is once its heartbeat window has passed."""
+        handle = real_create(base, rel)
+        os.utime(Path(base, *rel), (0.0, 0.0))
+        return handle
+
+    monkeypatch.setattr(ss, "create_nofollow", created_long_ago)
     lease = Mock()
     lease.poll_started.return_value = 4242
     actor = SimpleNamespace(closed=False, alive=phase != "natural")

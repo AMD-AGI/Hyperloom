@@ -8,15 +8,18 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom_common.coerce import to_str_list
+from hyperloom.common.failure_signature import argparse_refusal
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT
 from hyperloom.common.env_safety import (
     BLOCKED_EXTERNAL_ENV_NAMES,
     filter_untrusted_env_mapping,
     is_allowed_variant_env_key,
 )
 from hyperloom.common.overlay import is_safe_path_entry
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 from hyperloom.inference_optimizer.grid_server_args import (
     SGLANG_MOE_RUNNER_BACKEND_RE,
     moe_runner_requires_aiter,
@@ -92,6 +95,7 @@ class VariantResult:
     tpot_p90_ms: float | None = None
     intvty_p90: float | None = None
     intvty_p50: float | None = None
+    intvty_p50_checkpoint: float | None = None
     request_error_rate: float | None = None
     workspace: str | None = None
     report_path: str | None = None
@@ -142,6 +146,7 @@ class VariantResult:
             "tpot_p90_ms": self.tpot_p90_ms,
             "e2e_norm_intvty_p90": self.intvty_p90,
             "e2e_norm_intvty_p50": self.intvty_p50,
+            GRADED_INTVTY_P50_CHECKPOINT: self.intvty_p50_checkpoint,
             "request_error_rate": self.request_error_rate,
             "workspace": self.workspace,
             "report_path": self.report_path,
@@ -160,6 +165,24 @@ class VariantResult:
             "launch_evidence_path": self.launch_evidence_path,
             "granted_cap_sec": self.granted_cap_sec,
         }
+
+
+class RoundError(NamedTuple):
+    """Why a grid round measured nothing, and under which class it is recorded."""
+
+    summary: str
+    error_class: str
+
+
+def argv_refusal(server_log: str | None) -> RoundError | None:
+    """The round as its server's argument parser refused it, when the server's log says it did."""
+    if not server_log:
+        return None
+    try:
+        refusal = argparse_refusal(Path(server_log).read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+    return None if refusal is None else RoundError(refusal, ARGV_INVALID)
 
 
 def apply_variant_env(envs, variant, base_extra_envs, base_unset_envs):

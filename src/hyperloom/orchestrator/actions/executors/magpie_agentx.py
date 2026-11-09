@@ -17,6 +17,7 @@ from typing import Any, Mapping, NamedTuple, Sequence
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.outside_facts import AITER_LOG_TUNED_CONFIG_ENV
 from hyperloom_common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
@@ -260,6 +261,7 @@ def materialize_agentx(
     """Keep the workload YAML intact while changing only the server candidate."""
     config = copy.deepcopy(config)
     bench = config["benchmark"]
+    _log_tuned_config_hits(bench)
     envs = bench.setdefault("envs", {})
     if model_path and Path(model_path).is_dir():
         envs["MODEL_PATH"] = model_path
@@ -270,6 +272,16 @@ def materialize_agentx(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
     return output
+
+
+def _log_tuned_config_hits(bench: dict[str, Any]) -> None:
+    """Have the server log aiter's tuned-config hits unless the candidate unsets it; apply verification reads them."""
+    agentx = bench.get("agentx")
+    if not isinstance(agentx, dict):
+        return
+    launch = agentx.setdefault("launch_overrides", {"version": 1})
+    if AITER_LOG_TUNED_CONFIG_ENV not in launch.get("unset_env", []):
+        launch.setdefault("env", {}).setdefault(AITER_LOG_TUNED_CONFIG_ENV, "1")
 
 
 def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> None:
@@ -310,8 +322,9 @@ def enable_profile(config_path: Path) -> None:
     field is true and raises when the server lacks it, so claiming it on a runtime the patch
     did not reach ends the round before the server starts.
     """
+    from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
+
     from ._profile_setup import (
-        annotations_supported,
         apply_sglang_shape_tool,
         patch_for_profile,
         shape_discovery_enabled,
@@ -320,16 +333,19 @@ def enable_profile(config_path: Path) -> None:
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     bench = config["benchmark"]
     framework = str(bench["framework"]).lower()
-    _, sitecustomize = patch_for_profile(bench.setdefault("envs", {}), framework)
+    patch = patch_for_profile(bench.setdefault("envs", {}), framework)
     apply_launch_changes(bench, LaunchChanges())
     launch = bench["agentx"]["launch_overrides"]
     server_env = launch["env"]
     profile_env: dict[str, str] = {}
-    if sitecustomize:
+    if patch.sitecustomize or patch.site is not None:
         if "PYTHONPATH" in server_env:
             profile_env["PYTHONPATH"] = str(server_env["PYTHONPATH"])
         if "PYTHONPATH" in launch["unset_env"]:
             profile_env["PYTHONPATH"] = ""
+    if patch.site is not None:
+        prepend_launch_path(profile_env, "PYTHONPATH", str(patch.site))
+    if patch.sitecustomize:
         apply_sglang_shape_tool(profile_env, shape_discovery=shape_discovery_enabled(bench))
     if framework == "vllm":
         name = "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
@@ -342,7 +358,7 @@ def enable_profile(config_path: Path) -> None:
     torch_profiler.setdefault("num_profiles", 1)
     torch_profiler.setdefault("start_seconds", 300)
     torch_profiler.setdefault("interval_seconds", 900)
-    torch_profiler.setdefault("detailed_annotations", annotations_supported(bench["envs"]))
+    torch_profiler.setdefault("detailed_annotations", patch.annotations)
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 
