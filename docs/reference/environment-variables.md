@@ -908,7 +908,7 @@ Primary switch (default **off**) for live Langfuse trace push.
   packager also copies `reports/trace/*.jsonl` and, with the loose mode on by
   default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under the package
   destination `HYPERLOOM_SESSION_PACKAGE_DEST`: `/workspace` for the Claw sync when
-  it is unset, and `<session dir>/archive/` (mode 0700, on the shared storage) in
+  it is unset, and `<session dir>/archive/` (mode 2770, the run's group, on the shared storage) in
   a hosted run, where the entry sets it whatever the host passed. If a session might
   contain customer code or secrets, define an explicit retention + access-control
   policy for both the Langfuse project and the package destination, and consider
@@ -1217,15 +1217,17 @@ stay, because other code reads them. The sandbox keys, the MCP token and the arc
 `HYPERLOOM_INPUT_FILE` (`hyperloom.campaign-spec/v1`, schema `src/hyperloom/contracts/campaign_spec.v1.schema.json`), runs the
 packaged `src/hyperloom/inference_optimizer/assets/install.sh` (no flags; the installer of the legacy launchers, from the same
 wheel as the running code; it provisions TraceLens, GEAK, ray and the container-local `kernel-agent.env.sh`, see `KERNEL_AGENT_ENV`) on every leg, fresh or resumed, into the interpreter that runs the entry (`PYTHON`, `VIRTUAL_ENV` and `INFERENCE_OPTIMIZER_FORCE_PYTHON=1` are set for it, and that interpreter's `bin` directory leads `PATH` for the installer and `optimize`), with its
-output in `$HYPERLOOM_STATE_DIR/install.log`, then runs `optimize` in the same process. An installer that exits non-zero ends the run
+output in `$HYPERLOOM_STATE_DIR/install.log` (a new file of each leg's, mode 0664, renamed over the previous leg's before the script starts: never opened in place), then runs `optimize` in the same process. An installer that exits non-zero ends the run
 with `{"final": true, "returncode": 2, "error": ...}` naming `install.sh` and the log. The session directory is
 `$USER_DATA_PATH/<model directory name>/<HYPERLOOM_RUN_CREATED_AT as YYYYMMDDTHHMMSSZ>-<first 8 hex of sha256(HYPERLOOM_RUN_ID)>`; a
 restart finds the same directory and resumes it when it holds `manifest.json` and `state.json`. The entry writes two files in
-`$HYPERLOOM_STATE_DIR`: `session.json` (`{"session_dir": ...}`, as soon as the directory exists) and `exit.json`
+`$HYPERLOOM_STATE_DIR`, each a new file of mode 0664 renamed over the one before: `session.json` (`{"session_dir": ...}`, as soon as the directory exists) and `exit.json`
 (`{"final": true, "returncode": N, "stop_reason": ...}` when `optimize` ends for any reason, and `{"final": true, "returncode": 2,
 "error": ...}` when the request is refused). A host restarts the run only when `exit.json` is missing or its `final` is false.
 `HYPERLOOM_IMAGE` is set from the spec's `framework.image`, and the entry needs `USER_DATA_PATH` set to an absolute path. The result
-archive directory of the run is `<session dir>/archive/`, mode 0700, owned by the application user; the entry sets `HYPERLOOM_SESSION_PACKAGE_DEST` to it (whatever the host passed), so the session artifact package and its loose copies are written to `archive/hyperloom-session-packages/` on the shared storage, not to the container's `/workspace`.
+archive directory of the run is `<session dir>/archive/`, mode 2770 (the run's accounts share it, no one else can read it); one an earlier leg made is taken as it is, whoever made it, when this account can create a file in it, and refused when it is a link, not a directory, or open in any way to accounts outside its group (any of the others' permission bits). The packager makes the directories below it with its mode and each file new with mode 0660, renamed over the one an earlier leg left. The entry sets `HYPERLOOM_SESSION_PACKAGE_DEST` to it (whatever the host passed), so the session artifact package and its loose copies are written to `archive/hyperloom-session-packages/` on the shared storage, not to the container's `/workspace`.
+
+Each leg of a run may be another host account than the one before it, the accounts of the run sharing one group. Set up `HYPERLOOM_STATE_DIR` and `USER_DATA_PATH` as directories of that group with the setgid bit (`chmod 2775`), so that what is made below them takes the group; the entry warns on stderr, naming each, when one is not setgid. Before anything else, `app_bootstrap.sh` and then the entry check that this account can create and remove a file in each of them, and the entry then in the session directory; one it cannot ends the run with `{"final": true, "returncode": 2, "error": ...}` naming the directory, the errno and the directory's owner and mode, except that a `HYPERLOOM_STATE_DIR` this account cannot write is said on stderr only, since `exit.json` cannot be written there. The session directory, its parent and the directories of its skeleton are made mode 2775 whatever the umask, and an existing one is never chmodded. A hosted leg sets `HYPERLOOM_RUNTIME_DIR`, unless the host sets it, to a new mode-0700 directory below the container's temporary directory: the installer writes files there that later steps source and run, which must not be where another account of the group can replace them.
 
 `src/hyperloom/hosted/app_bootstrap.sh` starts a hosted run in an image without Hyperloom. It installs into the framework Python environment instead of a venv of its own, because a venv made from the image's interpreter cannot see the torch and ROCm stack that `install.sh` requires. The script is baked into the image: a change to it needs a rebuild.
 
@@ -1236,7 +1238,7 @@ The image is not required. `scripts/hosted_app_image/build_layer.sh --out <dir> 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. A path or `file://` URL may name a mirror another account owns (in a container that maps one id, the host root's mirror shows as 65534): the fetch from it, and only that fetch, runs with a global git config in `${TMPDIR:-/tmp}` whose `safe.directory` names the mirror's resolved path and its `.git`, nothing else, so no system-wide `safe.directory` is needed. |
-| `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built once into `$USER_DATA_PATH/.hyperloom/wheels/<sha>/` and only that wheel is installed (`--no-deps --force-reinstall`, so a new commit replaces an old one) into the image's framework Python environment (`/opt/venv` when it exists, else `$PYTHON`, else `python3`, the order `install.sh` uses), which also runs the entry. The runtime dependencies are resolved there by the `install.sh` the entry runs before `optimize`, as in the legacy flow. The environment records the installed commit in `.hyperloom-install`; a container that already holds it installs nothing. |
+| `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built in a new mode-0700 directory below the container's temporary directory, never on the shared storage, where another account of the group could put a wheel of its own in its place, and only that wheel is installed (`--no-deps --force-reinstall`, so a new commit replaces an old one) into the image's framework Python environment (`/opt/venv` when it exists, else `$PYTHON`, else `python3`, the order `install.sh` uses), which also runs the entry. The runtime dependencies are resolved there by the `install.sh` the entry runs before `optimize`, as in the legacy flow. The environment records the installed commit in `.hyperloom-install`; a container that already holds it installs nothing, and a new container builds the wheel again (a depth-1 fetch of the commit and a `pip wheel` of it). |
 | `HYPERLOOM_CODE_REVISION` | Set by the script | The commit id, exported before the entry starts: a wheel has no `.git` to read it from. |
 
 ### The host's guarantee about containers, and the resume that relies on it
@@ -1262,7 +1264,10 @@ current one would pass 4 MiB. The directory and the run id (`source` is `hyperlo
 environment, so a child process started by the run has no events directory and never emits.
 
 * `id` is a decimal string that strictly increases within the run. After a restart it continues from the last complete line of the
-  last segment; a half-written last line is cut off first.
+  last segment; a half-written last line is cut off first, by replacing the segment with a copy of its complete lines.
+* Each start of the writer (each leg of a run) begins a new segment, numbered after the last one, made new with mode 0664: the next
+  leg may be another account of the directory's group, which reads the earlier segments and never writes into one. Set up
+  `HYPERLOOM_EVENTS_DIR`, when the host names one outside `$HYPERLOOM_STATE_DIR`, like that directory (the run's group, setgid).
 * Every line ends with a newline and is written whole, so a line without one is an unfinished write, not an event. A reader that
   tails by byte offset takes only complete lines.
 * One event is at most 16 KiB; a larger one is sent with `data` replaced by `{"oversized": true, "bytes": N, "keys": [...]}` and a

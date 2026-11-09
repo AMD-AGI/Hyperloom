@@ -204,10 +204,20 @@ def test_a_full_quota_is_asked_again_after_the_retry_interval(monkeypatch: pytes
     monkeypatch.setattr(sandboxes, "_QUOTA_RETRY_SEC", 0.05)
     provider = _Provider()
     provider.quota = 0  # filled by sandboxes the pool does not hold: nothing of its own ends to wake it
+    refused_at: list[float] = []
+
+    def refuse() -> None:
+        # Room appears after the second refusal, counted rather than timed, so a slow runner cannot make the
+        # first create land after it.
+        refused_at.append(time.monotonic())
+        if len(refused_at) == 2:
+            provider.quota = None
+
+    provider.on_refuse = refuse
     pool = _pool(provider)
-    threading.Timer(0.3, lambda: setattr(provider, "quota", None)).start()
-    assert _acquire(pool).sandbox_id == "sbx-1"
-    assert len(provider.calls) > 2 and pool.active == 1
+    assert _acquire(pool, timeout_sec=10).sandbox_id == "sbx-1"
+    assert len(provider.calls) == 3 and pool.active == 1, "two refusals, then the create that found room"
+    assert refused_at[1] - refused_at[0] >= 0.05, "the full quota is asked again only after the retry interval"
 
 
 def test_waiting_for_the_quota_ends_at_the_tests_timeout_with_what_the_service_said(
