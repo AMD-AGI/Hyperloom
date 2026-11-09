@@ -5,6 +5,7 @@ import asyncio
 import logging
 import itertools
 import json
+import time
 
 import pytest
 
@@ -700,17 +701,20 @@ async def test_a_branch_has_one_specialist_and_keeps_room_for_a_test(session):
 
 
 async def test_the_claims_a_specialist_holds_are_renewed_until_its_branch_stops(session):
-    runtime = session.runtime(_Runs(), claim_ttl=0.3)
+    ttl = 1.2
+    runtime = session.runtime(_Runs(), claim_ttl=ttl)
     start = await session.repo.head(BRANCH)
     await runtime.start(BRANCH, start)
     holder = LocalBlackboard(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
-    claim = await holder.acquire(intent(BRANCH, start), SCRIPT[0].fingerprint(), ttl_seconds=0.3)
+    claim = await holder.acquire(intent(BRANCH, start), SCRIPT[0].fingerprint(), ttl_seconds=ttl)
 
-    await asyncio.sleep(0.9)
+    # More than two TTLs pass, with the loop stalled as on a starved CI runner, so only renewals keep the claim.
+    await asyncio.sleep(1.0)
+    time.sleep(0.5)
+    await asyncio.sleep(1.0)
     assert await session.claim(claim.key) is ClaimStatus.HELD
     await runtime.stop(BRANCH)
-    await asyncio.sleep(0.6)
-    assert await session.claim(claim.key) is ClaimStatus.EXPIRED
+    await _until(lambda: _equal(session.claim(claim.key), ClaimStatus.EXPIRED), "the claim's expiry")
 
 
 async def test_a_new_k_is_noted_once_in_the_branch_log(session):
