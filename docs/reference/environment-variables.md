@@ -898,6 +898,23 @@ bubblewrap's own line; the usual causes:
 | `bwrap: Can't mount proc on /newroot/proc: Operation not permitted` | The container's `/proc` has entries mounted over it (masked paths). |
 | `bwrap: Can't bind mount ... Invalid argument` | The root mount is marked unbindable (some container runtimes); the probe retries every launch under `unshare --mount`. |
 
+A native build's compile (`hyperloom.measure.runner.native.isolated`) has its own two tiers, also without a switch:
+user 65534 through `setpriv` (in a network namespace of its own where `unshare --net` works) when the build service is
+root and its user namespace maps 65534, else bubblewrap with the same probe and the same choice of binary, where it
+also starts a sandbox with a network of its own (the probe's canary keeps the host's network, so a host that allows no
+new network namespace is named here). Under bubblewrap the compile runs as the service's own user and keeps its
+supplementary groups (as root where the user namespace maps only root), so it reads in the bound `/etc` and `/opt`
+whatever that account reads, as an agent's sandbox does; only its work directory is writable, the toolchain, both
+interpreters, the tree the child imports from, the image's packages and the upstream build directory are read-only (an
+aiter module build lays its farm in the work directory, and the image's aiter directories the farm links into are
+read-only), it sees only `/sys/devices/system/cpu` of `/sys`, the base `/dev` nodes and no GPU, it has a network of
+its own (outside addresses give `ENETUNREACH`), and the signing key and trust file (registered as the app's private
+paths) are absent, also where a bound tree holds them (that tree is bound entry by entry without them); its environment
+is only `PATH`, `HOME`, `TMPDIR` and `LC_ALL`. The build record's `isolation` entry is `uid+netns`, `uid` or
+`bwrap+netns`. Where neither tier works, the toolbox refuses at start (`build_preflight`) and each build fails as the
+machine's, naming both reasons as its choice found them; a bubblewrap whose probe gives no answer in time is not
+refused but logged, and each build asks again.
+
 The tests that launch real sandboxes (marker `agent_isolation`) skip on a host without bubblewrap or a user namespace
 for it; with `HYPERLOOM_REQUIRE_ISOLATION_TESTS=1`, which CI sets after allowing unprivileged user namespaces, they
 fail instead.
