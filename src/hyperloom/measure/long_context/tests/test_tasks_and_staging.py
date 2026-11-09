@@ -260,7 +260,7 @@ def test_another_bound_is_another_entry_and_an_entry_built_before_the_bound_reco
 def test_the_directory_of_sets_in_a_shared_runner_cache_is_one_the_group_can_stage_in(tmp_path: Path) -> None:
     cache = tmp_path / "cache"
     cache.mkdir()
-    os.chmod(cache, 0o2775)  # a cache set up to be shared by the accounts of one group
+    cache.chmod(0o2775)  # a cache set up to be shared by the accounts of one group
     previous = os.umask(0o022)
     try:
         entry = stage_entry(cache, prompt_set(), {"seed": 1, "length": LENGTH, "tokenizer": {"fake": "0" * 64}})
