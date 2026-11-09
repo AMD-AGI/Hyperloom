@@ -744,6 +744,43 @@ class RequestClasses:
 
 
 @dataclass(frozen=True)
+class AgentxCheckpointRuling:
+    """What the AgentX checkpoint ruled on a test's measured round, as its ``agentx_checkpoint.json`` states it.
+
+    Both medians are the e2e-normalised interactivity of the profiling requests done ``at_sec`` in: the candidate's,
+    and the reference's (the parent's recorded one). ``trails`` is a ``gain_pct`` below ``-max_drop_pct``, the ruling
+    that stops the round; ``stopped`` says the round was stopped on it (enforced), not only recorded (shadow).
+    """
+
+    at_sec: float
+    reference_p50: float
+    candidate_p50: float
+    gain_pct: float
+    max_drop_pct: float
+    trails: bool
+    stopped: bool
+
+    def __post_init__(self) -> None:
+        for name in ("at_sec", "reference_p50", "candidate_p50", "gain_pct", "max_drop_pct"):
+            _number(getattr(self, name), f"the checkpoint's {name}")
+        _bool(self.trails, "the checkpoint's trails")
+        _bool(self.stopped, "the checkpoint's stopped")
+        if self.stopped and not self.trails:
+            raise MeasurementError("a checkpoint stops only a round that trails its reference")
+
+    def to_document(self) -> dict[str, object]:
+        return {name: getattr(self, name) for name in _RULING_FIELDS}
+
+    @classmethod
+    def from_document(cls, document: object) -> AgentxCheckpointRuling:
+        f = _mapping(document, "a checkpoint ruling")
+        return cls(**{name: f.get(name) for name in _RULING_FIELDS})
+
+
+_RULING_FIELDS = ("at_sec", "reference_p50", "candidate_p50", "gain_pct", "max_drop_pct", "trails", "stopped")
+
+
+@dataclass(frozen=True)
 class PhaseTiming:
     """How long one phase of a test took, and where it began.
 
@@ -1085,6 +1122,7 @@ __all__ = [
     "SHORT_PROMPTS_INCOMPLETE",
     "SHORT_PROMPTS_STATUSES",
     "AccuracyValue",
+    "AgentxCheckpointRuling",
     "AttachmentRef",
     "Attempt",
     "BuildCharge",

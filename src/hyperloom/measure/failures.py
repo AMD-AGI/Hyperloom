@@ -98,6 +98,10 @@ HF_CACHE_PERMISSION = "hf_cache_permission"
 #: sandboxes: ``hyperloom_multibranch.toolbox.attempts`` ends the test with it.
 SANDBOX_ACQUIRE_TIMEOUT = "sandbox_acquire_timeout"
 
+#: The AgentX checkpoint stopped the measured round for trailing its reference by more than the allowed drop
+#: (``measure.checkpoint``): a ruling on the candidate, never retried. The ruling itself is in the round's slot.
+AGENTX_EARLY_STOP = "agentx_early_stop"
+
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
     {
@@ -186,6 +190,7 @@ _PORT_IN_USE = re.compile(r"address already in use|\[Errno 98\]", re.IGNORECASE)
 # value to its definition.
 _SESSION_TIME_EXHAUSTED_RC = -915
 _ORCHESTRATOR_CANCELLED_RC = -917
+_AGENTX_EARLY_STOP_RC = -919
 
 _INFRA_RETURNCODES = {
     HOSTED_RUNNER_UNAVAILABLE_RC: "runner_unavailable",
@@ -275,6 +280,8 @@ def classify_test_failure(
         return FailureClassification(Disposition.STOPPED, failure_reason=_STOPPED_RETURNCODES[returncode])
     if returncode in _INFRA_RETURNCODES:
         return _infra(_INFRA_RETURNCODES[returncode])
+    if returncode == _AGENTX_EARLY_STOP_RC:
+        return _candidate(AGENTX_EARLY_STOP)
     if timed_out:
         return _unclear(TEST_TIMEOUT_REASON)
     if returncode == 0:
@@ -315,6 +322,8 @@ def _from_error_class(error_class: str) -> FailureClassification:
         return _infra(error_class)
     if error_class in PROGRAM_ERROR_CLASSES:
         return FailureClassification(Disposition.PROGRAM_ERROR, failure_reason=error_class)
+    if error_class == AGENTX_EARLY_STOP:
+        return _candidate(AGENTX_EARLY_STOP)
     # A class nobody handles is a framework defect. Calling it a candidate failure would write a false negative and
     # calling it infra would retry it forever, so it stops the line like any other program error.
     return FailureClassification(Disposition.PROGRAM_ERROR, failure_reason=f"unknown_error_class:{error_class}")

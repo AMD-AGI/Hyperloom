@@ -695,11 +695,8 @@ async def test_accepted_baseline_without_axes_clears_stale_perf(baseline_writer,
 
 async def test_promoted_baseline_arms_the_agentx_checkpoint(baseline_writer, tmp_path, monkeypatch):
     """The anchor an explore round reads right after baseline promotion carries the checkpoint median."""
-    from hyperloom.orchestrator.actions.executors._agentx_checkpoint import (
-        EARLY_STOP_ENV,
-        AgentxCheckpoint,
-        round_checkpoint,
-    )
+    from hyperloom.common.agentx_early_stop import EARLY_STOP_ENV
+    from hyperloom.orchestrator.actions.executors._agentx_checkpoint import AgentxCheckpoint, round_checkpoint
 
     monkeypatch.delenv(EARLY_STOP_ENV, raising=False)
     writer, outcome = baseline_writer
