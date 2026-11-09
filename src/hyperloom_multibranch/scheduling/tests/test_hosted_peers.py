@@ -433,3 +433,4 @@ def test_a_grant_without_a_run_id_names_its_sandboxes_by_the_session(
     inputs = PinnedToolboxInputs(host, tmp_path / "runner-cache")(SessionLayout(tmp_path / "MB-session"), 2)
 
     assert inputs.run_id == named
+    assert inputs.session_id == "MB-session", "a session the run starts again does not reuse a closed one's ids"

@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import json
+import logging
 import os
 import stat
 import subprocess
@@ -80,7 +81,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
-from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run
+from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, SessionOutcome, persisted_run
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version, read_manifest
 from hyperloom_multibranch.scheduling import local_peers
@@ -1872,6 +1873,98 @@ def test_a_stop_while_a_restart_closes_the_session_before_its_baseline_starts_no
 
     assert [kind for kind, _ in restart.calls] == ["final-only"]
     assert host.exit_document() == {"final": True, "returncode": 1, "stop_reason": "signal"}
+
+
+@pytest.mark.usefixtures("ready_environment")
+@pytest.mark.parametrize("baseline", [False, True], ids=["before-the-baseline", "after-the-baseline"])
+def test_a_restart_takes_over_the_final_only_lock_a_start_killed_while_closing_left(
+    host: Host, restart: Restart, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, baseline: bool
+) -> None:
+    root = tmp_path / "MB-20260101T000000Z-0123abcd"
+    layout = _ended_before_final(root) if baseline else _killed_in_prelude(root)
+    layout.final_only_lock.write_text("4242\n", encoding="utf-8")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    held: list[bool] = []
+
+    def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: object) -> int:
+        held.append(persisted.layout.final_only_lock.exists())
+        restart.calls.append(("final-only", persisted.layout.root))
+        _report(persisted.layout, stop_reason=persisted.ended.value)
+        return 1
+
+    monkeypatch.setattr(cli, "final_only", final_only)
+
+    cli.main(["hosted", "run"])
+
+    assert held == [False], "the pid in the lock is a process of the start that died; it holds nothing"
+    assert [kind for kind, _ in restart.calls] == (["final-only"] if baseline else ["final-only", "run"])
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_onto_another_build_closes_the_session_before_its_baseline_and_starts_again(
+    host: Host, restart: Restart, tmp_path: Path
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-20260101T000000Z-0123abcd")
+    _manifest(layout, code_version={"package": "0.0", "git_sha": "beef"})
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert [kind for kind, _ in restart.calls] == ["final-only", "run"], "a fix rolled out reaches the run it is for"
+    assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
+
+
+@pytest.mark.usefixtures("ready_environment")
+@pytest.mark.parametrize("ended", [SessionStopReason.SIGNAL, SessionStopReason.PRELUDE_FAILED])
+def test_a_restart_over_a_session_that_closed_before_its_baseline_ends_the_run_with_its_report(
+    host: Host, restart: Restart, tmp_path: Path, ended: SessionStopReason
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-20260101T000000Z-0123abcd")
+    _report(layout, stop_reason=ended.value, error="what CLOSE said")
+    written = layout.report.read_bytes()
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    assert restart.calls == [], "the session ended the run when it closed; only its exit.json was not written"
+    assert layout.report.read_bytes() == written
+    assert host.exit_document() == {"final": True, "returncode": cli.EXIT_FAILED, "stop_reason": ended.value}
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_over_a_session_a_restart_closed_before_it_started_again_starts_again(
+    host: Host, restart: Restart, tmp_path: Path
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-20260101T000000Z-0123abcd")
+    _report(layout, stop_reason=SessionStopReason.KILLED.value, error=lifecycle.NO_BASELINE)
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert [kind for kind, _ in restart.calls] == ["final-only", "run"]
+
+
+def test_a_final_only_takes_its_log_off_when_it_ends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+    layout.logs.mkdir(parents=True, exist_ok=True)
+
+    class Finishing:
+        def __init__(self, *args: object) -> None:
+            pass
+
+        async def finish(self, ended: SessionStopReason) -> SessionOutcome:
+            logging.getLogger("hyperloom_multibranch.test").warning("while it closes")
+            return SessionOutcome(ended, None, None, "no candidate")
+
+    monkeypatch.setattr(cli, "Session", Finishing)
+    handlers = list(logging.getLogger().handlers)
+
+    assert cli.final_only(persisted_run(layout.root), None, None) == 1
+    logging.getLogger("hyperloom_multibranch.test").warning("after it closed")
+
+    assert logging.getLogger().handlers == handlers
+    written = layout.scheduler_log.read_text(encoding="utf-8")
+    assert "while it closes" in written and "after it closed" not in written
 
 
 @pytest.mark.usefixtures("ready_environment")
