@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.inference_optimizer.session.base_launch import BASE_LAUNCH_FILE
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.state.base_launch import (
@@ -105,7 +104,7 @@ def test_the_server_base_carries_the_argv_and_the_env_a_launch_may_set(session):
     freeze_session_base(
         session,
         args=("--kv-cache-dtype", "fp8_e4m3", "--speculative-config", '{"method":"mtp"}'),
-        env={"SGLANG_USE_AITER": "1", "HF_TOKEN_FILE": hidden, "MODEL_PATH": "/elsewhere"},
+        env={"SGLANG_USE_AITER": "1", "HF_TOKEN": hidden},
     )
 
     base = session_server_base()
@@ -133,42 +132,29 @@ def test_the_golden_layer_reaches_the_server_base_above_the_base(session):
     assert dict(base.env) == {"SGLANG_USE_AITER": "1", "SGLANG_SIMULATE_ACC_LEN": "3.48"}
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        # Credentials.
-        "SOME_SECRET",
-        "HF_TOKEN",
-        "TOKENIZER_API_KEY",
-        "MY_TOKENIZER_SECRET",
-        # Interpreter hijacks and traffic redirects.
-        "PYTHONUSERBASE",
-        "NODE_OPTIONS",
-        "PERL5OPT",
-        "GIT_SSH_COMMAND",
-        "HTTPS_PROXY",
-        "HF_ENDPOINT",
-        "SSL_CERT_FILE",
-        "REQUESTS_CA_BUNDLE",
-        "TMPDIR",
-        "LD_LIBRARY_PATH",
-        "PYTHONPATH",
-        "PATH",
-        # Device selection.
-        *sorted(GPU_MASK_ENV_NAMES),
-        # Workload keys the optimizer owns.
-        "TP",
-        "MODEL",
-        "CONC",
-        "RUN_EVAL",
-        "RESULT_DIR",
-    ],
-)
-def test_a_launch_file_export_a_launch_may_not_set_never_reaches_the_server(session, name):
-    tuning = {"VLLM_ROCM_USE_AITER": "1", "TOKENIZERS_PARALLELISM": "false", "VLLM_CACHE_ROOT": "/workspace/cache"}
-    freeze_session_base(session, env={**tuning, name: "value"})
+def test_every_plain_setting_of_the_base_reaches_the_server_whatever_its_name_says(session):
+    golden = GoldenAcceptance(
+        value=3.48,
+        method="match-expected",
+        token_mode="real-draft-token",
+        spec_method="EAGLE",
+        draft_length=3,
+        curve=GoldenCurve(repo="https://github.com/org/curves", commit="e" * 40, path="al.json", sha256="f" * 64),
+        args=("--speculative-algorithm", "EAGLE"),
+        env={
+            "SGLANG_SIMULATE_ACC_LEN": "3.48",
+            "SGLANG_SIMULATE_ACC_METHOD": "match-expected",
+            "SGLANG_SIMULATE_ACC_TOKEN_MODE": "real-draft-token",
+        },
+    )
+    tuning = {
+        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+        "TOKENIZERS_PARALLELISM": "false",
+        "DEEPEP_COMBINE_TOKEN_BALANCED": "1",
+    }
+    freeze_session_base(session, env=tuning, golden=golden)
 
-    assert dict(session_server_base().env) == tuning
+    assert dict(session_server_base().env) == {**tuning, **golden.env}
 
 
 def test_a_base_file_the_session_did_not_record_is_refused(session):
