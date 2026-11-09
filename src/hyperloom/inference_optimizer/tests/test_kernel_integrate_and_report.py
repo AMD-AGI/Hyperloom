@@ -522,13 +522,13 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
 @pytest.mark.parametrize(
     "output,total,intvty,decision,reason",
     [
-        pytest.param(110.0, 900.0, 90.0, "REVERT", "p50_gain_below_threshold,p90_regressed", id="median-regresses"),
+        pytest.param(110.0, 1000.0, 90.0, "REVERT", "p50_gain_below_threshold,p90_regressed", id="median-regresses"),
         pytest.param(110.0, 1100.0, 100.0, "REVERT", "p50_gain_below_threshold", id="median-flat"),
-        pytest.param(110.0, 1100.0, 102.99, "REVERT", "p50_gain_below_threshold", id="median-just-below-the-bar"),
-        pytest.param(110.0, 1100.0, 103.0, "KEEP", None, id="median-exactly-at-the-bar"),
+        pytest.param(110.0, 1100.0, 101.99, "REVERT", "p50_gain_below_threshold", id="median-just-below-the-bar"),
+        pytest.param(110.0, 1100.0, 102.0, "KEEP", None, id="median-exactly-at-the-bar"),
         pytest.param(110.0, 1000.0, 110.0, "KEEP", None, id="median-clears-the-bar"),
-        pytest.param(90.0, 1000.0, 110.0, "REVERT", "output_regressed", id="output-guard-breach"),
-        pytest.param(110.0, 949.9, 110.0, "KEEP", None, id="total-no-longer-participates"),
+        pytest.param(90.0, 1000.0, 110.0, "KEEP", None, id="output-drop-alone-holds"),
+        pytest.param(110.0, 949.9, 110.0, "REVERT", "total_regressed", id="total-guard-breach"),
     ],
 )
 async def test_integrate_handler_grades_full_e2e_measurement(
@@ -644,11 +644,11 @@ async def test_integrate_handler_preserves_output_grading_and_threshold(
     "output,total,intvty,decision",
     [
         pytest.param(100.75, 1350.0, 135.0, "REVERT", id="median-regresses"),
-        pytest.param(100.1, 1507.5, 150.75, "REVERT", id="median-below-the-bar"),
-        pytest.param(100.1, 1500.0, 154.5, "KEEP", id="median-exactly-at-the-bar"),
+        pytest.param(100.1, 1507.5, 152.9, "REVERT", id="median-below-the-bar"),
+        pytest.param(100.1, 1500.0, 153.0, "KEEP", id="median-exactly-at-the-bar"),
         pytest.param(100.1, 1560.0, 160.0, "KEEP", id="median-clears-the-bar"),
-        pytest.param(94.0, 1500.0, 165.0, "REVERT", id="output-guard-breach"),
-        pytest.param(100.1, 1424.9, 165.0, "KEEP", id="total-no-longer-participates"),
+        pytest.param(94.0, 1500.0, 165.0, "KEEP", id="output-drop-alone-holds"),
+        pytest.param(100.1, 1424.9, 165.0, "REVERT", id="total-guard-breach"),
     ],
 )
 async def test_integrate_handler_grades_stack_increment_on_live_intvty_anchor(
