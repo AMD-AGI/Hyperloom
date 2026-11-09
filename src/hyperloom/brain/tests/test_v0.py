@@ -16,14 +16,17 @@ from hyperloom.brain_api import (
     Workload,
     check_proposal,
     check_review,
+    points_of,
     validate_brain,
 )
 
 _STATE = SearchState(Workload("m", "sglang"), baseline_tput=1.0, current_tput=1.0, keep_threshold_pct=1.0)
 
 
-def test_v0_honours_the_contract() -> None:
-    assert validate_brain(create_brain({})).name == "v0"
+def test_v0_honours_the_contract_and_marks_its_main_points() -> None:
+    brain = validate_brain(create_brain({}))
+    assert brain.name == "v0"
+    assert sorted(points_of(brain)) == ["main.propose", "main.review"]
 
 
 async def test_v0_proposes_nothing_and_defers_every_review() -> None:
