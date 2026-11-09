@@ -200,6 +200,7 @@ def test_the_baseline_is_keyed_by_the_benchmark_report_names() -> None:
         perf_metric.GRADED_OUTPUT,
         perf_metric.GRADED_INTVTY_P50,
         perf_metric.GRADED_INTVTY,
+        perf_metric.TOTAL_TOKEN_THROUGHPUT,
         perf_metric.GRADED_DURATION,
         perf_metric.GRADED_ERROR_RATE,
         TTFT_P50,
