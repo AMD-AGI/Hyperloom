@@ -78,10 +78,13 @@ the installed framework:
 
 - **Version.** The installed framework must be at least the version of the
   recipe's image. Only the release segment is compared, so `0.5.23.dev4` and
-  `0.5.23+rocm700` both count as `0.5.23`. An image tag that names no version
-  (a nightly, `latest`, `dev-*`) stands for the framework's latest release when the
-  base was resolved. An installed version that cannot be read is refused
-  (`framework_version_unknown`), an older one too (`framework_version_too_old`).
+  `0.5.23+rocm700` both count as `0.5.23`. An installed version that cannot be
+  read is refused (`framework_version_unknown`), an older one too
+  (`framework_version_too_old`). An image tag that names no version (a nightly,
+  `latest`, `dev-*`) is not held: the base records the framework's latest release
+  when it was resolved as an assumption (`version_basis: assumed_latest`), and
+  `launch.json` records the installed version beside it with `version_check:
+  assumed_not_held`.
 - **Flags.** The composed launch is parsed by the installed framework's own argument
   parser, after every patch on the server's path has taken effect. A flag the parser
   does not know is refused, never dropped (`flag_unknown`). A candidate's flag fails

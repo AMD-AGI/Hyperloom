@@ -23,6 +23,7 @@ from inference_suite.contracts.launch import (
     Removal,
     VersionCheck,
 )
+from inference_suite.recipe.image_version import recipe_image_facts
 from inference_suite.tests.test_base_launch_contract import _base
 from inference_suite.tests.test_config_contract import _SHA, _accuracy_round, _config
 
@@ -338,3 +339,27 @@ def test_the_digest_keeps_argv_order_and_covers_the_client():
 def test_the_version_check_follows_whether_the_base_names_a_recipe_version():
     with pytest.raises(LaunchError, match="not_applicable"):
         compose(_config(), _base(), replace(_FACTS, version_check=VersionCheck.NOT_APPLICABLE))
+
+
+_ASSUMED_BASE = _base(image=recipe_image_facts("lmsysorg/sglang-rocm:muse-spark-open", "v0.5.23"))
+
+
+def test_a_version_not_held_because_it_is_assumed_needs_a_base_whose_version_is_assumed():
+    assumed = replace(_FACTS, version_check=VersionCheck.ASSUMED_NOT_HELD)
+    launch = compose(_assumed_config(), _ASSUMED_BASE, assumed)
+    assert isinstance(launch, Launch)
+    assert launch.framework.recipe_min_version == "0.5.23"
+    assert Launch.from_document(json.loads(json.dumps(launch.to_document()))) == launch
+    with pytest.raises(LaunchError, match="assumed"):
+        compose(_config(), _base(), assumed)
+
+
+def test_a_launch_that_held_an_assumed_version_before_it_was_exempt_still_reads():
+    launch = compose(_assumed_config(), _ASSUMED_BASE, _FACTS)
+    assert isinstance(launch, Launch) and launch.framework.version_check is VersionCheck.PASSED
+    assert Launch.from_document(json.loads(json.dumps(launch.to_document()))) == launch
+
+
+def _assumed_config():
+    server = _config().server
+    return _config(server=replace(server, base=replace(server.base, digest=_ASSUMED_BASE.digest())))

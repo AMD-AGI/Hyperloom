@@ -25,6 +25,7 @@ from inference_suite.contracts.base_launch import (
     EnvValue,
     GoldenAcceptance,
     Redacted,
+    VersionBasis,
 )
 from inference_suite.contracts.config import GoldenUse
 from inference_suite.frameworks import Framework
@@ -66,6 +67,8 @@ class VersionCheck(str, Enum):
     NOT_APPLICABLE = "not_applicable"
     #: The round runs against a server it does not start, whose install is on another host than this round's.
     NOT_HELD = "not_held"
+    #: The recipe's image tag names no version, so the base's version is an assumed latest release, not a floor.
+    ASSUMED_NOT_HELD = "assumed_not_held"
 
 
 def _canonical(document: object) -> str:
@@ -181,7 +184,8 @@ class Removal:
 
 @dataclass(frozen=True)
 class FrameworkCheck:
-    """The framework the round ran: the interpreter, its installed version and the recipe version it reached (D6)."""
+    """The framework the round ran: the interpreter, its installed version, the recipe's version and how the install
+    was held to it (D6); the recipe's version is a floor only when the check passed."""
 
     name: Framework
     installed_version: str
@@ -335,6 +339,14 @@ class Launch:
             raise LaunchError(
                 f"the recipe version checked, {self.framework.recipe_min_version!r}, is not the base's "
                 f"{self.base.image.framework_version!r}"
+            )
+        if (
+            self.framework.version_check is VersionCheck.ASSUMED_NOT_HELD
+            and self.base.image.version_basis is not VersionBasis.ASSUMED_LATEST
+        ):
+            raise LaunchError(
+                f"the version check is assumed_not_held, but the base's version basis is "
+                f"{self.base.image.version_basis.value}"
             )
         for path, sha256 in _FIELDS.string_map(self.source_files, "the source files").items():
             _FIELDS.sha256(sha256, f"the sha256 of source file {path}")
