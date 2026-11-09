@@ -26,12 +26,15 @@ other than ``HYPERLOOM_STATE_DIR``, which it needs to install the hosted extra.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import json
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -39,6 +42,12 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
+from hyperloom_common.shared_storage import (
+    make_shared_dirs,
+    open_shared_replacement,
+    setgid_warnings,
+    writable_problems,
+)
 from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
 from hyperloom.hosted.host_info import HOST_ONLY_VARS, HostInfo, HostInfoError, Var, read_host_info, take_host_info
@@ -72,12 +81,19 @@ STOP_REQUEST_REASON = "signal"
 DEFAULT_MCP_HOST = "127.0.0.1"
 RETURNCODE_REFUSED = 2
 ENCODING = "utf-8"
-_DURABLE = WriteOptions(fsync=True)
+#: Where install.sh and the run keep their runtime state; a hosted leg defaults it to the container's own disk.
+ENV_RUNTIME_DIR = "HYPERLOOM_RUNTIME_DIR"
+#: ``exit.json`` and ``session.json``: replaced by rename on every leg, readable by the group (the next leg's account).
+_DURABLE = WriteOptions(fsync=True, shared=True)
 _USAGE = "usage: hyperloom hosted run"
 
 
 class Refused(Exception):
     """The request cannot be served as given; the run ends, finally, with return code 2."""
+
+
+class Unrecordable(Refused):
+    """A refusal ``exit.json`` cannot record (this account cannot write the state directory): said on stderr only."""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -91,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         return _run()
     except Refused as exc:
         print(f"[hosted] refused: {exc}", file=sys.stderr)
-        if state_dir is not None:
+        if state_dir is not None and not isinstance(exc, Unrecordable):
             write_exit(state_dir, final=True, returncode=RETURNCODE_REFUSED, error=str(exc))
         return RETURNCODE_REFUSED
 
@@ -110,8 +126,11 @@ def _run() -> int:
     _drop_cwd_from_sys_path()
     info = _read_inputs()
     spec = _read_spec(info)
-    if not Path(os.environ.get(ENV_USER_DATA_PATH, "")).is_absolute():
+    user_data = Path(os.environ.get(ENV_USER_DATA_PATH, ""))
+    if not user_data.is_absolute():
         raise Refused(f"{ENV_USER_DATA_PATH} must be set to an absolute path")
+    _check_shared_storage(info.state_dir, user_data)
+    _default_runtime_dir()
     if spec.flow == FLOW_MULTIBRANCH:
         # install.sh's ``ensure_hosted_extra`` step installs the wheel's ``hosted`` extra into this interpreter before the command starts.
         _put_interpreter_first_on_path()
@@ -122,7 +141,13 @@ def _run() -> int:
     # From here on the host-only inputs live in ``info`` only: no child process may inherit them.
     info = take_host_info(os.environ, require=())
     session_dir = _prepare_session_dir(spec, info)
-    os.environ[ENV_PACKAGE_DEST_ROOT] = str(ensure_archive_root(session_dir))  # the package outlives the container
+    try:
+        archive = ensure_archive_root(session_dir)
+    except OSError as exc:
+        if not isinstance(exc, PermissionError) and exc.errno != errno.ELOOP:
+            raise
+        raise Refused(str(exc)) from None  # a link another account put on the way stays until someone removes it
+    os.environ[ENV_PACKAGE_DEST_ROOT] = str(archive)  # the package outlives the container
     os.environ[ENV_IMAGE] = spec.framework_image
     _announce_grant(info)
     if stop_request_path(session_dir).is_file():
@@ -134,6 +159,34 @@ def _run() -> int:
     _confirm_previous_containers_gone(session_dir)
     with _plug_inputs(lock, info), _mcp_service(info, session_dir):
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
+
+
+def _check_shared_storage(state_dir: Path, user_data: Path) -> None:
+    """Refuse, naming each, the key directories this account cannot create and remove a file in.
+
+    A leg may be another account than the one before it; a directory that account left without group write fails here,
+    before anything is written, instead of at the first write of a resume. A key directory that is not setgid only
+    warns: what is made there takes this account's group.
+    """
+    with contextlib.suppress(OSError):  # one that cannot be made is named by the probe below
+        make_shared_dirs(user_data)
+    for warning in setgid_warnings({Var.STATE_DIR: state_dir, ENV_USER_DATA_PATH: user_data}):
+        print(f"[hosted] WARNING: {warning}", file=sys.stderr, flush=True)
+    unrecordable = writable_problems({Var.STATE_DIR: state_dir})
+    problems = unrecordable + writable_problems({ENV_USER_DATA_PATH: user_data})
+    if problems:
+        message = f"this account (uid {os.geteuid()}) cannot write the shared storage: {'; '.join(problems)}"
+        raise (Unrecordable if unrecordable else Refused)(message)
+
+
+def _default_runtime_dir() -> None:
+    """Give the leg a runtime directory of its own on the container's disk unless the host named one.
+
+    The default under ``USER_DATA_PATH`` is shared with the other accounts of the run, and the installer writes files
+    there that later steps source and run.
+    """
+    if not os.environ.get(ENV_RUNTIME_DIR):
+        os.environ[ENV_RUNTIME_DIR] = tempfile.mkdtemp(prefix="hyperloom-runtime-")
 
 
 SCOPE_GONE_REASON = "hosted resume: the host starts a leg only once the previous application container no longer exists"
@@ -191,12 +244,15 @@ def _run_installer(state_dir: Path) -> None:
 
     The script comes from the installed wheel, so it is of the commit that runs.  It is idempotent and runs on every leg.
     Its output goes to a file, never a pipe: the Ray daemon it starts would hold a pipe open.  The log is only the
-    script's own output; the entry adds nothing from the environment.
+    script's own output; the entry adds nothing from the environment.  Each leg's log is a new file of its own, renamed
+    over ``install.log`` before the script starts (:func:`~hyperloom_common.shared_storage.open_shared_replacement`):
+    the previous leg's, which may be another account's, and whatever a member of the group put there are replaced,
+    never opened.
     """
     log_path = state_dir / INSTALL_LOG
     print(f"[hosted] running {INSTALL_SCRIPT.name}; log {log_path}", flush=True)
     try:
-        with log_path.open("wb") as log:
+        with os.fdopen(open_shared_replacement(log_path), "wb") as log:
             returncode = subprocess.run(
                 ["bash", str(INSTALL_SCRIPT)],
                 stdin=subprocess.DEVNULL,
@@ -326,9 +382,14 @@ def _exec_multibranch() -> None:
 
 
 def _prepare_session_dir(spec: CampaignSpec, info: HostInfo) -> Path:
-    """Create the run's session directory and say where it is, before anything else can fail."""
+    """Create the run's session directory (group-shared, as the other legs' accounts write it too) and say where it is,
+    before anything else can fail; one this account cannot write is refused, naming it."""
     session_dir = hosted_session_dir(spec.model_path, info.run_created_at, info.run_id)
-    session_dir.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):  # one that cannot be made is named by the probe below
+        make_shared_dirs(session_dir)
+    problems = writable_problems({"the session directory": session_dir})
+    if problems:
+        raise Refused(f"this account (uid {os.geteuid()}) cannot write {problems[0]}")
     atomic_write_json(info.state_dir / SESSION_FILE, {"session_dir": str(session_dir)}, options=_DURABLE)
     return session_dir
 
