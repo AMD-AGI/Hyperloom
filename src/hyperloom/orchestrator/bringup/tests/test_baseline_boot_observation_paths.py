@@ -100,6 +100,29 @@ async def test_nonzero_exit_result_names_a_real_observation(slot, monkeypatch) -
     assert loaded.observation.server_elapsed_sec == 11.0
 
 
+@pytest.mark.parametrize(
+    "fault",
+    (
+        "Warning: Queue error - HSA_STATUS_ERROR_MEMORY_FAULT",
+        ":0:rocdevice.cpp :3905: Memory Fault Error [host: test-host, GPU index: 0, kernel: example_kernel]",
+    ),
+)
+@pytest.mark.asyncio
+async def test_rocm_memory_fault_is_reported_in_failed_baseline(slot, monkeypatch, fault) -> None:
+    session, out = slot
+
+    def _run(cmd, **kwargs):
+        (out / "server.log").write_text(fault + "\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="magpie: benchmark failed")
+
+    monkeypatch.setattr(bl, "run_with_session_kill", _run)
+    result = await _round(session, out)
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "server_init_dead"
+    assert fault in result["error"]
+
+
 @pytest.mark.asyncio
 async def test_observation_reads_the_log_magpie_wrote_in_its_run_workspace(slot, monkeypatch) -> None:
     """Magpie writes the server log under its own ``benchmark_*`` workspace, not at ``$SERVER_LOG``."""
