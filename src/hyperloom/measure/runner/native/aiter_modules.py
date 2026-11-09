@@ -269,7 +269,7 @@ class _Planned:
 
     def lay(self, blobs: BlobStore, work: Path) -> LaidTree:
         """Lay the farm below ``work``'s tree from the roots as a sheet carries them, with no meta directory inherited,
-        and name the modules to build."""
+        and name the modules to build. The farm's untouched files are links into the image's aiter (``linked``)."""
         tree = tree_dir(work)
         tree.mkdir()
         roots = [SheetRoot.parse(root.to_document(), f"roots[{index}]") for index, root in enumerate(self.roots)]
@@ -294,4 +294,6 @@ class _Planned:
             json.dump(plan, out)
         shutil.copyfile(Path(aiter_merge_hook.__file__), tree / _MERGE_HOOK)
         image_modules = farm.site / AITER_PACKAGE / _JIT_DIR
-        return LaidTree(self.recipe, self.machine, tree, image_modules, frozenset(), dict(self.variables))
+        return LaidTree(
+            self.recipe, self.machine, tree, image_modules, frozenset(), dict(self.variables), farm.mirrored
+        )
