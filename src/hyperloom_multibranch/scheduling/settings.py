@@ -6,11 +6,12 @@ hard limits."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from hyperloom.common.agentx_early_stop import EarlyStopMode
+from hyperloom.common.agentx_early_stop import EarlyStopMode, early_stop_mode
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -189,6 +190,12 @@ class RunSettings:
     agentx_early_stop: EarlyStopMode = EarlyStopMode.SHADOW
 
 
+def session_early_stop(environ: Mapping[str, str]) -> EarlyStopMode:
+    """How a new session holds its explores to the AgentX checkpoint: the mode ``environ`` names, shadow when it names
+    none (single-lineage's default is enforce); a resumed session keeps the mode its manifest recorded."""
+    return early_stop_mode(environ, EarlyStopMode.SHADOW)
+
+
 __all__ = [
     "AGENT_PORT",
     "DEFAULT_AGENTX_OBJECTIVE",
@@ -201,4 +208,5 @@ __all__ = [
     "RunSettings",
     "Workload",
     "sweep_concs",
+    "session_early_stop",
 ]
