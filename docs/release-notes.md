@@ -20,6 +20,18 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **An explore variant that moves a lever its base launch pins is dropped
+  before the round spends a slot on it.** When the base launch simulates
+  speculative-decoding acceptance (`rejection_sample_method: synthetic`,
+  `synthetic_acceptance_length`, `SGLANG_SIMULATE_ACC_LEN`), its draft and its
+  simulated acceptance are pinned: a proposal that changes, removes or unsets
+  one of them, or that declares an acceptance length on a base that verifies a
+  real draft, is now refused by the round's pre-flight filter with reason
+  `speculative_decoding_pinned` and listed in the round's skipped variants,
+  where before it was admitted and then failed as the launch was materialized,
+  having already taken a variant slot. The refusal at materialization stays as
+  the backstop for launches the filter does not compose.
+
 - **Bump validated SGLang stack to 0.5.23 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
   `lmsysorg/sglang-rocm:v0.5.23-rocm10-*` image tags, `models.tsv`, the

@@ -44,6 +44,7 @@ from ._spec_decode_pin import (
     SPECULATIVE_DECODING_PINNED,
     SpeculativeDecodingPinnedError,
     refuse_unpinned_speculative_change,
+    speculative_pin_reason,
 )
 
 __all__ = [
@@ -88,6 +89,7 @@ __all__ = [
     "run_grid_warmup_enabled",
     "run_with_session_kill",
     "session_breakdown_executor",
+    "speculative_pin_reason",
     "strip_visible_devices_from_config",
     "teardown_lifecycle_server",
 ]
