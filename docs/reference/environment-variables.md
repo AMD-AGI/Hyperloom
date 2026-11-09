@@ -906,7 +906,7 @@ are set into the workspace when unset too, since AITER otherwise builds its JIT 
 is read-only there (a GPU specialist so compiles them afresh). With neither `HF_HOME` nor `HF_HUB_CACHE` set, Hugging
 Face's default directory under the app's home (`$XDG_CACHE_HOME/huggingface`, else `~/.cache/huggingface`) becomes the
 child's `HF_HOME`, read-only and without its login files, so a model downloaded there stays visible once `HOME` has
-moved. They read their toolchain, the git metadata of the worktree's repository (the one whose admin directory the
+moved (where that directory is a link, `HF_HOME` names the directory it leads to, which is what the sandbox shows). They read their toolchain, the git metadata of the worktree's repository (the one whose admin directory the
 repository records for the worktree, never the one the worktree's `.git` file names: the agent can rewrite that file,
 and runs as the app's own uid, so no ownership check tells a directory it made from the app's), the framework source
 roots, the task's model when it is a local path, the programs of the stdio MCP servers they start (each named in one
@@ -938,11 +938,18 @@ sent as the app). What it needs is relayed in over Unix sockets in its scratch `
 (`orchestrator/specialists/sandbox_network.py`): each loopback endpoint its launch names (an HTTP MCP server, an LLM
 gateway on this host) at the same port on the sandbox's own loopback, and an HTTP proxy, which the sandbox's
 `HTTPS_PROXY` and `HTTP_PROXY` name (loopback exempt), that connects only to the other LLM endpoints and MCP
-servers its launch names: `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` and any other `*_BASE_URL` variable, codex's
-`model_providers.<name>.base_url`, each provider's API host where no base URL names one
-(`api.anthropic.com`, `api.openai.com`; Bedrock's runtime host in `AWS_REGION` with `CLAUDE_CODE_USE_BEDROCK`),
-and the MCP config's HTTP servers. It goes through the app's own `HTTPS_PROXY`/`HTTP_PROXY` (with any login in its
-URL) unless `NO_PROXY` exempts the host; the app's proxy settings are not shown inside. Anything else gets a 403:
+servers its launch names: `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` and any other `*_BASE_URL` variable, the value
+of codex's `-c model_providers.<name>.base_url=` setting (no other text on the command line, a dsh task say, names
+an endpoint), each provider's API host where no base URL names one (`api.anthropic.com`, `api.openai.com`), with
+`CLAUDE_CODE_USE_BEDROCK` the AWS hosts a Bedrock login uses (`bedrock-runtime`, `sts`, `portal.sso` and `oidc` in
+each region named by `AWS_REGION`, `AWS_DEFAULT_REGION`, `ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION` and the `region`
+and `sso_region` keys of `AWS_CONFIG_FILE`, `us-east-1` where none of the first two is set, and the global
+`sts.amazonaws.com`), and the HTTP servers of the MCP config (for an agent runner launch, the one it writes from
+`AgentLaunchSpec.mcp_servers`, for codex as for claude). A `CONNECT` reaches any of those; a plain `http` request only
+one named with `http://`. Through the app's own `HTTPS_PROXY`/`HTTP_PROXY` (with any login in its URL), unless
+`NO_PROXY` exempts the host, the bridge opens its own `CONNECT` to the checked host and port and carries the
+specialist's bytes only inside that tunnel, so nothing it sends later on the connection reaches that proxy as a
+request; the app's proxy settings are not shown inside. Anything else gets a 403:
 a sandboxed specialist downloads no model or package; what it reads must be on the host already (a Hugging Face
 model in the cache shown to it, say). A loopback endpoint below port 1024 cannot be served inside (a WARNING names
 it). The relay is a `python -I -S` of the app's interpreter that starts ahead of the agent and ends with the

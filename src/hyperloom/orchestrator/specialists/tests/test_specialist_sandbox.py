@@ -34,7 +34,7 @@ from hyperloom.common.proctree import REAP_MARK_ENV, marked_pids, proc_identity,
 from hyperloom.orchestrator.actions.executors._ray_serving import ManagedServerProcess
 from hyperloom.orchestrator.specialists import agent_runner, launch_env
 from hyperloom.orchestrator.specialists import subprocess_ as ss
-from hyperloom.orchestrator.specialists.agent_runner import AgentConfigError
+from hyperloom.orchestrator.specialists.agent_runner import AgentConfigError, McpEndpoint
 from hyperloom.orchestrator.specialists.launch_env import (
     CLAUDE_LOGIN_REFUSAL,
     CLAUDE_LOGIN_UNCONFINED,
@@ -50,6 +50,7 @@ from hyperloom.orchestrator.specialists.subprocess_ import (
 )
 from hyperloom.orchestrator.specialists.tests._agent_fixtures import (
     FORGES_ITS_GIT,
+    TOKEN_ENV,
     make_runner,
     make_spec,
     wait_finished,
@@ -649,6 +650,53 @@ async def test_a_sandboxed_specialist_calls_its_llm_gateways_and_mcp_server_and_
     }
     assert (gateway.seen, mcp.seen, far.seen) == (["/v1/messages"], ["/mcp"], [f"{far_url}/v1/responses"])
     assert head.seen == []
+
+
+#: The stand-in codex CLI: it calls the MCP servers its runner configured, one on this host's loopback and one at the
+#: host's address, which it reaches only through the proxy the sandbox names.
+_CODEX_MCP = """#!{python} -I
+import json, sys, urllib.request
+sys.stdin.read()
+def post(url):
+    try:
+        return urllib.request.urlopen(urllib.request.Request(url, data=b"{{}}"), timeout=20).read().decode()
+    except Exception as exc:
+        return type(exc).__name__
+json.dump({{"near": post("{near}"), "far": post("{far}"), "unnamed": post("{unnamed}")}}, open("reach.json", "w"))
+"""
+
+
+async def test_a_codex_the_agent_runner_sandboxes_reaches_the_mcp_servers_it_configured_for_it(
+    tmp_path: Path, sandboxed: BwrapIsolation, http_servers
+) -> None:
+    """codex has its MCP servers only in its private config.toml: the loopback one is relayed in at its port, the one
+    at the host's address goes through the bridge's proxy, and a server the launch does not name is a 403."""
+    host = _host_address()
+    near, far, unnamed = http_servers("near", "127.0.0.1"), http_servers("far", host), http_servers("unnamed", host)
+    near_url = f"http://127.0.0.1:{near.server_address[1]}/mcp"
+    far_url = f"http://{host}:{far.server_address[1]}/mcp"
+    unnamed_url = f"http://{host}:{unnamed.server_address[1]}/mcp"
+    cli = _script(
+        tmp_path / "cli" / "bin" / "codex",
+        _CODEX_MCP.format(python=sys.executable, near=near_url, far=far_url, unnamed=unnamed_url),
+    )
+    servers = (McpEndpoint("near", near_url, TOKEN_ENV), McpEndpoint("far", far_url, TOKEN_ENV))
+    runner = make_runner(tmp_path / "session")
+    workspace = tmp_path / "w"
+
+    handle = await runner.launch(make_spec(workspace, argv=(str(cli), "exec", "--json", "-"), mcp_servers=servers))
+    status = await wait_finished(runner, handle, timeout=60.0)
+    await runner.collect(handle)
+
+    assert isinstance(handle.session.proc, SandboxedProcess)
+    assert (status.returncode, status.error) == (0, ""), status
+    assert "[mcp_servers.near]" in (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
+    assert json.loads((workspace / "reach.json").read_text(encoding="utf-8")) == {
+        "near": "near",
+        "far": "far",
+        "unnamed": "HTTPError",
+    }
+    assert (near.seen, far.seen, unnamed.seen) == (["/mcp"], [far_url], [])
 
 
 #: Run as a Ray actor's worker would: the actor's process manager starts the launch, then the actor waits.

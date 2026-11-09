@@ -196,6 +196,25 @@ def test_hugging_faces_default_directory_stays_visible_read_only_once_the_home_m
     assert "HF_HOME" not in named
 
 
+def test_a_hugging_face_directory_reached_through_a_link_is_named_where_the_sandbox_shows_it(tmp_path):
+    """A sandbox binds what a link names, not the link: ``HF_HOME`` names the directory the link leads to, which is
+    there inside, and never the link, which is not."""
+    home = tmp_path / "app-home"
+    hub = tmp_path / "big-disk" / "huggingface"
+    (hub / "hub" / "models--org--m").mkdir(parents=True)
+    (home / ".cache").mkdir(parents=True)
+    (home / ".cache" / "huggingface").symlink_to(hub)
+    place = _place(tmp_path)
+    env = _env(HOME=str(home))
+
+    prepared = prepare_launch(_bwrap(), place, ["claude"], env)
+    prepared.release()
+
+    assert env["HF_HOME"] == os.path.realpath(hub)
+    assert prepared.policy is not None
+    assert any(env["HF_HOME"] == path or path.startswith(env["HF_HOME"] + "/") for path in prepared.policy.read_only)
+
+
 def _cannot_search(monkeypatch: pytest.MonkeyPatch, locked: Path) -> None:
     """Fail every look below ``locked`` as it fails for a uid that cannot search it (``EACCES``), where the suite runs
     as root, which can."""
