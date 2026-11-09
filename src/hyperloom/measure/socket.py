@@ -163,7 +163,8 @@ class RoundOutcome:
     """One round of a test; ``point`` indexes ``TestCall.points``.
 
     ``accuracy`` is set on an ``accuracy`` round only: the scores the evaluation wrote, which is the test's one
-    evaluation (in the warmup round of a graded test with a warmup, else in the measured round).
+    evaluation (in a round of its own after the measured bench when the test's server is held, else in the measured
+    round).
     ``nonfatal_warnings`` are the warnings ``run_grid`` wrote for the point, kept as written and carried by the first
     round of the point only, so a reader that joins the rounds' lists gets each warning once.
     """
@@ -214,7 +215,8 @@ class MeasurementBackend(Protocol):
 
     name: str
 
-    def run_test(self, call: TestCall) -> TestOutcome: ...
+    def run_test(self, call: TestCall) -> TestOutcome:
+        """Run the test ``call`` describes and return what it produced."""
 
 
 #: The backend used until another is chosen, by import path: the local backend imports this module for its types.

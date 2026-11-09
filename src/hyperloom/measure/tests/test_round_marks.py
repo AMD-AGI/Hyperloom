@@ -20,6 +20,7 @@ from hyperloom.contracts.measurement import PhaseTiming
 from hyperloom.measure.phases import PhaseRecorder
 from hyperloom.measure.round_marks import (
     ROLE_BOOT,
+    ROLE_EVAL,
     ROLE_MEASURE,
     ROLE_WARMUP,
     Boundary,
@@ -165,8 +166,8 @@ def test_an_output_directory_that_does_not_exist_holds_no_runs(tmp_path: Path) -
 # -- the boundaries of each kind of round -------------------------------------------------------------------------
 
 
-def test_the_warmup_round_of_a_graded_test_boots_warms_up_evaluates_and_collects_with_the_server_left_up() -> None:
-    run = _run(boot_seconds=82.0, eval_at=T0 + 150.0, ended=T0 + 200.0)
+def test_the_warmup_round_of_a_held_test_boots_warms_up_and_collects_with_the_server_left_up() -> None:
+    run = _run(boot_seconds=82.0, ended=T0 + 150.0)
     shape = _shape(ROLE_WARMUP, tail="round_collect")
 
     boundaries = round_boundaries(WINDOW, [run], shape)
@@ -175,13 +176,22 @@ def test_the_warmup_round_of_a_graded_test_boots_warms_up_evaluates_and_collects
         ("round_setup", 8.0),
         ("server_boot", 82.0),
         ("warmup", 60.0),
-        ("accuracy_eval", 50.0),
-        ("round_collect", 100.0),
+        ("round_collect", 150.0),
     ]
     assert [b.name for b in boundaries][0] == "round_setup" and boundaries[0].at == T0
 
 
-def test_the_measured_round_of_a_graded_test_found_its_server_ready_and_ends_in_the_teardown() -> None:
+def test_the_evaluation_round_of_a_graded_test_is_the_evaluation_from_the_moment_it_found_its_server_ready() -> None:
+    run = _run(ready=T0 + 3.0, eval_at=T0 + 5.0, ended=T0 + 55.0)
+
+    assert _phases(round_boundaries(WINDOW, [run], _shape(ROLE_EVAL, reuses_server=True))) == [
+        ("round_setup", 3.0),
+        ("accuracy_eval", 52.0),
+        ("teardown", 245.0),
+    ], "the instant the watchdog saw the evaluation begin splits nothing off a round that runs no bench"
+
+
+def test_the_measured_round_of_an_explore_found_its_server_ready_and_ends_in_the_teardown() -> None:
     run = _run(ready=T0 + 4.0, ended=T0 + 60.0)
 
     assert _phases(round_boundaries(WINDOW, [run], _shape())) == [
@@ -384,7 +394,7 @@ def test_a_run_whose_log_says_nothing_of_its_boot_is_one_boot_phase(tmp_path: Pa
 
 def test_every_phase_a_round_names_is_a_phase_the_contract_accepts() -> None:
     run = _run(boot_seconds=80.0, eval_at=T0 + 150.0, client_measured_at=T0 + 160.0, ended=T0 + 200.0)
-    for shape in (_shape(), _shape(ROLE_WARMUP), _shape(agentx=True)):
+    for shape in (_shape(), _shape(ROLE_WARMUP), _shape(ROLE_EVAL), _shape(agentx=True)):
         for boundary in round_boundaries(WINDOW, [run], shape):
             PhaseTiming(boundary.name, 0.0, 0.0)
 

@@ -36,7 +36,7 @@ their output, and serves it.
 | File | What |
 | --- | --- |
 | `server.mjs` | the server, every mode; Node 16 or later, no dependencies |
-| `share_query.py` | what global mode runs on the share host, sent compressed and base64-encoded inside the command (the gateway takes commands, not piped stdin; Git for Windows' ssh cuts a command at about 8 KB); Python 3.8 or later there, nothing installed. It always answers with one JSON object, `{"error": ...}` on failure, because through the gateway every command exits 0 and its stderr arrives on stdout |
+| `share_query.py` | what global mode runs on the share host, sent compressed and base64-encoded inside the command (some ssh gateways take commands only, not piped stdin; Git for Windows' ssh cuts a command at about 8 KB); Python 3.8 or later there, nothing installed. It always answers with one JSON object, `{"error": ...}` on failure, because behind such a gateway every command exits 0 and its stderr arrives on stdout |
 | `public/index.html`, `app.js` | one campaign: `/` in local mode, `/c/<project>/<user>/<campaign>/` in global mode, which adds the knowledge panel |
 | `public/global.html`, `global.js` | the share's index, by project, with filters by project, user and state in the query string |
 | `public/parallel.html`, `parallel.js` | a parallel run: lanes on the round's clock, their clocks and items, the round's map, the integration table |
@@ -77,7 +77,7 @@ Changed:
   can change, never decides what the page shows. It writes nothing, so a
   dashboard polling beside a running realtime collector never replaces that
   collector's `status.json`.
-- **Liveness from the Slurm job** (`--slurm-job`), as the Cluster A page's last
+- **Liveness from the Slurm job** (`--slurm-job`), as the earlier page's last
   fix did for chained campaigns: a driver inside a job on a GPU node is
   invisible to a process check on the login node, which shows a running
   campaign as "not running". Only a queued successor is "between
@@ -87,9 +87,9 @@ Changed:
   snapshot carries node data.
 - No hard-coded model, operating point or target. The KPIs show the
   campaign's own metric and unit; the progress bar shows only when the
-  campaign config states a target (the Cluster A page fell back to a B200 number).
+  campaign config states a target.
 - The events panel shows only when the collector is given `--events`;
-  `event_recorder.sh`, which watched one Cluster A campaign's paths, is not ported.
+  `event_recorder.sh`, which watched one campaign's paths, is not ported.
 - Global mode, the knowledge panel, and the share's index are new.
 
 ## Troubleshooting
