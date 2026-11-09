@@ -113,7 +113,13 @@ when `--gpu-type` is omitted.
   `HYPERLOOM_GPU_POWER_SAMPLING=0` turns the sampler off (the round then falls
   back to the benchmark report's reading, and either power budget is refused at
   launch, since it could not be measured) and `HYPERLOOM_GPU_POWER_INTERVAL_S`
-  sets its cadence (default 2 s, minimum 0.5 s).
+  sets its cadence (default 2 s, minimum 0.5 s). The sampler also reads each
+  card's energy counter (`amd-smi metric --energy`) as each measured window
+  opens and closes, into an `energy` block of `gpu_power.json`;
+  `HYPERLOOM_GPU_ENERGY=0` stops those reads. The round's measurement reports
+  the serving cards' total power from the counters (`gpu_power_total_w`) and
+  `output_tokens_per_joule`, both empty when a serving card was not counted in
+  every window; no budget, constraint or objective reads either.
 - **GPU power settings:** `--gpu-power-cap-w`, `--gpu-perf-level`,
   `--gpu-sclk-max-mhz`. By default asserted: set them with `amd-smi set` before
   launch; the session refuses to start or resume if a card it uses differs, and

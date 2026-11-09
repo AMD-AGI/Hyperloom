@@ -20,6 +20,23 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **Each round reports its serving cards' energy and output tokens per joule.**
+  The measured-phase GPU sampler also reads each card's energy counter
+  (`amd-smi metric --energy`) as each measured window opens and closes.
+  `gpu_power.json` gains an `energy` block after its v1 keys, which are
+  unchanged: per card `energy_j`, `avg_power_w` and `vs_sampled` (the counted
+  mean over the sampled one), and the serving cards' `total_energy_j` and
+  `total_power_w`, left `null` when a serving card was not read in every
+  window. The round's measurement and each grid row report that total as
+  `gpu_power_total_w`, and `output_tokens_per_joule` from it, at the GPU
+  boundary; a round without a counted total reports neither, so the two never
+  mix the counters with the sampled means. Nothing grades them: `--max-power-w`, the other constraints and the objective
+  read the sampled power as before. `HYPERLOOM_GPU_ENERGY=0` stops the counter
+  reads. The sampler now also closes a measured window when the phase ends
+  rather than up to one interval later, so the throttle shares cover the
+  measured phase alone. Before, a round's power was a mean of instantaneous
+  readings two seconds apart, which a bursty load biases, and no round
+  reported energy or tokens per joule.
 - **An MB AgentX session can be graded on total token throughput.**
   `hyperloom-multibranch run --workload agentx --agentx-objective
   total_token_throughput` keeps a change on the round's `total_token_throughput`

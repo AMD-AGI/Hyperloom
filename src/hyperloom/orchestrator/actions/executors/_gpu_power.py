@@ -8,7 +8,7 @@ neither the serving cards nor the load being measured; :class:`hyperloom_common.
 This module builds that recorder for a round (:func:`build_gpu_power_recorder`), names the same sampling for an
 inference_suite round, which runs the recorder itself (:func:`round_gpu_telemetry`), drives it from the server logs of a
 child the watchdog does not own (:class:`ServerLogPhaseDriver`), and reads the round's ``gpu_power.json`` back for the
-power-budget checks.
+power-budget checks and for the serving cards' total power a round's tokens per joule is reported from.
 """
 
 from __future__ import annotations
@@ -21,8 +21,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hyperloom_common.amd_smi import metric_value
-from hyperloom_common.env import EnvValueError, env_float
-from hyperloom_common.gpu_telemetry import DEFAULT_INTERVAL_SEC, MIN_INTERVAL_SEC, GpuPhase, GpuPowerRecorder
+from hyperloom_common.env import EnvValueError, env_flag, env_float
+from hyperloom_common.gpu_telemetry import (
+    DEFAULT_INTERVAL_SEC,
+    MIN_INTERVAL_SEC,
+    GpuPhase,
+    GpuPowerRecorder,
+    RecorderOptions,
+)
 from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
 from inference_suite.contracts import GpuTelemetry
 
@@ -32,6 +38,7 @@ __all__ = [
     "GPU_POWER_ARTIFACT_NAME",
     "ServerLogPhaseDriver",
     "build_gpu_power_recorder",
+    "read_measured_gpu_energy",
     "read_measured_gpu_power",
     "read_measured_gpu_power_by_gpu",
     "round_gpu_telemetry",
@@ -41,6 +48,8 @@ __all__ = [
 GPU_POWER_ARTIFACT_NAME = "gpu_power.json"
 
 _INTERVAL_ENV = "HYPERLOOM_GPU_POWER_INTERVAL_S"
+#: ``0`` keeps the recorder off the cards' energy counters; the sampled power is read either way.
+_ENERGY_ENV = "HYPERLOOM_GPU_ENERGY"
 
 #: How long :meth:`ServerLogPhaseDriver.stop` waits for a poll in flight, beyond one interval.
 _DRIVER_JOIN_SLACK_SEC = 10.0
@@ -140,6 +149,7 @@ def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | 
             output_path=str(Path(server_log_path).parent / GPU_POWER_ARTIFACT_NAME),
             gpus=gpus,
             interval_sec=env_float(_INTERVAL_ENV, DEFAULT_INTERVAL_SEC),
+            options=RecorderOptions(energy=env_flag(_ENERGY_ENV, default=True)),
         )
     except EnvValueError:
         log.warning("gpu_power: recorder could not be built; this round samples nothing", exc_info=True)
@@ -153,7 +163,11 @@ def round_gpu_telemetry() -> GpuTelemetry:
     except EnvValueError:
         log.warning("gpu_power: the sampling interval is unreadable; this round samples nothing", exc_info=True)
         return GpuTelemetry(enabled=False, interval_sec=DEFAULT_INTERVAL_SEC)
-    return GpuTelemetry(enabled=not gpu_power_sampling_unavailable(), interval_sec=max(MIN_INTERVAL_SEC, interval_sec))
+    return GpuTelemetry(
+        enabled=not gpu_power_sampling_unavailable(),
+        interval_sec=max(MIN_INTERVAL_SEC, interval_sec),
+        energy=env_flag(_ENERGY_ENV, default=True),
+    )
 
 
 def _read_round_artifact(workspace: Path | None, subprocess_started_unix: float | None) -> dict[str, Any] | None:
@@ -209,3 +223,17 @@ def read_measured_gpu_power_by_gpu(
         if (watts := metric_value((per_gpu.get(str(gpu)) or {}).get("avg_power_w"))) is not None
     }
     return True, (readings or None)
+
+
+def read_measured_gpu_energy(workspace: Path | None, *, subprocess_started_unix: float | None = None) -> float | None:
+    """The round's serving cards' total power over the measured phase, from their energy counters; ``None`` unmeasured.
+
+    It is the energy the counters gave over the phase over its length, and only that: a round whose serving cards were
+    not all counted in every window, that may have served on a card it could not read, or that no recorder ran on has
+    no total, though its sampled per-card means still reach ``gpu_power_by_gpu_w``.
+    """
+    payload = _read_round_artifact(workspace, subprocess_started_unix)
+    if payload is None or payload.get("unread_gpus"):
+        return None
+    energy = payload.get("energy")
+    return metric_value(energy.get("total_power_w")) if isinstance(energy, dict) else None

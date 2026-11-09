@@ -19,8 +19,10 @@ from inference_suite.server_log import LogCursor
 from hyperloom.orchestrator.actions.executors._gpu_power import (
     GPU_POWER_ARTIFACT_NAME,
     build_gpu_power_recorder,
+    read_measured_gpu_energy,
     read_measured_gpu_power,
     read_measured_gpu_power_by_gpu,
+    round_gpu_telemetry,
 )
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 
@@ -327,6 +329,76 @@ def test_builder_follows_amd_smi_and_the_switch(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_GPU_POWER_SAMPLING", "0")
     assert build_gpu_power_recorder(log_path, {}) is None
     assert build_gpu_power_recorder(None, {}) is None
+
+
+def test_both_builders_read_the_energy_counters_unless_the_operator_turns_them_off(tmp_path, monkeypatch):
+    log_path = str(tmp_path / "server.log")
+    monkeypatch.delenv("HYPERLOOM_GPU_POWER_SAMPLING", raising=False)
+    monkeypatch.delenv("HYPERLOOM_GPU_ENERGY", raising=False)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/amd-smi")
+    recorder = build_gpu_power_recorder(log_path, {})
+    assert recorder is not None and recorder._energy is True
+    assert round_gpu_telemetry().energy is True
+    monkeypatch.setenv("HYPERLOOM_GPU_ENERGY", "0")
+    recorder = build_gpu_power_recorder(log_path, {})
+    assert recorder is not None and recorder._energy is False
+    assert round_gpu_telemetry().energy is False
+
+
+def _write_round(directory, **payload) -> None:
+    (directory / GPU_POWER_ARTIFACT_NAME).write_text(json.dumps({"started_unix": time.time(), **payload}))
+
+
+_TWO_SERVING = {
+    "serving_gpus": [4, 5],
+    "unread_gpus": [],
+    "per_gpu": {"4": {"avg_power_w": 700.0}, "5": {"avg_power_w": 712.0}},
+}
+
+
+def test_the_serving_cards_total_comes_only_from_their_energy_counters(tmp_path):
+    _write_round(tmp_path, **_TWO_SERVING, energy={"total_power_w": 1405.3})
+    assert read_measured_gpu_energy(tmp_path) == 1405.3
+    _write_round(tmp_path, **_TWO_SERVING, energy={"total_power_w": None})
+    assert read_measured_gpu_energy(tmp_path) is None, "an uncounted round has no total, not its 1412 W of samples"
+    _write_round(tmp_path, **_TWO_SERVING)
+    assert read_measured_gpu_energy(tmp_path) is None, "an artifact from before the counters"
+
+
+def test_a_round_that_may_have_served_on_an_unread_card_has_no_total(tmp_path):
+    _write_round(tmp_path, serving_gpus=[4], unread_gpus=[5], energy={"total_power_w": 700.0})
+    assert read_measured_gpu_energy(tmp_path) is None, "card 5 may have served and could not be read"
+    nowhere = tmp_path / "no_recorder" / "workspace"
+    nowhere.mkdir(parents=True)
+    assert read_measured_gpu_energy(nowhere) is None
+
+
+def test_a_round_reports_its_output_tokens_per_joule_at_the_gpu_boundary(tmp_path):
+    _write_round(tmp_path, serving_gpus=[0], unread_gpus=[], avg_power_w=606.48, energy={"total_power_w": 600.0})
+    measurement = extract_benchmark_measurement(
+        {"success": True, "throughput": {"output_throughput": 12_000.0}}, workspace=tmp_path
+    )
+    assert measurement["gpu_power_total_w"] == 600.0
+    assert (measurement["energy_boundary"], measurement["output_tokens_per_joule"]) == ("gpu", 20.0)
+    assert measurement["gpu_power_avg_w"] == 606.48, "the sampled mean the budgets read is untouched"
+
+
+def test_an_uncounted_round_keeps_its_sampled_power_and_reports_no_tokens_per_joule(tmp_path):
+    _write_round(tmp_path, **_TWO_SERVING, avg_power_w=706.0, energy={"total_power_w": None})
+    measurement = extract_benchmark_measurement(
+        {"success": True, "throughput": {"output_throughput": 12_000.0}}, workspace=tmp_path
+    )
+    assert measurement["gpu_power_by_gpu_w"] == {"4": 700.0, "5": 712.0}
+    assert measurement["gpu_power_total_w"] is None, "the sampled means give no total"
+    assert measurement["energy_boundary"] is None and measurement["output_tokens_per_joule"] is None
+
+
+def test_a_throughput_that_counts_no_tokens_gives_no_tokens_per_joule(tmp_path):
+    _write_round(tmp_path, serving_gpus=[0], unread_gpus=[], energy={"total_power_w": 600.0})
+    report = {"success": True, "throughput_unit": "img/s", "throughput": {"output_throughput": 3.0}}
+    measurement = extract_benchmark_measurement(report, workspace=tmp_path)
+    assert measurement["gpu_power_total_w"] == 600.0
+    assert measurement["output_tokens_per_joule"] is None
 
 
 class _PhaseLog:

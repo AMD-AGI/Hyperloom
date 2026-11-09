@@ -516,6 +516,16 @@ def constraint_fields(source: Any) -> dict[str, Any]:
     return {name: getattr(source, name, None) for name in CONSTRAINT_FIELDS}
 
 
+#: What a round reports of its power beside :data:`CONSTRAINT_FIELDS`, and no constraint, budget or objective reads:
+#: the serving cards' total power from their energy counters, and the round's output tokens per joule.
+REPORTED_POWER_FIELDS = ("gpu_power_total_w", "output_tokens_per_joule")
+
+
+def measured_row_fields(measurement: Mapping[str, Any]) -> dict[str, Any]:
+    """A grid row's copy of *measurement*: its :data:`CONSTRAINT_FIELDS` and its :data:`REPORTED_POWER_FIELDS`."""
+    return {**constraint_fields(measurement), **{name: measurement.get(name) for name in REPORTED_POWER_FIELDS}}
+
+
 @dataclass(frozen=True)
 class GradedComparison:
     """A candidate, the figure it must beat, and the verdict on that pair.
@@ -590,6 +600,7 @@ __all__ = [
     "GRADED_UNSERVED_REQUESTS",
     "INTVTY_OBJECTIVES",
     "INTVTY_V1",
+    "REPORTED_POWER_FIELDS",
     "VERDICT_KEEP",
     "VERDICT_REVERT",
     "agentx_active",
@@ -606,6 +617,7 @@ __all__ = [
     "constraint_fields",
     "constraint_veto_reason",
     "latency_veto_reason",
+    "measured_row_fields",
     "power_veto_reason",
     "output_tput_of",
     "parse_intvty_noise_pct",
