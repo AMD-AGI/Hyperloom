@@ -150,6 +150,8 @@ class RunSettings:
     the host reviewed; off, nothing waits and each Arbor is started with its own gate off.
     ``references`` are the
     directories of reference material the run copies in before its first phase, each with the commit it was taken at.
+    ``reference_script`` is the operator's launch file the session freezes as its base (``""`` to resolve it from the
+    recipe sources; :mod:`~hyperloom_multibranch.scheduling.session_base`).
     ``dev_leases`` is how many dev sandboxes the session lends its specialists at once; 0 lends none. ``playbook`` says
     which scheduling playbook the session plays. ``inferencex_commit`` is the commit a fresh session's base launch reads
     InferenceX at (``""`` for the head of its ``main``)."""
@@ -163,6 +165,7 @@ class RunSettings:
     user_directions: tuple[str, ...] = ()
     agents: tuple[str, ...] = ()
     references: tuple[ReferenceSource, ...] = ()
+    reference_script: str = ""
     dev_leases: int = 0
     playbook: PlaybookMode = PlaybookMode.AUTO
     agent_directions: str = ""

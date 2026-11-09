@@ -464,11 +464,12 @@ async def _peers(
     dev_leases: int = 0,
     freeze: bool = True,
     inferencex_commit: str = "",
+    reference_script: str = "",
 ) -> AsyncIterator[_Built]:
     """The real peers of a session of ``workload`` on ``host`` in ``tmp_path`` lending ``dev_leases`` dev sandboxes,
     with the wiring their specialist sessions were built on; a branch's worktree, holding no component, is served
-    only when the session lends dev sandboxes. The session froze its base launch unless ``freeze`` is false. Every
-    variable the build exports is restored afterwards."""
+    only when the session lends dev sandboxes. The session froze its base launch unless ``freeze`` is false, from the
+    operator's ``reference_script`` when one is given. Every variable the build exports is restored afterwards."""
 
     for name in (*workload_environment(workload), BENCHMARK_CONFIG_ENV):
         monkeypatch.setenv(name, "")
@@ -490,6 +491,8 @@ async def _peers(
         {"geak": layout.reference / "geak"},
         dev_leases,
         (),
+        reference_script,
+        agent_launch="/launches/arbor.json",
         inferencex_commit=inferencex_commit,
     )
     wired: list[SessionWiring] = []
@@ -730,6 +733,25 @@ async def test_a_fresh_session_reads_inferencex_at_the_commit_its_setup_names(
 
     async with _peers(tmp_path, monkeypatch, WORKLOAD, freeze=False, inferencex_commit="8a76a78e41"):
         assert commits == ["8a76a78e41"]
+
+
+async def test_a_reference_script_is_frozen_as_the_base_and_served_to_the_arbors_in_place_of_their_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    script = tmp_path / "launch.sh"
+    script.write_text(
+        "python3 -m sglang.launch_server --model-path /models/Llama-3-8B --tp 2 --chunked-prefill-size 8\n"
+    )
+
+    async with _peers(tmp_path / "run", monkeypatch, WORKLOAD, freeze=False, reference_script=str(script)) as built:
+        frozen = frozen_base(built.layout.toolbox)
+        assert frozen is not None and frozen.launch.source.path == str(script)
+        assert built.wiring.setup.agent_launch == str(frozen.path)
+
+
+async def test_without_a_reference_script_the_arbors_are_served_their_own_launch(built: _Built) -> None:
+    assert built.wiring.setup.agent_launch == "/launches/arbor.json"
 
 
 async def test_the_specialists_are_wired_the_frozen_base_launch_s_server_half(built: _Built) -> None:

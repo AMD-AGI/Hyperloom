@@ -338,7 +338,8 @@ def specialist_recall(reports: Path) -> LessonRecall:
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
     """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`) and
     freezes the base launch every test runs on in ``MB-toolbox`` unless the session froze one
-    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`). Raises :class:`PeersUnavailable`
+    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which its Arbor agents are served
+    when the operator gave it as a reference script. Raises :class:`PeersUnavailable`
     when no base launch can be frozen or the session's canonical measurement cannot be taken.
 
     Called on the event loop the session runs on. The toolbox is built, not started: the session starts it, and its
@@ -355,8 +356,9 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox, host.image.ref)
-    frozen = freeze_session_base(layout.toolbox, workload, setup.agent_launch, setup.inferencex_commit)
-    base, setup = server_base(frozen.launch), replace(setup, agent_launch=served_launch(frozen, setup.agent_launch))
+    frozen = freeze_session_base(layout.toolbox, workload, setup.reference_script, setup.inferencex_commit)
+    served = served_launch(frozen, setup.reference_script, setup.agent_launch)
+    base, setup = server_base(frozen.launch), replace(setup, agent_launch=served)
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR

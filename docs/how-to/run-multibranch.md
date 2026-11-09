@@ -54,6 +54,9 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
   test replays, the harness's default when not given) for `agentx` only; `--kernel-optimizer`;
   `--inferencex-commit SHA` to resolve the session's base launch from InferenceX at that commit instead of `main`
   (see [Base launch](../reference/inference-suite.md#base-launch)).
+- **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for
+  `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source, and every
+  Arbor is served the frozen base. Without it the base comes from the recipe sources.
 - **Limits:** `--max-hours` (default 2, 0 for none), `--max-gpu-hours` and `--max-llm-usd` (0 for none),
   `--max-branches` (default 4). A negative or non-finite limit is a usage error.
 - **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2),

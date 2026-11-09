@@ -430,26 +430,76 @@ def test_the_agent_launch_file_is_kept_by_its_absolute_path(tmp_path: Path, monk
     assert _settings("--autonomous-agent", "/agents/arbor").agent_launch == ""
 
 
-def test_a_base_launch_record_is_an_agent_launch_kept_by_its_absolute_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    write_record(tmp_path / "base_launch.json")
+def test_a_base_launch_record_given_as_an_agent_launch_is_refused_for_the_reference_script(tmp_path: Path) -> None:
+    record = write_record(tmp_path / "base_launch.json")
 
-    settings = _settings("--autonomous-agent", "/agents/arbor", "--agent-launch", "base_launch.json")
-
-    assert settings.agent_launch == str(tmp_path / "base_launch.json")
+    with pytest.raises(ValueError, match="--agent-launch .* is a base launch record; give it as --reference-script"):
+        _settings("--autonomous-agent", "/agents/arbor", "--agent-launch", str(record))
 
 
-def test_an_unfilled_template_or_a_tampered_record_is_a_usage_error(tmp_path: Path) -> None:
+def test_an_unfilled_template_is_a_usage_error(tmp_path: Path) -> None:
     template = Path(__file__).parents[3] / "examples" / "multibranch-arbor-launch" / "launch.template.json"
-    tampered = write_record(tmp_path / "base_launch.json", env={"VLLM_ROCM_USE_AITER": "0"})
-    agent = ("--autonomous-agent", "/agents/arbor")
 
     with pytest.raises(ValueError, match="--agent-launch: .*still hold the template's placeholders"):
-        _settings(*agent, "--agent-launch", str(template))
-    with pytest.raises(ValueError, match="--agent-launch: .*base_digest_mismatch"):
-        _settings(*agent, "--agent-launch", str(tampered))
+        _settings("--autonomous-agent", "/agents/arbor", "--agent-launch", str(template))
+
+
+@pytest.mark.parametrize("agent", [[], ["--autonomous-agent", "/agents/arbor"]], ids=["specialists-only", "arbor"])
+@pytest.mark.parametrize(
+    "launch",
+    [
+        lambda path: write_record(path.with_suffix(".json")),
+        lambda path: path.write_text("vllm serve /models/Llama-3-8B --tensor-parallel-size 2\n") and path,
+    ],
+    ids=["record", "shell"],
+)
+def test_a_reference_script_is_kept_by_its_absolute_path_with_or_without_an_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent: list[str], launch: Callable[[Path], Path]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    name = launch(tmp_path / "launch.sh").name
+
+    settings = _settings(*agent, "--reference-script", name)
+
+    assert settings.reference_script == str(tmp_path / name)
+    assert (settings.agent_launch, _settings(*agent).reference_script) == ("", "")
+
+
+@pytest.mark.parametrize(
+    ("content", "match"),
+    [
+        (None, "No such file"),
+        ("python3 -m sglang.launch_server --tp 2\n", "has no vllm serving entrypoint"),
+        ("vllm serve /models/Llama-3-8B --tensor-parallel-size $TP\n", "from shell variables"),
+        ('{"schema": "hyperloom-base-launch/0"}', "a JSON launch file must be"),
+        ("tampered", "base_digest_mismatch"),
+    ],
+    ids=["no-file", "other-framework", "shell-variable", "not-a-record", "tampered"],
+)
+def test_a_reference_script_that_cannot_serve_as_the_base_is_a_usage_error(
+    tmp_path: Path, content: str | None, match: str
+) -> None:
+    path = tmp_path / "launch.sh"
+    if content == "tampered":
+        write_record(path, env={"VLLM_ROCM_USE_AITER": "0"})
+    elif content is not None:
+        path.write_text(content)
+
+    with pytest.raises(ValueError, match=f"--reference-script {path} cannot serve as the base launch: .*({match})"):
+        _settings("--reference-script", str(path))
+
+
+def test_an_agent_launch_beside_a_reference_script_is_a_usage_error(tmp_path: Path) -> None:
+    record = write_record(tmp_path / "base_launch.json")
+    launch = tmp_path / "launch.json"
+    launch.write_text(json.dumps({"server_flags": "--tp 1", "server_env": {}}))
+
+    with pytest.raises(
+        ValueError, match="--agent-launch is not taken with --reference-script: the Arbors are served the frozen base"
+    ):
+        _settings(
+            "--autonomous-agent", "/agents/arbor", "--reference-script", str(record), "--agent-launch", str(launch)
+        )
 
 
 @pytest.mark.parametrize(

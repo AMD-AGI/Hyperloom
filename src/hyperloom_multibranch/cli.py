@@ -40,12 +40,15 @@ kernel shares); each share then opens as a branch of its own, when it still has 
 as of any other limit, is a usage error.
 ``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's serving template; a name that is not one
 directory, or one given with no agent, is a usage error, and a pack the Arbor checkout lacks is refused when the branch
-starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX recipe's adds to, as resolved from InferenceX,
-or is a base launch record (``hyperloom-base-launch/1``) frozen elsewhere, which the session freezes as its base without
-reading any recipe source and each Arbor checks its launch against; a file the adapter cannot use, an unfilled template
-among them, or one given with no agent, is a usage error. ``--inferencex-commit SHA`` resolves a fresh session's base
-launch from InferenceX at that commit instead of the head of its ``main``; one that is not 7 to 40 hex digits is a
-usage error. Each ``--specialist-prompt`` file holds a direction the user
+starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX recipe's adds to, as resolved from InferenceX;
+a file the adapter cannot use, an unfilled template among them, a base launch record, or one given with no agent or
+with ``--reference-script``, is a usage error. ``--reference-script FILE`` is the session's base launch, as for
+``hyperloom optimize``: a shell launch script, or a base launch record (``hyperloom-base-launch/1``) frozen elsewhere,
+which the session freezes without reading any recipe source; every Arbor is then served the frozen base and checks its
+launch against it. A file that cannot serve as a base of the session's framework is a usage error, and one on another
+topology than the workload's is refused when the session freezes it. ``--inferencex-commit SHA`` resolves a fresh
+session's base launch from InferenceX at that commit instead of the head of its ``main``; one that is not 7 to 40 hex
+digits is a usage error. Each ``--specialist-prompt`` file holds a direction the user
 wrote for one specialist: its branch opens at PRELUDE's root ahead of the opening batch, counted within
 ``--max-branches``, its specialist sees the text in every launch prompt, and the judge neither stops it nor lowers its K
 for its first judged tests; an empty or unreadable file, or more files than ``--max-branches``, is a usage error.
@@ -194,7 +197,8 @@ from hyperloom_multibranch.scheduling.settings import (
     Workload,
 )
 from hyperloom_multibranch.specialist.arbor_adapter import DOSSIER_INDEX, ArborRefused, read_launch
-from inference_suite import parse_inferencex_commit
+from inference_suite import UserFileError, parse_inferencex_commit, parse_user_file
+from inference_suite.contracts import BaseLaunchError
 
 PROG = "hyperloom-multibranch"
 EXIT_FAILED = 1
@@ -293,6 +297,20 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
         choices=[optimizer.value for optimizer in KernelOptimizer],
         default=KernelOptimizer.FORGE.value,
         help="Kernel optimizer the session's recipes are scoped to.",
+    )
+    run.add_argument(
+        "--reference-script",
+        dest="reference_script",
+        type=Path,
+        default=None,
+        metavar=FILE_METAVAR,
+        help=(
+            "The session's base launch, as for hyperloom optimize: a shell launch script, or a base launch record"
+            " (hyperloom-base-launch/1) frozen by another session, which is frozen without reading any recipe source"
+            " (examples/multibranch-arbor-launch). It wins over every recipe source; omitted, the base comes from"
+            " InferenceX, then the framework's cookbook, then the default table. Every Arbor --autonomous-agent is"
+            " served the frozen base. Not the --reference directories the specialists read."
+        ),
     )
     run.add_argument(
         "--inferencex-commit",
@@ -495,8 +513,8 @@ def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
         metavar=FILE_METAVAR,
         help=(
             "For an Arbor --autonomous-agent: the launch an AgentX recipe's adds to, as resolved from InferenceX"
-            " (server_flags, server_env, model_name, client), or a base launch record (hyperloom-base-launch/1) the"
-            " session freezes as its base without reading any recipe source (examples/multibranch-arbor-launch)."
+            " (server_flags, server_env, model_name, client; examples/multibranch-arbor-launch). A base launch record"
+            " is given as --reference-script, whose frozen base the Arbors are served instead."
         ),
     )
     run.add_argument(
@@ -647,18 +665,40 @@ def _agent_pack(name: str | None, agents: list[str]) -> str:
     return name
 
 
-def _agent_launch(path: Path | None, agents: list[str]) -> str:
-    """The absolute path of the launch file or base launch record the Arbor agents are served, ``""`` without one;
-    refused with no agent to serve, or with every reason the adapter could not use it."""
+def _agent_launch(path: Path | None, agents: list[str], reference_script: Path | None) -> str:
+    """The absolute path of the launch file the Arbor agents are served, ``""`` without one; refused with no agent to
+    serve, beside a ``reference_script``, whose frozen base they are served, when it is a base launch record, which
+    is given as ``reference_script``, or with every reason the adapter could not use it."""
 
     if path is None:
         return ""
     if not agents:
         raise ValueError("--agent-launch needs an --autonomous-agent to serve it")
+    if reference_script is not None:
+        raise ValueError("--agent-launch is not taken with --reference-script: the Arbors are served the frozen base")
     try:
-        read_launch(path)
+        launch = read_launch(path)
     except ArborRefused as exc:
         raise ValueError(f"--agent-launch: {exc}") from exc
+    if launch.record:
+        raise ValueError(
+            f"--agent-launch {path} is a base launch record; give it as --reference-script, which freezes it as the"
+            " session's base and serves it to the Arbors"
+        )
+    return str(path.absolute())
+
+
+def _reference_script(path: Path | None, framework: str) -> str:
+    """The absolute path of the operator's launch file the session freezes as its base, ``""`` without one; refused
+    when it cannot serve as a ``framework`` base: unreadable, no launch of ``framework``, a flag set from a shell
+    variable, or a record that fails its schema or digest. Its topology is checked when the session freezes it."""
+
+    if path is None:
+        return ""
+    try:
+        parse_user_file(str(path), path.read_bytes(), framework=framework)
+    except (OSError, UserFileError, BaseLaunchError) as exc:
+        raise ValueError(f"--reference-script {path} cannot serve as the base launch: {exc}") from exc
     return str(path.absolute())
 
 
@@ -758,11 +798,12 @@ def settings_from(
         user_directions=_user_directions(prompts, caps.max_branches),
         agents=_agents(agents, caps.max_branches - len(prompts)),
         references=_references(args.references or []),
+        reference_script=_reference_script(args.reference_script, args.framework),
         dev_leases=args.dev_leases,
         playbook=PlaybookMode(args.playbook),
         agent_directions=_agent_directions(args.agent_directions, agents),
         agent_pack=_agent_pack(args.agent_pack, agents),
-        agent_launch=_agent_launch(args.agent_launch, agents),
+        agent_launch=_agent_launch(args.agent_launch, agents, args.reference_script),
         agent_dossier_minutes=args.agent_dossier_minutes,
         agent_share_minutes=args.agent_share_minutes,
         agent_port=_agent_port(args.agent_port, agents),

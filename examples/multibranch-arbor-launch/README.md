@@ -3,19 +3,24 @@
 An Arbor agent (`--autonomous-agent` on an Arbor checkout) is served the root recipe's launch. An AgentX recipe holds
 only what is added to its launch (`extra_server_args`, `extra_envs`): the round resolves the rest from the InferenceX recipe.
 Arbor would then serve defaults that multi-branch (MB) does not measure, so the adapter refuses an AgentX branch without
-the resolved launch. Give it with `--agent-launch FILE`:
+the resolved launch. Give it with `--agent-launch FILE`, or give the session's base with `--reference-script` (below):
 
 ```bash
 hyperloom-multibranch run ... --autonomous-agent <arbor> --agent-pack <pack> --agent-launch launch.json
 ```
 
-`FILE` is one of two things.
+## A base launch record: `--reference-script`
 
-## A base launch record
+A `base_launch.json` (`"schema": "hyperloom-base-launch/1"`) frozen by another session, or on another host, is not an
+`--agent-launch` file: give it as the session's base, as `hyperloom optimize` takes one, and leave `--agent-launch` out:
 
-A `base_launch.json` (`"schema": "hyperloom-base-launch/1"`) frozen by another session, or on another host. The session
-freezes it as its base without reading any recipe source, so this is also how a host that cannot reach InferenceX runs
-a session. A resumed session keeps the base it froze.
+```bash
+hyperloom-multibranch run ... --reference-script base_launch.json --autonomous-agent <arbor> --agent-pack <pack>
+```
+
+The session freezes it as its base without reading any recipe source, so this is also how a host that cannot reach
+InferenceX runs a session. `--reference-script` also takes a shell launch script, and a session without an Arbor takes
+it the same way. A resumed session keeps the base it froze.
 
 Each Arbor is then served the session's frozen base: its args and env, its golden layer's among them, with the root
 recipe's added. Arbor gets the record as `component.base_launch`, and its entrypoint as `component.entrypoint` when it
@@ -24,10 +29,11 @@ start on any difference. It compares the whole launch, the root recipe's additio
 recipe changes the base launch is refused. An Arbor older than `ba2f5a8` runs the launch without that check, and its
 branch notes so.
 
-A record that fails its own digest, or launches no server, is refused before PRELUDE; one for another framework or
-topology than the session's, when the session freezes it.
+A file that is no launch of the session's framework, sets a flag from a shell variable, or is a record that fails its
+own digest, is refused before PRELUDE, as is a record given as `--agent-launch` or an `--agent-launch` beside
+`--reference-script`; one for another topology than the session's, when the session freezes it.
 
-## A launch file
+## A launch file: `--agent-launch`
 
 Copy [`launch.template.json`](launch.template.json) and fill it from the InferenceX recipe the round resolves, at the workload's
 concurrency:
