@@ -345,9 +345,10 @@ class AttemptVerdictMixin:
 
         improved = self._clears_keep_bar(bench_result, measurement_scores, sigma_resolution)
 
-        # The numerical contract, which only assembly declares and only it needs. Every other backend was judged by
-        # the driver and measured through it since; re-running that verdict here would answer the same question with
-        # the same command, while reading a task configuration whose shape the engine has no business knowing.
+        # The task's own suite, for a backend whose candidates the driver cannot judge alone: assembly's numerical
+        # contract, a monokernel's spec, kernel and serving tests. Every other backend was judged by the driver and
+        # measured through it since; re-running that verdict here would answer the same question with the same
+        # command, while reading a task configuration whose shape the engine has no business knowing.
         canonical_summary = ""
         if improved and runs_task_suite_acceptance(self.ic.kernel_backend):
             canonical_started = time.time()

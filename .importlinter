@@ -246,6 +246,7 @@ modules =
     kernelforge.kernel_backends.gluon
     kernelforge.kernel_backends.hip
     kernelforge.kernel_backends.hipblaslt
+    kernelforge.kernel_backends.mono
     kernelforge.kernel_backends.triton
 ignore_imports =
     hyperloom.**.tests.** -> **

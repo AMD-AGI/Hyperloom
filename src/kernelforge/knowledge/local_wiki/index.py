@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 from kernelforge.config.resources import resource_path
@@ -180,6 +180,9 @@ def _descriptor(path: Path) -> str:
 # Pillars every operator-optimization task must load, in reading order.
 _MANDATORY_PILLARS = ("hardware", "common_methodology")
 
+#: The ``framework/`` levels a task can be served, in reading order.
+FRAMEWORKS = ("aiter", "mori", "sgl_amd_mono")
+
 
 def _flat_listing(folder: Path) -> str:
     """Flat ``<relative path> — <descriptor>`` listing for a folder (INDEX-less fallback)."""
@@ -281,15 +284,14 @@ def build_forge_knowledge(
     root: str | Path | None = None,
     *,
     language: str | Sequence[str] | None = None,
-    include_aiter: bool = False,
-    include_mori: bool = False,
+    frameworks: Collection[str] = (),
     defer_all: bool = False,
 ) -> str:
     """Assemble the layered knowledge block for one forge-loop kernel task.
 
     Layers, in reading order: ``hardware/`` + ``common_methodology/`` always;
-    ``framework/aiter/`` when ``include_aiter``; ``framework/mori/`` when
-    ``include_mori`` (ablation-only, off by default); ``languages/<language>/``
+    ``framework/<name>/`` for each name in ``frameworks``, in :data:`FRAMEWORKS`
+    order (``mori`` is ablation-only, off by default); ``languages/<language>/``
     when given and present. ``language`` accepts a sequence (triton/gluon are one
     toolchain and carry each other); duplicates collapse. Each level follows the
     INDEX.md convention. Returns "" if the root or all levels are missing.
@@ -303,10 +305,7 @@ def build_forge_knowledge(
         return ""
 
     rels: list[str] = list(_MANDATORY_PILLARS)
-    if include_aiter:
-        rels.append("framework/aiter")
-    if include_mori:
-        rels.append("framework/mori")
+    rels += [f"framework/{name}" for name in sorted(set(frameworks), key=FRAMEWORKS.index)]
     languages = [language] if isinstance(language, str) else list(language or ())
     deferred: set[str] = set()
     for position, name in enumerate(dict.fromkeys(item for item in languages if item)):

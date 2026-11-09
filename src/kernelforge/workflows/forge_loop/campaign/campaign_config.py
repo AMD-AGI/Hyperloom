@@ -16,7 +16,7 @@ from pathlib import Path
 
 from kernelforge.utils.git import git
 from kernelforge.utils.gpu_arch import canon_arch, canonical_gpu_type, detect_arch
-from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
+from kernelforge.kernel_backends.constants import KERNEL_BACKENDS, SGL_AMD_MONO_PACKAGE
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
     KernelSources,
     infer_source_owner_framework,
@@ -381,6 +381,9 @@ def infer_kernel_backend(source_paths: list[Path]) -> str:
         suffix = path.suffix.lower()
         if suffix in {".s", ".asm"} and _AMDGPU_ASSEMBLY_RE.search(text):
             return "assembly"
+        # Before FlyDSL: every monokernel is FlyDSL source, and its package is what sets the acceptance it needs.
+        if SGL_AMD_MONO_PACKAGE in path.parts:
+            return "mono"
         if "hipblaslt" in text or "hipblaslt" in path_text:
             return "hipblaslt"
         if "/aiter/" in path_text or "import aiter" in text:

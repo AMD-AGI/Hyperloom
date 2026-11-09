@@ -15,6 +15,7 @@ from typing import Any, ClassVar
 import yaml
 
 from kernelforge.evaluation.correctness.numerical import REQUEST_ENV, judge_evidence, validate_contract
+from kernelforge.evaluation.scoring import runs_task_suite_acceptance
 from kernelforge.utils.process_group import communicate_process_group
 
 CANONICAL_CONFIG_FILENAME = "config.yaml"
@@ -154,10 +155,11 @@ def _runnable_suite(workspace_dir: str, kernel_backend: str) -> _CanonicalSuite 
     """The suite to run for this workspace, or the verdict that stands in for running one."""
     suite = _load_suite(workspace_dir)
     if suite is None:
-        if kernel_backend == "assembly":
+        if runs_task_suite_acceptance(kernel_backend):
+            # A backend whose KEEP rests on the suite has nothing standing behind a candidate without one.
             return CanonicalCorrectnessResult(
                 passed=False,
-                detail="assembly acceptance requires config.yaml with a numerical_validation contract",
+                detail=f"{kernel_backend} acceptance requires {CANONICAL_CONFIG_FILENAME} declaring the task's suite",
                 outcome="unverified",
             )
         return CanonicalCorrectnessResult(

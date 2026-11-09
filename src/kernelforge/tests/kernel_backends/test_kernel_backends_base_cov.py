@@ -65,6 +65,14 @@ def test_resolve_language_dirs_empty_without_folder(tmp_path):
     assert resolve_language_dirs("", tmp_path) == ()
 
 
+def test_a_monokernel_reads_flydsl_first_and_carries_its_isa_and_hip_neighbours(tmp_path):
+    """Monokernels are FlyDSL; ISA notes and HIP glue are what a launch reaches past it."""
+    for name in ("hip", "assembly", "flydsl"):
+        (tmp_path / "languages" / name).mkdir(parents=True)
+
+    assert resolve_language_dirs("mono", tmp_path) == ("flydsl", "assembly", "hip")
+
+
 def test_build_single_kernel_backend_prompt_aiter_operator():
     config = Config(gpu_target="gfx950")
     # AITER operator path exercises include_aiter=True branch.

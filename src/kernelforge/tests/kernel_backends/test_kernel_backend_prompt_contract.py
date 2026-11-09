@@ -116,10 +116,15 @@ def forge_loop_prompts(monkeypatch):
 # the remaining steps are the same text renumbered 6-8.
 # The emitted-check gate correction moves only the shared driver paragraph in
 # all nine non-assembly prompts (including AVE); assembly stays byte-identical.
+# The monokernel backend added `mono` and moved assembly alone: the task-suite gate
+# paragraph the two backends share now names `allclose: True` from a driver that
+# judges each output itself as the other form of the pre-filter, and says "clears
+# the driver" where it said "clears SNR" (diffed line by line: those two sentences,
+# the first rewrapped onto two lines, and nothing else).
 _SHA256_FORGE_LOOP: dict[str, str] = {
     "ave": "3969bcd708d0dd6a46a7ed4401dbb9984cc0faa70bd13fe50509ea4e36fda434",
     "aiter": "fe0cfc662b64fac7fa1c4a48758366549d10b710f6aacec3a609e98277c16dfd",
-    "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
+    "assembly": "cfc8a0db6147d8f2e8ebb4ff7c9e433f5a50bf05252aba1624b53dd26939f753",
     "ck": "f6e5a979f4f96cf200d0f9bd2e161e68a3f0698b8cf771359eac0980b142613f",
     "flydsl": "a50aa0b1c2c4ae04b5d918149096569d16b03f7343f9a2ad88bd751b11b1c6b3",
     # The group-axis rule moved fusion alone: harness contract step 4 now forbids
@@ -129,6 +134,7 @@ _SHA256_FORGE_LOOP: dict[str, str] = {
     "gluon": "0c6b20832cd9f49349b5f5974137a7a35f958820530e4237a20a3fe56899956b",
     "hip": "662524299466f87fea4ad630c7fbf414a699a373f7635d5167c50cf1099eb48d",
     "hipblaslt": "4dc01cdd379c6c55a9847dd6f0532853b199128a5039eb09e51227657736d4da",
+    "mono": "8674a3aff39ceeb409316eefbcbb7c7db6c378af18900437025061b8f93d9860",
     "triton": "e32193395d0dc3ea323c29f6cfb3d82f2a96c66cb447057486a7e83fef538e89",
 }
 

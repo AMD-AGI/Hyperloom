@@ -59,7 +59,7 @@ ANALYSIS_TIMEOUT_SEC = 7200
             help="Fresh campaign: threshold in dB the driver's correctness "
             "suite must clear (stored immutably in the campaign config; "
             "ignored on --resume). A KEEP needs this and a measured gain "
-            "over the incumbent; assembly adds the task's own suite.",
+            "over the incumbent; assembly and mono add the task's own suite.",
         ),
     ),
     option_group(

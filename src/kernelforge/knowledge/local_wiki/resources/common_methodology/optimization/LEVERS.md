@@ -25,7 +25,7 @@ things worse.
 | # | Stage | Levers |
 |---|---|---|
 | 0 | **Classify** | `lever_bottleneck_class.md` |
-| 1 | **Algorithm / loop form / fusion** | `lever_fusion.md`, `lever_loop_form.md` |
+| 1 | **Algorithm / loop form / fusion** | `lever_fusion.md`, `lever_monokernel.md`, `lever_loop_form.md` |
 | 2 | **Feed the matrix cores** | `lever_mfma_sched.md`, `lever_prefetch.md`, `lever_lds_banks.md` |
 | 3 | **Parallelism** | `lever_grid_sizing.md`, `lever_occupancy.md`, `lever_xcd_locality.md` |
 | 4 | **Memory subsystem** | `lever_coalescing.md`, `lever_prefetch.md`, `lever_xcd_locality.md` |
@@ -56,6 +56,7 @@ row in a permitted data file are all edits *inside* the permitted set.
 | `lever_xcd_locality.md` | bandwidth-bound (re-fetch) | 8 XCDs × 32 CU, per-XCD L2, ≥1024 workgroups, 8-multiple tiles, swizzled CTA order, the 512 B stride cliff |
 | `lever_grid_sizing.md` | latency / occupancy-bound | wave64, `num_warps`, `__launch_bounds__`, **256 CUs**, split-K for decode, persistent kernels |
 | `lever_fusion.md` | bandwidth-bound; launch-bound | traffic fusion vs launch fusion, donors, when NOT to fuse, `launch_bound_share` and the 0.13 graph discount |
+| `lever_monokernel.md` | launch- / latency-bound decode with TP collectives | one persistent launch for a whole span, all-reduces inside; what it buys over launch fusion and what it costs |
 | `lever_cheap_sweeps.md` | stage 5 | `FORGE_SWEEP_<NAME>` + `sweep_const:` echo, one bench command per data point, joint sweeps, collapse to the literal before the turn ends |
 | `lever_autotune.md` | stage 5 | only aiter's per-shape DB reaches the live path; capture → race → deploy → **prove engagement**; the 10-tuple key |
 | `lever_edit_surface.md` | cross-cutting | what an editable file reaches: package rebind, injected device source, module constants (incl. `os.environ` defaults), data/config rows |
