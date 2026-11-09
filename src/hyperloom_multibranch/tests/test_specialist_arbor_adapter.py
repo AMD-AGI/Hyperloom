@@ -309,7 +309,7 @@ def test_an_agentx_arbor_on_the_session_s_base_measures_with_the_gate_s_round_an
     record = write_record(tmp_path / "record" / "base_launch.json")
     client = _agentx_client(tmp_path, monkeypatch)
     spec = replace(
-        _spec(tmp_path, launch=str(record), workload=AGENTX_WORKLOAD),
+        _spec(tmp_path, launch=str(record), workload=AGENTX_WORKLOAD, metric=GRADED_INTVTY_P50),
         server_args="",
         envs={},
         client=client,
@@ -669,7 +669,7 @@ def test_arbor_is_held_to_mb_s_accuracy_floor_unless_the_launch_or_the_recipe_se
 def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Path) -> None:
     # The benchmark's rules are considered in validation, and are part of the dossier.
     spec = _spec(tmp_path)
-    agentx = replace(spec, workload={"kind": "agentx", "conc": 8})
+    agentx = replace(spec, workload={"kind": "agentx", "conc": 8}, metric=GRADED_INTVTY_P50)
 
     rules = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)["directives"]
     agentx_rules = arbor_config(agentx, tmp_path / "checkout", BRANCH_RUN)["directives"]
@@ -684,6 +684,8 @@ def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Pa
     assert "the root it measures itself" in accuracy
     assert "error rate stays at or under 10%" in agentx_rules[2]
     assert "agentx.e2e_norm_intvty.p50" in agentx_rules[3] and "report.json" in agentx_rules[3]
+    total = host_rules(replace(agentx, metric=TOTAL_TOKEN_THROUGHPUT))
+    assert "agentx.throughput.total_tokens_per_second is the total_token_throughput" in total[3]
     unmeasured = host_rules(replace(agentx, client=""))
     assert len(unmeasured) == 3 and "error rate stays at or under 10%" in unmeasured[-1]
 
@@ -720,7 +722,7 @@ def test_a_launch_file_s_client_measures_arbor_only_when_mb_gives_none(tmp_path:
 
 def test_an_agentx_branch_is_refused_before_arbor_starts_unless_it_is_given_the_resolved_launch(tmp_path: Path) -> None:
     checkout = _write(tmp_path / "checkout", CHECKOUT_FILES)
-    spec = _spec(tmp_path, framework="sglang", server_args="", workload=AGENTX_WORKLOAD)
+    spec = _spec(tmp_path, framework="sglang", server_args="", workload=AGENTX_WORKLOAD, metric=GRADED_INTVTY_P50)
 
     with pytest.raises(ArborRefused, match="--agent-launch"):
         arbor_manifest(spec, ArborCheckout("arbor", "abc123", checkout), BRANCH_RUN)
