@@ -171,12 +171,10 @@ def geak_metric_axis(
 
     GEAK accepts on the single axis it is handed, so that axis has to be the
     objective. An interactivity-graded session keeps a candidate only on a gain
-    in the median ``e2e_norm_intvty_p50``, with the p90 tail and output
-    throughput as noise-band guards; searching either guard selects wins the
-    rebench reverts and passes over median wins. Total token throughput is in
-    neither: on a trace replay under a ~97% prefix cache it is ~99% input tokens
-    that were never computed, so a kernel win cannot surface on it. Every other
-    session is graded on output.
+    in the median ``e2e_norm_intvty_p50``, with the p90 tail and total token
+    throughput as noise-band guards (``hyperloom.common.agentx_objective``);
+    searching a guard selects wins the rebench reverts and passes over median
+    wins. Every other session is graded on output.
 
     A GEAK build that cannot measure ``e2e_norm_intvty_p50`` refuses it, or, predating
     that check, falls back to output and records that in ``metric_basis``;
