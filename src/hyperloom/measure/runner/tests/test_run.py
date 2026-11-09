@@ -1141,3 +1141,19 @@ def test_a_long_context_set_the_sandbox_does_not_hold_is_spec_rejected_before_an
     ) as info:
         runner._execute(call)
     assert info.value.error_class == "spec_rejected"
+
+
+@pytest.mark.parametrize("laid", [False, True], ids=["image", "farm"])
+def test_the_runner_tells_the_rounds_verdict_whether_its_farm_changed_the_framework(tmp_path, monkeypatch, laid):
+    """A serving interpreter that cannot import its framework is the image's fault unless the test rebuilt it."""
+    from types import SimpleNamespace
+
+    from hyperloom.measure.farm import Farm
+
+    monkeypatch.setattr(runner, "own_aiter_jit", lambda *args: {})
+    monkeypatch.setattr(runner, "raise_rebuild_watchdog", lambda *args: None)
+    context = SimpleNamespace(environ={}, work=tmp_path, notes=[], compile=tmp_path / "compile")
+    farm = Farm(site=tmp_path / "farm" / "site", packages=("sglang",)) if laid else None
+    call = TestCall(points=(), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), task_id="t")
+
+    assert runner._own_directories(context, call, None, farm, None).framework_changed is laid

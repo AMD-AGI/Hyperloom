@@ -157,6 +157,9 @@ class TestCall:
     #: ``None`` for one the patch deletes (``measure.farm.patched_configs``). The test's private copies of the tables
     #: (``measure.framework.copies``) carry them, so the server reads, and builds its modules from, the patched tables.
     tables_patch: Mapping[str, Path | None] = field(default_factory=dict)
+    #: Whether the points put a rebuilt framework (a farm, ``measure.farm``) first on the server's import path. Whoever
+    #: laid the farm sets it; a serving interpreter that cannot import its framework is the candidate's failure only then.
+    framework_changed: bool = False
     #: Ends the test when cancelled, as its boot limit does: the backend's own cancellation, which a caller that watches the
     #: test from beside it (the runner's card watch) passes in. ``None`` gives the backend one of its own; a caller that
     #: published a cancel scope of its own owns the cancellation, and this one is not used.
