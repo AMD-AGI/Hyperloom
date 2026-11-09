@@ -19,9 +19,11 @@ install_kernel_tools.sh ``write_env_file`` does: they go to this container's ker
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 from unittest import mock
@@ -573,10 +575,12 @@ def test_install_baremetal_reads_from_a_shared_dotenv_only_what_the_loader_lends
 
 
 # What another account writes into a .env it can write in a checkout directory of this account's (0755, .env 0666):
-# a loader, an endpoint, a fetch source, a credential, and a planted line hidden in a quoted value's continuation, with
-# the comments and lent lines that stay.
+# a loader, an endpoint, a fetch source, a credential, a planted line hidden in a quoted value's continuation and one
+# behind a carriage return in a comment (a line to the shell, two to a reader of universal newlines), with a comment
+# and the lent lines, which alone stay.
 _PLANTED_IN_A_WRITABLE_DOTENV = (
     "# kept: a comment\n"
+    "# a note\rHTTPS_PROXY=http://planted-proxy.invalid:3128\n"
     "FRAMEWORK=vllm\n"
     "NODE_OPTIONS=--require=/tmp/planted.js\n"
     "export LD_PRELOAD=/tmp/planted-preload.so\n"
@@ -587,7 +591,15 @@ _PLANTED_IN_A_WRITABLE_DOTENV = (
     "HF_HUB_OFFLINE='1'\n"
     "not an assignment\n"
 )
-_PLANTED_NAMES = ("NODE_OPTIONS", "LD_PRELOAD", "OPENAI_BASE_URL", "GEAK_REPO", "GEAK_NOTES", "PYTHONPATH")
+_PLANTED_NAMES = (
+    "NODE_OPTIONS",
+    "LD_PRELOAD",
+    "OPENAI_BASE_URL",
+    "GEAK_REPO",
+    "GEAK_NOTES",
+    "PYTHONPATH",
+    "HTTPS_PROXY",
+)
 
 
 def _writable_dotenv_in_a_private_checkout(tmp_path: Path) -> Path:
@@ -605,10 +617,11 @@ def _assert_the_next_load_lends_none_of_it(checkout: Path, workspace: Path, fram
     for them to lend, in install.sh's loader or preflight's. ``framework`` is what the install left FRAMEWORK."""
     dotenv = checkout / ".env"
     assert preflight_env._dotenv_not_private(dotenv) is None
-    text = dotenv.read_text(encoding="utf-8")
-    assert not [word for word in ("planted", "not an assignment") if word in text]
-    assert text.startswith("# kept: a comment\n")
-    assert "HF_HUB_OFFLINE='1'\n" in text
+    text = dotenv.read_bytes().decode("utf-8")
+    assert not [word for word in ("planted", "not an assignment", "#", "\r") if word in text]
+    # Rebuilt from what it lends, each assignment written afresh.
+    assert "HF_HUB_OFFLINE=1\n" in text.splitlines(keepends=True)
+    assert [line for line in text.splitlines() if not re.fullmatch(r"[A-Z_]+=[a-z0-9-]*", line)] == []
     assert [
         key
         for key, value in _assignments(checkout / ".env").items()
@@ -678,8 +691,8 @@ _SHAPES = (
 
 def test_the_rewrite_keeps_exactly_what_the_loader_lends_from_a_shared_dotenv(tmp_path):
     """runtime_env_keep_lent_dotenv_lines over a .env another account can write: the loader lends the same from the
-    file before and after, the kept file lends every assignment it holds, and blank and comment lines stay byte for
-    byte."""
+    file before and after, and the file is rebuilt from those assignments alone, each written afresh as NAME=VALUE in
+    its order: no comment, blank line or other byte of the old file stays."""
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     checkout.chmod(0o777)
@@ -700,10 +713,10 @@ def test_the_rewrite_keeps_exactly_what_the_loader_lends_from_a_shared_dotenv(tm
     assert after.stdout.splitlines()[:-1] == before.stdout.splitlines()[:-1]
     assert after.stdout.splitlines()[-1] == "[]"
     assert dotenv.read_bytes() == (
-        b"FRAMEWORK=vllm\n  export HYPERLOOM_RUN_MODE=docker\n"
-        b"HF_HUB_OFFLINE=\"1\"\nHF_DATASETS_OFFLINE='0'   \nHYPERLOOM_LLM_MODE=openai\r\n"
-        b"HYPERLOOM_FRAMEWORK_ENV = shared\n# FRAMEWORK=sglang\n\n   \nHF_DATASETS_OFFLINE=1"
+        b"FRAMEWORK=vllm\nHYPERLOOM_RUN_MODE=docker\nHF_HUB_OFFLINE=1\nHF_DATASETS_OFFLINE=0\n"
+        b"HYPERLOOM_LLM_MODE=openai\nHYPERLOOM_FRAMEWORK_ENV=shared\nHF_DATASETS_OFFLINE=1\n"
     )
+    assert dotenv.stat().st_mode & 0o777 == 0o600
 
 
 # Between the rewrite and the install's next write of .env, the other account appends a line to the file the rewrite
@@ -768,17 +781,16 @@ def test_another_account_cannot_append_to_the_dotenv_the_rewrite_leaves(tmp_path
 
 
 @pytest.mark.parametrize("owner", ["the-checkouts-owner", "a-third-account"])
-def test_root_keeps_the_users_own_dotenv_the_users_when_it_rewrites_it(tmp_path, owner):
-    """Root, on a user's checkout whose .env any account can write, replaces it with a 0600 file the user still owns;
-    a .env a third account owns becomes root's."""
+def test_root_leaves_the_dotenv_it_rewrites_its_own(tmp_path, owner):
+    """Root, on a user's checkout whose .env any account can write, replaces it with a 0600 file of root's, whoever
+    owned the old one, as every later write of .env leaves it: nothing is chowned."""
     if os.geteuid() != 0:
         pytest.skip("only root can give an entry to another account")
     checkout = tmp_path / "checkout"
     checkout.mkdir(mode=0o755)
     os.chown(checkout, _OTHER_UID, _OTHER_UID)
     dotenv = checkout / ".env"
-    text = "# kept: a comment\nFRAMEWORK=vllm\n"
-    dotenv.write_text(text, encoding="utf-8")
+    dotenv.write_text("# a comment\nFRAMEWORK=vllm\n", encoding="utf-8")
     dotenv.chmod(0o666)
     uid = _OTHER_UID if owner == "the-checkouts-owner" else _THIRD_UID
     os.chown(dotenv, uid, uid)
@@ -788,7 +800,195 @@ def test_root_keeps_the_users_own_dotenv_the_users_when_it_rewrites_it(tmp_path,
     assert proc.returncode == 0, proc.stderr
     entry = dotenv.stat()
     assert entry.st_mode & 0o777 == 0o600
-    expected = _OTHER_UID if owner == "the-checkouts-owner" else 0
-    assert (entry.st_uid, entry.st_gid) == (expected, expected)
-    assert dotenv.read_text(encoding="utf-8") == text
+    assert (entry.st_uid, entry.st_gid) == (0, 0)
+    assert dotenv.read_text(encoding="utf-8") == "FRAMEWORK=vllm\n"
     assert sorted(path.name for path in checkout.iterdir()) == [".env"]
+
+
+# One .env, read by both loaders: carriage returns in a comment, before a line, inside a value, doubled at a line's end,
+# in a quoted value over two CRLF lines and ending the file. A reader that split lines at a lone carriage return (as
+# universal newlines do) would find OPENAI_BASE_URL and HF_DATASETS_OFFLINE assigned.
+_CR_LADEN = (
+    b"# a note\rOPENAI_BASE_URL=http://planted-gateway.invalid/v1\n"
+    b"FRAMEWORK=vllm\r\n"
+    b"\rHYPERLOOM_LLM_MODE=openai\n"
+    b"HF_HUB_OFFLINE=1\rHF_DATASETS_OFFLINE=1\n"
+    b"HYPERLOOM_RUN_MODE=baremetal\r\r\n"
+    b'OPENAI_CUSTOM_HEADERS="X-A: 1\r\nX-B: 2"\r\n'
+    b"HYPERLOOM_FRAMEWORK_ENV=shared\r"
+)
+_CR_NAMES = (
+    "OPENAI_BASE_URL",
+    "FRAMEWORK",
+    "HYPERLOOM_LLM_MODE",
+    "HF_HUB_OFFLINE",
+    "HF_DATASETS_OFFLINE",
+    "HYPERLOOM_RUN_MODE",
+    "OPENAI_CUSTOM_HEADERS",
+    "HYPERLOOM_FRAMEWORK_ENV",
+)
+_CR_LENT = {
+    "FRAMEWORK": "vllm",
+    "HYPERLOOM_LLM_MODE": "openai",
+    "HYPERLOOM_RUN_MODE": "baremetal",
+    "HYPERLOOM_FRAMEWORK_ENV": "shared",
+}
+
+
+def _both_loaders(checkout: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """What load_dotenv_no_clobber and preflight's _load_dotenv_fallback each take of _CR_NAMES from ``checkout``'s
+    .env into an environment that has none of them, read as bytes so no carriage return is lost on the way."""
+    env = {"PATH": os.environ["PATH"], "REPO_ROOT": str(checkout)}
+    report = (
+        'load_dotenv_no_clobber || exit 9; for k in "$@"; do [ -z "${!k+set}" ] || printf "%s=%s\\0" "$k" "${!k}"; done'
+    )
+    proc = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", f'. "$0"; {report}', RUNTIME_ENV_SH.as_posix(), *_CR_NAMES],
+        env=env,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    shell = dict(item.split("=", 1) for item in proc.stdout.decode("utf-8").split("\0") if item)
+    with mock.patch.dict(os.environ, env, clear=True):
+        preflight_env._load_dotenv_fallback()
+        python = {key: os.environ[key] for key in _CR_NAMES if key in os.environ}
+    return shell, python
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o666], ids=["private", "writable-by-others"])
+def test_the_shell_and_preflight_split_a_dotenvs_lines_alike(tmp_path, mode):
+    """Both loaders end a line at a newline alone and drop one carriage return before it: from one .env full of
+    carriage returns they take the same assignments, and neither finds one in a comment. A .env another account can
+    write lends the same once the install rebuilt it, then private, to either."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir(mode=0o755)
+    dotenv = checkout / ".env"
+    dotenv.write_bytes(_CR_LADEN)
+    dotenv.chmod(mode)
+
+    shell, python = _both_loaders(checkout)
+
+    assert python == shell
+    if mode == 0o600:
+        assert shell == {
+            **_CR_LENT,
+            "HF_HUB_OFFLINE": "1\rHF_DATASETS_OFFLINE=1",
+            "OPENAI_CUSTOM_HEADERS": "X-A: 1\nX-B: 2",
+        }
+        return
+    assert shell == _CR_LENT
+    rewrite = _shell('runtime_env_keep_lent_dotenv_lines "$1"', str(dotenv))
+    assert rewrite.returncode == 0, rewrite.stderr
+    assert preflight_env._dotenv_not_private(dotenv) is None
+    assert _both_loaders(checkout) == (_CR_LENT, _CR_LENT)
+
+
+def _fake_command(bin_dir: Path, name: str, body: str) -> None:
+    bin_dir.mkdir(exist_ok=True)
+    command = bin_dir / name
+    command.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+    command.chmod(0o755)
+
+
+def _rewrite_with(bin_dir: Path, dotenv: Path, **extra: str) -> subprocess.CompletedProcess:
+    """runtime_env_keep_lent_dotenv_lines with the commands in ``bin_dir`` ahead of the real ones."""
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", **extra}
+    return _shell('runtime_env_keep_lent_dotenv_lines "$1"', str(dotenv), env=env)
+
+
+def _writable_dotenv(tmp_path: Path) -> Path:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    checkout.chmod(0o777)
+    dotenv = checkout / ".env"
+    dotenv.write_text("FRAMEWORK=vllm\nNODE_OPTIONS=--require=/tmp/planted.js\n", encoding="utf-8")
+    dotenv.chmod(0o666)
+    return dotenv
+
+
+# The name the rewrite's new file gets, made known to the other account by a stand-in for mktemp.
+_KNOWN_NAME = ".env.knownname0"
+
+
+def test_the_rewrite_never_writes_through_a_link_at_its_new_files_name(tmp_path):
+    """Another account that puts a link where the rewrite makes its new file finds it refused: the file is made
+    there or not at all (O_EXCL), so a file of this account's the link names is never written."""
+    dotenv = _writable_dotenv(tmp_path)
+    victim = tmp_path / "victim"
+    victim.write_text("this account's own file\n", encoding="utf-8")
+    (dotenv.parent / _KNOWN_NAME).symlink_to(victim)
+    _fake_command(tmp_path / "bin", "mktemp", f"echo {_KNOWN_NAME}")
+
+    proc = _rewrite_with(tmp_path / "bin", dotenv)
+
+    assert proc.returncode == 1
+    assert f"cannot remove the credentials from {dotenv}" in proc.stderr
+    assert victim.read_text(encoding="utf-8") == "this account's own file\n"
+    assert "NODE_OPTIONS" in dotenv.read_text(encoding="utf-8")
+
+
+def test_the_rewrite_refuses_a_new_file_that_is_not_a_regular_file_of_its_own(tmp_path):
+    """A link at the new file's name to something other than a regular file (a pipe here) is opened by the shell's
+    noclobber, and then refused before anything is written to it, given a mode or renamed."""
+    dotenv = _writable_dotenv(tmp_path)
+    pipe = tmp_path / "pipe"
+    os.mkfifo(pipe, 0o644)
+    (dotenv.parent / _KNOWN_NAME).symlink_to(pipe)
+    _fake_command(tmp_path / "bin", "mktemp", f"echo {_KNOWN_NAME}")
+    reader = os.open(pipe, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        proc = _rewrite_with(tmp_path / "bin", dotenv)
+        written = b""
+        with contextlib.suppress(BlockingIOError):
+            written = os.read(reader, 4096)
+    finally:
+        os.close(reader)
+
+    assert proc.returncode == 1
+    assert written == b""
+    assert stat.S_IMODE(pipe.stat().st_mode) == 0o644
+    assert dotenv.is_file() and not dotenv.is_symlink()
+    assert "NODE_OPTIONS" in dotenv.read_text(encoding="utf-8")
+
+
+def test_the_rewrite_finds_a_new_file_swapped_before_its_rename(tmp_path):
+    """Another account that replaces the new file with its own between the write and the rename has put its file at
+    .env; the rewrite finds that and fails rather than report a .env of this account's."""
+    dotenv = _writable_dotenv(tmp_path)
+    real_mv = shutil.which("mv")
+    _fake_command(
+        tmp_path / "bin",
+        "mv",
+        f'rm -f -- "$3" && printf "NODE_OPTIONS=--require=/tmp/swapped.js\\n" > "$3" && exec {real_mv} "$@"',
+    )
+
+    proc = _rewrite_with(tmp_path / "bin", dotenv)
+
+    assert proc.returncode == 1
+    assert f"cannot remove the credentials from {dotenv}" in proc.stderr
+
+
+def test_the_rewrite_stays_in_the_directory_it_opened(tmp_path):
+    """Another account that moves the checkout directory away and puts a link to a directory of its own at its name,
+    while the rewrite runs, gets nothing there: the new file is made, written and renamed through the directory the
+    rewrite opened."""
+    dotenv = _writable_dotenv(tmp_path)
+    checkout = dotenv.parent
+    moved = tmp_path / "moved"
+    theirs = tmp_path / "theirs"
+    theirs.mkdir()
+    _fake_command(
+        tmp_path / "bin",
+        "mktemp",
+        f'mv -- "{checkout}" "{moved}" && ln -s -- "{theirs}" "{checkout}" && echo {_KNOWN_NAME}',
+    )
+
+    proc = _rewrite_with(tmp_path / "bin", dotenv)
+
+    assert proc.returncode == 0, proc.stderr
+    assert list(theirs.iterdir()) == []
+    assert (moved / ".env").read_text(encoding="utf-8") == "FRAMEWORK=vllm\n"
+    assert stat.S_IMODE((moved / ".env").stat().st_mode) == 0o600
+    assert sorted(path.name for path in moved.iterdir()) == [".env"]
