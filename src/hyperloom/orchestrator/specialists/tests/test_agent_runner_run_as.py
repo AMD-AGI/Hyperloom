@@ -30,7 +30,8 @@ from hyperloom.orchestrator.specialists.launch_env import (
     LaunchStatus,
     SandboxedProcess,
 )
-from hyperloom.orchestrator.specialists.tests._agent_fixtures import make_runner, make_spec, wait_finished
+from hyperloom.orchestrator.specialists.agent_runner import McpEndpoint
+from hyperloom.orchestrator.specialists.tests._agent_fixtures import TOKEN_ENV, make_runner, make_spec, wait_finished
 
 _USER_ENV = "HYPERLOOM_SPECIALIST_USER"
 _TODAYS_KWARGS = {"stdin", "stdout", "stderr", "env", "cwd", "start_new_session"}
@@ -231,6 +232,35 @@ async def test_a_sandboxed_codex_runs_with_its_own_sandbox_off(tmp_path: Path, m
 
     [(argv, _kwargs)] = calls
     assert argv[argv.index("--") + 1 :][-5:] == ["codex", "exec", CODEX_BYPASS_FLAG, "--json", "-"]
+
+
+@pytest.mark.parametrize("backend", ["codex", "claude"])
+async def test_a_sandboxed_sessions_network_reaches_its_mcp_servers_whichever_backend_takes_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    """codex takes its servers from its private config.toml, not its argv: the config the runner wrote decides the
+    reach for it as for claude, whose ``--mcp-config`` names the same servers."""
+    monkeypatch.setattr(agent_runner, "_launch_isolation", lambda: _tier("bwrap"))
+    reached: list[Any] = []
+    real = agent_runner.prepare_launch
+
+    def prepare(*args: Any) -> Any:
+        prepared = real(*args)
+        reached.append(prepared.network.reach if prepared.network is not None else None)  # gone once released
+        return prepared
+
+    monkeypatch.setattr(agent_runner, "prepare_launch", prepare)
+    servers = (
+        McpEndpoint("near", "http://127.0.0.1:7009/mcp", TOKEN_ENV),
+        McpEndpoint("far", "https://mcp.example.test/x", TOKEN_ENV),
+    )
+    argv = ("codex", "exec", "--json", "-") if backend == "codex" else ("claude", "--print")
+
+    await _launch(tmp_path, argv=argv, backend=backend, mcp_servers=servers, env={"CLAUDE_CODE_OAUTH_TOKEN": "tok"})
+
+    [reach] = reached
+    assert reach is not None and dict(reach.loopback) == {7009: "127.0.0.1"}
+    assert ("mcp.example.test", 443) in reach.remote
 
 
 @pytest.mark.parametrize("value", [None, "", "   "])
