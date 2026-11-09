@@ -389,8 +389,8 @@ class LocalProcess:
         return self._code if self._code is not None else self.popen.poll()
 
     def retire(self) -> None:
-        """End the launcher of a command that ended and left nothing running, which it would otherwise wait for until
-        the sandbox stops."""
+        """Collect the launcher of a command that ended and left nothing running, ending it first when it has not
+        exited by itself yet, so it does not stay a zombie until the sandbox stops."""
 
         if self.returncode is None or any(running(pid) for pid, _ in descendants(self.popen.pid)):
             return
