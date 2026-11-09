@@ -1613,6 +1613,53 @@ async def test_resume_consistency_clears_stale_pending_integrate(coord: Coordina
 
 
 @pytest.mark.asyncio
+async def test_resume_requeues_an_integrate_the_lost_environment_stopped(coord: Coordinator, monkeypatch) -> None:
+    params = {"patch_name": "spec-patch", "source_specialist_task_id": "spec-1"}
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params=params,
+            idempotency_key="approved:integrate_patch:abc",
+            requires_lanes=["benchmark_lane", "server_lifecycle"],
+            lease_ttl_sec=900,
+            dispatch_class="llm",
+        )
+    )
+    await coord.tasks.transition(task.task_id, "running")
+    await coord.tasks.transition(
+        task.task_id,
+        "cancelled",
+        {
+            "reason": "operator_confirmed_stopped",
+            "confirmed_scope_gone": "lost-scope",
+            "cleanup_confirmed": True,
+            "outcome": {"task_id": task.task_id, "state": "cancelled", "result": {}},
+        },
+    )
+    coord.shared_state.pending_integrate = {"task_id": task.task_id, "patches": ["/tmp/p.diff"]}
+    monkeypatch.setattr(
+        coord.writeback,
+        "_resume_rollback_pending_integrate",
+        lambda pending, _gone_scope=None: {"reversed": list(pending["patches"]), "failed": []},
+    )
+    report = {"fixes": [], "warnings": []}
+
+    await coord.writeback._resume_recover_pending_integrate(report)
+
+    queued = await coord.tasks.queued()
+    assert [(t.kind, t.idempotency_key, t.params, t.requires_lanes, t.lease_ttl_sec) for t in queued] == [
+        ("integrate_patch", "approved:integrate_patch:abc-retry1", params, ["benchmark_lane", "server_lifecycle"], 900)
+    ]
+    assert [f["kind"] for f in report["fixes"]] == ["rolled_back_pending_integrate", "requeued_pending_integrate"]
+    assert report["fixes"][1] == {
+        "kind": "requeued_pending_integrate",
+        "task_id": task.task_id,
+        "requeued_task_id": queued[0].task_id,
+    }
+    assert coord.shared_state.pending_integrate == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "phase", "replayed"),
     [("kept", "accepted", True), ("reverted", "restored", False)],
@@ -2996,6 +3043,47 @@ async def test_materialize_requeues_same_content_after_terminal_twin(coord: Coor
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
     assert len(queued) == 1
     assert queued[0].task_id != first.task_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "requeued_key"),
+    [
+        ({"status": "failed", "error_class": "server_launch_failed", "error": "server exited 1"}, "-retry1"),
+        ({"status": "ok", "output_throughput": 100.0, "completed_requests": 8}, None),
+    ],
+    ids=["failed-result", "measured-result"],
+)
+async def test_a_baseline_twin_answers_a_repeat_proposal_only_once_it_measured(
+    coord: Coordinator, result: dict, requeued_key: str | None
+) -> None:
+    """The runner books every returned result ``succeeded``; whether the twin measured is in the result itself."""
+
+    async def _baseline(_ctx):
+        return dict(result)
+
+    coord.sub.register_executor("baseline", _baseline)
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-s0"))
+    first = [t for t in await coord.tasks.queued() if t.kind == "baseline"][0]
+    lease = await coord.locks.acquire_many(
+        list(first.requires_lanes), holder_id=first.task_id, task_id=first.task_id, action="baseline", ttl_sec=600
+    )
+    await coord.sub.run_task(first, prebound_lease=lease)
+    assert (await coord.tasks.get(first.task_id)).state == "succeeded"
+
+    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-s1"))
+
+    live = [t.idempotency_key for t in (*await coord.tasks.queued(), *await coord.tasks.running())]
+    tail = await coord.bus.tail(topic="observation", n=20)
+    skipped = [m.payload for m in tail if m.payload.get("kind") == "proposal_materialize_skipped"]
+    if requeued_key is None:
+        assert live == []
+        assert [(p["reason"], p["proposal_msg_id"], p["task_id"]) for p in skipped] == [
+            ("baseline_already_succeeded", "prop-s1", first.task_id)
+        ]
+    else:
+        assert live == [f"{first.idempotency_key}{requeued_key}"]
+        assert skipped == []
 
 
 # -- handle_delegate branches ----------------------------------------------

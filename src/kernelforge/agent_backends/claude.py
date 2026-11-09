@@ -585,7 +585,7 @@ class ClaudeBackend:
         del usage  # Availability probes are not part of campaign accounting.
         self.preflight()
         selected_model = model.strip() or self.runtime.model
-        timeout = timeout_sec or min(60, self.runtime.timeout_sec)
+        timeout = timeout_sec or self.runtime.probe_timeout_sec
         command = [
             resolve_claude_cli(self.runtime.executable),
             "--print",

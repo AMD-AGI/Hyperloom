@@ -9,13 +9,15 @@ import pytest
 
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
-from hyperloom_multibranch.contracts.blackboard.records import REPLAY_TARGET
+from hyperloom_multibranch.contracts.blackboard.records import REPLAY_TARGET, MapDirection
 from hyperloom_multibranch.blackboard.families import (
     OTHER_TARGET,
     Component,
     Family,
     Mechanism,
+    direction_names_op,
     family_of,
+    names_op,
     op_family,
 )
 
@@ -161,3 +163,38 @@ def test_a_label_reads_back_as_its_family(family: Family) -> None:
 @pytest.mark.parametrize("label", ["not a family", "gemm · sprinkling · config", "gemm · fusion · nowhere"])
 def test_a_label_no_family_has_reads_as_none(label: str) -> None:
     assert Family.from_label(label) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "op", "named"),
+    [
+        ("root profile: largest rms_norm_kernel 4.0 %", "rms_norm_kernel.kd", True),
+        ("rms_norm_kernel.kd takes 4% of the profile", "rms_norm_kernel", True),
+        ("aiter::cross_device_reduce_1stage is a quarter of it", "aiter::cross_device_reduce_1stage", True),
+        ("fused_rms_norm_kernel takes 4%", "rms_norm_kernel", False),
+        ("the rms_norm_kernels take 4%", "rms_norm_kernel", False),
+        ("largest rms_norm_kernel 4.0 %", "", False),
+    ],
+)
+def test_a_text_names_an_op_as_a_whole_word_with_or_without_its_kd_suffix(text: str, op: str, named: bool) -> None:
+    assert names_op(text, op) is named
+
+
+@pytest.mark.parametrize(
+    ("direction", "op", "named"),
+    [
+        (
+            MapDirection("m-fuse", "Small kernels folded", "open", "largest rms_norm_kernel 4.0 %"),
+            "rms_norm_kernel.kd",
+            True,
+        ),
+        (MapDirection("m-rmsnorm", "Small kernels folded", "open"), "rmsnorm", True),
+        (MapDirection("m-fuse", "Small kernels folded", "open"), "rms_norm_kernel", False),
+        (MapDirection("m-fuse", "rmsnorm into the gemm_a8w8 epilogue", "open", ops=("rmsnorm.kd",)), "rmsnorm", True),
+        (MapDirection("m-fuse", "rmsnorm into the gemm_a8w8 epilogue", "open", ops=("rmsnorm",)), "gemm_a8w8", False),
+    ],
+)
+def test_a_direction_names_the_ops_it_lists_and_without_a_list_those_its_id_title_or_why_name(
+    direction: MapDirection, op: str, named: bool
+) -> None:
+    assert direction_names_op(direction, op) is named

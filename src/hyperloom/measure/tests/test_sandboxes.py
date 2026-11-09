@@ -33,8 +33,10 @@ from hyperloom.sandbox.tests.test_sandbox_e2b import (
     GATEWAY_CUTS,
     KEY_SPENT_BODY,
     KEY_MEASUREMENT,
+    PENDING_TIMEOUT_MESSAGE,
     SANDBOX,
     _listed,
+    key_spent_body,
     _Service,
     service,  # noqa: F401 (the canned service the end-to-end case runs against)
 )
@@ -202,10 +204,20 @@ def test_a_full_quota_is_asked_again_after_the_retry_interval(monkeypatch: pytes
     monkeypatch.setattr(sandboxes, "_QUOTA_RETRY_SEC", 0.05)
     provider = _Provider()
     provider.quota = 0  # filled by sandboxes the pool does not hold: nothing of its own ends to wake it
+    refused_at: list[float] = []
+
+    def refuse() -> None:
+        # Room appears after the second refusal, counted rather than timed, so a slow runner cannot make the
+        # first create land after it.
+        refused_at.append(time.monotonic())
+        if len(refused_at) == 2:
+            provider.quota = None
+
+    provider.on_refuse = refuse
     pool = _pool(provider)
-    threading.Timer(0.3, lambda: setattr(provider, "quota", None)).start()
-    assert _acquire(pool).sandbox_id == "sbx-1"
-    assert len(provider.calls) > 2 and pool.active == 1
+    assert _acquire(pool, timeout_sec=10).sandbox_id == "sbx-1"
+    assert len(provider.calls) == 3 and pool.active == 1, "two refusals, then the create that found room"
+    assert refused_at[1] - refused_at[0] >= 0.05, "the full quota is asked again only after the retry interval"
 
 
 def test_waiting_for_the_quota_ends_at_the_tests_timeout_with_what_the_service_said(
@@ -365,6 +377,32 @@ def test_a_sandbox_that_failed_while_its_create_was_cut_is_not_created_again_und
         _acquire(pool)
     assert _keys_created(service) == ["run-1:req-1:1", "run-1:req-1:1"]
     assert pool.active == 0
+
+
+def test_a_sandbox_that_timed_out_pending_while_its_create_was_cut_is_unavailable_not_failed(
+    service: _Service,
+) -> None:
+    """The replay is told the key is spent and that its sandbox ended in the service's pending timeout: no capacity in
+    time, as the 503 the cut hid would have said, so the attempt is unavailable and its key is not replaced."""
+    _platform_answers(service, GATEWAY_CUTS[0], (410, key_spent_body(PENDING_TIMEOUT_MESSAGE)))
+    pool = _e2b_pool(service)
+    with pytest.raises(SandboxUnavailable, match="pending_timeout: not running after") as unavailable:
+        _acquire(pool)
+    assert not isinstance(unavailable.value, (SandboxQuotaExceeded, AcquireTimedOut))
+    assert _keys_created(service) == ["run-1:req-1:1", "run-1:req-1:1"]
+    assert pool.active == 0
+
+
+def test_a_key_an_earlier_process_spent_on_a_failed_sandbox_is_replaced_not_the_end_of_the_attempt(
+    service: _Service,
+) -> None:
+    """The first send is told the key is spent, and the stored reason names the failure of that earlier sandbox: this
+    create made nothing, so the pool moves on to the attempt's next key."""
+    _platform_answers(service, (410, key_spent_body(CREATE_FAILED_MESSAGE)))
+    service.reply("GET", "/sandboxes/sbx-1", (200, _listed("sbx-1", dict(_THIS_RUN))))
+    runner = _acquire(_e2b_pool(service))
+    assert runner.sandbox_id == "sbx-1"
+    assert _keys_created(service) == ["run-1:req-1:1", "run-1:req-1:1:r1"]
 
 
 def test_a_create_cut_by_the_gateway_finds_its_pending_sandbox_through_the_pool(service: _Service) -> None:

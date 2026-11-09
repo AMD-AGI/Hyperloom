@@ -16,6 +16,7 @@ from kernelforge.workflows.rewrite_controller import ControllerLayout, published
 
 from hyperloom_common.llm.llm_attribution import inject_env
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    ORCHESTRATOR_CANCELLED_RETURNCODE,
     RoundWatch,
     run_with_session_kill,
 )
@@ -84,7 +85,10 @@ def read_controller_result(
     result = _read_json(layout.controller_state)
     patch_count = len(published_operator_dirs(layout))
     status = str(result.get("status") or "").strip().lower()
-    if status not in _TERMINAL_STATUSES:
+    if returncode == ORCHESTRATOR_CANCELLED_RETURNCODE:
+        # Not terminal: the cycle's Controller did not finish, whatever it published.
+        status = "cancelled"
+    elif status not in _TERMINAL_STATUSES:
         status = "partial" if patch_count else "failed"
     normalized = {
         **result,

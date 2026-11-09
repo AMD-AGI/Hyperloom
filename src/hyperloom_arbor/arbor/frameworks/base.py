@@ -85,7 +85,7 @@ class FrameworkAdapter:
         own (``setsid``), and its shell writes its own PID there before ``exec``-ing it,
         so the PID is the server's and its group's whatever ``setsid`` had to do. Arbor
         then stops that group and nothing else: inside MB, standalone's pattern
-        ``pkill`` stopped MB's own servers. Without either, the command is byte for
+        ``pkill`` would stop MB's own servers. Without either, the command is byte for
         byte what it always was (arbor/tests/test_frameworks_parity.py).
         """
         serve = f"{env_prefix(server_env)}{self.serve_cmd(config, server_flags)}"

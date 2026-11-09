@@ -2,7 +2,7 @@
 
     <store>/<run_id>/
       run.json            the config as initialized, its sha256, the gates' sha256, the Arbor sha
-      gates.json          the operator's gates, pinned (ab_model_m.sbatch re-checks the sha on the node)
+      gates.json          the operator's gates, pinned (the A/B script re-checks the sha on the node)
       approvals.json      rewrites the operator let into a round (`arbor.parallel approve`)
       HOST                {host, pid, heartbeat}: the one host whose ticks may write
       state.json          the run's phase and round (controller.py)

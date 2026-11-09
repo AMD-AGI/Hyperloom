@@ -10,10 +10,12 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
+from hyperloom_common.tests.shared_accounts import theirs
 from hyperloom.hosted import entry, host_info
 from hyperloom.hosted.host_info import Var
 from hyperloom.hosted.tests.test_campaign import FULL, MINIMAL
@@ -48,8 +50,13 @@ def run(tmp_path, monkeypatch):
         "ANTHROPIC_BASE_URL": "https://gateway.example.test",
         **_SECRETS,
     }
-    for name in (*(v for k, v in vars(Var).items() if not k.startswith("_")), entry.ENV_IMAGE):
-        monkeypatch.delenv(name, raising=False)
+    for name in (*(v for k, v in vars(Var).items() if not k.startswith("_")), entry.ENV_IMAGE, entry.ENV_RUNTIME_DIR):
+        # Set first so that monkeypatch restores it: what the entry sets in os.environ must not outlive the test.
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    container_tmp = tmp_path / "container-tmp"
+    container_tmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(container_tmp))  # the container's own disk
 
     def inject():
         """What the host does at every (re)start of the application: the same environment again."""
@@ -63,7 +70,16 @@ def run(tmp_path, monkeypatch):
     monkeypatch.setattr(entry, "INSTALL_SCRIPT", installer)  # the real installer is never run by a unit test
     inject()
     yield type(
-        "Run", (), {"state": state, "work": work, "spec": spec, "restart": staticmethod(inject), "installer": installer}
+        "Run",
+        (),
+        {
+            "state": state,
+            "work": work,
+            "spec": spec,
+            "restart": staticmethod(inject),
+            "installer": installer,
+            "container_tmp": container_tmp,
+        },
     )
     set_hosted_plug_inputs(None)
 
@@ -106,7 +122,8 @@ def _session_json(run):
 
 
 # -- a fresh run -------------------------------------------------------------------------------------------------
-def test_a_fresh_run_gets_its_session_dir_the_plug_profile_and_a_private_archive(run, monkeypatch):
+def test_a_fresh_run_gets_its_session_dir_the_plug_profile_and_a_group_shared_archive(run, monkeypatch):
+    run.work.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
     fake = FakeOptimize(monkeypatch, stop_reason="target_reached")
     assert entry.main(["run"]) == 0
     (argv,) = fake.calls
@@ -116,7 +133,8 @@ def test_a_fresh_run_gets_its_session_dir_the_plug_profile_and_a_private_archive
     assert not [a for a in argv if a.startswith("--resume-from")]
     assert _exit(run) == {"final": True, "returncode": 0, "stop_reason": "target_reached"}
     archive = Path(session) / "archive"
-    assert stat.S_IMODE(archive.stat().st_mode) == 0o700 and archive.stat().st_uid == os.getuid()
+    assert stat.S_IMODE(archive.stat().st_mode) == 0o2770 and archive.stat().st_uid == os.getuid()
+    assert [stat.S_IMODE(path.stat().st_mode) for path in (Path(session).parent, Path(session))] == [0o2775, 0o2775]
 
 
 def test_session_json_is_written_before_optimize_starts(run, monkeypatch):
@@ -330,6 +348,93 @@ def test_a_refusal_the_state_directory_cannot_hold_is_still_return_code_2(run, m
     assert Var.STATE_DIR in capsys.readouterr().err
 
 
+# -- the shared storage, which each leg may write as another account ---------------------------------------------
+def test_a_user_data_path_this_account_cannot_write_ends_the_run_finally_naming_it(run, monkeypatch):
+    fake = FakeOptimize(monkeypatch)
+    run.work.rmdir()
+    run.work.write_text("")  # what no account can create a file in
+    assert entry.main(["run"]) == 2
+    error = _exit(run)["error"]
+    assert f"cannot write the shared storage: USER_DATA_PATH {run.work}: ENOTDIR" in error
+    assert fake.calls == [] and not (run.state / "session.json").exists()
+
+
+def test_a_state_dir_this_account_cannot_write_is_said_on_stderr_only(run, monkeypatch, capsys):
+    FakeOptimize(monkeypatch)
+    probe = entry.writable_problems
+    monkeypatch.setattr(
+        entry,
+        "writable_problems",
+        lambda dirs: [f"{name} {path}: EACCES" for name, path in dirs.items() if name == Var.STATE_DIR] or probe(dirs),
+    )
+    assert entry.main(["run"]) == 2
+    assert f"{Var.STATE_DIR} {run.state}: EACCES" in capsys.readouterr().err
+    assert list(run.state.iterdir()) == []
+
+
+def test_a_session_directory_this_account_cannot_write_ends_the_run_finally_naming_it(run, monkeypatch):
+    fake = FakeOptimize(monkeypatch)
+    (run.work / "m").write_text("")  # where the model's directory of sessions goes
+    assert entry.main(["run"]) == 2
+    assert "cannot write the session directory " + str(run.work / "m") in _exit(run)["error"]
+    assert fake.calls == []
+
+
+def test_an_archive_an_earlier_leg_left_unusable_ends_the_run_finally_naming_it(run, monkeypatch):
+    fake = FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    archive = Path(_session_json(run)) / "archive"
+    archive.rmdir()
+    archive.symlink_to(run.work)
+    run.restart()
+    assert entry.main(["run"]) == 2
+    assert _exit(run) == {
+        "final": True,
+        "returncode": 2,
+        "error": f"the archive {archive} is not a directory (a link to one is refused too)",
+    }
+    assert len(fake.calls) == 1
+
+
+def test_a_link_another_account_put_on_the_way_to_the_session_ends_the_run_finally_naming_it(run, monkeypatch):
+    fake = FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    sessions = Path(_session_json(run)).parent
+    sessions.rename(sessions.with_name("moved"))
+    sessions.symlink_to(sessions.with_name("moved"))
+    theirs(sessions, monkeypatch)
+    run.restart()
+    assert entry.main(["run"]) == 2
+    error = _exit(run)["error"]
+    assert "is not followed past a directory another account can write or owns" in error and str(sessions) in error
+    assert len(fake.calls) == 1
+
+
+def test_a_key_directory_without_setgid_is_warned_about_and_one_with_it_is_not(run, monkeypatch, capsys):
+    FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    err = capsys.readouterr().err
+    assert f"WARNING: USER_DATA_PATH {run.work} is not setgid" in err and f"chmod g+s {run.state}" in err
+    for key in (run.work, run.state):
+        key.chmod(0o2775)
+    run.restart()
+    entry.main(["run"])
+    assert "is not setgid" not in capsys.readouterr().err
+
+
+def test_the_runtime_dir_is_one_of_the_legs_own_on_the_container_disk_unless_the_host_names_one(run, monkeypatch):
+    run.installer.write_text(f'#!/bin/bash\necho "$HYPERLOOM_RUNTIME_DIR" >> {run.work}/seen\n')
+    fake = FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    runtime = Path(fake.environments[0][entry.ENV_RUNTIME_DIR])
+    assert runtime.parent == run.container_tmp and stat.S_IMODE(runtime.stat().st_mode) == 0o700
+    assert (run.work / "seen").read_text().split() == [str(runtime)]
+    run.restart()
+    monkeypatch.setenv(entry.ENV_RUNTIME_DIR, "/host/chose/this")
+    entry.main(["run"])
+    assert fake.environments[1][entry.ENV_RUNTIME_DIR] == "/host/chose/this"
+
+
 def test_anything_but_run_is_a_usage_error_that_writes_nothing(run, capsys):
     assert entry.main(["walk"]) == 2 and entry.main([]) == 2
     assert not (run.state / "exit.json").exists()
@@ -393,7 +498,7 @@ def _multibranch(run, **placement):
     run.spec.write_text(json.dumps(doc))
 
 
-def test_multibranch_execs_into_its_entry_with_the_environment_unchanged(run, monkeypatch):
+def test_multibranch_execs_into_its_entry_with_the_environment_unchanged_but_for_path(run, monkeypatch):
     _multibranch(run)
     before = dict(os.environ)
     calls = []
@@ -402,9 +507,46 @@ def test_multibranch_execs_into_its_entry_with_the_environment_unchanged(run, mo
     fake = FakeOptimize(monkeypatch)
     entry.main(["run"])
     assert [(c[0], c[1]) for c in calls] == [("hyperloom-multibranch", ["hyperloom-multibranch", "hosted", "run"])]
+    bin_dir = str(Path(sys.executable).parent)
+    path = calls[0][2].pop("PATH")
+    assert path.split(os.pathsep)[0] == bin_dir  # the installer's interpreter resolves the command
+    before.pop("PATH", None)
+    runtime = calls[0][2].pop(entry.ENV_RUNTIME_DIR)
+    assert Path(runtime).parent == run.container_tmp
     assert calls[0][2] == before and Var.RUN_ID in before
     assert fake.calls == [] and not (run.state / "session.json").exists() and not (run.state / "exit.json").exists()
     assert os.environ.get(entry.ENV_IMAGE) is None
+
+
+def _multibranch_order(run, monkeypatch, *, exit_code=0):
+    _multibranch(run)
+    _recording_installer(run, None, exit_code=exit_code)
+
+    def fake_exec(file, argv):
+        with (run.work / "order").open("a") as order:
+            order.write("exec\n")
+
+    monkeypatch.setattr(entry.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(entry.os, "execvp", fake_exec)
+
+
+def test_multibranch_runs_the_installer_before_the_exec_without_host_secrets(run, monkeypatch):
+    _multibranch_order(run, monkeypatch)
+    run.installer.write_text(
+        run.installer.read_text().replace(
+            "exit 0", f'echo "${{HYPERLOOM_MCP_TOKEN:-unset}}" >> {run.work}/order\nexit 0'
+        )
+    )
+    entry.main(["run"])
+    assert _order(run) == ["installer 0", "unset", "exec"]
+
+
+def test_multibranch_installer_failure_stops_before_the_exec(run, monkeypatch):
+    _multibranch_order(run, monkeypatch, exit_code=7)
+    assert entry.main(["run"]) == 2
+    written = _exit(run)
+    assert (written["final"], written["returncode"]) == (True, 2) and "install.sh failed" in written["error"]
+    assert _order(run) == ["installer 0"]
 
 
 def test_multibranch_without_its_command_is_final_with_return_code_2(run, monkeypatch):
@@ -603,6 +745,44 @@ def test_the_installer_output_goes_to_a_log_in_the_state_dir(run, monkeypatch):
     assert set((run.state / entry.INSTALL_LOG).read_text().split()) == {"install-output", "install-error"}
 
 
+def test_each_legs_installer_log_is_a_new_file_renamed_over_the_last_never_one_opened_in_place(run, monkeypatch):
+    """The previous leg's log may be another account's, and a member of the group may have put a link there."""
+    run.state.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
+    _recording_installer(run, None)
+    _record_optimize(run, monkeypatch)
+    entry.main(["run"])
+    log = run.state / entry.INSTALL_LOG
+    assert stat.S_IMODE(log.stat().st_mode) == 0o664
+    (run.state.parent / "first-leg-log").hardlink_to(log)
+    first = log.read_text()
+    outside = run.state.parent / "outside"
+    outside.write_text("kept")
+    log.unlink()
+    log.symlink_to(outside)
+
+    run.restart()
+    entry.main(["run"])
+
+    assert outside.read_text() == "kept" and not log.is_symlink()
+    assert (run.state.parent / "first-leg-log").read_text() == first
+    assert set(log.read_text().split()) == {"install-output", "install-error"}
+    assert stat.S_IMODE(log.stat().st_mode) == 0o664
+    assert [path.name for path in run.state.iterdir() if path.name.startswith(".")] == []
+
+
+def test_exit_and_session_json_are_readable_by_the_group_and_replaced_never_rewritten(run, monkeypatch):
+    run.state.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
+    FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    for name in (entry.EXIT_FILE, entry.SESSION_FILE):
+        (run.state.parent / f"earlier-{name}").hardlink_to(run.state / name)
+    run.restart()
+    entry.main(["run"])
+    for name in (entry.EXIT_FILE, entry.SESSION_FILE):
+        assert stat.S_IMODE((run.state / name).stat().st_mode) == 0o664
+        assert not (run.state / name).samefile(run.state.parent / f"earlier-{name}")
+
+
 def test_a_failing_installer_ends_the_run_finally_and_optimize_never_starts(run, monkeypatch, capsys):
     _recording_installer(run, None, exit_code=7)
     _record_optimize(run, monkeypatch)
@@ -623,7 +803,15 @@ def test_the_installer_sees_no_host_only_input(run, monkeypatch):
     entry.main(["run"])
     seen = (run.work / "seen").read_text()
     assert "sentinel-secret" not in seen
-    assert not [name for name in host_info.HOST_ONLY_VARS if f"\n{name}=" in "\n" + seen]
+    leaked = [name for name in host_info.HOST_ONLY_VARS if f"\n{name}=" in "\n" + seen]
+    assert leaked == [Var.STATE_DIR]
+
+
+def test_the_installer_is_told_the_state_dir_so_it_installs_the_hosted_extra(run, monkeypatch):
+    run.installer.write_text(f'#!/bin/bash\necho "$HYPERLOOM_STATE_DIR" > {run.work}/seen\n')
+    FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    assert (run.work / "seen").read_text().strip() == str(run.state)
 
 
 def test_a_missing_installer_ends_the_run_finally(run, monkeypatch):
