@@ -624,8 +624,8 @@ def _launch_refusals(spec: AgentSpec) -> list[str]:
         return []
     return [
         "an AgentX recipe's launch holds only what the round adds to the one it resolves from InferenceX, so Arbor would"
-        " serve defaults MB does not measure: give the resolved launch with --agent-launch"
-        " (examples/multibranch-arbor-launch)"
+        " serve defaults MB does not measure: give the resolved launch with --agent-launch, or the session's base"
+        " with --reference-script (examples/multibranch-arbor-launch)"
     ]
 
 
