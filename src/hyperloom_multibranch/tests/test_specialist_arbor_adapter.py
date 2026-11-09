@@ -437,6 +437,45 @@ def test_arbor_runs_the_pack_the_spec_names_and_one_its_checkout_lacks_is_refuse
     assert arbor_config(spec, checkout, BRANCH_RUN)["pack"] == "serving"
 
 
+def test_arbor_runs_the_validator_scripts_its_pack_names(tmp_path: Path) -> None:
+    """Arbor's agentx pack names validator/bench_agentx.sh; a config naming validator/bench.sh was refused as no file."""
+    own = {
+        "packs/agentx/pack.yaml": "name: agentx\nvalidator:\n  bench: validator/bench_agentx.sh\n"
+        "  correctness: validator/correctness.sh\n",
+        "packs/agentx/validator/bench_agentx.sh": "#!/usr/bin/env bash\n",
+        "packs/agentx/validator/correctness.sh": "#!/usr/bin/env bash\n",
+    }
+    checkout = _write(tmp_path / "checkout", {**CHECKOUT_FILES, **own})
+
+    config = arbor_config(replace(_spec(tmp_path), pack="agentx"), checkout, BRANCH_RUN)
+
+    validator = checkout / "packs" / "agentx" / "validator"
+    assert config["bench_script"] == str(validator / "bench_agentx.sh")
+    assert config["correctness_script"] == str(validator / "correctness.sh")
+    assert not [reason for reason in refusals(config) if "pack" in reason or "script" in reason]
+    unread = _write(tmp_path / "other", {"packs/x/pack.yaml": "validator: [\n"})
+    assert arbor_adapter.validator_script(unread / "packs" / "x", "bench", "validator/bench.sh") == "validator/bench.sh"
+
+
+def test_the_python_arbor_needs_is_the_one_its_checkout_names(tmp_path: Path) -> None:
+    """A checkout from Arbor 6126676 names 3.10 (serving images ship it); one without the name needs 3.11."""
+    import subprocess
+    import sys
+
+    check = next(command for command in arbor_adapter.INSTALL if "PYTHON_MIN" in command)
+    code = check.split(" -c ", 1)[1].strip("'")
+    named = _write(tmp_path / "named", {"arbor/version.py": "PYTHON_MIN: tuple[int, int] = (3, 10)\n"})
+    later = _write(tmp_path / "later", {"arbor/version.py": "PYTHON_MIN: tuple[int, int] = (9, 0)\n"})
+    older = _write(tmp_path / "older", {"arbor/__init__.py": ""})
+
+    def run(cwd: Path) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, "-c", code], cwd=cwd, capture_output=True, text=True)
+
+    assert run(named).returncode == 0
+    assert "Arbor needs Python 9.0 or newer" in run(later).stderr
+    assert (run(older).returncode == 0) == (sys.version_info[:2] >= (3, 11))
+
+
 #: A launch resolved from an InferenceX AgentX recipe, as a launch file.
 RESOLVED = {
     "server_flags": "--mem-fraction-static 0.8 --chunked-prefill-size 16384",
