@@ -354,6 +354,21 @@ def test_tracelens_patch_runs_under_the_container_environment(monkeypatch: pytes
     assert "--local --tracelens-root /tl --patch-set roofline" in ran.stdout
 
 
+def test_engine_restart_gives_each_role_its_own_profiler_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeCli({})
+    fake._extract_pod_json = lambda _stdout: {}
+    monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)
+    env = {"SGLANG_TORCH_PROFILER_DIR": "/shared/torch_trace"}
+    router = {"role": "router", "podIP": "10.0.0.3", "sshPort": 29000}
+    for pod in [*_PD_STATE["prefill_pods"], *_PD_STATE["decode_pods"], router]:
+        pd_cmds._ssh_pod(dict(_PD_STATE), pod, action="restart", extra_env=env, timeout=5)
+    scripts = dict(fake.calls)
+    assert "export SGLANG_TORCH_PROFILER_DIR=/shared/torch_trace/prefill\n" in scripts["10.0.0.1"]
+    assert "export SGLANG_TORCH_PROFILER_DIR=/shared/torch_trace/decode\n" in scripts["10.0.0.2"]
+    assert "SGLANG_TORCH_PROFILER_DIR" not in scripts["10.0.0.3"]
+    assert env == {"SGLANG_TORCH_PROFILER_DIR": "/shared/torch_trace"}
+
+
 def test_engines_not_running_names_pods_whose_launch_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeCli({"10.0.0.1": "HL_ALIVE\n", "10.0.0.2": "HL_GONE\n"})
     monkeypatch.setattr(pd_cmds, "_cli", lambda: fake)

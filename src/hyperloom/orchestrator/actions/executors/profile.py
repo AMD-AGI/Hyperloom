@@ -305,10 +305,11 @@ def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
 
 
 def _capture_trace_files(trace_dir: Path) -> tuple[Path | None, list[Path]]:
-    capture_dirs = (
-        trace_dir / "capture_traces",
-        trace_dir / "graph_capture_profile",
-        trace_dir / "graph_capture",
+    """The graph-capture folder under ``trace_dir`` (or a PD role's subdir, decode first) and its files."""
+    capture_dirs = tuple(
+        base / name
+        for base in (trace_dir, trace_dir / "decode", trace_dir / "prefill")
+        for name in ("capture_traces", "graph_capture_profile", "graph_capture")
     )
     capture = next((path for path in capture_dirs if path.is_dir()), None)
     if capture is None:
@@ -798,7 +799,7 @@ async def _infera_profile_window(round_trace_root: str):
 # Attaches this round's multi-node trace files. A PD cluster's prefill and decode traces land in per-role subdirs and
 # are recorded as ``role_traces``, decode's being the main trace; otherwise the heaviest file is the main trace.
 def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_started_unix: float) -> None:
-    from ._multi_node_server_lifecycle import select_pd_role_traces
+    from ._multi_node_server_lifecycle import select_pd_node_traces
 
     trace_dir = Path(round_trace_root)
     if not trace_dir.is_dir():
@@ -809,13 +810,15 @@ def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_
             round_trace_root,
         )
         return
-    role_traces = select_pd_role_traces(str(trace_dir), task_started_unix)
+    node_traces = select_pd_node_traces(str(trace_dir), task_started_unix)
+    role_traces = {role: paths[0] for role, paths in node_traces.items()}
     all_files = sorted(trace_dir.glob("*.trace.json.gz"))
     trace_files = [p for p in all_files if safe_mtime(p) >= task_started_unix]
     result["trace_dir"] = str(trace_dir)
     result["trace_files"] = [str(p) for p in trace_files] + sorted(role_traces.values())
     if role_traces:
         result["role_traces"] = role_traces
+        result["role_node_traces"] = node_traces
         result["main_trace_path"] = role_traces.get("decode") or role_traces["prefill"]
         log.info("profile_executor: multi-node role traces selected: %s", role_traces)
     elif trace_files:

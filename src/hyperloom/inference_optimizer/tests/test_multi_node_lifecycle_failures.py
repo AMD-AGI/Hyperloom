@@ -418,3 +418,30 @@ def test_pd_role_traces_are_kept_when_the_trace_filesystem_clock_lags(
         "prefill": str(root / "prefill" / "2-TP-0.trace.json.gz"),
         "decode": str(root / "decode" / "2-TP-0.trace.json.gz"),
     }
+
+
+def test_pd_role_traces_take_the_first_gpu_of_each_node(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import os
+
+    root = tmp_path / "torch_trace"
+    (root / "decode").mkdir(parents=True)
+    (root / "prefill").mkdir(parents=True)
+    for rank in range(16):
+        (root / "decode" / f"5-TP-{rank}.trace.json.gz").write_bytes(b"x" * (100 if rank == 3 else 10))
+    for rank in range(8):
+        older = root / "decode" / f"4-TP-{rank}.trace.json.gz"
+        older.write_bytes(b"x")
+        os.utime(older, (older.stat().st_mtime - 60, older.stat().st_mtime - 60))
+        (root / "prefill" / f"7-TP-{rank}-DECODE.trace.json.gz").write_bytes(b"x" * 50)
+        (root / "prefill" / f"7-TP-{rank}-EXTEND.trace.json.gz").write_bytes(b"x")
+    pods = [{"podIP": "10.0.0.1"}, {"podIP": "10.0.0.2"}]
+    monkeypatch.setattr(life, "_read_state", lambda: {"decode_pods": pods, "prefill_pods": pods[:1]})
+
+    since = min(p.stat().st_mtime for p in (root / "decode").iterdir()) - 1
+    by_node = life.select_pd_node_traces(str(root), since)
+
+    assert by_node == {
+        "prefill": [str(root / "prefill" / "7-TP-0-EXTEND.trace.json.gz")],
+        "decode": [str(root / "decode" / "5-TP-0.trace.json.gz"), str(root / "decode" / "5-TP-8.trace.json.gz")],
+    }
+    assert life.select_pd_role_traces(str(root), since) == {role: paths[0] for role, paths in by_node.items()}

@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterator, Mapping
 
+from hyperloom_common.io import safe_mtime
 from hyperloom_common.timeutil import format_exc_brief
 from hyperloom_common.env import EnvValueError, env_flag
 from hyperloom.inference_optimizer import multi_node
@@ -639,21 +641,62 @@ def pd_role_trace_dir(root: str, role: str) -> str:
     return str(Path(root) / role)
 
 
-def select_pd_role_traces(root: str, since_unix: float) -> dict[str, str]:
-    """Return the heaviest ``*.trace.json.gz`` written since ``since_unix`` under each ``<root>/<role>`` dir."""
-    selected: dict[str, str] = {}
+_RANK_TRACE_RE = re.compile(r"\A(?P<batch>.+)-TP-(?P<rank>\d+)(?:-(?P<stage>[A-Z]+))?\.trace\.json\.gz\Z")
+_ROLE_STAGE = {"prefill": "EXTEND", "decode": "DECODE"}
+
+
+def _role_node_count(state: Mapping[str, Any], role: str) -> int:
+    """Number of nodes (pods) serving ``role``; one when the state lists none."""
+    pods = [pod for pod in (state.get(f"{role}_pods") or []) if isinstance(pod, dict)]
+    return max(1, len(pods))
+
+
+def _first_gpu_traces(paths: list[Path], role: str, nodes: int) -> list[str]:
+    """The first GPU's trace of each node from the newest batch in ``paths``; the heaviest file when none is per-rank.
+
+    SGLang numbers TP ranks across a role's nodes, so node ``n`` starts at rank ``n * ranks_per_node``. A stage-split
+    trace prefers the role's own stage.
+    """
+    batches: dict[str, dict[int, dict[str, Path]]] = {}
+    newest: dict[str, float] = {}
+    for path in paths:
+        match = _RANK_TRACE_RE.match(path.name)
+        if match is None:
+            continue
+        batch = match["batch"]
+        batches.setdefault(batch, {}).setdefault(int(match["rank"]), {})[match["stage"] or ""] = path
+        newest[batch] = max(newest.get(batch, 0.0), safe_mtime(path))
+    if not batches:
+        return [str(max(paths, key=lambda p: (p.stat().st_size, p.name)))] if paths else []
+    ranks = batches[max(newest, key=lambda batch: newest[batch])]
+    per_node = -(-(max(ranks) + 1) // nodes)
+    picks: list[str] = []
+    for node in range(nodes):
+        stages = ranks.get(node * per_node)
+        if stages:
+            picks.append(str(stages.get(_ROLE_STAGE.get(role, "")) or stages.get("") or sorted(stages.values())[0]))
+    return picks
+
+
+def select_pd_node_traces(root: str, since_unix: float) -> dict[str, list[str]]:
+    """Return, per PD role, the first GPU's trace of each node written since ``since_unix`` under ``<root>/<role>``."""
+    state = _read_state() or {}
+    selected: dict[str, list[str]] = {}
     for role in PD_PROFILE_ROLES:
-        sized: list[tuple[int, str]] = []
-        for path in Path(pd_role_trace_dir(root, role)).glob("*.trace.json.gz"):
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            if stat.st_mtime >= since_unix:
-                sized.append((stat.st_size, str(path)))
-        if sized:
-            selected[role] = max(sized)[1]
+        fresh = [
+            path
+            for path in Path(pd_role_trace_dir(root, role)).glob("*.trace.json.gz")
+            if path.is_file() and safe_mtime(path) >= since_unix
+        ]
+        picks = _first_gpu_traces(fresh, role, _role_node_count(state, role))
+        if picks:
+            selected[role] = picks
     return selected
+
+
+def select_pd_role_traces(root: str, since_unix: float) -> dict[str, str]:
+    """Return each PD role's first-node trace from :func:`select_pd_node_traces`."""
+    return {role: paths[0] for role, paths in select_pd_node_traces(root, since_unix).items()}
 
 
 async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> None:

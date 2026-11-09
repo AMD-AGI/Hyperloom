@@ -64,7 +64,14 @@ from ._trace_inputs import (
     _trace_file_size,
     discover_trace_inputs,
 )
-from ._trace_split import TraceSplitJob, _default_workspace_path, _run_trace_split
+from ._trace_split import (
+    STEADY_STATE_MODES,
+    UNSPLIT_MODE,
+    TraceSplitJob,
+    _default_workspace_path,
+    _run_trace_split,
+    copy_unsplit_trace,
+)
 
 # trace_analyze heals a vanished checkout through this module's _ensure_tracelens_checkout.
 from ._tracelens_checkout import (
@@ -571,7 +578,7 @@ def _add_chunk_selection_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--steady-state-mode",
-        choices=("mixed", "decode_only", "prefilldecode", "generic"),
+        choices=STEADY_STATE_MODES,
         default=(os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip() or "mixed"),
         help=(
             "Which steady-state chunk to consume for the perf report. "
@@ -592,6 +599,9 @@ def _add_chunk_selection_args(parser: argparse.ArgumentParser) -> None:
             "chunk carries the real GEMM / attention kernels. "
             "Switch to 'decode_only' when you specifically want the "
             "longest pure-decode region (decode-perf comparison runs). "
+            "'decode_only_or_generic' takes the decode-only chunk, else the "
+            "generic one (PD decode servers); 'unsplit' analyses the whole "
+            "trace without splitting it (PD prefill servers). "
             "May also be set via env "
             "INFERENCE_OPTIMIZER_STEADY_STATE_MODE so the coordinator "
             "can re-issue roofline with a different mode after a "
@@ -850,6 +860,25 @@ def _split_steady_state(run: AnalysisRun, job: TraceSplitJob) -> Path:
     return cli_trace_path
 
 
+def _use_unsplit_trace(run: AnalysisRun, trace_path: Path, split_dir: Path) -> Path:
+    """Hand the whole captured trace to the perf report, as a copy under ``split_dir``."""
+    copied = copy_unsplit_trace(trace_path, split_dir)
+    run.run_meta["selection"].update(
+        {
+            "requested_mode": UNSPLIT_MODE,
+            "chunk_label": UNSPLIT_MODE,
+            "selected_chunk": str(copied),
+            "selected_chunk_count": 1,
+            "fell_back_to_full_trace": False,
+        }
+    )
+    note_step(run.run_meta, "split_trace", category="split", status="skipped", skip_reason=UNSPLIT_MODE)
+    run.artifacts["tracelens_trace_split_dir"] = str(split_dir)
+    run.artifacts["tracelens_steady_state_trace"] = str(copied)
+    append_log(run.log_path, f"--steady-state-mode={UNSPLIT_MODE} -> using {copied.name} for perf report")
+    return copied
+
+
 def _clamp_chunk_stream_overlaps(run: AnalysisRun, chunk_path: Path) -> None:
     """Truncate same-stream overrunning GPU events in the steady-state chunk before TraceLens reads it."""
     try:
@@ -995,7 +1024,10 @@ def _analyse_trace(run: AnalysisRun, trace_input: Path, trace_files: list[Path])
         current_step="split_trace",
     )
     split_dir = tracelens_dir / "trace_split"
-    cli_trace_path = _split_steady_state(run, TraceSplitJob(analysis_trace_path, split_dir, tl_root))
+    if args.steady_state_mode == UNSPLIT_MODE:
+        cli_trace_path = _use_unsplit_trace(run, analysis_trace_path, split_dir)
+    else:
+        cli_trace_path = _split_steady_state(run, TraceSplitJob(analysis_trace_path, split_dir, tl_root))
     _clamp_chunk_stream_overlaps(run, cli_trace_path)
 
     # Graph-capture folder for TraceLens inference graph replay analysis.

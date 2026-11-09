@@ -210,6 +210,34 @@ class TestCollectSplitChunks:
                 [],
             )
 
+    def test_decode_only_or_generic_falls_back_to_the_generic_chunk(self, tmp_path):
+        split_dir = tmp_path / "split"
+        split_dir.mkdir()
+        self._write_dummy_chunk(split_dir, "steady_state_test.json.gz")
+        self._write_dummy_chunk(split_dir, "sglang_iteration_0-31.json.gz")
+
+        chunk, meta, _ = trace_split._collect_split_chunks(
+            split_dir, "decode_only_or_generic", tmp_path / "trace.json.gz", []
+        )
+        assert chunk.name == "steady_state_test.json.gz"
+        assert meta["selected_mode"] == "decode_only_or_generic"
+
+        self._write_dummy_chunk(split_dir, "decode_only_steady_state_test.json.gz")
+        chunk, _, _ = trace_split._collect_split_chunks(
+            split_dir, "decode_only_or_generic", tmp_path / "trace.json.gz", []
+        )
+        assert chunk.name == "decode_only_steady_state_test.json.gz"
+
+    def test_unsplit_trace_is_copied_into_the_split_dir(self, tmp_path):
+        raw = tmp_path / "1-TP-0-EXTEND.trace.json.gz"
+        raw.write_bytes(b"raw-trace")
+
+        copied = trace_split.copy_unsplit_trace(raw, tmp_path / "split")
+
+        assert copied == tmp_path / "split" / raw.name
+        assert copied.read_bytes() == b"raw-trace"
+        assert raw.read_bytes() == b"raw-trace"
+
     def test_missing_mode_raises(self, tmp_path):
         split_dir = tmp_path / "split"
         split_dir.mkdir()

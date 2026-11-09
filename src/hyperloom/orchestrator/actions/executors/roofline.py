@@ -24,6 +24,7 @@ from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
+from ._pd_combined_report import report_pd_profile
 from ._pd_role_trace import ROLE_STEADY_STATE_MODE, analyze_role_traces
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
@@ -926,6 +927,7 @@ class RooflineExecutor:
         main_role = _pd_main_role(profiled)
         if main_role:
             payload.setdefault("steady_state_mode", ROLE_STEADY_STATE_MODE[main_role])
+            payload.setdefault("split_llm_inference", False)
 
         analysis = await self._analyze(ctx, recorder, payload)
         if not isinstance(analysis, _AnalysisOutcome):
@@ -948,7 +950,8 @@ class RooflineExecutor:
         *,
         framework: str,
     ) -> None:
-        """Analyse the PD roles other than ``main_role`` and record every role's summary on ``last_trace_analyze_by_role``."""
+        """Analyse the PD roles other than ``main_role``, record every role's summary on ``last_trace_analyze_by_role``,
+        then run the combined per-node TraceLens report."""
         role_traces = dict(profiled.result.get("role_traces") or {})
         self.shared_state.last_trace_analyze_by_role = await analyze_role_traces(
             role_traces,
@@ -956,6 +959,10 @@ class RooflineExecutor:
             framework=framework,
             known={main_role: analysis.result},
         )
+        try:
+            await report_pd_profile(profiled.result, framework=framework, platform=self.shared_state.gpu_type)
+        except (OSError, RuntimeError, ValueError) as exc:
+            log.warning("roofline: pd combined report raised: %r", exc)
 
     async def _profile_until_usable(
         self, ctx: RunnerContext, recorder: Any, arm: _ProfileArm

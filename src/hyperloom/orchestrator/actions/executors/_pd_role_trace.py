@@ -8,20 +8,21 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# The TraceLens steady-state chunk each PD role's trace carries: a prefill engine runs prefill batches only, a
-# decode engine decode batches only.
-ROLE_STEADY_STATE_MODE = {"prefill": "prefilldecode", "decode": "decode_only"}
+# The TraceLens input each PD role's trace yields: a decode engine's trace holds decode steps only, so its steady-state
+# chunk is taken with or without the decode-only label; a prefill engine's few steps are analysed whole.
+ROLE_STEADY_STATE_MODE = {"prefill": "unsplit", "decode": "decode_only_or_generic"}
 
 _TOP_KERNELS = 5
 
 
 def role_analysis_payload(role: str, trace_path: str, framework: str, workspace_path: str = "") -> dict[str, Any]:
-    """Build the non-LLM trace_analyze request for one role's trace."""
+    """Build the non-LLM trace_analyze request for one role's trace; the splitter runs without LLM phase hints."""
     payload: dict[str, Any] = {
         "trace_input": trace_path,
         "framework": framework,
         "analysis_route": "non-llm",
         "steady_state_mode": ROLE_STEADY_STATE_MODE.get(role, "mixed"),
+        "split_llm_inference": False,
         "roofline_output_name": f"kernel_roofline_{role}.json",
     }
     if workspace_path:

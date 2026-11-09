@@ -215,6 +215,14 @@ def _refresh_pods(state: dict[str, Any], spec: LaunchSpec) -> None:
     state["decode_pods"] = [pod for pod in pods if pod["role"] == "decode"]
 
 
+def _role_env(extra_env: dict[str, str], role: str) -> dict[str, str]:
+    """``extra_env`` with an engine role's ``SGLANG_TORCH_PROFILER_DIR`` narrowed to ``<dir>/<role>``."""
+    profiler_dir = str(extra_env.get("SGLANG_TORCH_PROFILER_DIR") or "").rstrip("/")
+    if role not in ("prefill", "decode") or not profiler_dir:
+        return extra_env
+    return {**extra_env, "SGLANG_TORCH_PROFILER_DIR": f"{profiler_dir}/{role}"}
+
+
 def _ssh_pod(
     state: dict[str, Any],
     pod: dict[str, Any],
@@ -226,7 +234,7 @@ def _ssh_pod(
     role = str(pod.get("role") or "")
     ip = str(pod.get("podIP") or "")
     port = int(pod.get("sshPort") or state.get("ssh_port") or 0)
-    body = launch_script(role, str(pod.get("launch_command") or "true"), extra_env, log_ip=ip)
+    body = launch_script(role, str(pod.get("launch_command") or "true"), _role_env(extra_env, role), log_ip=ip)
     needle = cmdline_needle(role, str(state.get("backend") or "atom"))
     payload = _bash_payload(role, body, needle, action)
     info(f"{state.get('backend')} {action}: ssh -> {ip}:{port} role={role}")
