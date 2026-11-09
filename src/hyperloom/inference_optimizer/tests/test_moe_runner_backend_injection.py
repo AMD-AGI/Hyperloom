@@ -38,7 +38,6 @@ _AMD = "mi300x"
 def _hermetic_env(monkeypatch):
     """Neutralise host GPU autodetect + env so AMD-gating is deterministic."""
     monkeypatch.delenv("GPU_TYPE", raising=False)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     # Pin autodetect OFF so non-AMD test cases never see real hardware.
     monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: None)
     for key in (
