@@ -24,7 +24,13 @@ from pathlib import Path
 import pytest
 
 import hyperloom
-from hyperloom.inference_optimizer.session.paths import db_path_for, private_db_path_for, shared_db_path_for
+from hyperloom.inference_optimizer.session.paths import (
+    ENV_LEDGER_DIR,
+    db_path_for,
+    private_db_exists,
+    private_db_path_for,
+    shared_db_path_for,
+)
 from hyperloom.inference_optimizer.session.resume_guard import ensure_resume_safe
 from hyperloom.inference_optimizer.tools import event_counts
 from hyperloom.orchestrator.bus.storage import connection as bus_connection
@@ -171,18 +177,42 @@ def test_the_session_events_tool_reads_the_private_database(tmp_path, own_tmp, c
     assert json.loads(capsys.readouterr().out) == {}
 
 
-def test_db_path_for_names_the_private_database_when_it_cannot_be_examined(tmp_path, own_tmp, monkeypatch):
+def _a_planted_link(where: Path) -> None:
+    target = where.parent.parent / "somebody-elses-file"
+    target.write_text("kept")
+    where.symlink_to(target)
+
+
+def _a_planted_directory(where: Path) -> None:
+    where.mkdir()
+
+
+def _a_file_of_another_account(where: Path) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("a file of another account needs root to make")
+    where.write_text("not ours")
+    os.chown(where, 60999, 60999)
+
+
+@pytest.mark.parametrize("plant", [_a_planted_link, _a_planted_directory, _a_file_of_another_account])
+def test_an_entry_planted_where_the_private_database_would_be_is_not_taken_for_it(tmp_path, own_tmp, plant):
+    """A link, a directory or a file of another account there does not move even a credential-free session onto the
+    private path, where the open would refuse it and the read-only tools would read it."""
     session = _session(tmp_path)
-    private = private_db_path_for(session)
-    real_stat = os.stat
+    where = private_db_path_for(session)
+    where.parent.mkdir(parents=True, mode=0o700)
+    plant(where)
+    assert not private_db_exists(session)
+    assert db_path_for(session) == shared_db_path_for(session)
+    assert database_target(session, SharedState()) == (shared_db_path_for(session), 0o664)
 
-    def refused(path, *args, **kwargs):
-        if Path(path) == private:
-            raise PermissionError(errno.EACCES, "Permission denied")
-        return real_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(os, "stat", refused)
-    assert db_path_for(session) == private, "the caller is refused when it opens it; nothing is made beside it"
+def test_a_ledger_directory_that_is_not_absolute_is_refused_by_name(tmp_path, own_tmp, monkeypatch):
+    monkeypatch.setenv(ENV_LEDGER_DIR, "relative/ledgers")
+    session = _session(tmp_path)
+    for call in (private_db_path_for, db_path_for):
+        with pytest.raises(ValueError, match="HYPERLOOM_LEDGER_DIR must be an absolute path"):
+            call(session)
 
 
 # -- a place that is not safe is refused before anything is made --------------------------------------------------------
@@ -241,6 +271,59 @@ def test_a_sticky_group_writable_temporary_directory_is_accepted_as_a_shared_tmp
     where = private_db_path_for(_session(tmp_path))
     SqliteConnection(where, file_mode=_PRIVATE).raw.close()
     assert where.exists()
+
+
+def test_a_link_planted_as_the_ledger_root_after_the_path_was_resolved_is_refused_not_judged_by_its_target(
+    tmp_path, own_tmp, monkeypatch
+):
+    """When the ledger root does not exist yet, another account can make it a link of its own between the resolving of the
+    path and the checks: a link to a directory that would pass (here one of this account's, ``0700``) must not."""
+    session = _session(tmp_path)
+    where = private_db_path_for(session)
+    safe = tmp_path / "safe"
+    safe.mkdir(mode=0o700)
+    real_realpath, planted = os.path.realpath, []
+
+    def resolving_then_planting(path, *args, **kwargs):
+        resolved = real_realpath(path, *args, **kwargs)
+        if Path(path) == where.parent and not planted:
+            where.parent.parent.symlink_to(safe)
+            planted.append(where.parent.parent)
+        return resolved
+
+    monkeypatch.setattr(os.path, "realpath", resolving_then_planting)
+    _no_sqlite(monkeypatch)
+    monkeypatch.setattr(os, "mkdir", lambda *args, **kwargs: pytest.fail("a directory was made through the link"))
+    with pytest.raises(DatabaseNotPrivate) as raised:
+        SqliteConnection(where, file_mode=_PRIVATE)
+    assert planted and str(raised.value).startswith(f"{planted[0]} (owner ") and "is a link" in str(raised.value)
+    assert list(safe.iterdir()) == [], "nothing was written through the link"
+
+
+def test_a_link_made_where_a_directory_was_about_to_be_made_is_refused_before_anything_is_made_below_it(
+    tmp_path, own_tmp, monkeypatch
+):
+    """The ledger root is made by another account as a link between the looking for it and the making of it: the
+    making finds it there, and must not go on to make the directory below it, through the link."""
+    session = _session(tmp_path)
+    where = private_db_path_for(session)
+    safe = tmp_path / "safe"
+    safe.mkdir(mode=0o700)
+    real_mkdir, attempted = os.mkdir, []
+
+    def planting(path, *args, **kwargs):
+        attempted.append(Path(path))
+        if Path(path) == where.parent.parent and not where.parent.parent.is_symlink():
+            where.parent.parent.symlink_to(safe)
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "mkdir", planting)
+    _no_sqlite(monkeypatch)
+    with pytest.raises(DatabaseNotPrivate) as raised:
+        SqliteConnection(where, file_mode=_PRIVATE)
+    assert "is a link" in str(raised.value)
+    assert attempted == [where.parent.parent], "no directory was made below the link, even to be removed again"
+    assert list(safe.iterdir()) == [], "nothing was made below the link"
 
 
 # -- a file in the private directory that cannot be had ---------------------------------------------------------------

@@ -261,28 +261,38 @@ def shared_db_path_for(session_dir: Path) -> Path:
 
 def private_db_path_for(session_dir: Path) -> Path:
     """Return the path of this account's own coordinator database for a session, outside the session directory (see
-    :data:`PRIVATE_DB_DIR_PREFIX` and :data:`ENV_LEDGER_DIR`); nothing is made there."""
+    :data:`PRIVATE_DB_DIR_PREFIX` and :data:`ENV_LEDGER_DIR`); nothing is made there.
+
+    Raises:
+        ValueError: When ``HYPERLOOM_LEDGER_DIR`` is not an absolute path: a relative one names a different ledger from
+            each working directory.
+    """
     resolved = Path(os.path.realpath(session_dir))
     name = re.sub(r"[^A-Za-z0-9_.-]", "_", resolved.name)[:40] or "session"
     key = hashlib.sha256(os.fsencode(resolved)).hexdigest()[:16]
     named = os.environ.get(ENV_LEDGER_DIR, "").strip()
+    if named and not os.path.isabs(named):
+        raise ValueError(f"{ENV_LEDGER_DIR} must be an absolute path, not {named!r}")
     ledgers = (
         Path(named) if named else Path(os.environ.get("TMPDIR") or "/tmp") / f"{PRIVATE_DB_DIR_PREFIX}{os.geteuid()}"
     )
     return ledgers / f"{name}-{key}" / "coordinator.db"
 
 
+def private_db_exists(session_dir: Path) -> bool:
+    """Whether this account has made its own coordinator database for a session: a regular file of this account's, a
+    link never followed at the end. An entry another account planted there (a link, a file of its own) is not one."""
+    try:
+        info = os.lstat(private_db_path_for(session_dir))
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()
+
+
 def db_path_for(session_dir: Path) -> Path:
     """Return the coordinator database this account uses for a session: its own outside the session directory once it
     has made one, else the one in the session directory."""
-    private = private_db_path_for(session_dir)
-    try:
-        os.stat(private)
-    except FileNotFoundError:
-        return shared_db_path_for(session_dir)
-    except OSError:
-        return private  # not examined: the caller is refused when it opens it
-    return private
+    return private_db_path_for(session_dir) if private_db_exists(session_dir) else shared_db_path_for(session_dir)
 
 
 def asset_root() -> Path:
@@ -409,6 +419,7 @@ __all__ = [
     "make_session_dir",
     "mn_profile_trace_root",
     "deps_cache_root",
+    "private_db_exists",
     "private_db_path_for",
     "resolve_dep_dir",
     "runtime_dir",

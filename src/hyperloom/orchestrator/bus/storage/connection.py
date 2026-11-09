@@ -151,16 +151,19 @@ def _make_database_file(db_path: Path, file_mode: int) -> None:
 
 
 def _require_safe_chain(directory: Path) -> None:
-    """Refuse unless ``directory`` and every directory above it belong to root or this account and cannot be written by
-    the group or others (a sticky one can: it lets nobody rename an entry that is not theirs, and the next directory
-    down is checked to be root's or this account's). SQLite reaches the database, and makes its journal files, by
-    path: a directory on that path in which another account could rename entries would let it put a database of its own
-    where SQLite opens one, between any two lookups."""
+    """Refuse unless ``directory`` and every directory above it are real directories (never a link: one that was there
+    when the path was resolved is gone from it, so one found now was put there since) that belong to root or this
+    account and cannot be written by the group or others (a sticky one can: it lets nobody rename an entry that is not
+    theirs, and the next directory down is checked to be root's or this account's). SQLite reaches the database, and
+    makes its journal files, by path: a directory on that path in which another account could rename entries would let it
+    put a database of its own where SQLite opens one, between any two lookups."""
     for each in (directory, *directory.parents):
         try:
-            info = os.stat(each)
+            info = os.lstat(each)
         except OSError as exc:
             raise DatabaseNotPrivate(_refusal(each, f"cannot be examined ({exc.strerror})")) from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise DatabaseNotPrivate(_refusal(each, "is a link, which another account could point elsewhere"))
         if not stat.S_ISDIR(info.st_mode):
             raise DatabaseNotPrivate(_refusal(each, "is not a directory"))
         if info.st_uid not in (0, _this_account()):
@@ -208,6 +211,7 @@ def _make_private_directories(directory: Path) -> list[Path]:
             try:
                 os.mkdir(path, _OWNER_DIRECTORY)
             except FileExistsError:
+                _require_safe_chain(path)  # made by someone since it was looked for: a real directory, not a link
                 continue
             except OSError as exc:
                 raise DatabaseNotPrivate(_refusal(path, f"cannot be made ({exc.strerror})")) from exc
