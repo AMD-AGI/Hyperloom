@@ -50,6 +50,18 @@ it.
   reading, so a scheduler or an idle server elsewhere on the host blocked
   every card. See [inference-suite](reference/inference-suite.md).
 
+- **`hyperloom-multibranch run` takes the operator's base launch as
+  `--reference-script FILE`, with or without an Arbor agent.** It is the
+  file `hyperloom optimize --reference-script` takes: a shell launch script
+  or a `base_launch.json` frozen elsewhere, which the session freezes as its
+  base without reading any recipe source. Before, only a session with an
+  `--autonomous-agent` could take a base, as an `--agent-launch` record.
+  Every Arbor of such a session is served the frozen base. **Upgrade note:**
+  an `--agent-launch` that is a base launch record, or any `--agent-launch`
+  beside `--reference-script`, now exits 2; pass the record as
+  `--reference-script`. See
+  [Options of `run`](how-to/run-multibranch.md#options-of-run).
+
 - **A `custom` workload's entrypoint is named after the board itself.**
   `--benchmark-scripts-dir` is searched for `custom_<gpu-type>.sh` with the
   board as given, so `mi308x`, `mi325x` and `mi350x` now look for

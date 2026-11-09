@@ -328,6 +328,7 @@ class Session:
             self._reference_dirs(),
             settings.dev_leases,
             settings.agents,
+            settings.reference_script,
             settings.agent_pack,
             settings.agent_launch,
             settings.agent_port,
