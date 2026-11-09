@@ -57,6 +57,7 @@ __all__ = [
     "DRM_VRAM_KEY",
     "ENV_CONC",
     "ENV_EP",
+    "ENV_EVAL_ONLY",
     "ENV_ISL",
     "ENV_MAGPIE_EVAL_LIMIT",
     "ENV_MAGPIE_EVAL_TASKS",
@@ -231,6 +232,7 @@ _inferencex = _PACK.names(
     "random_range_ratio",
     "conc",
     "run_eval",
+    "eval_only",
     "num_prompts",
     "num_warmups",
     "max_model_len",
@@ -245,6 +247,7 @@ ENV_OSL = _inferencex["osl"]
 ENV_RANDOM_RANGE_RATIO = _inferencex["random_range_ratio"]
 ENV_CONC = _inferencex["conc"]
 ENV_RUN_EVAL = _inferencex["run_eval"]
+ENV_EVAL_ONLY = _inferencex["eval_only"]
 ENV_NUM_PROMPTS = _inferencex["num_prompts"]
 ENV_NUM_WARMUPS = _inferencex["num_warmups"]
 ENV_MAX_MODEL_LEN = _inferencex["max_model_len"]

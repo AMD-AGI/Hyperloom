@@ -31,7 +31,7 @@ import errno
 import os
 import stat
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from hyperloom_common.fs_utils import read_text_nofollow
@@ -108,21 +108,31 @@ def _app_owned_dir(path: Path) -> None:
         raise OSError(errno.EPERM, "not a directory owned by the app", str(path))
 
 
-def trusted_admin_dir(worktree: Path) -> Path:
+def trusted_admin_dir(worktree: Path, common: Path | None = None) -> Path:
     """The admin directory of the linked worktree ``worktree``, proven to be the app's.
+
+    The path the gitfile names is resolved before anything is checked, and the resolved path is what is returned and
+    what git is given, so no symlink is followed after the check. Ownership alone does not prove it when whoever writes
+    the worktree writes files the app's uid owns (a sandbox whose user namespace maps its user to the app's): it can
+    lay out an admin directory of its own beside a gitfile naming it. One in the worktree is refused; for one it lays
+    out anywhere else it writes, a caller that knows the repository it made the worktree from passes its git directory
+    as ``common``, and the admin directory must then be one of that repository's.
 
     Raises:
         OSError: ``.git`` is not a gitfile, or the directory it names is not an
             app-owned admin directory of a repository whose ``worktrees`` entry
-            points back at this gitfile.
+            points back at this gitfile, or of ``common`` when given.
     """
     gitfile = worktree / _GITFILE
     first = read_text_nofollow(gitfile).strip()
     if not first.startswith("gitdir:"):
         raise OSError(errno.EINVAL, "not a gitdir pointer", str(gitfile))
-    admin = Path(first.removeprefix("gitdir:").strip())
-    if not admin.is_absolute():
-        admin = worktree / admin
+    named = Path(first.removeprefix("gitdir:").strip())
+    # Resolved once, here, and only the resolved path is checked and handed to git: a symlink on the way (one the
+    # worktree's writer owns) could be pointed elsewhere between this check and each git run that resolves it again.
+    admin = Path(os.path.realpath(named if named.is_absolute() else worktree / named))
+    if admin.is_relative_to(os.path.realpath(worktree)):
+        raise OSError(errno.EPERM, "the admin dir lies in the worktree, which its writer writes", str(admin))
     _app_owned_dir(admin)
     _app_owned_dir(admin.parent)
     _app_owned_dir(admin.parent.parent)
@@ -131,6 +141,8 @@ def trusted_admin_dir(worktree: Path) -> Path:
         raise OSError(errno.EPERM, "not an admin dir of a linked worktree", str(admin))
     if os.path.realpath(read_text_nofollow(back).strip()) != os.path.realpath(gitfile):
         raise OSError(errno.EPERM, "the admin dir does not belong to this worktree", str(admin))
+    if common is not None and os.path.realpath(admin.parent.parent) != os.path.realpath(common):
+        raise OSError(errno.EPERM, f"the admin dir is not one of the repository {common}", str(admin))
     return admin
 
 
@@ -193,7 +205,7 @@ def worktree_head(worktree: Path | None, *, admin: Path | None = None) -> str:
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
-def _blank_driver_programs(git: list[str], worktree: Path, env: dict[str, str], timeout: float) -> list[str]:
+def blank_driver_programs(git: list[str], worktree: Path, env: dict[str, str], timeout: float) -> list[str]:
     """The ``-c <key>=`` pairs that blank every driver program the config ``git`` reads defines, includes followed.
 
     Raises:
@@ -221,7 +233,12 @@ def _blanked(key: str) -> str:
 
 
 def app_git(
-    worktree: Path, *args: str, timeout: float = _DEFAULT_TIMEOUT_SEC, admin: Path | None = None
+    worktree: Path,
+    *args: str,
+    timeout: float = _DEFAULT_TIMEOUT_SEC,
+    env: Mapping[str, str] | None = None,
+    common: Path | None = None,
+    admin: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``git <args>`` in ``worktree`` against its trusted admin dir, never against what the worktree holds.
 
@@ -230,13 +247,16 @@ def app_git(
     when the app owns it (:func:`trusted_admin_dir`), which proves nothing against an agent that runs as the app's uid.
 
     No program the repository's config names runs: the ``NO_PROGRAMS`` pins, every configured driver program blanked,
-    and no transport. A repository nested in the tree is the caller's to keep out (see the module docstring).
+    and no transport. The driver programs are read from the config just before the command, which reads it again; the
+    config lies in the admin and common directories, the app's, so no one but the app writes a driver in between. A repository nested in the tree is the caller's to keep out (see the module docstring).
+    ``env`` adds variables of the caller's (an index file, an identity) under the ones that keep this so; ``common``
+    is as :func:`trusted_admin_dir`'s, and not used when ``admin`` is given.
 
     Raises:
         OSError: The worktree's git metadata is not the app's, or its config cannot be neutralized (nothing was run).
     """
-    admin = trusted_admin_dir(worktree) if admin is None else admin
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    admin = trusted_admin_dir(worktree, common) if admin is None else admin
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, **(env or {})}
     env.update(
         GIT_CONFIG_NOSYSTEM="1",
         GIT_CONFIG_GLOBAL="/dev/null",
@@ -256,7 +276,7 @@ def app_git(
         f"safe.directory={admin}",
         *NO_PROGRAMS,
     ]
-    argv = [*git, *_blank_driver_programs(git, worktree, env, timeout), *args]
+    argv = [*git, *blank_driver_programs(git, worktree, env, timeout), *args]
     # Decoded as file names are, so a path git prints goes back to git unchanged.
     return subprocess.run(
         argv,
@@ -307,6 +327,7 @@ __all__ = [
     "NO_TRANSPORT",
     "app_git",
     "app_git_diff",
+    "blank_driver_programs",
     "recorded_admin_dir",
     "repo_root",
     "safe_directory_args",
