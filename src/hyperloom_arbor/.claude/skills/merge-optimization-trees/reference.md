@@ -3,27 +3,26 @@
 Detail behind steps 5–8 of [SKILL.md](SKILL.md). This file covers only what makes two knob states comparable; where GPUs
 are, the storage policy and container permissions are the cluster's own rules.
 
-## Both operating points, always
+## Every operating point, always
 
-Every result is reported at **C8 and C32**. A single-concurrency number is not
-a deliverable, and the two are not the same code path:
+Every result is reported at **every operating point the target names**, at
+least a low and a high concurrency. A single-concurrency number is not a
+deliverable, and the points are not the same code path:
 
 - Batch-shaped gates route on request or row count, not on load. With
-  spec-decode at 5 speculative tokens, verify rows are
-  `concurrency x (1 + spec_tokens)` — 48 rows at C8 against 192 at C32 — and
-  ROCm sparse-attention gates branch on exactly that number. A knob can be
-  admitted at one point and silently rejected at the other.
+  spec-decode, verify rows are `concurrency x (1 + spec_tokens)`, and ROCm
+  sparse-attention gates can branch on exactly that number. A knob can be
+  admitted at one point and silently rejected at another.
 - Launch-width and tiling work tuned at high concurrency can invert at low
-  concurrency. A prefill-gather knee in programs per CU gave large
-  speedups at depth, collapsed on a small input, and **inverted to a
-  slowdown** past the knee.
-- Components can be entirely absent at one point. At C8, all-reduce,
-  shared-expert MoE, sparse prefill and the sparse attention indexer measure
-  **zero time with zero calls**. A feature in those components has no C8 time to
-  remove, so its gain cannot transfer — the Amdahl denominator is different,
-  not merely smaller.
+  concurrency. A change with a knee in programs per CU can win large at depth,
+  much less on a small input, and **be slower** past the knee.
+- Components can be entirely absent at one point. At low concurrency, an
+  all-reduce, a shared-expert MoE, a sparse prefill path or a sparse attention
+  indexer can make **zero calls**. A feature in those components then has no
+  time to remove there, so its gain cannot transfer — the Amdahl denominator
+  is different, not merely smaller.
 
-Keep prompt counts identical across the two points, and give every replay its
+Keep prompt counts identical across the points, and give every replay its
 own output directory so their aggregate files cannot overwrite each other.
 
 ## Warm up before every measured run
@@ -91,21 +90,20 @@ Record the marker counts with the result. A dispatch proof of
 ### Assert the anchor strings against source first
 
 Derive the grep pattern from the marker strings **in the code**, and assert the
-match offline before the campaign starts. It is a two-line test and it has
-repeatedly been the difference between a campaign and a wasted one.
+match offline before the campaign starts. It is a two-line test, and without
+it a campaign can be wasted.
 
-- A harness matching `SwiGLU` collected nothing for a knob whose marker reads
-  `SiluAndMulWithClamp dispatch`. Checking every anchor found several that could
-  never match — enough to discard a large share of the knobs while every run
-  still reported success and every number still looked fine.
+- A harness matching `SwiGLU` collects nothing for a knob whose marker reads
+  `SiluAndMulWithClamp dispatch`, and discards the knob while every run still
+  reports success and every number still looks fine.
 - Substring patterns fail on hyphenation and on wording drift between a knob's
   name and its log line: `hidden quant` does not match
   `hidden-state MXFP8 producer`.
-- **A marker that fires in both states proves nothing about the knob.**
-  `SiluAndMulWithClamp dispatch:` logs an unrelated op's bound method and
-  appears whether the fusion knob is on or off; the knob's own marker was a
-  different string that also had to be paired with a second line confirming the
-  consumer *admitted* the fusion. Prefer markers of the form
+- **A marker that fires in both states proves nothing about the knob.** A
+  line such as `SiluAndMulWithClamp dispatch:` that logs an unrelated op's
+  bound method appears whether the fusion knob is on or off. The knob needs
+  its own marker, and may need a second line confirming the consumer
+  *admitted* the fusion. Prefer markers of the form
   `knob=<0|1> <deciding input> -> <path chosen>`.
 
 ### `logger.info_once` reports the first call, not the run
@@ -113,13 +111,13 @@ repeatedly been the difference between a campaign and a wasted one.
 This is the single most misleading instrument in the set. A marker reading
 
 ```
-DSv4.1 sparse MLA decode: knob=1 batch=<large> -> Triton decode (base path)
+my feature: knob=1 batch=<large> -> base path
 ```
 
-was read as "this feature declines at C32, so it is inert there". It was not
-inert: later decode steps ran smaller batches that fell inside the kernel's
-row band, it dispatched, and it killed the server. The wrong reading survived
-into the documentation.
+says only what the first call did. It does not mean "this feature declines at
+this operating point, so it is inert there": later decode steps can run
+smaller batches that fall inside the kernel's row band, dispatch it, and kill
+the server.
 
 For any knob gated on batch size, sequence length or context length, the first
 log line is the *least* informative one. Count dispatches, or log once per
@@ -131,10 +129,9 @@ When a set of knobs fails as a set, halving the ON set finds the culprit in
 `log2(N)` runs. The bisect is only valid if these hold:
 
 - **Re-run the control in the environment's CURRENT state.** Not the state it
-  had before the failures. A container degraded over one session from passing
-  every control run to failing most of them, and was fixed by recreating it;
-  without a control re-check after the failures, every knob would have been
-  blamed for the container.
+  had before the failures. A container can degrade over a session from passing
+  every check to failing most of them; without a control re-check after the
+  failures, every knob is blamed for the container.
 - **Confirm each step's environment actually took effect.** Read the marker and
   check the knob you turned off reads `knob=0` and its feature marker is
   absent. A bisect step that silently did not apply points at the wrong half.
@@ -165,9 +162,10 @@ usually far larger than the effect being chased.
 
 Related: attribute the gain to the right thing. A treatment arm beating an
 *older* baseline tells you about the whole tree. Only the paired control —
-same tree, knob off — isolates the knob. A lean tree measuring well above a
-stock baseline looked like a knob win; its own paired control measured the
-same, so the knobs were flat and the merged tree had earned all of it.
+same tree, knob off — isolates the knob. A lean tree can beat the stock
+baseline by a wide margin and look like a knob win while its own paired
+control measures the same: then the knobs are flat and the merged tree earned
+all of it.
 
 ## Interaction edges from profiles
 
@@ -191,8 +189,8 @@ For every candidate, whether kept or **banked**:
 - class (NEW / ALT / DUP) and the evidence for it — shared files, shared
   functions, shared new symbols
 - knob name and default
-- measured result at C8 and C32, per seed, against a baseline from the same
-  node and the same session
+- measured result at every operating point, per seed, against a baseline from
+  the same node and the same session
 - dispatch proof for both knob states
 - for a banked candidate: which candidate beat it, on what measured grounds,
   and **one sentence on what it does differently from the winner**
@@ -221,7 +219,7 @@ For the final tree:
 
 - base commit, and any sibling repos with their branches
 - the exact knob configuration, including the knobs left off
-- both operating points at three seeds
+- every operating point at three seeds
 - node identity
 - the list of dropped features with reasons
 

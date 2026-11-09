@@ -8,7 +8,7 @@ onto the integrated tree, whatever the lane started from.
 
 For addition k: merge it onto integrated k-1 (a 3-way merge, flags merged per
 key). A conflict drops it, reopenable by the next round's dossier, with the
-paths. Otherwise both trees are exported and `ab_model_m.sbatch` measures them on
+paths. Otherwise both trees are exported and the A/B script (`cluster.ab_script`) measures them on
 one node, B C C B, under the pinned gates; `gatecheck.evaluate`, with the
 lane's strongest booked intent choosing the bar, decides:
 

@@ -1,20 +1,18 @@
 """Keep the controller's run loop alive, and write down why it died.
 
-Ported from arbor/mesh2/keeper.py (<fork>/mesh3-confirm a691edc), with the
-mesh's storage helpers replaced by store.py's and the supervisor being
-`python3 -m arbor.parallel run`. Its history, as mesh2 wrote it:
+Ported from an earlier executor's keeper, with its storage helpers replaced by
+store.py's and the supervisor being `python3 -m arbor.parallel run`.
 
-A supervisor once died on a login node and nothing noticed for a long time. Its
-log held a startup warning and no traceback, which is what an external kill
-looks like, and there were two suspects -- the login node's per-process
-memory limit and the per-user cgroup, which had been throttling it -- with no
-record that could tell them apart.
+A supervisor that dies on a login node can go unnoticed. Its log may hold no
+traceback, which is what an external kill looks like, and its suspects -- the
+login node's per-process memory limit and the per-user cgroup -- leave no
+record that tells them apart.
 
 So the keeper does two things. It restarts the supervisor, with backoff,
 whenever it exits. And before restarting it records what distinguishes one
 cause from another: the exit status and signal, how long it ran, the memory of
 its whole process tree at the last sample and at peak, the cgroup's memory
-counters before and after, and the tail of its log. A second silent death then
+counters before and after, and the tail of its log. A silent death then
 arrives with its own diagnosis.
 
 It also kills a supervisor whose heartbeat has gone stale. Every tick rewrites

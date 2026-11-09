@@ -34,8 +34,8 @@ The harness reads it (`arbor/knobs.py`):
   - Record the image digest, concurrency and lengths with the kill.
 - **"Blocked by the image" is not a dead end.** A feature that fails in the pinned image may work in a newer one.
   Record the blocker and the version that fixes it.
-- **Numerics changes need the accuracy gate before a KEEP** (`numerics` in the catalog). A throughput gate alone has
-  kept broken changes.
+- **Numerics changes need the accuracy gate before a KEEP** (`numerics` in the catalog). A throughput gate alone can
+  keep broken changes.
 - **Re-test workarounds on every image change.** Removing a stale one is a candidate optimization.
 - **Bundles:** some wins are a set of settings whose members fail or sit under the gate alone.
   - Apply the catalogued set in one iteration, name the bundle, and prove each member took effect.

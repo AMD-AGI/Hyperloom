@@ -160,7 +160,7 @@ def hot_kernels_from_trace(
     rows: list[dict[str, Any]] = []
     for name, (dur, count) in agg.items():
         cat = categorize_kernel_name(name)
-        if launch_bound_only and cat in COMPUTE_CATEGORIES:
+        if launch_bound_only and (cat in COMPUTE_CATEGORIES or cat == "collective"):
             continue
         rows.append(
             {

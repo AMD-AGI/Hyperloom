@@ -90,6 +90,7 @@ class FuseRequest:
     gpu: str
     agent: FuseAgentOptions
     max_recipes: int
+    deadline_unix: float
     smoke: SmokeOptions
     gpu_arch: str
     layout: ServingLayout

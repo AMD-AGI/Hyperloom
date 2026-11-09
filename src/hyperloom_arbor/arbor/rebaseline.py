@@ -1,7 +1,7 @@
 """One scale for a rolling campaign's numbers, across the nodes its chunks land on.
 
 A rolling chunk measures the current tree on its own node and makes that the bar
-(scripts/model-m-campaign/rebase_bar.py), so the gate and the agent compare against the
+(the campaign launcher's rebaseline step), so the gate and the agent compare against the
 node they run on. Read in sequence, though, the bar then jumps with the node: on a slower
 node it drops, even after several KEEPs, which reads as a regression. So the scale
 is interpolated instead of jumping with the node.
@@ -62,7 +62,7 @@ def applies(campaign, session=None) -> tuple[bool, str]:
     return True, f"{len(dirs)} direction(s) from the dossier"
 
 
-# rebase_bar.py's lesson text, for lessons written before they carried the fields:
+# The rebaseline step's lesson text, for lessons written before they carried the fields:
 # "bar rebased on <node> (job <id>): <old> -> <new> (<rel>), <secondary> <old> -> <new>; ..."
 _PRIMARY = re.compile(r"bar rebased on \S+ \(job [^)]*\): (\S+) -> ([-+.\deE]+)")
 _SECONDARY = re.compile(r"-> [-+.\deE]+(?: \([^)]*\))?, \S+ (\S+) -> ([-+.\deE]+|None);")
