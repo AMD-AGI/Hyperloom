@@ -28,6 +28,7 @@ from inference_suite import framework_version
 from inference_suite.contracts import FailedStep
 from inference_suite.framework_probe import FrameworkProbeError, probe_install, run_probe
 from inference_suite.frameworks import Framework
+from inference_suite.recipe.image_version import recipe_image_facts
 
 IMPORT_ERROR_LOG = (
     "Traceback (most recent call last):\n  File \"x.py\", line 1\nModuleNotFoundError: No module named 'sglang_patch'\n"
@@ -458,7 +459,7 @@ def test_a_probe_that_says_nothing_of_the_framework_leaves_the_verdict_to_the_lo
 ) -> None:
     """A probe that could not start or that failed for another reason, or a version that cannot be read, says nothing
     of the install: it is left to the logs as if no step were named, so the test is run again."""
-    details = [framework_version.check(None, "0.5.0").detail]  # type: ignore[union-attr]
+    details = [framework_version.check(None, recipe_image_facts("lmsysorg/sglang:v0.5.0-rocm700", None)).detail]  # type: ignore[union-attr]
     for python, program in ((str(tmp_path / "no-such-python"), "pass"), (_bare_interpreter(tmp_path), "1/0")):
         with pytest.raises(FrameworkProbeError) as refused:
             run_probe(python, program, (), {}, cwd=tmp_path)

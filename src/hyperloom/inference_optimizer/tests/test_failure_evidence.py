@@ -367,9 +367,11 @@ class TestAnUnknownFrameworkVersion:
         from inference_suite import framework_version
         from inference_suite.framework_probe import FrameworkProbeError, probe_install, run_probe
         from inference_suite.frameworks import Framework
+        from inference_suite.recipe.image_version import recipe_image_facts
 
         bare = self._bare_interpreter(tmp_path)
-        details = {"unversioned": framework_version.check(None, "0.5.0").detail}  # type: ignore[union-attr]
+        tagged = recipe_image_facts("lmsysorg/sglang:v0.5.0-rocm700", None)
+        details = {"unversioned": framework_version.check(None, tagged).detail}  # type: ignore[union-attr]
         probes = {
             "not-installed": lambda: probe_install(bare, Framework.SGLANG, {}, cwd=tmp_path),
             "import-raised": lambda: run_probe(bare, "import sglang_patch", (), {}, cwd=tmp_path),

@@ -210,7 +210,7 @@ def _measured_invocation(config: SuiteConfig, client: ClientTool | AgentxTool) -
 
 def _provisional_check(base: BaseLaunch) -> VersionCheck:
     """The version check a launch is composed with before the probe answers; :meth:`_Round._hold_framework` replaces it."""
-    return VersionCheck.NOT_APPLICABLE if base.image.framework_version is None else VersionCheck.PASSED
+    return framework_version.unheld(base.image) or VersionCheck.PASSED
 
 
 @dataclass(frozen=True)
@@ -387,7 +387,7 @@ class _Round:
             install = probe_install(python, launch.framework.name, env, cwd=self.layout.framework_cwd)
         except FrameworkProbeError as exc:
             return Stop(FailedStep.FRAMEWORK_VERSION_UNKNOWN, str(exc))
-        verdict = framework_version.check(install.version, launch.framework.recipe_min_version)
+        verdict = framework_version.check(install.version, launch.base.image)
         if isinstance(verdict, VersionRefusal):
             return Stop(verdict.step, verdict.detail)
         held = replace(launch.framework, installed_version=install.version or UNVERSIONED, version_check=verdict)

@@ -20,6 +20,14 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A recipe image whose tag names no framework version no longer refuses an
+  older install.** For an untagged image such as
+  `lmsysorg/sglang-rocm:muse-spark-open`, the version InferenceSuite assumes
+  (the framework's latest release at resolve time) is recorded but no longer
+  held as a minimum, and `launch.json` reports `version_check:
+  assumed_not_held` with the installed version. Before, such a round stopped
+  with `framework_version_too_old` even when the server ran exactly the recipe's
+  image. A version read from the image tag is still held.
 - **The base launch can be resolved from InferenceX at a given commit.**
   `--inferencex-commit SHA` on `hyperloom optimize`, `hyperloom-multibranch
   run` and `python -m inference_suite resolve`, and

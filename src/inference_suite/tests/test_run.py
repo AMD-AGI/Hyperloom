@@ -58,7 +58,7 @@ from inference_suite.framework_probe import FrameworkInstall, FrameworkProbeErro
 from inference_suite.load.scriptable import scriptable_base
 from inference_suite.parser_check import FlagRefusal, RefusedFlag
 from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
-from inference_suite.recipe.image_version import NO_RECIPE_IMAGE
+from inference_suite.recipe.image_version import NO_RECIPE_IMAGE, recipe_image_facts
 from inference_suite.runtime import server as runtime_server
 from inference_suite.runtime import watch
 from inference_suite.runtime.phases import Phase
@@ -680,6 +680,22 @@ def test_a_round_refused_before_its_server_starts_writes_a_failed_report(rig, mo
     layout = RunLayout(Path(config.paths.run_dir))
     assert not layout.server_log.exists() and report.server is None
     assert Report.from_document(json.loads(layout.report.read_text())) == report
+
+
+def test_an_install_below_a_version_assumed_for_an_untagged_recipe_image_still_runs_and_records_it_unheld(rig):
+    rig.base = replace(rig.base, image=recipe_image_facts("lmsysorg/sglang-rocm:muse-spark-open", "v0.5.23"))
+    rig.base_path.write_text(json.dumps(rig.base.to_document()))
+    rig.installed = "0.5.21+gc722c0a1"
+
+    result = run.run_round(rig.config("r1"))
+
+    assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
+    framework = Launch.from_document(json.loads(result.layout.launch.read_text())).framework
+    assert (framework.installed_version, framework.recipe_min_version, framework.version_check) == (
+        "0.5.21+gc722c0a1",
+        "0.5.23",
+        VersionCheck.ASSUMED_NOT_HELD,
+    )
 
 
 def test_a_flag_the_parser_refuses_names_the_candidate_layer(rig):
