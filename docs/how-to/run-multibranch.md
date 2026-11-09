@@ -33,6 +33,7 @@ session directory left behind. Only the image check itself runs later, in the ne
 | `HYPERLOOM_IMAGE_CHECK` | no | `warn` (default) logs a failing fact of the rule pack about the image, `strict` fails the command before PRELUDE (exit 1), `off` checks nothing. Any other value is a usage error. |
 | `INFERENCE_SUITE_TOOL_CACHE` | no | The tool cache `install.sh` staged the pinned InferenceX client in, which every test runs. Default `inference-suite-tools` under the dependency cache. Without a staging there that verifies, the command fails, naming `python -m inference_suite stage --tool-cache <dir>`. |
 | `KB_STORE_URL`, `KB_STORE_TOKEN` | no | Both set: PRELUDE reads warm-start leads from the Recipe KB and CLOSE writes the final recipe back. Neither set: no Recipe KB. Only one set is refused. |
+| `HYPERLOOM_AGENTX_EARLY_STOP` | no | AgentX checkpoint mode: `shadow` (default here), `enforce` or `off`. Read once when the session starts and kept in `MB-manifest.json`, so a resumed session keeps it. Any other value is a usage error. |
 
 The short-prompt and long-context consistency checks are on by default and, when a test runs them, run on its own
 server, reading a prompt set staged in this host's runner cache (`HYPERLOOM_RUNNER_CACHE`). `HYPERLOOM_SHORT_PROMPTS`
@@ -40,6 +41,17 @@ names the short-prompt set's key and `HYPERLOOM_LONG_CONTEXT` the long-context s
 Unset, each uses the session model's own set: the local measurement stages it when it is missing, `--measurement
 hosted` runs the check only when it is already staged. A named set that is not staged refuses the measurement before
 any test starts.
+
+The AgentX checkpoint judges only explore tests of a session graded on `p50_interactivity`: each one's median
+interactivity over the first 1800 s of profiling against the median its parent commit recorded, as single-lineage
+does. In `shadow` the test runs to its end and its result carries the ruling (`agentx_checkpoint`: both medians, the
+drop, and `trails`, whether `enforce` would have stopped it); `MB-report.md` says how many explores it judged, how many
+it would have stopped and how those ended (KEEP, REGRESSED, FLAT, ...), and how many ran unjudged for want of a parent
+median. In `enforce` a test that trails by more than 2% is stopped, never retried, and judged REGRESSED with the
+refusal `checkpoint_trailed`; its gain covers the first 1800 s only and it records no value. Confirm, integration,
+FINAL and baseline tests, correctness fixes and retractions are never judged, nor is any test under
+`total_token_throughput`, where P50 is only a guard within a 5% band and nothing shows the first half hour predicts a
+throughput verdict.
 
 `HYPERLOOM_ACTIVE_IMAGE_REF` and `HYPERLOOM_ACTIVE_IMAGE_DIGEST` must name the image the session runs on, and the
 agent CLI the specialists run must be installed. `--measurement hosted` also needs the grant variables its help lists

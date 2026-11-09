@@ -40,6 +40,7 @@ from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeError
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.compile import CompiledEnvironment, EnvironmentCompiler
 from hyperloom.measure.eval_context import check_eval_context
+from hyperloom.measure.checkpoint import CheckpointPlan
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import (
@@ -345,12 +346,14 @@ def generate_profile_point(
 @dataclass(frozen=True)
 class AcceptedMeasurement:
     """What acceptance produces for a test request: its environment and the points it runs, and the short-prompt
-    consistency check and the long-context check the toolbox decided the test runs (``None`` for none)."""
+    consistency check, the long-context check and the AgentX checkpoint the toolbox decided the test runs (``None`` for
+    none)."""
 
     environment: CompiledEnvironment
     points: tuple[Path, ...]
     short_prompts: ShortPromptPlan | None = None
     long_context: LongContextPlan | None = None
+    checkpoint: CheckpointPlan | None = None
 
 
 def accept_measurement(
