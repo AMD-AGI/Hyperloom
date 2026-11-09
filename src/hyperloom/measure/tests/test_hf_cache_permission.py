@@ -116,10 +116,10 @@ def test_a_cache_refusal_survived_before_another_error_is_not_the_cause() -> Non
 @pytest.mark.parametrize("lock", [BUILDER_LOCK, INFO_LOCK])
 def test_a_build_lock_refusal_is_infra_only_when_the_test_ended_on_it(lock: str) -> None:
     ended = TRACEBACK.replace(LOCK, lock)
-    verdict = classify_test_failure(returncode=1, logs=[ended])
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(ended,)))
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, f"{HF_CACHE_PERMISSION}: {lock}")
     later = "ValueError: the prompt is longer than the context"
-    survived = classify_test_failure(returncode=1, logs=[ended + later])
+    survived = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(ended + later,)))
     assert (survived.failure_class, survived.failure_reason) == (
         FailureClass.UNCLEAR,
         f"{PYTHON_EXCEPTION_REASON}: {later}",
