@@ -161,6 +161,22 @@ def test_own_round_tears_its_server_down_and_deletes_its_pidfile(tmp_path):
     assert [mark.phase for mark in clock.marks] == [Phase.SPAWN, Phase.READY, Phase.TEARDOWN]
 
 
+def test_the_server_starts_in_the_run_dir_not_the_callers_directory(tmp_path, monkeypatch):
+    # ``python -m`` puts the current directory first on the import path; the caller's may hold a framework checkout.
+    rig = _Rig(tmp_path)
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    monkeypatch.chdir(caller)
+    lifecycle = rig.lifecycle(rig.config("r1"))
+    assert isinstance(lifecycle.acquire(), Server)
+    try:
+        record = ServerPidfile.read(RunLayout(tmp_path / "r1").server_pid)
+        assert record is not None
+        assert os.readlink(f"/proc/{record.pid}/cwd") == str(tmp_path / "r1")
+    finally:
+        lifecycle.release()
+
+
 def test_boot_then_reuse_rounds_each_copy_their_range_of_the_live_log(tmp_path):
     rig = _Rig(tmp_path)
     boot = rig.lifecycle(rig.config("boot", LifecycleMode.BOOT))

@@ -60,7 +60,7 @@ def atom(tmp_path: Path, request: pytest.FixtureRequest) -> dict[str, str]:
 def _judge(argv: Sequence[str], env: dict[str, str]) -> ParserAnswer:
     probe = parser_probe(Framework.ATOM, argv)
     assert probe is not None
-    return read_answer(run_probe(sys.executable, probe.program, probe.args, env))
+    return read_answer(run_probe(sys.executable, probe.program, probe.args, env, cwd=Path("/")))
 
 
 def _kv(flag: str, value: str, equals: bool) -> tuple[str, ...]:

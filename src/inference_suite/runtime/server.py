@@ -220,7 +220,9 @@ class ServerLifecycle:
             return Stop(FailedStep.GPUS_UNAVAILABLE, busy)
         started = time.monotonic()
         self._clock.mark(Phase.SPAWN, started)
-        spawned = self._spawned = spawn(self._launch.argv, self._server_env(), self._log)
+        spawned = self._spawned = spawn(
+            self._launch.argv, self._server_env(), self._log, cwd=self._layout.framework_cwd
+        )
         self._record(spawned)
         watch = ServerWatch(self._log, self._log_start, self._config.deadlines, started)
         stop = self._await_ready(spawned, watch)

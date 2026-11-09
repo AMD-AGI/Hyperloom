@@ -3,8 +3,9 @@
 
 """Ask the serving interpreter itself about the framework it runs.
 
-A probe runs ``framework_python`` with the launch environment, so it resolves the packages, and the patches on the
-path, that the server will. The install it reports is what the version check (D6) holds to the recipe, and the
+A probe runs ``framework_python`` with the launch environment, in the directory the server starts in
+(:attr:`~inference_suite.contracts.RunLayout.framework_cwd`), so it resolves the packages, and the patches on the path,
+that the server will. The install it reports is what the version check (D6) holds to the recipe, and the
 parser check (D7) runs its program through the same probe.
 """
 
@@ -14,6 +15,7 @@ import json
 import subprocess  # nosec B404 - the probe runs the interpreter the config names
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from inference_suite.frameworks import Framework, framework_facts
 
@@ -55,12 +57,15 @@ class FrameworkInstall:
     version: str | None
 
 
-def run_probe(python: str, program: str, args: Sequence[str], env: Mapping[str, str]) -> Mapping[str, object]:
-    """The JSON object ``program`` prints last when ``python`` runs it with ``args`` in ``env``."""
+def run_probe(
+    python: str, program: str, args: Sequence[str], env: Mapping[str, str], *, cwd: Path
+) -> Mapping[str, object]:
+    """The JSON object ``program`` prints last when ``python`` runs it with ``args`` in ``env``, started in ``cwd``."""
     try:
         completed = subprocess.run(  # nosec B603 - argv[0] is the interpreter the config names
             [python, "-c", program, *args],
             env=dict(env),
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -82,12 +87,12 @@ def run_probe(python: str, program: str, args: Sequence[str], env: Mapping[str, 
     return answer
 
 
-def probe_install(python: str, framework: Framework, env: Mapping[str, str]) -> FrameworkInstall:
-    """The install of ``framework`` that ``python`` imports in ``env``."""
+def probe_install(python: str, framework: Framework, env: Mapping[str, str], *, cwd: Path) -> FrameworkInstall:
+    """The install of ``framework`` that ``python`` imports in ``env``, started in ``cwd``."""
     package = framework_facts(framework).python_package
     if package is None:
         raise FrameworkProbeError(f"{framework.value} ships no package to probe")
-    answer = run_probe(python, _INSTALL_PROGRAM, (package,), env)
+    answer = run_probe(python, _INSTALL_PROGRAM, (package,), env, cwd=cwd)
     origin = answer.get("origin")
     if not origin:
         raise FrameworkProbeError(f"{python} cannot import {package}")

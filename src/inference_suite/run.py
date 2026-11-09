@@ -384,7 +384,7 @@ class _Round:
             return replace(launch, framework=replace(launch.framework, version_check=VersionCheck.NOT_HELD))
         python = self.config.server.framework_python
         try:
-            install = probe_install(python, launch.framework.name, env)
+            install = probe_install(python, launch.framework.name, env, cwd=self.layout.framework_cwd)
         except FrameworkProbeError as exc:
             return Stop(FailedStep.FRAMEWORK_VERSION_UNKNOWN, str(exc))
         verdict = framework_version.check(install.version, launch.framework.recipe_min_version)
@@ -393,7 +393,7 @@ class _Round:
         held = replace(launch.framework, installed_version=install.version or UNVERSIONED, version_check=verdict)
         launch = replace(launch, framework=held)
         try:
-            refusal = parser_check.check(launch, python, env)
+            refusal = parser_check.check(launch, python, env, cwd=self.layout.framework_cwd)
         except parser_check.ParserCheckError as exc:
             return Stop(FailedStep.FLAG_UNKNOWN, str(exc))
         except FrameworkProbeError as exc:
