@@ -221,6 +221,24 @@ def test_atomic_write_group_read_yields_to_mode_and_preserve(tmp_path):
     assert stat.S_IMODE(q.stat().st_mode) == 0o600
 
 
+def test_a_shared_group_read_write_makes_the_missing_parent_before_asking_it_for_its_group(tmp_path):
+    """Outside shared storage a ``shared`` write keeps its private mode, and ``group_read`` asks the parent for it:
+    the parent ``make_parents`` makes, which is not there before the call."""
+    top = tmp_path / "top"
+    top.mkdir()
+    top.chmod(0o2750)
+    if not top.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    p = top / "missing" / "g.json"
+    previous = os.umask(0o027)
+    try:
+        atomic_write_text(p, "x", options=WriteOptions(shared=True, group_read=True, make_parents=True))
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(p.parent.stat().st_mode) == 0o2750, "made under the umask, keeping the setgid of its parent"
+    assert (p.read_text(), stat.S_IMODE(p.stat().st_mode)) == ("x", 0o640)
+
+
 class TestAppendJsonl:
     def test_appends_lines(self, tmp_path):
         p = tmp_path / "log.jsonl"
