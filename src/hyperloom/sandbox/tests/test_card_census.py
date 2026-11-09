@@ -22,6 +22,7 @@ from hyperloom.sandbox.card_occupancy import (
     METHOD_CENSUS,
     METHOD_CENSUS_FDINFO,
     CardReading,
+    Holder,
     Intrusion,
     OwnProcesses,
     read_holders,
@@ -30,6 +31,7 @@ from hyperloom.sandbox.tests.kernel_tree import KernelTree
 
 _SERVER_VRAM = 200 << 30  # what the server's descriptor says, in bytes
 _FOREIGN_VRAM = 3 << 30
+_HELPER_VRAM = 512 << 20  # a helper of the server with memory of its own, more than almost none
 _CARD = 5
 _NOBODY = OwnProcesses(frozenset())
 
@@ -329,13 +331,13 @@ def _test_server(tree: KernelTree, pids: list[int]) -> OwnProcesses:
 def test_two_holders_of_a_card_that_are_both_the_tests_own_processes_with_memory_on_it_are_not_crowded(
     pod: KernelTree,
 ) -> None:
-    """The server and a helper of it that initialised the GPU: two fresh holders, one with almost no memory, both seen in
-    the pod with memory on the card's render node and both the test's. Not a foreign holder."""
+    """The server and a helper of it with memory of its own on the GPU: two holders, both seen in the pod with memory on the
+    card's render node and both the test's. Not a foreign holder."""
     own = _test_server(pod, [101, 102])
     pod.holds(3001, _CARD, vram=_SERVER_VRAM, queues=6)
-    pod.holds(3002, _CARD, vram=4 << 20, queues=0)
+    pod.holds(3002, _CARD, vram=_HELPER_VRAM, queues=0)
     pod.renders(101, _CARD, kib=_SERVER_VRAM // 1024)
-    pod.renders(102, _CARD, kib=(4 << 20) // 1024)
+    pod.renders(102, _CARD, kib=_HELPER_VRAM // 1024)
 
     reading = _read(pod)
 
@@ -352,19 +354,19 @@ def test_a_holder_beyond_what_the_tests_own_processes_explain_is_crowded_and_the
     one, whose memory the pod's processes do not account for either."""
     own = _test_server(pod, [101, 102])
     pod.holds(3001, _CARD, vram=_SERVER_VRAM, queues=6)
-    pod.holds(3002, _CARD, vram=4 << 20, queues=0)
+    pod.holds(3002, _CARD, vram=_HELPER_VRAM, queues=0)
     pod.holds(3003, _CARD, vram=_FOREIGN_VRAM, queues=2)
     pod.renders(101, _CARD, kib=_SERVER_VRAM // 1024)
-    pod.renders(102, _CARD, kib=(4 << 20) // 1024)
+    pod.renders(102, _CARD, kib=_HELPER_VRAM // 1024)
 
     found = _read(pod).intrusions(own, before_test=False)
 
     assert [i.key for i in found] == [("crowded", _CARD), ("unaccounted", _CARD)]
     assert found[0].what == (
-        "3 processes with memory on card 5 at once (host pid 3001 with 200.0 GiB, host pid 3002 with 0.0 GiB, "
+        "3 processes with memory on card 5 at once (host pid 3001 with 200.0 GiB, host pid 3002 with 0.5 GiB, "
         "host pid 3003 with 3.0 GiB), 2 explained; this container's processes with memory on its render node: "
         "pid 101 (the test) with 200.0 GiB: python3 -m server --rank=101; "
-        "pid 102 (the test) with 0.0 GiB: python3 -m server --rank=102"
+        "pid 102 (the test) with 0.5 GiB: python3 -m server --rank=102"
     )
 
 
@@ -388,7 +390,7 @@ def test_a_process_of_the_pod_that_is_not_the_tests_explains_no_holder(pod: Kern
 def test_a_forked_child_sharing_its_parents_drm_file_explains_no_second_holder(pod: KernelTree) -> None:
     own = _test_server(pod, [101, 102])
     pod.holds(3001, _CARD, vram=_SERVER_VRAM, queues=6)
-    pod.holds(3002, _CARD, vram=4 << 20, queues=0)
+    pod.holds(3002, _CARD, vram=_HELPER_VRAM, queues=0)
     pod.renders(101, _CARD, kib=_SERVER_VRAM // 1024, client="101-3")
     pod.renders(102, _CARD, kib=_SERVER_VRAM // 1024, client="101-3")
 
@@ -404,9 +406,9 @@ def test_plain_census_still_allows_one_holder_with_memory_per_card_and_says_the_
     """Where the render nodes' descriptors cannot be read, two holders are one too many, however many the test has."""
     own = _test_server(pod, [101, 102])
     pod.holds(3001, _CARD, vram=_SERVER_VRAM, queues=6)
-    pod.holds(3002, _CARD, vram=4 << 20, queues=0)
+    pod.holds(3002, _CARD, vram=_HELPER_VRAM, queues=0)
     pod.renders(101, _CARD, kib=_SERVER_VRAM // 1024)
-    pod.renders(102, _CARD, kib=(4 << 20) // 1024)
+    pod.renders(102, _CARD, kib=_HELPER_VRAM // 1024)
     real = os.scandir
 
     def refuse(path: object):
@@ -423,7 +425,69 @@ def test_plain_census_still_allows_one_holder_with_memory_per_card_and_says_the_
     found = reading.intrusions(own, before_test=False)
     assert [i.key for i in found] == [("crowded", _CARD)]
     assert found[0].what.startswith(
-        "2 processes with memory on card 5 at once (host pid 3001 with 200.0 GiB, host pid 3002 with 0.0 GiB), "
+        "2 processes with memory on card 5 at once (host pid 3001 with 200.0 GiB, host pid 3002 with 0.5 GiB), "
         "1 explained; the render node's descriptors were not read ("
     )
     assert "cannot be listed: Permission denied" in found[0].what
+
+
+def test_a_launcher_with_no_queue_and_almost_no_memory_beside_its_scheduler_does_not_crowd_the_card(
+    tmp_path: Path,
+) -> None:
+    """A real server's card in a pod: the kernel lists its scheduler (9.08 GiB, six queues) and the launcher that started
+    it (``python -m sglang.launch_server``, the parent of every scheduler), which opened the GPU and holds a few MiB and no
+    queue; the launcher's render descriptor says 0 KiB. The kernel names both by host ids, the pod by ids of its own. The
+    launcher holds almost nothing: one holder counts, the scheduler, which the test's own process explains."""
+    tree = KernelTree(tmp_path, pid_namespace="pid:[4026532001]")
+    scheduler_vram = 9298 << 20  # 9.08 GiB
+    tree.holds(3803968, 0, vram=2 << 20, queues=0)
+    tree.holds(3804483, 0, vram=scheduler_vram, queues=6)
+    tree.process(828000, command=("python3", "-m", "hyperloom.measure.runner"))
+    tree.process(828224, parent=828000, command=("python", "-m", "sglang.launch_server", "--tp", "8"))
+    tree.process(828685, parent=828224, command=("sglang::scheduler_TP0",))
+    tree.renders(828224, 0, kib=0)
+    tree.renders(828685, 0, kib=scheduler_vram // 1024)
+    own = OwnProcesses(frozenset({828000}), procfs=tree.procfs)
+
+    reading = read_holders([0], kfd=tree.kfd, procfs=tree.procfs)
+
+    assert reading.method == METHOD_CENSUS_FDINFO
+    assert sorted((h.pid, h.vram, h.queues) for h in reading.holders) == [
+        (3803968, 2 << 20, 0),
+        (3804483, scheduler_vram, 6),
+    ]
+    assert reading.unaccounted == {0: 2 << 20}
+    assert reading.explained(0, own) == 1
+    assert reading.intrusions(own, before_test=False) == ()
+    assert [i.key for i in reading.intrusions(own, before_test=True)] == [
+        ("host-pid", 3803968, 0),
+        ("host-pid", 3804483, 0),
+    ]
+
+
+def test_a_holder_with_almost_no_memory_is_not_counted_where_the_descriptors_cannot_be_read() -> None:
+    """Without the pod's descriptors the server is the one holder allowed: a second holder with almost no memory does not
+    crowd the card, with no queue or with one; with more memory it does."""
+    server = Holder(_CARD, 3001, "", _SERVER_VRAM, 6)
+
+    def crowded(second: Holder) -> list[tuple[str | int, ...]]:
+        reading = CardReading((server, second), method=METHOD_CENSUS)
+        return [i.key for i in reading.intrusions(_NOBODY, before_test=False)]
+
+    assert crowded(Holder(_CARD, 3002, "", 2 << 20, 0)) == []
+    assert crowded(Holder(_CARD, 3002, "", 2 << 20, 1)) == []
+    assert crowded(Holder(_CARD, 3002, "", _HELPER_VRAM, 0)) == [("crowded", _CARD)]
+
+
+def test_a_tests_process_with_almost_no_memory_on_the_render_node_explains_no_holder(pod: KernelTree) -> None:
+    """The test's launcher with a few MiB on the render node does not make room for a foreign holder beside the server."""
+    own = _test_server(pod, [101, 102])
+    pod.holds(3001, _CARD, vram=_SERVER_VRAM, queues=6)
+    pod.holds(3003, _CARD, vram=_FOREIGN_VRAM, queues=2)
+    pod.renders(101, _CARD, kib=_SERVER_VRAM // 1024)
+    pod.renders(102, _CARD, kib=(2 << 20) // 1024)
+
+    reading = _read(pod)
+
+    assert reading.explained(_CARD, own) == 1
+    assert [i.key for i in reading.intrusions(own, before_test=False)][0] == ("crowded", _CARD)
