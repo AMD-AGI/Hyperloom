@@ -228,6 +228,9 @@ class VariantResult:
     e2el_mean_ms: float | None = None
     gpu_power_avg_w: float | None = None
     gpu_power_by_gpu_w: dict[str, float] | None = None
+    # Reported, never a constraint: the serving cards' counted total power, and tokens per joule.
+    gpu_power_total_w: float | None = None
+    output_tokens_per_joule: float | None = None
     tpot_mean_ms: float | None = None
     input_throughput: float | None = None
     tpot_p90_ms: float | None = None
@@ -279,6 +282,8 @@ class VariantResult:
             "e2el_mean_ms": self.e2el_mean_ms,
             "gpu_power_avg_w": self.gpu_power_avg_w,
             "gpu_power_by_gpu_w": self.gpu_power_by_gpu_w,
+            "gpu_power_total_w": self.gpu_power_total_w,
+            "output_tokens_per_joule": self.output_tokens_per_joule,
             "tpot_mean_ms": self.tpot_mean_ms,
             "input_throughput": self.input_throughput,
             "tpot_p90_ms": self.tpot_p90_ms,

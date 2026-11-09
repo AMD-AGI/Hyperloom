@@ -25,7 +25,7 @@ from inference_suite import stop
 from inference_suite.server_log import death_excerpt
 
 from hyperloom_common.env import env_flag, is_truthy
-from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT, constraint_fields
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT, measured_row_fields
 from hyperloom.common.env_safety import (
     redact_secret_values,
     ungrounded_env_file_reason,
@@ -1311,7 +1311,7 @@ def _measured_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantResult:
         duration_seconds=measurement.get("duration_seconds"),
         ttft_mean_ms=measurement.get("ttft_mean_ms"),
         benchmark_backend=measurement.get("benchmark_backend"),
-        **constraint_fields(measurement),
+        **measured_row_fields(measurement),
         tpot_mean_ms=measurement.get("tpot_mean_ms"),
         input_throughput=measurement.get("input_throughput"),
         tpot_p90_ms=measurement.get("tpot_p90_ms"),

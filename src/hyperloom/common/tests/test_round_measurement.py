@@ -53,7 +53,15 @@ def test_a_completed_fixed_round_is_a_valid_measurement_with_every_fixed_key() -
 
 def test_the_measurement_carries_every_key_a_v1_benchmark_report_measurement_carries() -> None:
     v1 = extract_benchmark_measurement({"success": True, "throughput": {"output_throughput": 1.0}})
-    assert set(v1) - {"gpu_power_avg_w", "gpu_power_by_gpu_w"} <= set(round_measurement(_fixed(), None))
+    # The power fields come from the round's gpu_power.json, which benchmark_result adds to either measurement.
+    power = {
+        "gpu_power_avg_w",
+        "gpu_power_by_gpu_w",
+        "gpu_power_total_w",
+        "energy_boundary",
+        "output_tokens_per_joule",
+    }
+    assert set(v1) - power <= set(round_measurement(_fixed(), None))
 
 
 @pytest.mark.parametrize(

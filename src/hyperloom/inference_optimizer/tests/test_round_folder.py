@@ -20,6 +20,8 @@ from inference_suite.tests.test_compose import _launch
 from inference_suite.tests.test_report_contract import _report
 
 _FIXED = FixedMetrics.of({"output_throughput": 1234.5, "completed_requests": 640})
+#: No recorder wrote ``gpu_power.json`` here, and the report's one-card reading gives no serving-card total.
+_NO_RECORDED_TOTAL = {"gpu_power_total_w": None, "energy_boundary": None, "output_tokens_per_joule": None}
 
 
 def _run_dir(tmp_path: Path, *, launch: bool = True, **report_overrides: object) -> Path:
@@ -43,6 +45,7 @@ def test_a_run_dir_is_measured_through_the_mapper(tmp_path: Path) -> None:
         "raw_result_path": str(RunLayout(run_dir).inferencex_result),
         "gpu_power_avg_w": 600.5,
         "gpu_power_by_gpu_w": None,
+        **_NO_RECORDED_TOTAL,
     }
     assert measurement["valid_measurement"] is True
 
@@ -134,4 +137,5 @@ def test_a_v1_report_maps_field_by_field_as_before(tmp_path: Path) -> None:
         "valid_measurement": True,
         "ttft_e2el_source": "benchmark_report",
         "tpot_source": "benchmark_report",
+        **_NO_RECORDED_TOTAL,
     }

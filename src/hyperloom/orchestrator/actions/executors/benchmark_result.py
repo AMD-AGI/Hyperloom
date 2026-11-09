@@ -650,6 +650,33 @@ def _round_gpu_power(
     }
 
 
+#: The boundary a round's tokens per joule is drawn at: the serving cards' own power, without the host's or the node's.
+_ENERGY_BOUNDARY = "gpu"
+#: Throughput units that count tokens; a report that names none is a serving framework's, whose throughput is tokens.
+_TOKEN_THROUGHPUT_UNITS = (None, "tok/s")
+
+
+def _add_gpu_energy_fields(
+    measurement: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
+) -> None:
+    """Report the serving cards' counted total power and the round's output tokens per joule; nothing grades either.
+
+    Added once every other field is settled, since a raw or salvaged result can still replace ``output_throughput``.
+    The tokens per joule is that throughput over the total power, and is ``None`` whenever the total is. A throughput in
+    images or other units counts no tokens, so it gives none.
+    """
+    from ._gpu_power import read_measured_gpu_energy
+
+    total_w = read_measured_gpu_energy(workspace, subprocess_started_unix=subprocess_started_unix)
+    throughput = to_float(measurement.get("output_throughput"))
+    in_tokens = measurement.get("throughput_unit") in _TOKEN_THROUGHPUT_UNITS
+    measurement["gpu_power_total_w"] = total_w
+    measurement["energy_boundary"] = _ENERGY_BOUNDARY if total_w is not None else None
+    measurement["output_tokens_per_joule"] = (
+        round(throughput / total_w, 4) if in_tokens and throughput is not None and total_w else None
+    )
+
+
 def extract_benchmark_measurement(
     report: dict[str, Any] | None,
     *,
@@ -686,6 +713,7 @@ def extract_benchmark_measurement(
         measurement = agentx_measurement(report)
         measurement.update(_round_gpu_power(report, workspace, subprocess_started_unix))
         _add_agentx_timeline_fields(measurement, workspace)
+        _add_gpu_energy_fields(measurement, workspace, subprocess_started_unix)
         return measurement
     measurement = _measurement_from_report(report, workspace, subprocess_started_unix)
 
@@ -719,6 +747,7 @@ def extract_benchmark_measurement(
     # computed rather than measured, and a derived value must not be read as
     # one the benchmark reported.
     measurement["tpot_source"] = origins.get("tpot_mean_ms") or LATENCY_UNAVAILABLE
+    _add_gpu_energy_fields(measurement, workspace, subprocess_started_unix)
     return measurement
 
 
@@ -729,6 +758,7 @@ def _round_folder_measurement(run_dir: Path, subprocess_started_unix: float | No
     measurement.update(_round_gpu_power(folder.report.to_document(), run_dir, subprocess_started_unix))
     if folder.report.agentx is not None:
         _add_agentx_timeline_fields(measurement, run_dir)
+    _add_gpu_energy_fields(measurement, run_dir, subprocess_started_unix)
     return measurement
 
 

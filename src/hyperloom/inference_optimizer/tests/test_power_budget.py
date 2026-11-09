@@ -170,6 +170,50 @@ class TestMeasurementCarriesPower:
         )
         assert integrate_measurement_fields(v.to_dict())["gpu_power_by_gpu_w"] == {"4": 650.0}
 
+    def test_a_measured_grid_row_carries_the_reported_total_and_tokens_per_joule(self, tmp_path):
+        """The planned power-cap sweep is a grid: its rows must carry what each point drew and its tokens per joule."""
+        import time
+        from types import SimpleNamespace
+
+        from hyperloom.orchestrator.actions.executors import _grid_runner
+
+        at = SimpleNamespace(
+            variant=SimpleNamespace(name="v", extra_server_args="", extra_envs={}, note=""), benchmark_timeout_sec=600
+        )
+        measured = SimpleNamespace(
+            workspace=tmp_path, round=SimpleNamespace(proc=SimpleNamespace(returncode=0), started_unix=time.time())
+        )
+        reported = {"gpu_power_total_w": 1405.3, "output_tokens_per_joule": 0.8539}
+        outcome = SimpleNamespace(measurement={"output_throughput": 1200.0, **reported}, measured=measured, warnings=[])
+        row = _grid_runner._measured_row(at, outcome).to_dict()
+        assert {key: row[key] for key in reported} == reported
+
+
+#: Fields a round reports from its energy counters; none of them may move a KEEP decision.
+_REPORTED_ENERGY = {"gpu_power_total_w": 99_999.0, "energy_boundary": "gpu", "output_tokens_per_joule": 1e-6}
+
+
+class TestReportedEnergyDecidesNothing:
+    def test_no_constraint_reads_the_reported_energy_fields(self):
+        from hyperloom.common.perf_metric import CONSTRAINT_FIELDS, REPORTED_POWER_FIELDS
+
+        assert set(REPORTED_POWER_FIELDS) <= set(_REPORTED_ENERGY)
+        assert not set(_REPORTED_ENERGY) & set(CONSTRAINT_FIELDS)
+
+    @pytest.mark.parametrize(
+        ("by_gpu", "verdict", "veto"),
+        [
+            ({"4": 712.0, "5": 712.0}, VERDICT_REVERT, "power_budget_exceeded"),
+            ({"4": 650.0, "5": 650.0}, VERDICT_KEEP, ""),
+        ],
+    )
+    def test_the_verdict_is_the_same_with_them_as_without(self, by_gpu, verdict, veto):
+        state = SharedState(baseline_tput=1000.0, power_budget_w=1400.0)
+        measurement = {"output_throughput": 1200.0, "gpu_power_by_gpu_w": by_gpu}
+        for candidate in (measurement, {**measurement, **_REPORTED_ENERGY}):
+            graded = resolve_graded_comparison(state, candidate, keep_threshold_pct=1.0)
+            assert (graded.verdict, graded.veto_reason) == (verdict, veto)
+
 
 class TestIntegrateDecision:
     def test_the_shared_integrate_decision_reverts_an_over_budget_gain(self):
