@@ -123,6 +123,34 @@ def _flag_pairs(argv: list[str]) -> list[tuple[str, ...]]:
     return found
 
 
+_MOUNTS = ("--bind", "--ro-bind", "--ro-bind-try", "--dev-bind-try", "--symlink", "--tmpfs", "--proc")
+
+
+def _assert_read_only_root(pairs: list[tuple[str, ...]]) -> None:
+    """The system trees are shown read-only, however a host's credential locations make ``/usr`` bound (whole, or entry
+    by entry around a file a link in a home resolves to); the cards' devices are bound on the sandbox's own ``/dev``;
+    and the root is made read-only once everything is mounted."""
+    usr = [pair for pair in pairs if pair[0] in _MOUNTS and (pair[-1] == "/usr" or pair[-1].startswith("/usr/"))]
+    assert usr, "the system tree is shown"
+    assert all(pair[0] in ("--ro-bind-try", "--symlink") for pair in usr), "nothing of it is writable"
+    dev = pairs.index(("--tmpfs", "/dev"))
+    devices = [pairs.index(("--dev-bind-try", node, node)) for node in ("/dev/kfd", "/dev/dri")]
+    assert all(index > dev for index in devices), "the cards' devices are bound on the sandbox's /dev, after its tmpfs"
+    mounts = [index for index, pair in enumerate(pairs) if pair[0] in _MOUNTS]
+    assert pairs.index(("--remount-ro", "/")) > max(mounts), "the root is read-only once everything is mounted"
+
+
+def _system_file() -> Path:
+    """A regular file below ``/usr`` that no sandbox here needs: what a link in a home may resolve to."""
+    for directory in (Path("/usr/share/common-licenses"), Path("/usr/share/doc")):
+        found = (
+            sorted(p for p in directory.glob("*") if p.is_file() and not p.is_symlink()) if directory.is_dir() else []
+        )
+        if found:
+            return found[0]
+    pytest.skip("no regular file below /usr/share/common-licenses or /usr/share/doc on this host")
+
+
 @pytest.fixture(autouse=True)
 def fresh_process(monkeypatch: pytest.MonkeyPatch) -> None:
     """A process that has not been marked hosted, has said nothing yet, and has no app state directory."""
@@ -205,14 +233,43 @@ def test_a_runner_with_no_account_runs_in_bubblewrap_with_its_tree_and_key_writa
     tmp = [pair for pair in pairs if pair[0] == "--bind" and pair[-1] == "/tmp"]
     shm = [pair for pair in pairs if pair[0] == "--bind" and pair[-1] == "/dev/shm"]
     assert len(tmp) == 1 and len(shm) == 1 and tmp[0][1] != shm[0][1]
-    root = pairs.index(("--ro-bind-try", "/usr", "/usr"))
-    devices = [pairs.index(("--dev-bind-try", node, node)) for node in ("/dev/kfd", "/dev/dri")]
-    assert all(index > root for index in devices), "the cards' devices are bound after the root"
+    _assert_read_only_root(pairs)
     bound = [
         pair[1] for pair in pairs if pair[0] in ("--bind", "--ro-bind-try", "--ro-bind") and pair[1] != "/dev/null"
     ]
     assert not [path for path in bound if path in (str(base), str(state)) or path.startswith(f"{state}/")]
     assert not [path for path in bound if path.startswith(f"{base}/") and not path.startswith(f"{directory}/")]
+
+
+def test_a_link_in_the_home_to_a_system_file_leaves_that_file_out_and_the_system_tree_read_only(
+    area: Path, providers: list[LocalSandboxProvider], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A home that holds a program directory on PATH is masked entry by entry around it, each entry where it resolves:
+    # a link there to a file below /usr hides that file, so /usr is bound entry by entry without it (as on a CI
+    # runner whose home links into /usr).
+    fake = FakeBwrap(area)
+    monkeypatch.setattr(confined, "choose_test_isolation", _given(fake.isolation()))
+    target = _system_file()
+    home = area / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    (home / "linked").symlink_to(target)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", f"{home / '.local' / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
+    base = area / "sandboxes"
+    provider = LocalSandboxProvider([_runner()], gpus=(0,), base_dir=base, users=ProcessUsers(plan=RunnerPlan()))
+    providers.append(provider)
+    sandbox = provider.create("runner", role="measurement", timeout_sec=60, metadata={})
+    _wait(lambda: _log_says(sandbox, "runner started"))
+
+    [launch] = fake.launches()
+    argv = launch["argv"]
+    assert isinstance(argv, list)
+    pairs = _flag_pairs(argv)
+    assert sandbox.confined
+    assert ("--ro-bind-try", "/usr", "/usr") not in pairs, "the system tree is bound entry by entry"
+    assert not [pair for pair in pairs if str(target) in pair[1:]], "the file the home links to is left out"
+    _assert_read_only_root(pairs)
+    assert ("--ro-bind-try", "/usr/bin", "/usr/bin") in pairs, "what is beside it is shown"
 
 
 def test_a_template_with_no_card_gets_no_card_device(
