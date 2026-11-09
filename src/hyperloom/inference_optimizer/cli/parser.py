@@ -13,6 +13,7 @@ from typing import NoReturn
 from .constraint_args import add_constraint_arguments
 from .gpu_power_args import add_gpu_power_arguments
 from .optimize_args import (
+    add_base_launch_arguments,
     add_cluster_arguments,
     add_conc_sweep_arguments,
     add_critic_arguments,
@@ -558,6 +559,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add_pd_role_arguments(opt)
     _add_budget_arguments(opt)
     add_workload_arguments(opt)
+    add_base_launch_arguments(opt)
     add_target_arguments(opt)
     add_constraint_arguments(opt)
     add_gpu_power_arguments(opt)

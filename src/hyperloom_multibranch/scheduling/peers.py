@@ -85,7 +85,8 @@ class PeerSetup:
     ``agent_review`` how an Arbor's own review gate is handed over (``AgentSpec.review``: the host reviews, nobody
     does, or ``""`` for neither), ``agent_maps`` the scheduler's side of a mapping branch, ``None`` without agents, and
     ``agent_share_minutes`` the least an agent must have left to run for its branch to wait for cards its lease was
-    refused.
+    refused. ``inferencex_commit`` is the commit a fresh session's base launch reads InferenceX at (``""`` for the
+    head of its ``main``).
     """
 
     layout: SessionLayout
@@ -104,6 +105,7 @@ class PeerSetup:
     agent_review: str = ""
     agent_maps: MapCalls | None = None
     agent_share_minutes: float = SHARE_MINUTES
+    inferencex_commit: str = ""
 
 
 PeerFactory = Callable[[PeerSetup], Peers]

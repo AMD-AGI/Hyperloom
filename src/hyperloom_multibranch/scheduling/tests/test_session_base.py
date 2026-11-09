@@ -24,7 +24,7 @@ from hyperloom_multibranch.scheduling.session_base import freeze_session_base, s
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.specialist.arbor_adapter import read_launch
 from hyperloom_multibranch.tests.base_records import MODEL_ID, base_record, write_record
-from inference_suite import SourceSnapshot
+from inference_suite import InferencexCommitRefused, SourceSnapshot
 from inference_suite.contracts import Workload as LaunchWorkload
 from inference_suite.recipe import sources
 from inference_suite.recipe.resolve import UnreadSource
@@ -44,7 +44,7 @@ def asked(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, object]]:
 
     calls: list[tuple[object, object]] = []
 
-    def fetch(query: object, *, user_file: object = None) -> SourceSnapshot:
+    def fetch(query: object, *, user_file: object = None, inferencex_commit: str = "") -> SourceSnapshot:
         calls.append((query, user_file))
         return SourceSnapshot(None, 1_793_000_000, user_file=user_file, unread=UnreadSource("InferenceX", "offline"))
 
@@ -190,3 +190,35 @@ def test_an_arbor_launch_file_is_served_as_it_is(tmp_path: Path) -> None:
 
     assert served_launch(frozen, str(launch)) == str(launch)
     assert served_launch(frozen, "") == ""
+
+
+def test_a_fresh_session_reads_inferencex_at_the_commit_it_was_given_and_a_resumed_one_reads_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commits: list[str] = []
+
+    def fetch(query: object, *, user_file: object = None, inferencex_commit: str = "") -> SourceSnapshot:
+        commits.append(inferencex_commit)
+        return SourceSnapshot(None, 1_793_000_000, user_file=user_file, unread=UnreadSource("InferenceX", "offline"))
+
+    monkeypatch.setattr(cli_base_launch, "fetch_sources", fetch)
+
+    first = freeze_session_base(tmp_path, WORKLOAD, "", "8a76a78e41")
+    resumed = freeze_session_base(tmp_path, WORKLOAD, "", "0123456789")
+    freeze_session_base(tmp_path / "unpinned", WORKLOAD, "")
+
+    assert commits == ["8a76a78e41", ""]
+    assert resumed == first
+
+
+def test_a_refused_inferencex_commit_leaves_the_session_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(query: object, *, user_file: object = None, inferencex_commit: str = "") -> NoReturn:
+        raise InferencexCommitRefused(f"InferenceX {inferencex_commit} lacks infx.srt_slurm.x.verifier")
+
+    monkeypatch.setattr(cli_base_launch, "fetch_sources", refuse)
+
+    with pytest.raises(PeersUnavailable, match="8a76a78e41 lacks infx.srt_slurm.x.verifier"):
+        freeze_session_base(tmp_path, WORKLOAD, "", "8a76a78e41")
+    assert frozen_base(tmp_path) is None

@@ -336,6 +336,7 @@ class Session:
             REVIEW_HOST if settings.review_gate else REVIEW_OFF,
             MapCalls(self._map_start, self._map_split) if settings.agents else None,
             settings.agent_share_minutes,
+            settings.inferencex_commit,
         )
 
     def _score_with_defaults(self) -> None:

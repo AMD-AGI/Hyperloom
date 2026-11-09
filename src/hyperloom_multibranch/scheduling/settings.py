@@ -151,7 +151,8 @@ class RunSettings:
     ``references`` are the
     directories of reference material the run copies in before its first phase, each with the commit it was taken at.
     ``dev_leases`` is how many dev sandboxes the session lends its specialists at once; 0 lends none. ``playbook`` says
-    which scheduling playbook the session plays."""
+    which scheduling playbook the session plays. ``inferencex_commit`` is the commit a fresh session's base launch reads
+    InferenceX at (``""`` for the head of its ``main``)."""
 
     workload: Workload
     max_hours: float
@@ -173,6 +174,7 @@ class RunSettings:
     stop_after_map: bool = False
     agent_dossier: str = ""
     review_gate: bool = True
+    inferencex_commit: str = ""
 
 
 __all__ = [

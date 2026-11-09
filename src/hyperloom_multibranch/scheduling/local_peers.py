@@ -355,7 +355,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox, host.image.ref)
-    frozen = freeze_session_base(layout.toolbox, workload, setup.agent_launch)
+    frozen = freeze_session_base(layout.toolbox, workload, setup.agent_launch, setup.inferencex_commit)
     base, setup = server_base(frozen.launch), replace(setup, agent_launch=served_launch(frozen, setup.agent_launch))
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)

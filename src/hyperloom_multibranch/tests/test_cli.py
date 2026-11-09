@@ -410,6 +410,16 @@ def test_an_agent_pack_without_an_agent_or_not_one_directory_is_a_usage_error(ex
         _settings(*extra)
 
 
+def test_the_inferencex_commit_is_kept_in_lower_case_and_is_main_s_head_without_one() -> None:
+    assert _settings("--inferencex-commit", "8A76A78E41").inferencex_commit == "8a76a78e41"
+    assert _settings().inferencex_commit == ""
+
+
+def test_an_inferencex_commit_that_is_no_sha_is_a_usage_error() -> None:
+    with pytest.raises(ValueError, match="is not a commit"):
+        _settings("--inferencex-commit", "main")
+
+
 def test_the_agent_launch_file_is_kept_by_its_absolute_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "launch.json").write_text(json.dumps({"server_flags": "--tp 1", "server_env": {}}))

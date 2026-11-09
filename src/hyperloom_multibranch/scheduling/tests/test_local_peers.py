@@ -702,7 +702,7 @@ async def test_a_fresh_session_freezes_its_base_launch_in_the_toolbox_directory_
     monkeypatch.delenv("HL_MODEL_BASE", raising=False)
     queries: list[object] = []
 
-    def offline(query: object, *, user_file: object = None) -> SourceSnapshot:
+    def offline(query: object, *, user_file: object = None, inferencex_commit: str = "") -> SourceSnapshot:
         queries.append(query)
         return SourceSnapshot(None, 1_793_000_000, user_file=user_file, unread=UnreadSource("InferenceX", "offline"))
 
