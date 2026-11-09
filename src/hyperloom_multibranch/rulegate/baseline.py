@@ -19,7 +19,6 @@ from hyperloom.common.perf_metric import (
     GRADED_DURATION,
     GRADED_ERROR_RATE,
     GRADED_INTVTY,
-    GRADED_INTVTY_P50,
     GRADED_OUTPUT,
 )
 from hyperloom.contracts.measurement import Purpose, TestResult
@@ -27,13 +26,15 @@ from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE
 from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, GateRecords
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.rulegate.accuracy import baseline_accuracy
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.inferencex import DispersionThreshold, InferenceXBaseline
 from hyperloom_multibranch.rulegate.readings import UnreadableResult, agentx_reading, inferencex_reading
 
 logger = logging.getLogger(__name__)
 
-# Without these an AgentX comparison is graded on nothing, or found incomparable for every candidate.
-_AGENTX_REQUIRED = (GRADED_INTVTY_P50, GRADED_INTVTY, GRADED_OUTPUT, GRADED_DURATION, GRADED_ERROR_RATE)
+# Without these and the objective's metric an AgentX comparison is graded on nothing, or found incomparable for every
+# candidate.
+_AGENTX_REQUIRED = (GRADED_INTVTY, GRADED_OUTPUT, GRADED_DURATION, GRADED_ERROR_RATE)
 
 
 async def write_inferencex_baseline(
@@ -69,23 +70,25 @@ async def read_inferencex_baseline(store: CommitQuery) -> InferenceXBaseline:
     )
 
 
-async def write_agentx_baseline(store: GateRecords, root_commit: str, baseline: TestRecord) -> BaselineRecord:
-    """The baseline read from one root test, ``baseline``."""
-    reading = agentx_reading(_root_result(baseline, root_commit))
-    record = replace(_agentx_record(root_commit, reading), request_ids=(baseline.request_id,))
+async def write_agentx_baseline(
+    store: GateRecords, root_commit: str, baseline: TestRecord, objective: AgentXObjective
+) -> BaselineRecord:
+    """The baseline read from one root test, ``baseline``, its bar on ``objective``."""
+    reading = agentx_reading(_root_result(baseline, root_commit), objective.metric)
+    record = replace(_agentx_record(root_commit, reading, objective.metric), request_ids=(baseline.request_id,))
     await store.write_baseline(record)
     return record
 
 
-def _agentx_record(root_commit: str, reading: Mapping[str, float]) -> BaselineRecord:
-    missing = [key for key in _AGENTX_REQUIRED if key not in reading]
+def _agentx_record(root_commit: str, reading: Mapping[str, float], graded: str) -> BaselineRecord:
+    missing = [key for key in (graded, *_AGENTX_REQUIRED) if key not in reading]
     if missing:
         raise UnreadableResult(f"the AgentX baseline does not report {', '.join(missing)}")
     return BaselineRecord(
         root_commit,
         values=dict(sorted(reading.items())),
         dispersion_pct={},
-        threshold_pct={GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT},
+        threshold_pct={graded: AGENTX_KEEP_P50_THRESHOLD_PCT},
         request_ids=(),
     )
 

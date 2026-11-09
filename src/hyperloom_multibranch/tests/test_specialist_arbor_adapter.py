@@ -9,10 +9,12 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import pytest
 
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT
 from hyperloom.measure.compile import (
     ComponentLayout,
     PackageBase,
@@ -24,7 +26,11 @@ from hyperloom_multibranch.specialist import arbor_adapter
 from hyperloom_multibranch.specialist.agent_manifest import REFUSED_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, make_ready, root_profile
 from hyperloom_multibranch.specialist.arbor_adapter import (
+    ARBOR_OBJECTIVES,
     ARBOR_PYTHON,
+    OBJECTIVE_KEY,
+    OBJECTIVE_MODULE,
+    OBJECTIVE_SINCE,
     BRANCH_RUN,
     DOSSIER_DIR,
     DOSSIER_PASS,
@@ -435,6 +441,53 @@ def test_arbor_runs_the_pack_the_spec_names_and_one_its_checkout_lacks_is_refuse
     assert not [reason for reason in refusals(config) if "pack" in reason or "script" in reason]
     assert any("agentx-gone" in reason and "pack.yaml" in reason for reason in refusals(missing))
     assert arbor_config(spec, checkout, BRANCH_RUN)["pack"] == "serving"
+
+
+#: Arbor's arbor/objective.py as far as the adapter reads it: the metric keys it optimizes on opt_objective.
+OBJECTIVE_9C455DF = 'KNOWN = {"e2e_norm_intvty_p50": ("max", ""), "total_throughput": ("max", "")}\n'
+OBJECTIVE_E8D31B7 = 'KNOWN = {"p50_interactivity": ("max", ""), "total_throughput": ("max", "")}\n'
+
+
+@pytest.mark.parametrize(
+    ("metric", "written"),
+    [
+        (GRADED_INTVTY_P50, "e2e_norm_intvty_p50"),
+        (TOTAL_TOKEN_THROUGHPUT, "total_throughput"),
+        ("output_throughput", None),
+    ],
+)
+def test_arbor_optimizes_the_metric_the_session_keeps_on(tmp_path: Path, metric: str, written: str | None) -> None:
+    config = arbor_config(replace(_spec(tmp_path), metric=metric), tmp_path / "checkout", BRANCH_RUN)
+
+    assert config.get(OBJECTIVE_KEY) == written
+
+
+@pytest.mark.parametrize(
+    ("objective", "metric", "refused"),
+    [
+        (OBJECTIVE_9C455DF, GRADED_INTVTY_P50, False),
+        (OBJECTIVE_9C455DF, TOTAL_TOKEN_THROUGHPUT, False),
+        (OBJECTIVE_E8D31B7, GRADED_INTVTY_P50, True),
+        (OBJECTIVE_E8D31B7, TOTAL_TOKEN_THROUGHPUT, False),
+        (None, GRADED_INTVTY_P50, False),
+        (None, TOTAL_TOKEN_THROUGHPUT, True),
+    ],
+    ids=["9c455df-p50", "9c455df-total", "e8d31b7-p50", "e8d31b7-total", "older-p50", "older-total"],
+)
+def test_an_arbor_that_cannot_optimize_the_session_s_objective_is_refused_naming_the_commit(
+    tmp_path: Path, objective: str | None, metric: str, refused: bool
+) -> None:
+    files = {**CHECKOUT_FILES, **({OBJECTIVE_MODULE: objective} if objective else {})}
+    checkout = _write(tmp_path / "checkout", files)
+    run = partial(
+        arbor_manifest, replace(_spec(tmp_path), metric=metric), ArborCheckout("arbor", "abc", checkout), BRANCH_RUN
+    )
+
+    if refused:
+        with pytest.raises(ArborRefused, match=f"cannot optimize .*pin Arbor {OBJECTIVE_SINCE} or later"):
+            run()
+    else:
+        assert run().config.get(OBJECTIVE_KEY) == ARBOR_OBJECTIVES[metric]
 
 
 def test_arbor_runs_the_validator_scripts_its_pack_names(tmp_path: Path) -> None:

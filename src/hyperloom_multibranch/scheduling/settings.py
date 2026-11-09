@@ -10,9 +10,10 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 
@@ -29,6 +30,8 @@ SHARE_MINUTES = 63.0
 #: The first port of the blocks the Arbor agents' servers take, unless the run names another. Sessions that share a
 #: machine each name their own, since every agent serves on the host's network.
 AGENT_PORT = 31100
+#: The axis an AgentX session is graded on unless the run names another.
+DEFAULT_AGENTX_OBJECTIVE = AgentXObjective.P50_INTERACTIVITY
 
 
 def sweep_concs(conc: int) -> tuple[int, ...]:
@@ -69,6 +72,7 @@ class Workload:
     replay, whose shape the trace fixes; ``conc`` is the primary operating point of either. ``ep`` is the
     expert-parallel size an AgentX workload is served at; an InferenceX one is served at :data:`DEFAULT_EP`.
     ``agentx_duration_sec`` is an AgentX workload's trace window, ``None`` for the measuring harness's default.
+    ``agentx_objective`` is the axis an AgentX workload is graded on; an InferenceX one is graded on output throughput.
 
     ``gpu_type`` is named, not detected: the toolbox writes it into every measurement spec, built before PRELUDE runs.
     """
@@ -83,6 +87,7 @@ class Workload:
     inferencex: InferenceXShape | None
     ep: int = DEFAULT_EP
     agentx_duration_sec: int | None = None
+    agentx_objective: AgentXObjective = DEFAULT_AGENTX_OBJECTIVE
 
     @property
     def model_basename(self) -> str:
@@ -95,10 +100,10 @@ class Workload:
     @property
     def metric(self) -> str:
         """The metric the session's values are read in: the frontier policy, final selection, the dashboard and the
-        final recipe's metric. AgentX is graded on P50 interactivity, the key its rule gate's baseline is written
+        final recipe's metric. AgentX is graded on its objective's metric, the key its rule gate's baseline is written
         under."""
 
-        return GRADED_INTVTY_P50 if self.inferencex is None else GRADED_OUTPUT
+        return self.agentx_objective.metric if self.inferencex is None else GRADED_OUTPUT
 
     @property
     def profiles_moved_head_on_merge(self) -> bool:
@@ -182,6 +187,7 @@ class RunSettings:
 
 __all__ = [
     "AGENT_PORT",
+    "DEFAULT_AGENTX_OBJECTIVE",
     "DOSSIER_MINUTES",
     "SHARE_MINUTES",
     "SWEEP_FACTORS",

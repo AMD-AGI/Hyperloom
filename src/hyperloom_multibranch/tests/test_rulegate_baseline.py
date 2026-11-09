@@ -13,6 +13,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
+    TOTAL_TOKEN_THROUGHPUT,
 )
 from hyperloom.contracts.measurement import AccuracyValue, Purpose, RoundValue, TestKind, TestRequest
 from hyperloom.contracts.recipe import RecipeDelta
@@ -23,6 +24,7 @@ from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord
 from hyperloom_multibranch.blackboard import LocalBlackboard, codec
 from hyperloom_multibranch.blackboard.tests.factories import delta, result
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.baseline import (
     write_agentx_baseline,
     read_inferencex_baseline,
@@ -134,7 +136,7 @@ async def test_only_a_prelude_baseline_of_the_root_is_a_baseline(session, fields
 async def test_an_agentx_baseline_is_its_one_root_test(session):
     root_test = await session.measured("b0", metrics=AGENTX)
 
-    record = await write_agentx_baseline(session.gate, ROOT, root_test)
+    record = await write_agentx_baseline(session.gate, ROOT, root_test, AgentXObjective.P50_INTERACTIVITY)
 
     assert (record.values, record.request_ids, record.dispersion_pct) == (AGENTX, ("b0",), {})
     assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
@@ -147,7 +149,22 @@ async def test_an_agentx_root_test_without_what_every_comparison_reads_anchors_n
     partial = {key: value for key, value in AGENTX.items() if key != dropped}
     root_test = await session.measured("b0", metrics=partial)
     with pytest.raises(UnreadableResult, match=dropped):
-        await write_agentx_baseline(session.gate, ROOT, root_test)
+        await write_agentx_baseline(session.gate, ROOT, root_test, AgentXObjective.P50_INTERACTIVITY)
+
+
+async def test_a_total_throughput_agentx_baseline_sets_its_bar_on_total_token_throughput(session):
+    root_test = await session.measured("b0", metrics={**AGENTX, TOTAL_TOKEN_THROUGHPUT: 5000.0})
+
+    record = await write_agentx_baseline(session.gate, ROOT, root_test, AgentXObjective.TOTAL_TOKEN_THROUGHPUT)
+
+    assert record.threshold_pct == {TOTAL_TOKEN_THROUGHPUT: AGENTX_KEEP_P50_THRESHOLD_PCT}
+    assert record.values[TOTAL_TOKEN_THROUGHPUT] == 5000.0
+
+
+async def test_a_total_throughput_agentx_root_test_without_total_token_throughput_anchors_nothing(session):
+    root_test = await session.measured("b0", metrics=AGENTX)
+    with pytest.raises(UnreadableResult, match=TOTAL_TOKEN_THROUGHPUT):
+        await write_agentx_baseline(session.gate, ROOT, root_test, AgentXObjective.TOTAL_TOKEN_THROUGHPUT)
 
 
 def test_a_baseline_written_before_it_named_a_source_reads_back_with_none():
