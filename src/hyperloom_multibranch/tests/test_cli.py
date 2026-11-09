@@ -22,6 +22,7 @@ stops before the grant ends as ``hosted run`` does.
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import json
 import os
@@ -65,6 +66,9 @@ from hyperloom.measure.compile import PackageBase
 from hyperloom.measure.points import PointError
 from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom_multibranch import cli
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
@@ -75,6 +79,7 @@ from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
+from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version, read_manifest
@@ -1223,16 +1228,29 @@ def test_importing_the_command_and_the_session_loads_no_main_flow_runtime() -> N
     assert probe.stdout.strip() == "[]"
 
 
-def _ended_before_final(root: Path) -> SessionLayout:
+def _ended_before_final(root: Path, *, baseline: bool = True) -> SessionLayout:
     """A session directory as a run that ended before FINAL leaves it: the manifest of :func:`_settings`, the root
-    recipe PRELUDE committed, and the report CLOSE wrote with no final choice in it."""
+    recipe PRELUDE committed, the baseline the rule gate wrote on the blackboard unless ``baseline`` is off, and the
+    report CLOSE wrote with no final choice in it."""
 
     layout = SessionLayout(root)
     layout.reports.mkdir(parents=True)
     layout.prelude.mkdir(parents=True)
     _manifest(layout)
     _write(layout.root_recipe, {"components": []})
+    if baseline:
+        gate = LocalBlackboard(layout.blackboard, Writer(Role.GATE, "gate"))
+        asyncio.run(gate.write_baseline(BaselineRecord("r0", {TOTAL_TOKEN_THROUGHPUT: 1.0}, {}, {}, ("t1",))))
     _report(layout)
+    return layout
+
+
+def _killed_in_prelude(root: Path) -> SessionLayout:
+    """A session directory as a run killed with its machine in PRELUDE leaves it: the root committed, its baseline
+    test in flight and so no baseline written, and no report."""
+
+    layout = _ended_before_final(root, baseline=False)
+    layout.report.unlink()
     return layout
 
 
@@ -1770,6 +1788,90 @@ def test_a_restart_finishes_the_session_an_earlier_start_began_and_ends_the_run_
     assert agent_cli == [_settings()], "the session is finished on the settings its manifest holds, not the spec's"
     assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
     assert len(host.stops) == 1
+
+
+@dataclass
+class Restart:
+    """What a restart did, in order: each session it closed with ``final-only`` and each one it started."""
+
+    calls: list[tuple[str, object]]
+
+
+@pytest.fixture
+def restart(agent_binaries: None, host: Host, monkeypatch: pytest.MonkeyPatch) -> Restart:
+    """``final-only`` and ``run_session`` noted in the order they run: the close of a session writes the report a
+    CLOSE that was not stopped writes, the start of one creates its directory and names it, as the real ones do."""
+
+    done = Restart([])
+
+    def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: object) -> int:
+        done.calls.append(("final-only", persisted.layout.root))
+        _report(persisted.layout, stop_reason=persisted.ended.value, error=lifecycle.NO_BASELINE)
+        return 1
+
+    def run_session(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+        done.calls.append(("run", settings))
+        layout = create_session(host.workspace, settings.workload.model_basename, Clock())
+        report_root(layout.root)
+        _report(layout, stop_reason="time_exhausted")
+        return 0
+
+    monkeypatch.setattr(cli, "final_only", final_only)
+    monkeypatch.setattr(cli, "run_session", run_session)
+    return done
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_before_the_baseline_was_recorded_closes_that_session_and_starts_the_specs_again(
+    host: Host, restart: Restart, tmp_path: Path
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-20260101T000000Z-0123abcd")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert [kind for kind, _ in restart.calls] == ["final-only", "run"], "the run goes on; it does not end in a FINAL"
+    assert restart.calls[0][1] == layout.root
+    started = restart.calls[1][1]
+    assert isinstance(started, RunSettings) and started.workload == _settings(*SPEC_RUN_ARGS).workload
+    session = Path(json.loads((host.state_dir / "session.json").read_text(encoding="utf-8"))["session_dir"])
+    assert session != layout.root and session.parent.parent == host.workspace
+    assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_before_the_root_was_committed_starts_the_specs_session_again_at_once(
+    host: Host, restart: Restart, tmp_path: Path
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-20260101T000000Z-0123abcd")
+    layout.root_recipe.unlink()
+    layout.manifest.unlink()
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert [kind for kind, _ in restart.calls] == ["run"], "a session that rooted nothing left nothing to close"
+    assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_stop_while_a_restart_closes_the_session_before_its_baseline_starts_no_other(
+    host: Host, restart: Restart, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-20260101T000000Z-0123abcd")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    def stopped(persisted: PersistedRun, peer_factory: PeerFactory, services: object) -> int:
+        restart.calls.append(("final-only", persisted.layout.root))
+        _report(persisted.layout, stop_reason=SessionStopReason.SIGNAL.value)
+        return 1
+
+    monkeypatch.setattr(cli, "final_only", stopped)
+
+    assert cli.main(["hosted", "run"]) == 1
+
+    assert [kind for kind, _ in restart.calls] == ["final-only"]
+    assert host.exit_document() == {"final": True, "returncode": 1, "stop_reason": "signal"}
 
 
 @pytest.mark.usefixtures("ready_environment")
