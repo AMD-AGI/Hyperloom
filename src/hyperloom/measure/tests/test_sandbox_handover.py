@@ -39,14 +39,16 @@ class _Sandbox:
         return SandboxInfo(self.sandbox_id, "t", dict(self._metadata))
 
     def kill(self) -> None:
+        if self._service.kill_error is not None:
+            raise self._service.kill_error
         self._service.closed(self.sandbox_id)
 
 
 class _Service:
     """A sandbox service that records ``("create", id)``, ``("running", id)`` and ``("close", id)`` in order.
 
-    ``hold`` makes the next create wait until it is set, ``quota`` refuses a create while that many run, and ``fail``
-    makes a create raise.
+    ``hold`` makes the next create wait until it is set, ``quota`` refuses a create while that many run, ``fail``
+    makes a create raise, ``kill_error`` makes a close raise, and ``on_find`` runs at the start of every ``find``.
     """
 
     name = "fake"
@@ -59,6 +61,8 @@ class _Service:
         self.quota: int | None = None
         self.refusals = 0
         self.fail: Exception | None = None
+        self.kill_error: Exception | None = None
+        self.on_find: Callable[[], None] = lambda: None
         self._lock = threading.Lock()
         self._count = 0
 
@@ -87,6 +91,7 @@ class _Service:
         return self.live[sandbox_id]
 
     def find(self, metadata, *, role):
+        self.on_find()
         with self._lock:
             infos = [sandbox.info() for sandbox in self.live.values()]
         return [info for info in infos if all(info.metadata.get(k) == v for k, v in metadata.items())]
@@ -117,7 +122,7 @@ def _in_thread(target: Callable[[], object]) -> tuple[threading.Thread, list[obj
     def run() -> None:
         try:
             landed.append(target())
-        except BaseException as exc:  # noqa: BLE001 - the test reads what the worker raised
+        except Exception as exc:  # noqa: BLE001 - the test reads what the worker raised
             landed.append(exc)
 
     worker = threading.Thread(target=run, daemon=True)
@@ -138,6 +143,7 @@ def test_the_next_sandbox_runs_before_the_handed_over_one_is_closed() -> None:
     pool.hand_over(first)
     assert pool.parked == first.sandbox_id and pool.active == 0, "kept, and its slot is free for the next test"
     second = _acquire(pool, "req-2")  # max_parallel_tests is 1: the kept sandbox is no second test
+    assert pool.active == 1, "closing the kept sandbox gave back no slot of the test that runs"
     assert service.events == [
         ("running", first.sandbox_id),
         ("running", second.sandbox_id),
@@ -320,3 +326,126 @@ def test_a_create_refused_for_quota_keeps_the_old_one_until_the_timeout() -> Non
     assert time.monotonic() - began < 5, "the closed sandbox woke the create at once, not after the quota retry"
     pool.release(second)
     assert service.live == {}
+
+
+def test_a_create_in_flight_leaves_no_room_to_keep_a_sandbox(caplog) -> None:
+    """Two tests at once on a grant of two GPUs: while the second test's sandbox is still being created, the first
+    test's sandbox is not kept for a third, whose sandbox would make three of two GPUs and wait for the quota."""
+    service = _Service()
+    pool = _pool(service, grant=(3, 2), max_parallel_tests=2, timeout=30)
+    first = _acquire(pool, "req-1")
+    service.hold = threading.Event()
+    worker, landed = _in_thread(lambda: _acquire(pool, "req-2"))
+    _until(service.creating.is_set, "req-2's create to begin")
+    pool.note_upcoming({"req-1", "req-2", "req-3"})
+    with caplog.at_level(logging.INFO, logger="hyperloom.measure.sandboxes"):
+        pool.hand_over(first)
+    assert pool.parked is None and first.sandbox_id not in service.live
+    assert "has no room for 3 sandboxes with 3 GPUs" in caplog.text
+    service.hold.set()
+    _joined(worker)
+    [second] = landed
+    assert isinstance(second, RunnerSandbox)
+    service.hold, service.quota = None, 2  # the grant's two GPUs
+    began = time.monotonic()
+    third = _acquire(pool, "req-3")
+    assert service.refusals == 0 and time.monotonic() - began < 5, "req-3's create ran at once"
+    pool.release(second)
+    pool.release(third)
+    assert service.live == {} and pool.active == 0
+
+
+def test_a_kept_sandbox_without_room_beside_two_creates_is_closed_before_the_second() -> None:
+    """The kept sandbox waits for req-2's sandbox; req-3 starts before that one runs and the grant has no room for
+    all three, so the kept one is closed before req-3's create instead of the service refusing it."""
+    service = _Service()
+    pool = _pool(service, grant=(3, 2), max_parallel_tests=2, timeout=30)
+    first = _acquire(pool, "req-1")
+    pool.note_upcoming({"req-1", "req-2", "req-3"})
+    pool.hand_over(first)
+    assert pool.parked == first.sandbox_id
+    service.hold, service.quota = threading.Event(), 2
+    second_worker, second = _in_thread(lambda: _acquire(pool, "req-2"))
+    _until(service.creating.is_set, "req-2's create to begin")
+    third_worker, third = _in_thread(lambda: _acquire(pool, "req-3"))
+    _until(lambda: first.sandbox_id not in service.live, "the kept sandbox to close before req-3's create")
+    assert pool.parked is None
+    service.hold.set()
+    _joined(second_worker)
+    _joined(third_worker)
+    assert service.refusals == 0, "no create was refused for the grant's quota"
+    assert service.events[:2] == [("running", first.sandbox_id), ("close", first.sandbox_id)]
+    for runner in (*second, *third):
+        assert isinstance(runner, RunnerSandbox)
+        pool.release(runner)
+    assert service.live == {} and pool.active == 0
+
+
+def test_a_grant_that_shrank_after_the_hand_over_closes_the_kept_sandbox_before_the_create() -> None:
+    service = _Service()
+    reserved = [0, 0]
+    handover = Handover(3, 2, reserved=lambda: (reserved[0], reserved[1]))
+    pool = SandboxPool(
+        service, {1: "runner-1"}, run_id="run-1", limits=PoolLimits(max_parallel_tests=1, handover=handover)
+    )
+    first = _acquire(pool, "req-1")
+    pool.note_upcoming({"req-2"})
+    pool.hand_over(first)
+    assert pool.parked == first.sandbox_id
+    reserved[:] = [1, 1]  # a branch's dev sandbox took a card of the grant meanwhile
+    second = _acquire(pool, "req-2")
+    assert service.events == [
+        ("running", first.sandbox_id),
+        ("close", first.sandbox_id),
+        ("running", second.sandbox_id),
+    ]
+    assert pool.parked is None and pool.active == 1
+
+
+@pytest.mark.parametrize("failing", ["close", "reserved"])
+def test_a_claim_that_raises_gives_the_slot_back(failing: str) -> None:
+    """Closing the kept sandbox before a create, or counting the grant, raises something unexpected: the test fails
+    and its slot is free for the next one."""
+    service = _Service()
+    reserved: list[Callable[[], tuple[int, int]]] = [lambda: (0, 0)]
+    handover = Handover(3, 2, reserved=lambda: reserved[0]())
+    pool = SandboxPool(
+        service, {1: "runner-1"}, run_id="run-1", limits=PoolLimits(max_parallel_tests=1, handover=handover)
+    )
+    first = _acquire(pool, "req-1")
+    pool.note_upcoming({"req-2", "req-3"})
+    pool.hand_over(first)
+    assert pool.parked == first.sandbox_id
+
+    def broken() -> tuple[int, int]:
+        raise RuntimeError("the leases could not be counted")
+
+    if failing == "close":
+        reserved[0] = lambda: (1, 1)  # no room: the kept sandbox is closed before the create
+        service.kill_error = RuntimeError("the service could not be reached")
+    else:
+        reserved[0] = broken
+    with pytest.raises(RuntimeError):
+        _acquire(pool, "req-2")
+    assert pool.active == 0, "the failed test gave its slot back"
+    service.kill_error = None
+    service.closed(first.sandbox_id)  # a sandbox the pool could not close ends on its own timeout
+    reserved[0] = lambda: (0, 0)
+    third = _acquire(pool, "req-3", timeout_sec=2)
+    pool.release(third)
+
+
+def test_a_hand_over_while_the_pool_closes_keeps_nothing() -> None:
+    service = _Service()
+    pool = _pool(service)
+    first = _acquire(pool, "req-1")
+    pool.note_upcoming({"req-2"})
+    handed: list[None] = []
+
+    def hand_over_once() -> None:  # the test ends while the pool closes, before it forgets what it holds
+        if not handed:
+            handed.append(pool.hand_over(first))
+
+    service.on_find = hand_over_once
+    pool.close()
+    assert handed and pool.parked is None and service.live == {}
