@@ -2,11 +2,11 @@
 
 AgentX is NOT a synthetic fixed-token benchmark. It replays real multi-turn agentic coding sessions ("WEKA traces") — variable-length, long-context (up to 1M tokens), with sub-agent spawning.
 
-## What output_throughput measures
+## What total_throughput measures
 
-`output_throughput` is output tokens per second per GPU, extracted from `request_metrics.throughput.per_gpu.output_tput_tps` in the aiperf aggregate. This is the primary optimization metric.
+`total_throughput` is input and output tokens per second per GPU, extracted from `request_metrics.throughput.per_gpu.total_tput_tps` in the aiperf aggregate: the InferenceX dashboard's tput/GPU, and the primary optimization metric. At AgentX's long contexts most of it is input, so prefill-side work moves it most.
 
-`total_throughput_per_gpu` includes both input and output tokens — useful for understanding prefill vs decode balance but not the optimization target.
+`output_throughput` (output tokens per second per GPU, `per_gpu.output_tput_tps`) is recorded beside it: a decode-side gain that hardly moves the total shows there, and in the interactivity and ITL fields.
 
 ## Measurement characteristics
 

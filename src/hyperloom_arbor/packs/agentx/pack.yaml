@@ -3,9 +3,12 @@ description: "AgentX agentic-coding inference optimization via InferenceX trace 
 
 objective:
   kind: maximize_perf
-  metric: output_throughput
+  # The InferenceX dashboard's tput/GPU: input and output tokens per second per GPU. At AgentX's long contexts the
+  # output is under 1 % of it, so a pack that gated on output_throughput optimized another number than the one reported.
+  # output_throughput stays in every bench_output.json.
+  metric: total_throughput
   direction: max
-  unit: "tok/s"
+  unit: "tok/s/GPU"
   measurement:
     count: 1
     threshold_rel: 1.01
@@ -25,7 +28,7 @@ tools:
   kv_trace_simulator: "tools/kv_trace_simulator.py"
 
 constraints:
-  - "Profile the decode step (rocprofv3) before proposing any change. A change that does not address one of the top-3 ops by GPU time will not move the AgentX metric."
+  - "Profile the decode step on the campaign's own server (rocprofv3) before proposing any change. A change that does not address one of the top-3 ops by GPU time will not move the AgentX metric."
   - "Profile again after every KEEP to see if the bottleneck shifted."
   - "The real work is deep: trace critical paths, edit framework source, write kernels. Knobs are warmup only — exhaust in 2-3 iterations then go deeper permanently."
   - "Every code change must address a real hardware bottleneck confirmed by rocprofv3."
