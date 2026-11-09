@@ -1065,7 +1065,21 @@ def prelude_landed(root: Path) -> bool:
 def persisted_run(root: Path) -> PersistedRun:
     """The session in ``root``, read back from what :meth:`Session._write_manifest` and CLOSE left there, or from what
     a session that was killed left without a CLOSE; raises ValueError naming what keeps FINAL from running over it.
-    Creates nothing. Blocks."""
+    Only the build it ran on may read back what it measured. Creates nothing. Blocks."""
+
+    persisted = persisted_session(root)
+    ran_on, here = read_manifest(persisted.layout.manifest).code_version, code_version()
+    if ran_on != here:
+        raise ValueError(
+            f"the session in {root} ran on {ran_on} and this build is {here}; FINAL and CLOSE read back what that "
+            "build persisted, so run them from it"
+        )
+    return persisted
+
+
+def persisted_session(root: Path) -> PersistedRun:
+    """:func:`persisted_run` on any build: for a session that recorded no baseline, which a restart only closes, so
+    nothing it measured is read back."""
 
     if not root.is_dir():
         raise ValueError(f"{root} is not a directory")
@@ -1074,12 +1088,6 @@ def persisted_run(root: Path) -> PersistedRun:
         manifest = read_manifest(layout.manifest)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"{root} is no multi-branch session that ran: {exc}") from exc
-    ran_on, here = manifest.code_version, code_version()
-    if ran_on != here:
-        raise ValueError(
-            f"the session in {root} ran on {ran_on} and this build is {here}; FINAL and CLOSE read back what that "
-            "build persisted, so run them from it"
-        )
     if not layout.root_recipe.is_file():
         raise ValueError(f"the session in {root} committed no root, so FINAL has nothing to validate")
     return PersistedRun(layout, manifest.settings, ended_before_final(layout))
@@ -1097,6 +1105,7 @@ __all__ = [
     "SessionOutcome",
     "SessionServices",
     "persisted_run",
+    "persisted_session",
     "prelude_landed",
     "recorded_baseline",
 ]
