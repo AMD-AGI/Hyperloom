@@ -7,8 +7,10 @@
 ``run --config <config.yaml> --run-dir <dir>`` runs the round into ``<dir>``, prints its ``report.json`` path and
 exits 0 when the round completed, 1 when it did not. SIGTERM and SIGINT cancel the round, which still reaps what it
 started and writes its report. ``stop --pid-dir <dir>`` prints what it reaped as JSON and exits 1 while a process
-outlives SIGKILL. ``resolve --query <query.json> --gpus <n> --out <base_launch.json>`` reads the sources once and
-writes the base they give, or exits 2 naming why each source holds none. ``stage --tool-cache <dir> [--source
+outlives SIGKILL. ``resolve --query <query.json> --gpus <n> --out <base_launch.json> [--inferencex-commit <sha>]``
+reads the sources once, InferenceX at ``<sha>`` instead of the head of its ``main`` when given, and writes the base
+they give, or exits 2 naming why each source holds none, or why ``<sha>`` is refused: InferenceX has no such commit, or
+it lacks code the resolver runs. ``stage --tool-cache <dir> [--source
 <InferenceX checkout>]`` stages the pinned tools (:func:`inference_suite.staging.ensure_staged`) and prints the
 manifest's sha256; it stages nothing into a cache that already verifies, and exits 2 with ``staging_missing`` when it
 cannot stage or the cache is damaged. ``publish --stagings <dir> [--source <InferenceX checkout>]`` publishes the
@@ -34,7 +36,7 @@ from inference_suite.contracts.config import SuiteConfig
 from inference_suite.contracts.layout import RunDirError
 from inference_suite.contracts.report import FailedStep, RunStatus
 from inference_suite.recipe.resolve import Miss, resolve_base
-from inference_suite.recipe.sources import fetch_sources
+from inference_suite.recipe.sources import InferencexCommitRefused, fetch_sources
 from inference_suite.recipe.user_file import parse_user_file
 from inference_suite.run import run_round
 from inference_suite.runtime.process import PidfileError
@@ -109,7 +111,11 @@ def _resolve(args: argparse.Namespace) -> int:
         )
     except (OSError, ValueError) as exc:
         return _refused(f"{FailedStep.CONFIG_INVALID.value}: {exc}")
-    resolved = resolve_base(query, fetch_sources(query, user_file=user_file), gpus=args.gpus)
+    try:
+        snapshot = fetch_sources(query, user_file=user_file, inferencex_commit=args.inferencex_commit)
+    except InferencexCommitRefused as exc:
+        return _refused(str(exc))
+    resolved = resolve_base(query, snapshot, gpus=args.gpus)
     if isinstance(resolved, Miss):
         for reason in resolved.reasons():
             print(reason, file=sys.stderr)
@@ -152,6 +158,15 @@ def _parser() -> argparse.ArgumentParser:
     resolve_parser.add_argument("--gpus", type=int, required=True, help="the GPUs the session may use")
     resolve_parser.add_argument("--out", type=Path, required=True, help="where to write base_launch.json")
     resolve_parser.add_argument("--user-file", type=Path, help="the operator's own launch file, which is the base")
+    resolve_parser.add_argument(
+        "--inferencex-commit",
+        default="",
+        metavar="SHA",
+        help=(
+            "read InferenceX at this commit (a full sha or a prefix of 7 or more hex digits) instead of the head of"
+            " its main; the cookbooks, vLLM recipes and ATOM catalog are still read at main"
+        ),
+    )
     resolve_parser.set_defaults(handler=_resolve)
     stage_parser = commands.add_parser("stage", help="stage the pinned tools into a tool cache unless it holds them")
     stage_parser.add_argument("--tool-cache", type=Path, required=True, help="the tool cache rounds verify")

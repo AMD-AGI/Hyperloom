@@ -58,7 +58,7 @@ from inference_suite.framework_probe import FrameworkInstall, FrameworkProbeErro
 from inference_suite.load.scriptable import scriptable_base
 from inference_suite.parser_check import FlagRefusal, RefusedFlag
 from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
-from inference_suite.recipe.image_version import NO_RECIPE_IMAGE
+from inference_suite.recipe.image_version import NO_RECIPE_IMAGE, recipe_image_facts
 from inference_suite.runtime import server as runtime_server
 from inference_suite.runtime import watch
 from inference_suite.runtime.phases import Phase
@@ -237,12 +237,19 @@ class _Rig:
         harness_python.chmod(0o755)
         server_script = tmp_path / "fake_server.py"
         server_script.write_text(_SERVER)
+        # The framework python: records the argv it serves and runs the fake server in place of its server module.
+        self.served = tmp_path / "served_argv"
+        self.framework_python = tmp_path / "framework_python"
+        self.framework_python.write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "{self.served}"\nshift 2\nexec "{sys.executable}" "{server_script}" "$@"\n'
+        )
+        self.framework_python.chmod(0o755)
+        self.probed: list[str] = []
         self.eval_script = tmp_path / "fake_eval.py"
         self.eval_script.write_text(_EVAL)
         self.base = _base(
             query=replace(_base().query, workload=Workload.FIXED, isl=_FIXED.isl, osl=_FIXED.osl),
             golden_al=None,
-            entrypoint=(sys.executable, str(server_script)),
             args=("--disable-radix-cache",),
             env={"SGLANG_USE_AITER": "1", "HF_TOKEN": Redacted(hashlib.sha256(_SECRET.encode()).hexdigest())},
         )
@@ -253,8 +260,9 @@ class _Rig:
             self.port = sock.getsockname()[1]
         self.installed = "0.5.23"
         self.refusal: FlagRefusal | None = None
+        self.probe_cwds: list[Path] = []
         monkeypatch.setattr(run, "probe_install", self._probe)
-        monkeypatch.setattr(parser_check, "check", lambda *_args: self.refusal)
+        monkeypatch.setattr(parser_check, "check", self._check)
         monkeypatch.setattr(run, "_lm_eval_version", lambda: "0.4.9")
         monkeypatch.setattr(run, "GpuPowerRecorder", functools.partial(gpu_telemetry.GpuPowerRecorder, query=_AmdSmi()))
         planned = EvalPlan.invocation
@@ -270,9 +278,15 @@ class _Rig:
         self.busy_gpus: str | None = None
         monkeypatch.setattr(runtime_server, "unavailable_gpus", lambda gpus: self.busy_gpus)
 
-    def _probe(self, python, framework, env):
+    def _probe(self, python, framework, env, *, cwd):
         assert env["HF_TOKEN"] == _SECRET
+        self.probe_cwds.append(cwd)
+        self.probed.append(python)
         return FrameworkInstall(python, "3.12.3", "/site-packages/sglang/__init__.py", self.installed)
+
+    def _check(self, launch, python, env, *, cwd):
+        self.probe_cwds.append(cwd)
+        return self.refusal
 
     def config(self, run_dir: str, **changes) -> SuiteConfig:
         base = _config()
@@ -280,6 +294,7 @@ class _Rig:
             base.server,
             base=BaseRef(str(self.base_path), self.base.digest()),
             port=self.port,
+            framework_python=str(self.framework_python),
             source_files={},
             absent_source_files=(),
             env_inherit=("FAKE_CLIENT_CALLS", "HF_TOKEN"),
@@ -335,10 +350,22 @@ def test_a_fixed_round_with_eval_reports_what_it_measured_and_leaves_its_run_dir
     assert report.eval.results_file == "eval/served/results_2026-11-06T00-00-00.json"
     assert report.server is not None and not report.server.reused and report.server.log_range is None
     assert not layout.server_pid.exists()
+    assert rig.probe_cwds == [layout.root, layout.root]
 
     settled = _snapshot(layout.root)
     time.sleep(0.5)
     assert _snapshot(layout.root) == settled
+
+
+def test_the_server_runs_in_the_interpreter_the_round_probed_and_launch_json_records_its_argv(rig):
+    result = run.run_round(rig.config("r1"))
+
+    assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
+    launch = Launch.from_document(json.loads(result.layout.launch.read_text()))
+    assert rig.probed == [str(rig.framework_python)]
+    assert tuple(rig.served.read_text().splitlines()) == launch.argv
+    assert launch.argv[:3] == (str(rig.framework_python), "-m", "sglang.launch_server")
+    assert result.report.launch_digest == launch.digest()
 
 
 def test_gpu_samples_cover_the_measured_window_alone(rig):
@@ -612,7 +639,7 @@ def test_a_round_writes_only_into_an_empty_run_dir(rig):
         run.run_round(config)
 
 
-def _crashed_parser(*_args):
+def _crashed_parser(*_args, **_kwargs):
     raise FrameworkProbeError("the probe exited 1 with no answer: KeyError: 'libamd_smi.so'")
 
 
@@ -653,6 +680,22 @@ def test_a_round_refused_before_its_server_starts_writes_a_failed_report(rig, mo
     layout = RunLayout(Path(config.paths.run_dir))
     assert not layout.server_log.exists() and report.server is None
     assert Report.from_document(json.loads(layout.report.read_text())) == report
+
+
+def test_an_install_below_a_version_assumed_for_an_untagged_recipe_image_still_runs_and_records_it_unheld(rig):
+    rig.base = replace(rig.base, image=recipe_image_facts("lmsysorg/sglang-rocm:muse-spark-open", "v0.5.23"))
+    rig.base_path.write_text(json.dumps(rig.base.to_document()))
+    rig.installed = "0.5.21+gc722c0a1"
+
+    result = run.run_round(rig.config("r1"))
+
+    assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
+    framework = Launch.from_document(json.loads(result.layout.launch.read_text())).framework
+    assert (framework.installed_version, framework.recipe_min_version, framework.version_check) == (
+        "0.5.21+gc722c0a1",
+        "0.5.23",
+        VersionCheck.ASSUMED_NOT_HELD,
+    )
 
 
 def test_a_flag_the_parser_refuses_names_the_candidate_layer(rig):
@@ -739,6 +782,22 @@ def test_an_external_round_measures_a_server_it_neither_starts_nor_holds_to_the_
     launch = Launch.from_document(json.loads(layout.launch.read_text()))
     assert launch.framework.version_check is VersionCheck.NOT_HELD
     assert (pid_dir / "server.pid").exists()
+    assert not runtime_server.stop(pid_dir).survivors
+
+
+def test_an_external_round_on_a_base_with_no_recipe_version_records_the_check_as_not_applicable(rig):
+    pid_dir = rig.tmp / "pids"
+    _user_file_base(rig)
+    boot = rig.config(
+        "boot", workload=WorkloadKind.NONE, fixed=None, lifecycle=Lifecycle(LifecycleMode.BOOT, str(pid_dir))
+    )
+    assert run.run_round(boot).report.run_status is RunStatus.COMPLETED
+
+    result = run.run_round(rig.config("external", lifecycle=Lifecycle(LifecycleMode.EXTERNAL)))
+
+    assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
+    launch = Launch.from_document(json.loads(result.layout.launch.read_text()))
+    assert launch.framework.version_check is VersionCheck.NOT_APPLICABLE
     assert not runtime_server.stop(pid_dir).survivors
 
 

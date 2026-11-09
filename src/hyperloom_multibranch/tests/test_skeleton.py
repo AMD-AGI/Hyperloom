@@ -1008,6 +1008,15 @@ async def test_the_agent_port_of_the_run_reaches_the_peers(tmp_path: Path) -> No
     assert stage.setup.agent_port == 32100
 
 
+async def test_the_inferencex_commit_of_the_run_reaches_the_peers(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.settings = replace(stage.settings, inferencex_commit="8a76a78e41")
+
+    stage._session()
+
+    assert stage.setup.inferencex_commit == "8a76a78e41"
+
+
 @pytest.mark.parametrize(("review_gate", "handed"), [(True, "host"), (False, "off")])
 async def test_the_session_s_review_stands_in_for_each_arbor_s_own(
     tmp_path: Path, review_gate: bool, handed: str

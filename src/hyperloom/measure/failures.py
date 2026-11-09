@@ -33,6 +33,7 @@ from hyperloom.common.failure_signature import (
     IMPORT_ERROR,
     SERVE_FLAG,
     classify_failure,
+    framework_unimportable_line,
 )
 from hyperloom.contracts.measurement import FailureClass
 from hyperloom.measure import log_causes
@@ -134,6 +135,9 @@ SERVER_BOOT_TIMEOUT_REASON = "server_boot_timeout"
 HOST_GPUS_UNAVAILABLE_REASON = "host_gpus_unavailable"
 #: The server went quiet while serving (``FailedStep.SERVER_STALLED``): a hang or a slow candidate end alike.
 SERVER_STALLED_REASON = "server_stalled"
+#: The serving interpreter could not report its framework (``FailedStep.FRAMEWORK_VERSION_UNKNOWN``) in a test that
+#: changed nothing of the framework: the image or the sandbox's environment cannot serve it, whatever the candidate.
+FRAMEWORK_UNIMPORTABLE_REASON = "framework_unimportable"
 #: The steps inference_suite names a round failed at that are not about the candidate, or that name the cause better
 #: than any line of a log that holds only the symptom. Every other step leaves the verdict to the logs.
 _FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
@@ -148,12 +152,6 @@ _FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
 }
 #: The steps whose reason quotes the report's ``failure_detail``, as ``<reason>: <detail>``.
 _DETAILED_STEPS = frozenset({FailedStep.FLAG_UNKNOWN})
-#: What the suite's framework probe says, as ``FailedStep.FRAMEWORK_VERSION_UNKNOWN``, when the serving interpreter
-#: finds no package of the framework at all (``framework_probe.probe_install``). Like a probe whose import raised, it
-#: is the candidate's ``import_error``, the cause a server that died on the same import used to name in its log; a
-#: probe that ran too long or could not start, or a version it could not read, says nothing of the candidate. The probe
-#: says it as the whole detail, so it is taken only at the end of the detail, as the experience ledger takes it.
-_FRAMEWORK_NOT_FOUND = re.compile(r"\scannot import [A-Za-z_][\w.]*\s*\Z")
 #: The two causes an unclear failure names when its log carries them; the reason is ``<prefix>: <the log's line>``.
 #: A failure the log only calls a crashed evaluation names the refused request too, when the log carries one.
 LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
@@ -247,7 +245,9 @@ class FailureEvidence:
     failed on its own says nothing of the server; ``detail`` is what the caller observed of a boot timeout, which the
     return code alone does not say; ``step_failure`` is the step the failed round's ``report.json`` names, with its
     detail, which inference_suite records in place of the return code it exits with; ``unrun`` is ``<error_class>:
-    <message>`` of a failed round refused before it ran, which left no log: the only account of it there is.
+    <message>`` of a failed round refused before it ran, which left no log: the only account of it there is;
+    ``framework_changed`` is whether the test put a rebuilt framework on its server's import path
+    (:attr:`~hyperloom.measure.socket.TestCall.framework_changed`).
     """
 
     logs: tuple[str, ...] = ()
@@ -255,6 +255,7 @@ class FailureEvidence:
     detail: str = ""
     step_failure: StepFailure | None = None
     unrun: str = ""
+    framework_changed: bool = False
 
 
 def classify_test_failure(
@@ -286,7 +287,7 @@ def classify_test_failure(
         return _infra(f"{HUB_RATE_LIMITED}: {refused}")
     reported = evidence.step_failure
     step = reported.step if reported else None
-    by_step = _from_step(reported) if reported else None
+    by_step = _from_step(reported, evidence.framework_changed) if reported else None
     if by_step is not None:
         return by_step
     named = _named_by_logs(text, parts)
@@ -319,10 +320,10 @@ def _from_error_class(error_class: str) -> FailureClassification:
     return FailureClassification(Disposition.PROGRAM_ERROR, failure_reason=f"unknown_error_class:{error_class}")
 
 
-def _from_step(reported: StepFailure) -> FailureClassification | None:
-    """The verdict the failed step decides by itself; ``None`` leaves it to the logs."""
+def _from_step(reported: StepFailure, framework_changed: bool) -> FailureClassification | None:
+    """The verdict the step a round failed at gives by itself; ``None`` leaves it to the logs."""
     if reported.step is FailedStep.FRAMEWORK_VERSION_UNKNOWN:
-        return _unimportable_framework(reported.detail.strip())
+        return _framework_unimportable(reported.detail.strip(), framework_changed)
     if reported.step not in _FAILED_STEP_VERDICTS:
         return None
     failure_class, reason = _FAILED_STEP_VERDICTS[reported.step]
@@ -331,10 +332,16 @@ def _from_step(reported: StepFailure) -> FailureClassification | None:
     return FailureClassification(Disposition.FAILED, failure_class, reason)
 
 
-def _unimportable_framework(detail: str) -> FailureClassification | None:
-    """The candidate's ``import_error`` when the framework probe found no framework or its import raised, else ``None``."""
-    line = log_causes.one_line(detail) if _FRAMEWORK_NOT_FOUND.search(detail) else log_causes.import_error(detail)
-    return _candidate(f"{IMPORT_ERROR}: {line}") if line else None
+def _framework_unimportable(detail: str, changed: bool) -> FailureClassification | None:
+    """The probe found no framework or its import raised: the rebuilt framework broke the import when the test laid one,
+    else the image's own install cannot be imported. Any other probe failure says neither and is left to the logs."""
+    unimportable = framework_unimportable_line(detail)
+    if unimportable is None:
+        return None
+    line = log_causes.one_line(unimportable)
+    if changed:
+        return _candidate(f"{IMPORT_ERROR}: {line}")
+    return _infra(f"{FRAMEWORK_UNIMPORTABLE_REASON}: {line}")
 
 
 def _named_by_logs(text: str, parts: list[str]) -> FailureClassification | None:

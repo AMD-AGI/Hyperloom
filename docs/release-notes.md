@@ -20,6 +20,101 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **An MB AgentX session can be graded on total token throughput.**
+  `hyperloom-multibranch run --workload agentx --agentx-objective
+  total_token_throughput` keeps a change on the round's `total_token_throughput`
+  instead of `e2e_norm_intvty_p50`; the default, `p50_interactivity`, leaves
+  existing sessions as they were. The 3% bar, the P90 and output-throughput
+  guards, the retest and the error-rate threshold are unchanged. The objective is
+  recorded in the manifest and kept on resume; FINAL, the dashboard and
+  `MB-report.md` name it, and the bar's refusal reads
+  `total_throughput_gain_below_threshold`. Its Recipe KB record carries
+  `total_throughput_gain_pct`, not `interactivity_gain_pct`, and does not
+  replace an interactivity champion. Each Arbor is given the objective as its
+  config's `opt_objective` and optimizes it instead of its pack's metric; an
+  Arbor that cannot (before `9c455df` for P50, `df9b55a` for total token
+  throughput) is refused at preflight, except an older
+  one in a P50 session, which runs on its pack's metric as before.
+  `--agentx-objective` with
+  `--workload inferencex` exits 2. Before, an operator had to patch the source
+  to grade on total throughput.
+- **An MB AgentX session's Recipe KB record carries both total throughputs.**
+  The gate now records `total_token_throughput` on each AgentX judgement, so
+  `total_throughput` and `baseline_total_throughput` are written beside the
+  interactivity gain; before, they were always left out.
+- **An Arbor agent on an AgentX session measures with the gate's own round.**
+  Its `component.bench_command` is now `python -m inference_suite run`
+  against its server, on the session's frozen base, trace corpus, seed,
+  concurrency and trace window, writing `report.json` per run; its bench phase
+  is capped at the trace window plus an hour. Before, MB gave it no client,
+  so Arbor ran its pack's `bench_agentx.sh`, which installs its own aiperf,
+  downloads the trace itself and needs bench variables (`MODEL_PREFIX`,
+  `DURATION`, `INFMAX_CONTAINER_WORKSPACE`, ...) that only a hand-written
+  `--agent-launch` file carried; with `--reference-script` it could not run at
+  all. A session whose base or staged tools cannot run that round now refuses
+  to start, naming why.
+- **A recipe image whose tag names no framework version no longer refuses an
+  older install.** For an untagged image such as
+  `lmsysorg/sglang-rocm:muse-spark-open`, the version InferenceSuite assumes
+  (the framework's latest release at resolve time) is recorded but no longer
+  held as a minimum, and `launch.json` reports `version_check:
+  assumed_not_held` with the installed version. Before, such a round stopped
+  with `framework_version_too_old` even when the server ran exactly the recipe's
+  image. A version read from the image tag is still held.
+- **The base launch can be resolved from InferenceX at a given commit.**
+  `--inferencex-commit SHA` on `hyperloom optimize`, `hyperloom-multibranch
+  run` and `python -m inference_suite resolve`, and
+  `multibranch.inferencex_commit` in a hosted run's campaign spec, read
+  InferenceX at that commit (a full sha, or a prefix of 7 or more hex digits; a pull request's
+  head commit included) instead of the head of `main`, so a session can match
+  a CI run; `base_launch.json` records the full sha. Before, InferenceX was
+  always read at `main`. The cookbooks, vLLM recipes and ATOM catalog are
+  still read at `main`, and a resumed session keeps its frozen base. A commit
+  InferenceX does not have, or one that lacks the functions the resolver runs
+  (such as `acceptance_length`), is refused before the session starts,
+  naming what it lacks; resolve that
+  base elsewhere and pass the frozen `base_launch.json` as
+  `--reference-script`. A hosted run whose spec value is no commit ends for
+  good with exit 2, and one whose commit is refused with exit 1, as `run`
+  does; before, a hosted session that could not resolve its base crashed and
+  was started again. While a commit is pinned, a fixed session never falls
+  back to the default table: a source that cannot be read (InferenceX, the
+  model card, a release list, a cookbook) refuses it, naming the source and its
+  error, and so does no recipe serving it, naming why each source missed. See
+  [Base launch](reference/inference-suite.md#base-launch).
+
+- **A card that another process only opened no longer stops the session
+  with `host_gpus_unavailable`.** Every ROCm process opens all cards and
+  keeps up to a few MiB on each; the pre-boot GPU check now counts a
+  process as holding a card only above 1 GiB of VRAM there (or when
+  `amd-smi` reports none). It used to refuse any card with a nonzero
+  reading, so a scheduler or an idle server elsewhere on the host blocked
+  every card. See [inference-suite](reference/inference-suite.md).
+
+- **`hyperloom-multibranch run` takes the operator's base launch as
+  `--reference-script FILE`, with or without an Arbor agent.** It is the
+  file `hyperloom optimize --reference-script` takes: a shell launch script
+  or a `base_launch.json` frozen elsewhere, which the session freezes as its
+  base without reading any recipe source. Before, only a session with an
+  `--autonomous-agent` could take a base, as an `--agent-launch` record.
+  Every Arbor of such a session is served the frozen base. **Upgrade note:**
+  an `--agent-launch` that is a base launch record, or any `--agent-launch`
+  beside `--reference-script`, now exits 2; pass the record as
+  `--reference-script`. See
+  [Options of `run`](how-to/run-multibranch.md#options-of-run).
+
+- **A serving round's server runs in the interpreter its framework checks
+  read.** The server now starts as `<framework_python> -m sglang.launch_server`
+  (vLLM: `-m vllm.entrypoints.cli.main serve`; ATOM: `-m
+  atom.entrypoints.openai_server`) instead of the base's `python3 -m ...` or
+  `vllm serve` through `PATH`, which could run another install than the one the
+  version probe and flag parser had validated. `launch.json` records the command
+  as `entrypoint` and in `argv`, so launch digests of new rounds differ from
+  earlier ones; base digests and earlier `launch.json` files read as before.
+  **Upgrade note:** a frozen base whose entrypoint is not its framework's
+  default (for example a hand-edited interpreter path) is refused as
+  `config_invalid`; set `framework_python` to that interpreter instead.
+
 - **A `custom` workload's entrypoint is named after the board itself.**
   `--benchmark-scripts-dir` is searched for `custom_<gpu-type>.sh` with the
   board as given, so `mi308x`, `mi325x` and `mi350x` now look for

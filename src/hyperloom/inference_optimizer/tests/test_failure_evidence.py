@@ -25,15 +25,20 @@ from hyperloom.orchestrator.state.failure_evidence import (
 class TestClassifyFailureAttribution:
     def test_known_invalid_measurement_is_harness_failure(self):
         assert (
-            classify_failure_attribution(error_class="round_nonzero_invalid_measurement") == FAILURE_ATTRIBUTION_HARNESS
+            classify_failure_attribution(framework_changed=False, error_class="round_nonzero_invalid_measurement")
+            == FAILURE_ATTRIBUTION_HARNESS
         )
 
     def test_explicit_candidate_class_is_publishable(self):
-        assert classify_failure_attribution(error_class="capability_unsupported") == FAILURE_ATTRIBUTION_CANDIDATE
+        assert (
+            classify_failure_attribution(framework_changed=False, error_class="capability_unsupported")
+            == FAILURE_ATTRIBUTION_CANDIDATE
+        )
 
     def test_candidate_specific_cli_error_is_publishable(self):
         assert (
             classify_failure_attribution(
+                framework_changed=False,
                 error_class="server_init_dead",
                 error_excerpt="error: unrecognized argument --unsupported-fast-path",
             )
@@ -43,6 +48,7 @@ class TestClassifyFailureAttribution:
     def test_environment_evidence_overrides_generic_failure_class(self):
         assert (
             classify_failure_attribution(
+                framework_changed=False,
                 error_class="server_init_dead",
                 error_excerpt="memory reservation failed because a concurrent GPU holder remained",
             )
@@ -52,6 +58,7 @@ class TestClassifyFailureAttribution:
     def test_a_taken_server_port_is_the_environments(self):
         assert (
             classify_failure_attribution(
+                framework_changed=False,
                 error_class="round_nonzero_invalid_measurement",
                 error_excerpt="AgentX server port 8888 is unavailable; existing servers are not reused",
             )
@@ -69,16 +76,22 @@ class TestClassifyFailureAttribution:
     )
     def test_a_server_that_died_is_not_the_harnesss(self, excerpt):
         assert (
-            classify_failure_attribution(error_class="round_nonzero_invalid_measurement", error_excerpt=excerpt)
+            classify_failure_attribution(
+                framework_changed=False, error_class="round_nonzero_invalid_measurement", error_excerpt=excerpt
+            )
             == FAILURE_ATTRIBUTION_UNKNOWN
         )
 
     def test_ambiguous_failure_remains_unknown(self):
-        assert classify_failure_attribution(error_class="server_init_dead") == FAILURE_ATTRIBUTION_UNKNOWN
+        assert (
+            classify_failure_attribution(framework_changed=False, error_class="server_init_dead")
+            == FAILURE_ATTRIBUTION_UNKNOWN
+        )
 
     def test_valid_explicit_attribution_wins(self):
         assert (
             classify_failure_attribution(
+                framework_changed=False,
                 error_class="round_timeout",
                 explicit=FAILURE_ATTRIBUTION_CANDIDATE,
             )
@@ -289,12 +302,13 @@ class TestFailedStepClasses:
             FailedStep.STAGING_MISSING,
         }
         for step in environment:
-            assert classify_failure_attribution(error_class=failed_step_error_class(step)) == (
+            assert classify_failure_attribution(framework_changed=False, error_class=failed_step_error_class(step)) == (
                 FAILURE_ATTRIBUTION_ENVIRONMENT
             )
         for step in harness:
             assert (
-                classify_failure_attribution(error_class=failed_step_error_class(step)) == FAILURE_ATTRIBUTION_HARNESS
+                classify_failure_attribution(framework_changed=False, error_class=failed_step_error_class(step))
+                == FAILURE_ATTRIBUTION_HARNESS
             )
 
     def test_a_golden_owned_touch_is_a_candidate_failure(self):
@@ -303,7 +317,10 @@ class TestFailedStepClasses:
         from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 
         error_class = failed_step_error_class(FailedStep.GOLDEN_OWNED_TOUCHED)
-        assert classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_CANDIDATE
+        assert (
+            classify_failure_attribution(framework_changed=False, error_class=error_class)
+            == FAILURE_ATTRIBUTION_CANDIDATE
+        )
 
 
 class TestTheSuitePathClasses:
@@ -317,7 +334,10 @@ class TestTheSuitePathClasses:
 
     def test_a_nonzero_round_is_attributed_to_the_harness(self):
         for error_class in ("round_nonzero_invalid_measurement", "round_nonzero_after_valid_measurement"):
-            assert classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_HARNESS
+            assert (
+                classify_failure_attribution(framework_changed=False, error_class=error_class)
+                == FAILURE_ATTRIBUTION_HARNESS
+            )
 
     def test_a_failed_client_is_signed_by_its_output_like_a_nonzero_round(self):
         from hyperloom.orchestrator.state.failure_evidence import nonzero_output_signature
@@ -328,9 +348,9 @@ class TestTheSuitePathClasses:
 
 
 class TestAnUnknownFrameworkVersion:
-    """A round the suite stopped at ``framework_version_unknown`` is attributed as the toolbox settles a test that
-    stopped there (``hyperloom.measure.failures``): the candidate's when the framework could not be imported, the
-    environment's when the probe says nothing of the framework. The details are the real probe's."""
+    """A round the suite stopped at ``framework_version_unknown`` is the candidate's only when the attempt changed the
+    framework and the probe says the framework cannot be imported; an unchanged install that cannot be imported, and
+    a probe that says nothing of the framework, are the environment's. The details are the real probe's."""
 
     @staticmethod
     def _bare_interpreter(tmp_path) -> str:
@@ -347,14 +367,16 @@ class TestAnUnknownFrameworkVersion:
         from inference_suite import framework_version
         from inference_suite.framework_probe import FrameworkProbeError, probe_install, run_probe
         from inference_suite.frameworks import Framework
+        from inference_suite.recipe.image_version import recipe_image_facts
 
         bare = self._bare_interpreter(tmp_path)
-        details = {"unversioned": framework_version.check(None, "0.5.0").detail}  # type: ignore[union-attr]
+        tagged = recipe_image_facts("lmsysorg/sglang:v0.5.0-rocm700", None)
+        details = {"unversioned": framework_version.check(None, tagged).detail}  # type: ignore[union-attr]
         probes = {
-            "not-installed": lambda: probe_install(bare, Framework.SGLANG, {}),
-            "import-raised": lambda: run_probe(bare, "import sglang_patch", (), {}),
-            "no-interpreter": lambda: run_probe(str(tmp_path / "no-such-python"), "pass", (), {}),
-            "other-error": lambda: run_probe(bare, "1/0", (), {}),
+            "not-installed": lambda: probe_install(bare, Framework.SGLANG, {}, cwd=tmp_path),
+            "import-raised": lambda: run_probe(bare, "import sglang_patch", (), {}, cwd=tmp_path),
+            "no-interpreter": lambda: run_probe(str(tmp_path / "no-such-python"), "pass", (), {}, cwd=tmp_path),
+            "other-error": lambda: run_probe(bare, "1/0", (), {}, cwd=tmp_path),
         }
         for name, probe in probes.items():
             with pytest.raises(FrameworkProbeError) as refused:
@@ -362,53 +384,76 @@ class TestAnUnknownFrameworkVersion:
             details[name] = str(refused.value)
         return details
 
-    def test_the_ledger_attributes_it_as_the_toolbox_settles_it(self, tmp_path):
+    @staticmethod
+    def _attributed(detail: str, framework_changed: bool) -> str:
         from inference_suite.contracts import FailedStep
 
-        from hyperloom.contracts.measurement import FailureClass
-        from hyperloom.measure.failures import FailureEvidence, StepFailure, classify_test_failure
         from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 
-        error_class = failed_step_error_class(FailedStep.FRAMEWORK_VERSION_UNKNOWN)
-        attributed, settled = {}, {}
-        for name, detail in self._details(tmp_path).items():
-            attributed[name] = classify_failure_attribution(error_class=error_class, error_excerpt=detail)
-            evidence = FailureEvidence(step_failure=StepFailure(FailedStep.FRAMEWORK_VERSION_UNKNOWN, detail))
-            settled[name] = (
-                classify_test_failure(returncode=1, evidence=evidence).failure_class is FailureClass.CANDIDATE
-            )
+        return classify_failure_attribution(
+            error_class=failed_step_error_class(FailedStep.FRAMEWORK_VERSION_UNKNOWN),
+            framework_changed=framework_changed,
+            error_excerpt=detail,
+        )
 
-        assert attributed == {
-            "unversioned": FAILURE_ATTRIBUTION_ENVIRONMENT,
-            "not-installed": FAILURE_ATTRIBUTION_CANDIDATE,
-            "import-raised": FAILURE_ATTRIBUTION_CANDIDATE,
-            "no-interpreter": FAILURE_ATTRIBUTION_ENVIRONMENT,
-            "other-error": FAILURE_ATTRIBUTION_ENVIRONMENT,
+    @staticmethod
+    def _settled(detail: str, framework_changed: bool):
+        from inference_suite.contracts import FailedStep
+
+        from hyperloom.measure.failures import FailureEvidence, StepFailure, classify_test_failure
+
+        evidence = FailureEvidence(
+            step_failure=StepFailure(FailedStep.FRAMEWORK_VERSION_UNKNOWN, detail), framework_changed=framework_changed
+        )
+        return classify_test_failure(returncode=1, evidence=evidence)
+
+    def test_an_unimportable_framework_is_the_candidates_only_when_the_attempt_changed_it(self, tmp_path):
+        details = self._details(tmp_path)
+        attributed = {
+            (name, changed): self._attributed(detail, changed)
+            for name, detail in details.items()
+            for changed in (False, True)
         }
-        assert {name: how == FAILURE_ATTRIBUTION_CANDIDATE for name, how in attributed.items()} == settled
+
+        environment, candidate = FAILURE_ATTRIBUTION_ENVIRONMENT, FAILURE_ATTRIBUTION_CANDIDATE
+        assert attributed == {
+            ("unversioned", False): environment,
+            ("unversioned", True): environment,
+            ("not-installed", False): environment,
+            ("not-installed", True): candidate,
+            ("import-raised", False): environment,
+            ("import-raised", True): candidate,
+            ("no-interpreter", False): environment,
+            ("no-interpreter", True): environment,
+            ("other-error", False): environment,
+            ("other-error", True): environment,
+        }
+
+    @pytest.mark.parametrize("framework_changed", [False, True], ids=["image", "changed"])
+    def test_the_ledger_and_the_toolbox_agree_on_the_same_detail(self, tmp_path, framework_changed):
+        from hyperloom.contracts.measurement import FailureClass
+
+        for name, detail in self._details(tmp_path).items():
+            settled = self._settled(detail, framework_changed).failure_class is FailureClass.CANDIDATE
+            attributed = self._attributed(detail, framework_changed) == FAILURE_ATTRIBUTION_CANDIDATE
+            assert attributed == settled, name
 
     @pytest.mark.parametrize(
-        ("detail", "candidate"),
+        ("detail", "unimportable"),
         [
             pytest.param("the probe ran\n/opt/py/bin/python cannot import sglang", True, id="last-line"),
             pytest.param("/opt/py/bin/python cannot import sglang\n", True, id="trailing-newline"),
             pytest.param("/opt/py/bin/python cannot import sglang\nthen the probe ran past 60 s", False, id="mid-line"),
         ],
     )
-    def test_a_multi_line_detail_is_read_alike_by_the_ledger_and_the_toolbox(self, detail, candidate):
-        """The probe says ``<python> cannot import <package>`` as the whole detail, so both readers take it only at the
-        end of the whole detail: a line inside it that ends so is no answer of the probe, for either."""
-        from inference_suite.contracts import FailedStep
-
-        from hyperloom.contracts.measurement import FailureClass
-        from hyperloom.measure.failures import FailureEvidence, StepFailure, classify_test_failure
-        from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
-
-        error_class = failed_step_error_class(FailedStep.FRAMEWORK_VERSION_UNKNOWN)
-        attributed = classify_failure_attribution(error_class=error_class, error_excerpt=detail)
-        evidence = FailureEvidence(step_failure=StepFailure(FailedStep.FRAMEWORK_VERSION_UNKNOWN, detail))
-        settled = classify_test_failure(returncode=1, evidence=evidence).failure_class is FailureClass.CANDIDATE
-        assert (attributed == FAILURE_ATTRIBUTION_CANDIDATE, settled) == (candidate, candidate)
+    def test_the_probe_answer_counts_only_at_the_end_of_the_detail(self, detail, unimportable):
+        """The probe says ``<python> cannot import <package>`` as the whole detail, so a line inside it that ends so is
+        no answer of the probe."""
+        expected = FAILURE_ATTRIBUTION_CANDIDATE if unimportable else FAILURE_ATTRIBUTION_ENVIRONMENT
+        assert self._attributed(detail, framework_changed=True) == expected
 
     def test_with_no_evidence_it_stays_the_environments(self):
-        assert classify_failure_attribution(error_class="framework_version_unknown") == FAILURE_ATTRIBUTION_ENVIRONMENT
+        assert (
+            classify_failure_attribution(error_class="framework_version_unknown", framework_changed=True)
+            == FAILURE_ATTRIBUTION_ENVIRONMENT
+        )
