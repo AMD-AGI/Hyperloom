@@ -10,24 +10,26 @@ it; what is asserted is what a built toolbox does with a request that forces the
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from hyperloom.contracts.measurement import Purpose
 from hyperloom.measure.long_context.build import build_entry
-from hyperloom.measure.long_context.plan import LongContextPlan
+from hyperloom.measure.long_context.plan import LENGTH_BOUND, LongContextPlan
 from hyperloom.measure.long_context.tests.support import LENGTH, encode, staged_plan
 from hyperloom.measure.short_prompts.staging import CACHE_ENV
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox import long_context as long_context_module
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.long_context import LONG_CONTEXT_ENV, LongContextNotStaged, LongContextSetup
 from hyperloom_multibranch.toolbox.short_prompts import MODEL_PATH_ENV, SHORT_PROMPTS_ENV
 from hyperloom_multibranch.toolbox.tests.helpers import req
 from hyperloom_multibranch.toolbox.tests.test_long_context_triggers import _model
+from hyperloom_multibranch.toolbox.tests.test_short_prompts_option import _built as _built_agentx
 from hyperloom_multibranch.toolbox.tests.test_short_prompts_option import (
     _acceptance,
-    _built,
     _hosted,
     _local,
     _runner_env,
@@ -45,6 +47,12 @@ def _no_ambient_sets(monkeypatch: pytest.MonkeyPatch) -> None:
 def _setup(cache: Path) -> LongContextSetup:
     plan = staged_plan(cache)
     return LongContextSetup(plan.prompt_set, plan.prompts_sha256, plan.length)
+
+
+async def _built(tmp_path: Path, **options: object) -> tuple[LocalHostedToolbox, dict[str, str]]:
+    """A toolbox of an InferenceX campaign (an AgentX one runs no long-context check) built with ``options``."""
+    inferencex = replace(_acceptance(tmp_path), workload_kind=WorkloadKind.INFERENCEX)
+    return await _built_agentx(tmp_path, inferencex, **options)
 
 
 async def _planned(toolbox: LocalHostedToolbox, **request: object) -> LongContextPlan | None:
@@ -75,7 +83,9 @@ async def test_a_set_in_the_options_is_carried_by_acceptance_and_the_runner_is_t
     assert _runner_env(toolbox)[CACHE_ENV] == str((tmp_path / "cache").resolve())
     assert CACHE_ENV not in branch_env, "the agent's own sandboxes are not told where the prompt set is"
     plan = await _planned(toolbox, long_context_check=True)
-    assert plan is not None and (plan.prompt_set, plan.prompts_sha256, plan.length) == (*vars(setup).values(),)
+    assert plan is not None and (plan.prompt_set, plan.prompts_sha256, plan.length, plan.bound) == (
+        *vars(setup).values(),
+    )
     assert plan.trigger == ("request long_context_check",)
     assert await _planned(toolbox) is None and await _planned(toolbox, long_context_check=False) is None
     assert toolbox._acceptance._short_prompts is None, "the other check stays off"
@@ -146,7 +156,7 @@ def _models_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LongContextS
     monkeypatch.setenv(CACHE_ENV, str(cache))
     monkeypatch.setenv(MODEL_PATH_ENV, str(model))
     entry = build_entry(model, cache, length=LENGTH, encode=encode)
-    return LongContextSetup(entry.key, entry.prompts_sha256, LENGTH)
+    return LongContextSetup(entry.key, entry.prompts_sha256, LENGTH, LENGTH_BOUND)
 
 
 async def test_nothing_named_runs_the_check_with_the_models_own_set_under_the_rules_triggers_only(
@@ -188,6 +198,52 @@ async def test_a_hosted_toolbox_takes_the_environments_set_and_off_turns_it_off(
     assert default.at(None) == setup, "the model's own set, found staged"  # type: ignore[union-attr]
     monkeypatch.setenv(LONG_CONTEXT_ENV, "off")
     assert _hosted(tmp_path / "off")._acceptance._long_context is None
+
+
+def _staged_with_test_tokenizer(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Stage with the test tokenizer in place of the model's; the lengths staged at."""
+    lengths: list[int] = []
+
+    def built(model_dir: Path, root: Path, *, length: int) -> object:
+        lengths.append(length)
+        return build_entry(model_dir, root, length=length, encode=encode)
+
+    monkeypatch.setattr(long_context_module, "build_entry", built)
+    return lengths
+
+
+async def test_a_hosted_toolbox_that_sees_the_runner_cache_stages_the_models_set_when_a_test_first_needs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache, model = tmp_path / "cache", _model(tmp_path)
+    cache.mkdir()
+    monkeypatch.setenv(CACHE_ENV, str(cache))
+    monkeypatch.setenv(MODEL_PATH_ENV, str(model))
+    lengths = _staged_with_test_tokenizer(monkeypatch)
+    (tmp_path / "hosted").mkdir()
+
+    source = _hosted(tmp_path / "hosted")._acceptance._long_context
+
+    assert not (cache / "evalsets").exists(), "nothing is staged before a test says what context its launch serves"
+    setup = source.at(None)  # type: ignore[union-attr]
+    assert setup is not None and setup.length == LENGTH and (cache / "evalsets" / setup.prompt_set).is_dir()
+    assert source.at(None) == setup and lengths == [LENGTH], "staged once, then found"  # type: ignore[union-attr]
+
+
+async def test_a_hosted_toolbox_that_does_not_see_the_runner_cache_stages_nothing_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    cache, model = tmp_path / "cache", _model(tmp_path)
+    monkeypatch.setenv(CACHE_ENV, str(cache))
+    monkeypatch.setenv(MODEL_PATH_ENV, str(model))
+    lengths = _staged_with_test_tokenizer(monkeypatch)
+    (tmp_path / "hosted").mkdir()
+
+    with caplog.at_level("WARNING"):
+        source = _hosted(tmp_path / "hosted")._acceptance._long_context
+
+    assert f"does not see the runner cache {cache}" in caplog.text
+    assert source.at(None) is None and lengths == [] and not cache.exists()  # type: ignore[union-attr]
 
 
 async def test_the_local_toolbox_stages_the_models_set_when_a_test_first_needs_it(
