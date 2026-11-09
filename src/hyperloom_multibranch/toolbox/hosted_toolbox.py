@@ -514,6 +514,7 @@ def build_hosted_toolbox(
     native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
     acceptance = with_native_plan(acceptance, native)
     grant = inputs.grant()
+    parallel_tests_for(grant, inputs.tp)  # a grant that cannot run one test is refused before the templates are read
     runner = _runner_template(inputs)  # refused before the lease templates are read
     provider = _service_provider(inputs, options.retry)
     leases = _leases(provider, inputs, options.lease_tuning)

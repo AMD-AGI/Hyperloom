@@ -75,6 +75,7 @@ from hyperloom_multibranch.toolbox.hosted_toolbox import (
     HostedToolbox,
     HostedToolboxInputs,
     build_hosted_toolbox,
+    handover_for,
     parallel_tests_for,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -409,7 +410,9 @@ async def test_the_toolbox_is_built_from_the_inputs(tmp_path: Path) -> None:
     assert toolbox.backend._config.create_envs == {SOURCE_SHA_ENV: _SOURCE_SHA}, "no repository, no manifest pin"
     assert toolbox.backend.pool.template_for(2) == _RUNNERS[1]
     assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8)
-    assert toolbox._parallel_limit() == 4 and toolbox._queue.policy.global_concurrency == 4, "8 GPUs, TP=2"
+    assert toolbox._parallel_limit() == 3 and toolbox._queue.policy.global_concurrency == 3, (
+        "8 GPUs, TP=2: four tests fit, one test's room is kept for the sandbox handed to the next test"
+    )
     assert toolbox.analysis_tools == (TRACELENS_TOOL,), "kernel_tune and roofline are the local toolbox's"
     assert not toolbox.single_node
 
@@ -444,7 +447,9 @@ def test_the_runner_cache_manifest_digest_is_a_create_environment_of_every_runne
 
 def test_the_grants_sandboxes_and_gpus_bound_the_tests_at_once(tmp_path: Path) -> None:
     toolbox = _toolbox(None, tmp_path, grant_limits={**_GRANT, "max_sandboxes": 3})
-    assert toolbox._parallel_limit() == 3 and toolbox._queue.policy.global_concurrency == 3
+    assert toolbox._parallel_limit() == 2 and toolbox._queue.policy.global_concurrency == 2, (
+        "three sandboxes: two tests and the one kept for the next test"
+    )
     with pytest.raises(ValueError, match="a grant of 2 GPUs cannot run a test of TP=4"):
         _toolbox(
             None, tmp_path, tp=4, grant_limits={**_GRANT, "max_gpus": 2}, sandbox_templates={"measurement": {"4": "r"}}
@@ -467,6 +472,9 @@ def test_the_parallel_tests_rule_is_the_lesser_of_whole_tests_and_sandboxes(
     grant = GrantLimits(max_sandboxes=sandboxes, max_gpus=gpus, gpu_hours=1.0, max_runtime_sec=60)
     assert parallel_tests_for(grant, tp) == expected
     assert "parallel_tests_for" in hosted_toolbox.__all__
+    handover = handover_for(grant, tp)
+    assert (handover is None) == (expected == 1), "a sandbox is kept only where the grant fits two tests"
+    assert parallel_tests_for(grant, tp, handover) == max(1, expected - 1), "and then one test's room is held for it"
 
 
 def test_the_parallel_tests_rule_without_a_grant_is_the_pools_default_and_refuses_a_grant_too_small() -> None:
@@ -801,12 +809,12 @@ async def test_a_lease_is_a_dev_sandbox_and_its_cards_leave_the_measurement_capa
         assert lease.template == _DEVS[1] and lease.sandbox.run("echo hi").stdout == "hi\n"  # type: ignore[attr-defined]
         assert lease.lifetime_sec == 600 + LIFETIME_MARGIN_SEC  # type: ignore[attr-defined]
         assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8, leased_cards=2)
-        assert lease.remaining_cards == 6 and toolbox._parallel_limit() == 3
+        assert lease.remaining_cards == 6 and toolbox._parallel_limit() == 2, "three tests fit, one's room is kept"
         (created,) = [c for c in service.creates if c.role == "dev"]
         assert created.metadata[PURPOSE_KEY] == LEASE_PURPOSE and created.metadata[BRANCH_ID_KEY] == "b1"
         assert created.metadata[RUN_ID_KEY] == "run-1" and not created.options.envs, "a dev sandbox is given no source"
         await toolbox.release_branch_sandbox(lease.lease_id)
-        assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8) and toolbox._parallel_limit() == 4
+        assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8) and toolbox._parallel_limit() == 3
         assert service.running("dev") == []
     finally:
         await toolbox.close()
