@@ -190,6 +190,44 @@ def test_a_hosted_run_refuses_an_unconfined_sandbox_too(probe):
     assert refused.value.reasons[0] == f"running them as an account: {SANDBOX_ACCOUNT}"
 
 
+def _ray_path_refuses(reason: str) -> str:
+    return (
+        f"specialists run as the account {ACCOUNT.user}, but {RAY_ACTOR_PATH} and bubblewrap cannot confine one here,"
+        f" so that path refuses its specialists: {reason}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("bwrap", "answer", "reason"),
+    [
+        (LAYER, LAYER_DENIED, f"bubblewrap ({LAYER}, 0.13.1): bwrap: setting up uid map: Permission denied"),
+        (LAYER, NO_ANSWER, f"bubblewrap at {LAYER}: no answer in 10 s"),
+        (None, None, NO_LAYER_BWRAP),
+    ],
+    ids=["denied", "no-answer", "none-named"],
+)
+def test_a_hosted_run_with_an_account_warns_once_that_the_ray_path_refuses_where_bubblewrap_cannot_confine(
+    account, caplog, probe, bwrap, answer, reason
+):
+    probe.answer = answer
+    with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
+        assert require_agent_isolation(bwrap=bwrap) == AccountIsolation(ACCOUNT)
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.WARNING, _ray_path_refuses(reason))]
+    if answer:
+        assert probe.asked == [bwrap], "the layer's bubblewrap, by its path"
+    with pytest.raises(IsolationRefused) as refused:
+        choose_agent_isolation(allow_account=False)
+    assert reason in refused.value.reasons, "the Ray GPU actor path refuses for the reason the warning gave"
+    assert choose_agent_isolation() == AccountIsolation(ACCOUNT), "every other specialist: the account"
+
+
+def test_a_hosted_run_with_an_account_and_a_layer_bubblewrap_that_confines_says_nothing_more(account, caplog, probe):
+    probe.answer = IN_LAYER
+    with caplog.at_level(logging.INFO, logger=agent_isolation.__name__):
+        assert require_agent_isolation(bwrap=LAYER) == AccountIsolation(ACCOUNT)
+    assert caplog.records == [] and probe.asked == [LAYER]
+
+
 # ---- the order of the tiers ----
 
 

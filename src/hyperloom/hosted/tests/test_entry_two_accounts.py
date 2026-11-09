@@ -21,8 +21,9 @@ from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 
 _SRC = str(Path(entry.__file__).parents[2])
 
-#: One leg: the entry, with the packaged installer and ``optimize`` stood in for, run as this account. The stand-in
-#: writes what a run writes outside the session's own files: an event, and the session package into the archive.
+#: One leg: the entry, with the packaged installer, the check that agents can be isolated (no hosting layer here) and
+#: ``optimize`` stood in for, run as this account. The stand-in writes what a run writes outside the session's own
+#: files: an event, and the session package into the archive.
 _LEG = """
 import json, os, sys
 sys.dont_write_bytecode = True
@@ -38,6 +39,7 @@ from hyperloom.inference_optimizer.breakdown.session_package import package_sess
 from hyperloom_common.shared_storage import make_shared_dirs
 
 entry.INSTALL_SCRIPT = Path(leg["installer"])
+entry.require_agent_isolation = lambda bwrap: None
 
 def optimize(argv):
     session = Path(next(a for a in argv if a.startswith("--session-dir=")).partition("=")[2])
