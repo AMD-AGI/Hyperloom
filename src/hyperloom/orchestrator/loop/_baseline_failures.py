@@ -47,11 +47,16 @@ _BASELINE_FAILED_STOP_REASON = "baseline_failed"
 #: inference_suite refused the round before it spawned a server: the operator's environment or config, never a
 #: framework error an enablement round could author against.
 _REFUSED_BEFORE_SPAWN_CLASSES: frozenset[str] = frozenset(failed_step_error_class(step) for step in STEPS_BEFORE_SPAWN)
+#: Refusals before spawn that the next attempt can clear by itself (a port or a held server freed meanwhile), so they
+#: count toward the streak instead of stopping the run at once.
+_TRANSIENT_BEFORE_SPAWN_CLASSES: frozenset[str] = frozenset(
+    failed_step_error_class(step) for step in (FailedStep.PORT_IN_USE, FailedStep.REUSE_NOT_OWNED)
+)
 
 #: Baseline failures a retry cannot change, each mapped to the stop reason it ends the run with on its FIRST
 #: occurrence, with no streak.
 _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
-    **dict.fromkeys(_REFUSED_BEFORE_SPAWN_CLASSES, _BASELINE_FAILED_STOP_REASON),
+    **dict.fromkeys(_REFUSED_BEFORE_SPAWN_CLASSES - _TRANSIENT_BEFORE_SPAWN_CLASSES, _BASELINE_FAILED_STOP_REASON),
     # Refused before spawn, or by Hyperloom's own argv check: a retry recomposes the same argv.
     ARGV_INVALID: ARGV_INVALID,
     # The server booted and measured a cold cache. The next attempt launches the same server and no framework patch
