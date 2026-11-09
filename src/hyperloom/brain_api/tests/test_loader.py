@@ -22,7 +22,7 @@ from hyperloom.plugs.manifest import ManifestSources, resolve_manifest
 _SRC = Path(__file__).resolve().parents[3]
 
 _GOOD = """
-from hyperloom.brain_api import Proposal, Review
+from hyperloom.brain_api import Proposal, ProposeAsk, Review, ReviewAsk, eval_point
 
 class Brain:
     name = "fake"
@@ -31,10 +31,12 @@ class Brain:
     def __init__(self, config):
         self.config = config
 
-    async def propose(self, state, ask, ports):
+    @eval_point("main.propose")
+    async def propose(self, state, ask: ProposeAsk, ports) -> Proposal:
         return Proposal()
 
-    async def review(self, state, ask, ports):
+    @eval_point("main.review")
+    async def review(self, state, ask: ReviewAsk, ports) -> Review:
         return Review()
 
 def create_brain(config):
@@ -89,8 +91,15 @@ def test_a_brain_for_another_contract_is_refused(brain_module, version) -> None:
 
 
 def test_a_brain_missing_an_async_call_site_is_refused(brain_module) -> None:
-    source = _GOOD.format(version=CONTRACT_VERSION).replace("async def review", "def review")
+    source = _GOOD.format(version=CONTRACT_VERSION).replace('    @eval_point("main.review")\n', "")
+    source = source.replace("async def review", "def review")
     with pytest.raises(BrainContractError, match="review"):
+        load_brain(brain_module(source))
+
+
+def test_a_brain_whose_main_methods_are_not_their_eval_points_is_refused(brain_module) -> None:
+    source = _GOOD.format(version=CONTRACT_VERSION).replace('@eval_point("main.propose")', '@eval_point("x.propose")')
+    with pytest.raises(BrainContractError, match=r"propose must be marked @eval_point\('main.propose'\)"):
         load_brain(brain_module(source))
 
 
