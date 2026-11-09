@@ -6,7 +6,8 @@
 The campaign spec maps onto the options of ``run`` (:func:`run_argv`), so a hosted session is built by the one builder
 of :class:`~hyperloom_multibranch.scheduling.settings.RunSettings` a command-line session is. Besides the common part
 the legacy entry validated, a multi-branch session needs ``multibranch.workload`` (``--workload``),
-``workload.conc`` and ``workload.precision``; ``multibranch.max_branches`` is ``--max-branches``,
+``workload.conc`` and ``workload.precision``; ``multibranch.inferencex_commit`` is ``--inferencex-commit``,
+``multibranch.max_branches`` ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``placement.measurement`` is ``--measurement``, and ``placement.max_parallel_tests`` is
 ``--max-parallel-tests``, at most what runs at once where the session measures. The fields ``run`` has no option for --
@@ -156,6 +157,7 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "isl": spec.isl,
         "osl": spec.osl,
         "ep": spec.ep,
+        "inferencex-commit": _inferencex_commit(section.get("inferencex_commit")),
         "max-hours": max_hours,
         "max-gpu-hours": spec.max_gpu_hours,
         "max-llm-usd": spec.max_llm_usd,
@@ -166,6 +168,12 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
     }
     agents = [f"--autonomous-agent={source}" for source in _agent_sources(section.get("autonomous_agents"))]
     return ["run", *(f"--{option}={value}" for option, value in values.items() if value is not None), *agents]
+
+
+def _inferencex_commit(commit: object) -> str | None:
+    if commit is not None and not isinstance(commit, str):
+        raise HostedRefused("multibranch.inferencex_commit must be a string")
+    return commit
 
 
 def _agent_sources(sources: object) -> list[str]:

@@ -36,7 +36,8 @@ response it was read from.
 
 To match a run made at an older InferenceX, pin it with `--inferencex-commit
 <sha>` (`resolve`, `hyperloom optimize` and `hyperloom-multibranch run` all take
-it): a full sha, or a prefix of 7 or more hex digits of a commit on one of
+it, and a hosted multibranch run takes it from its campaign spec's
+`multibranch.inferencex_commit`): a full sha, or a prefix of 7 or more hex digits of a commit on one of
 InferenceX's branches or at the head of one of its refs, a pull request's
 included. The base records the full sha it read. Only InferenceX is pinned; the
 cookbooks, the vLLM recipes site and ATOM's catalog are still read at `main`. A

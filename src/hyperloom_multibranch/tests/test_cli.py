@@ -82,7 +82,7 @@ from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
 from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
 from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation, launch_isolation
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
-from hyperloom_multibranch.scheduling.peers import PeerFactory
+from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH, ProcessRecord
 from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.tests.checkouts import knowledge_checkout
@@ -1435,6 +1435,20 @@ def test_a_hosted_spec_lends_dev_sandboxes_and_runs_agents_with_the_grants_dev_k
     assert agent_cli == [on_the_command_line]
 
 
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_resolves_its_base_from_inferencex_at_the_commit_it_names(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.spec(multibranch={**SPEC["multibranch"], "inferencex_commit": "8A76A78E41"})
+    on_the_command_line = _settings(*SPEC_RUN_ARGS, "--inferencex-commit", "8a76a78e41")
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert agent_cli == [on_the_command_line]
+    assert on_the_command_line.inferencex_commit == "8a76a78e41"
+
+
 @pytest.mark.parametrize(
     ("agents", "named"),
     [(["/agents/a"], "need HYPERLOOM_SANDBOX_KEY_DEV"), ("/agents/a", "must be a list of agent sources")],
@@ -1511,6 +1525,8 @@ def test_a_hosted_session_ends_a_close_grace_and_a_margin_before_the_grant_and_i
         ({"workload": {"isl": 1024, "osl": 512, "precision": "fp8"}}, "workload.conc"),
         ({"workload": {"conc": 16, "isl": 1024, "osl": 512}}, "workload.precision"),
         ({"multibranch": {"workload": "agentx"}}, "--isl is not taken by an agentx workload"),
+        ({"multibranch": {"workload": "inferencex", "inferencex_commit": "main"}}, "'main' is not a commit"),
+        ({"multibranch": {"workload": "inferencex", "inferencex_commit": 1234567}}, "must be a string"),
     ],
 )
 @pytest.mark.usefixtures("ready_environment")
@@ -1569,6 +1585,23 @@ def test_a_leg_that_cannot_open_a_file_of_the_run_ends_it_for_good_naming_the_fi
     document = host.exit_document()
     assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
     assert document["error"] == f"[Errno 13] Permission denied: '{roster}'"
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_a_hosted_session_whose_base_launch_is_refused_ends_the_run_for_good_naming_why(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def base_refused(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+        report_root(create_session(host.workspace, settings.workload.model_basename, Clock()).root)
+        raise PeersUnavailable("the base launch could not be resolved: InferenceX has no commit 8a76a78e41")
+
+    monkeypatch.setattr(cli, "run_session", base_refused)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert "InferenceX has no commit 8a76a78e41" in str(document["error"])
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
