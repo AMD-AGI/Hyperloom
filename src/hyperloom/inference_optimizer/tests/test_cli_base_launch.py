@@ -22,12 +22,14 @@ from pathlib import Path
 import pytest
 
 import inference_suite
+from hyperloom.common import visible_devices
 from hyperloom.inference_optimizer.cli import base_launch as bl
 from hyperloom.inference_optimizer.cli.lineup_banners import print_lineup_banners
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.inference_optimizer.framework_paths import OPERATOR_SCRIPTS_DIR_ENV
 from hyperloom.inference_optimizer.session.base_launch import BASE_LAUNCH_FILE, read_base_launch, shared_state_fields
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
+from hyperloom.orchestrator.policy import gate as policy
 from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite import SourceFetchError, SourceSnapshot
 from inference_suite.contracts import BaseLaunch, BaseLaunchError, Redacted, SourceKind, Topology, Workload
@@ -603,6 +605,9 @@ def test_the_inferencex_commit_flag_is_read_at_the_commit_it_names_and_main_with
         return _snapshot()
 
     monkeypatch.setattr(bl, "fetch_sources", fetch)
+    # The parser's capacity defaults count the machine's GPUs; a unit test asks no hardware.
+    monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
+    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
     optimize = _build_parser()
     pinned = optimize.parse_args(["optimize", "--inferencex-commit", "8a76a78e41"]).inferencex_commit
     unpinned = optimize.parse_args(["optimize"]).inferencex_commit
