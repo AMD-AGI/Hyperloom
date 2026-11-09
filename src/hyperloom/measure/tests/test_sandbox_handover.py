@@ -444,8 +444,194 @@ def test_a_hand_over_while_the_pool_closes_keeps_nothing() -> None:
 
     def hand_over_once() -> None:  # the test ends while the pool closes, before it forgets what it holds
         if not handed:
-            handed.append(pool.hand_over(first))
+            handed.append(None)  # first, since the hand-over lists the run's sandboxes too
+            pool.hand_over(first)
 
     service.on_find = hand_over_once
     pool.close()
     assert handed and pool.parked is None and service.live == {}
+
+
+class _Pending(_Service):
+    """A service whose sandbox is listed (``find``) while its create still waits for a node, as the hosted service lists
+    a sandbox that queues; the create returns when ``hold`` is set."""
+
+    def create(self, template, *, role, timeout_sec, metadata, options=CreateOptions()):
+        with self._lock:
+            self._count += 1
+            sandbox = _Sandbox(self, f"sbx-{self._count}", dict(metadata))
+            self.live[sandbox.sandbox_id] = sandbox
+        self.creating.set()
+        if self.hold is not None:
+            assert self.hold.wait(10), "the test never let the create through"
+        with self._lock:
+            self.events.append(("running", sandbox.sandbox_id))
+        return sandbox
+
+
+def test_a_sandbox_kept_for_a_create_in_flight_is_closed_when_that_sandbox_runs() -> None:
+    """req-2's create began while req-1 still ran, so it never claimed req-1's sandbox: once req-2's sandbox runs and
+    no other test waits, the kept one is closed then, not at the next change of the queue or the timeout."""
+    service = _Pending()
+    pool = _pool(service, grant=(8, 8), max_parallel_tests=7, timeout=30)
+    first = _acquire(pool, "req-1")
+    service.hold = threading.Event()
+    worker, landed = _in_thread(lambda: _acquire(pool, "req-2"))
+    _until(service.creating.is_set, "req-2's create to begin")
+    pool.note_upcoming({"req-1", "req-2"})
+    pool.hand_over(first)
+    assert pool.parked == first.sandbox_id, "req-2's listed, pending sandbox is its create's, not an unknown one"
+    service.hold.set()
+    _joined(worker)
+    [second] = landed
+    assert isinstance(second, RunnerSandbox)
+    assert pool.parked is None and set(service.live) == {second.sandbox_id}
+    assert service.events == [
+        ("running", first.sandbox_id),
+        ("running", second.sandbox_id),
+        ("close", first.sandbox_id),
+    ]
+    pool.release(second)
+    assert service.live == {} and pool.active == 0
+
+
+def test_a_sandbox_kept_for_a_create_in_flight_stays_while_another_test_waits() -> None:
+    service = _Pending()
+    pool = _pool(service, grant=(8, 8), max_parallel_tests=7, timeout=30)
+    first = _acquire(pool, "req-1")
+    service.hold = threading.Event()
+    worker, landed = _in_thread(lambda: _acquire(pool, "req-2"))
+    _until(service.creating.is_set, "req-2's create to begin")
+    pool.note_upcoming({"req-1", "req-2", "req-3"})
+    pool.hand_over(first)
+    service.hold.set()
+    _joined(worker)
+    assert pool.parked == first.sandbox_id, "req-3 still waits for a sandbox"
+    third = _acquire(pool, "req-3")
+    assert pool.parked is None and first.sandbox_id not in service.live
+    for runner in (*landed, third):
+        pool.release(runner)
+    assert service.live == {} and pool.active == 0
+
+
+def test_a_test_that_holds_a_sandbox_is_not_waiting_for_one(caplog) -> None:
+    service = _Service()
+    pool = _pool(service, grant=(8, 8), max_parallel_tests=2)
+    first, second = _acquire(pool, "req-1"), _acquire(pool, "req-2")
+    pool.note_upcoming({"req-1", "req-2"})  # req-2 runs: it asks for no sandbox
+    with caplog.at_level(logging.INFO, logger="hyperloom.measure.sandboxes"):
+        pool.hand_over(first)
+    assert pool.parked is None and set(service.live) == {second.sandbox_id}
+    assert "no test waits for a sandbox" in caplog.text
+
+
+def test_a_sandbox_of_the_run_the_pool_does_not_hold_leaves_no_room_to_keep_one(caplog) -> None:
+    """A measurement sandbox of the run that the pool does not hold (left by an earlier process, or one whose close
+    failed) counts against the grant with GPUs the pool does not know: nothing is kept beside it."""
+    service = _Service()
+    pool = _pool(service, grant=(3, 3), max_parallel_tests=2)
+    stray = service.create("runner-1", role="measurement", timeout_sec=60, metadata={"hyperloom.run-id": "run-1"})
+    first = _acquire(pool, "req-1")
+    pool.note_upcoming({"req-2"})
+    with caplog.at_level(logging.INFO, logger="hyperloom.measure.sandboxes"):
+        pool.hand_over(first)
+    assert pool.parked is None and set(service.live) == {stray.sandbox_id}
+    assert "1 measurement sandbox(es) of the run that the pool does not hold" in caplog.text
+
+
+def test_a_sandbox_kept_before_a_stray_appeared_is_closed_before_the_next_create() -> None:
+    """Grant (3, 3): req-1's sandbox is kept beside req-c's; then a sandbox of the run the pool does not hold appears.
+    Keeping req-1's through req-2's create would make four of three: it is closed before the create instead."""
+    service = _Service()
+    pool = _pool(service, grant=(3, 3), max_parallel_tests=3)  # the stray takes a slot: one is left for req-2
+    first, other = _acquire(pool, "req-1"), _acquire(pool, "req-c")
+    pool.note_upcoming({"req-c", "req-2"})
+    pool.hand_over(first)
+    assert pool.parked == first.sandbox_id
+    stray = service.create("runner-1", role="measurement", timeout_sec=60, metadata={"hyperloom.run-id": "run-1"})
+    service.quota = 3
+    second = _acquire(pool, "req-2", timeout_sec=5)
+    assert service.refusals == 0, "the kept sandbox was closed before the create, not after a refusal"
+    assert service.events[-2:] == [("close", first.sandbox_id), ("running", second.sandbox_id)]
+    assert set(service.live) == {other.sandbox_id, stray.sandbox_id, second.sandbox_id}
+    pool.release(second)
+    pool.release(other)
+
+
+@pytest.mark.parametrize("claimed", [False, True])
+def test_a_branch_lease_takes_the_room_of_the_kept_sandbox(claimed: bool) -> None:
+    """A lease promised while a sandbox is kept: when the grant has no room for the lease beside it, the kept sandbox
+    is closed (``make_room``), whether or not the next test's create has begun."""
+    service = _Service()
+    reserved = [0, 0]
+    handover = Handover(3, 2, reserved=lambda: (reserved[0], reserved[1]))
+    pool = SandboxPool(
+        service, {1: "runner-1"}, run_id="run-1", limits=PoolLimits(max_parallel_tests=1, handover=handover)
+    )
+    first = _acquire(pool, "req-1")
+    pool.note_upcoming({"req-2"})
+    pool.hand_over(first)
+    worker = None
+    if claimed:
+        service.hold = threading.Event()
+        worker, landed = _in_thread(lambda: _acquire(pool, "req-2"))
+        _until(service.creating.is_set, "req-2's create to begin")
+    pool.make_room()
+    assert pool.parked == first.sandbox_id, "nothing changed: the kept sandbox still has its room"
+    reserved[:] = [1, 1]  # a branch's dev sandbox is promised a card of the grant
+    pool.make_room()
+    assert pool.parked is None and first.sandbox_id not in service.live
+    if worker is not None:
+        assert service.hold is not None
+        service.hold.set()
+        _joined(worker)
+        pool.release(landed[0])
+    assert service.live == {} and pool.active == 0
+
+
+def test_a_lease_that_leaves_room_keeps_the_sandbox() -> None:
+    service = _Service()
+    reserved = [0, 0]
+    handover = Handover(8, 8, reserved=lambda: (reserved[0], reserved[1]))
+    pool = SandboxPool(
+        service, {1: "runner-1"}, run_id="run-1", limits=PoolLimits(max_parallel_tests=1, handover=handover)
+    )
+    first = _acquire(pool, "req-1")
+    pool.note_upcoming({"req-2"})
+    pool.hand_over(first)
+    reserved[:] = [1, 1]
+    pool.make_room()
+    assert pool.parked == first.sandbox_id
+
+
+def test_a_kept_sandbox_whose_close_raises_leaves_the_new_sandbox_with_its_test(caplog) -> None:
+    """The next sandbox runs and closing the kept one raises something unexpected: the new sandbox is still returned
+    to its test, which holds its slot and releases it as usual; the error is logged."""
+    service = _Service()
+    pool = _pool(service)
+    first = _acquire(pool, "req-1")
+    pool.note_upcoming({"req-2", "req-3"})
+    pool.hand_over(first)
+    service.kill_error = RuntimeError("the service could not be reached")
+    with caplog.at_level(logging.ERROR, logger="hyperloom.measure.sandboxes"):
+        second = _acquire(pool, "req-2")
+    assert isinstance(second, RunnerSandbox) and second.sandbox_id in service.live
+    assert "could not be closed" in caplog.text and "the service could not be reached" in caplog.text
+    assert pool.parked is None and pool.active == 1
+    service.kill_error = None
+    pool.release(second)
+    assert pool.active == 0
+    service.closed(first.sandbox_id)  # a sandbox the pool could not close ends on its own timeout
+    third = _acquire(pool, "req-3", timeout_sec=2)
+    pool.release(third)
+    assert service.live == {} and pool.active == 0
+
+
+def test_a_sweep_closes_the_runs_sandboxes_no_unfinished_attempt_names() -> None:
+    service = _Service()
+    kept = service.create("runner-1", role="measurement", timeout_sec=60, metadata={"hyperloom.run-id": "run-1"})
+    stray = service.create("runner-1", role="measurement", timeout_sec=60, metadata={"hyperloom.run-id": "run-1"})
+    other = service.create("runner-1", role="measurement", timeout_sec=60, metadata={"hyperloom.run-id": "run-2"})
+    pool = _pool(service)
+    assert pool.sweep({kept.sandbox_id}) == [stray.sandbox_id]
+    assert set(service.live) == {kept.sandbox_id, other.sandbox_id}, "another run's sandbox is never touched"
