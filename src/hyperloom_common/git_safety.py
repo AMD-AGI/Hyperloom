@@ -146,12 +146,60 @@ def trusted_admin_dir(worktree: Path, common: Path | None = None) -> Path:
     return admin
 
 
-def worktree_head(worktree: Path | None) -> str:
-    """The commit a linked worktree sits at, read through its trusted admin dir; ``""`` when there is none to trust."""
-    if worktree is None or not (worktree / _GITFILE).exists():
+def recorded_admin_dir(repo: Path, worktree: Path, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> Path:
+    """The admin directory of the linked worktree ``worktree``, as the repository ``repo`` it was added from records it.
+
+    Only ``repo``'s git directory is read, never what the worktree holds: its ``.git`` file is the agent's to rewrite,
+    and an agent that runs as the app's own uid (in a bubblewrap sandbox) makes an admin directory no ownership check
+    tells from the app's (:func:`trusted_admin_dir`). The one entry of the repository's ``worktrees`` whose ``gitdir``
+    names the worktree's ``.git`` is it.
+
+    Raises:
+        OSError: ``repo`` has no git directory, or not exactly one of its linked worktrees is ``worktree``.
+        subprocess.SubprocessError: git did not answer within ``timeout``.
+    """
+    done = subprocess.run(
+        ["git", *NO_PROGRAMS, "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if done.returncode != 0:
+        raise OSError(errno.ENOENT, f"no git directory: {done.stderr.strip()}", str(repo))
+    entries = Path(done.stdout.strip()) / "worktrees"
+    gitfile = os.path.realpath(worktree / _GITFILE)
+    found = [entry for entry in _linked_entries(entries) if _names(entry, gitfile)]
+    if len(found) != 1:
+        raise OSError(errno.ENOENT, f"{len(found)} linked worktrees of {repo} are this one", str(worktree))
+    return found[0]
+
+
+def _linked_entries(entries: Path) -> list[Path]:
+    """The admin directories under a repository's ``worktrees`` directory."""
+    try:
+        return sorted(entry for entry in entries.iterdir() if entry.is_dir() and not entry.is_symlink())
+    except FileNotFoundError:
+        return []
+
+
+def _names(entry: Path, gitfile: str) -> bool:
+    """Whether the admin directory ``entry`` belongs to the worktree whose resolved ``.git`` is ``gitfile``."""
+    try:
+        named = read_text_nofollow(entry / "gitdir").strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return os.path.realpath(os.path.join(entry, named)) == gitfile
+
+
+def worktree_head(worktree: Path | None, *, admin: Path | None = None) -> str:
+    """The commit a linked worktree sits at, read through ``admin`` (:func:`app_git`) or else its trusted admin dir;
+    ``""`` when there is none to trust."""
+    if worktree is None or (admin is None and not (worktree / _GITFILE).exists()):
         return ""
     try:
-        done = app_git(worktree, "rev-parse", "HEAD")
+        done = app_git(worktree, "rev-parse", "HEAD", admin=admin)
     except OSError:
         return ""
     return done.stdout.strip() if done.returncode == 0 else ""
@@ -189,20 +237,24 @@ def app_git(
     *args: str,
     timeout: float = _DEFAULT_TIMEOUT_SEC,
     env: Mapping[str, str] | None = None,
-    common: Path | None = None,
+    admin: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``git <args>`` in ``worktree`` against its trusted admin dir, never against what the worktree holds.
+
+    The admin dir is ``admin``, as the caller found it from the repository's side (:func:`recorded_admin_dir`), when
+    given: the worktree's ``.git`` is then not read at all. Otherwise it is the one that ``.git`` names, believed only
+    when the app owns it (:func:`trusted_admin_dir`), which proves nothing against an agent that runs as the app's uid.
 
     No program the repository's config names runs: the ``NO_PROGRAMS`` pins, every configured driver program blanked,
     and no transport. The driver programs are read from the config just before the command, which reads it again; the
     config lies in the admin and common directories, the app's, so no one but the app writes a driver in between. A repository nested in the tree is the caller's to keep out (see the module docstring).
-    ``env`` adds variables of the caller's (an index file, an identity) under the ones that keep this so; ``common``
-    is as :func:`trusted_admin_dir`'s.
+    ``env`` adds variables of the caller's (an index file, an identity) under the ones that keep this so. A caller that
+    holds the repository passes ``admin=trusted_admin_dir(worktree, common)`` to have the admin dir checked against it.
 
     Raises:
         OSError: The worktree's git metadata is not the app's, or its config cannot be neutralized (nothing was run).
     """
-    admin = trusted_admin_dir(worktree, common)
+    admin = trusted_admin_dir(worktree) if admin is None else admin
     env = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, **(env or {})}
     env.update(
         GIT_CONFIG_NOSYSTEM="1",
@@ -237,8 +289,11 @@ def app_git(
     )
 
 
-def app_git_diff(worktree: Path, base: str, pathspec: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    """``git diff <base>`` over ``pathspec`` in ``worktree`` by ``app_git``, untracked paths shown as created.
+def app_git_diff(
+    worktree: Path, base: str, pathspec: Sequence[str], *, admin: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    """``git diff <base>`` over ``pathspec`` in ``worktree`` by ``app_git`` (through ``admin`` when given), untracked
+    paths shown as created.
 
     The untracked paths are marked intent-to-add by name, never by ``add -A``: an ``add`` over a path the index
     tracks checks a repository nested there for local changes by running git in it, under that repository's own
@@ -249,12 +304,20 @@ def app_git_diff(worktree: Path, base: str, pathspec: Sequence[str]) -> subproce
         OSError: As ``app_git``.
         subprocess.SubprocessError: As ``app_git``.
     """
-    listed = app_git(worktree, "ls-files", "--others", "--exclude-standard", "-z", "--", *pathspec)
+    listed = app_git(worktree, "ls-files", "--others", "--exclude-standard", "-z", "--", *pathspec, admin=admin)
     untracked = [path for path in listed.stdout.split("\0") if path] if listed.returncode == 0 else []
     for start in range(0, len(untracked), _ADD_BATCH):
-        app_git(worktree, "--literal-pathspecs", "add", "-N", "--", *untracked[start : start + _ADD_BATCH])
+        app_git(worktree, "--literal-pathspecs", "add", "-N", "--", *untracked[start : start + _ADD_BATCH], admin=admin)
     return app_git(
-        worktree, "diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty", base, "--", *pathspec
+        worktree,
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=dirty",
+        base,
+        "--",
+        *pathspec,
+        admin=admin,
     )
 
 
@@ -264,6 +327,7 @@ __all__ = [
     "app_git",
     "app_git_diff",
     "blank_driver_programs",
+    "recorded_admin_dir",
     "repo_root",
     "safe_directory_args",
     "trusted_admin_dir",

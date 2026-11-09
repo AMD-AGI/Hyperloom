@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from stat import S_ISDIR
 
 from hyperloom.common.proctree import descendants
 
@@ -228,9 +229,14 @@ def _directory_blocks(directory: Path, subdirs: list[Path]) -> int:
 
 
 def dir_usage_bytes(path: Path) -> int | None:
-    """Disk blocks used under ``path`` (symlinks not followed); ``None`` when it does not exist."""
+    """Disk blocks used under ``path``, following no symlink (one at ``path`` neither); ``None`` (unknown) when ``path``
+    is not a directory of its own: a link a specialist left at its worktree's path would have the app walk whatever
+    directory it names."""
     root = Path(path)
-    if not root.exists():
+    try:
+        if not S_ISDIR(os.lstat(root).st_mode):
+            return None
+    except OSError:
         return None
     total = 0
     stack = [root]

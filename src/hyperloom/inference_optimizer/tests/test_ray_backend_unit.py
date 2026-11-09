@@ -1681,6 +1681,28 @@ def test_serving_actor_env_removes_secrets_and_preserves_ray_devices(
     assert captured["stdin_path"] == "/tmp/prompt.txt"
 
 
+def test_a_serving_actor_only_appends_to_a_log_its_launch_says_was_created_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A launch naming the log's identity hands the process manager that log to append to; one naming a path alone
+    keeps the path, which the manager creates."""
+    captured: list[Any] = []
+
+    class _CaptureProcess:
+        def start(self, cmd, *, env=None, cwd=None, log_path=None, stdin_path=None):
+            captured.append(log_path)
+            return 4321
+
+    monkeypatch.setitem(sys.modules, "ray", _PassthroughRay())
+    monkeypatch.setattr(rs, "ManagedServerProcess", _CaptureProcess)
+    actor = rs._serving_actor_body()()
+
+    actor.start(rs.ActorLaunch(["agent"], log_path="/w/process.log", log_identity=(7, 11)))
+    actor.start(rs.ActorLaunch(["server"], log_path="/w/server.log"))
+
+    assert captured == [rs.CreatedLog("/w/process.log", (7, 11)), "/w/server.log"]
+
+
 def test_serving_actor_run_blocking_timeout_sentinel(monkeypatch: pytest.MonkeyPatch):
     """A hard timeout in run_blocking is reported as the sentinel returncode."""
     monkeypatch.setitem(sys.modules, "ray", _PassthroughRay())
