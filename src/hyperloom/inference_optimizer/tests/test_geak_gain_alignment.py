@@ -420,7 +420,8 @@ async def test_agentx_2b_uses_current_canonical_measurement(
 
     assert not state.geak_pending
     attempt = state.explore_attempts[-1]
-    if case == "positive":
+    # Output throughput guards nothing, so ``output_drop`` promotes like ``positive``.
+    if case in {"positive", "output_drop"}:
         assert attempt["decision"] == "promoted"
         assert state.current_best["tput"] == measured
         assert state.current_best["input_throughput"] == 800.0 - measured
@@ -438,8 +439,7 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         assert state.cumulative_gain_validated_stack_len == 1
         assert state.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
         assert resume_pending(state) is True
-        # ``output_drop`` joins them: the guard reads output throughput, which this case regresses past the band.
-        if case in {"lift_refused", "missing_axes", "output_drop"}:
+        if case in {"lift_refused", "missing_axes"}:
             assert attempt["decision"] == "no_promote"
             assert attempt["status"] == "no_promote"
             assert state.geak_result["revalidation_status"] == "no_promote"

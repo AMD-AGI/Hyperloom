@@ -2427,8 +2427,8 @@ async def test_promote_explore_two_winners_produce_two_stack_entries(session_dir
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "last_tput,last_total,last_intvty,rejected",
-    [(130.0, 1250.0, 125.0, False), (90.0, 1250.0, 125.0, True), (140.0, 1150.0, 115.0, True)],
-    ids=["last_winner_intvty", "last_output_drop_rejected", "last_duplicate_recorded"],
+    [(130.0, 1250.0, 125.0, False), (130.0, 1100.0, 125.0, True), (140.0, 1150.0, 115.0, True)],
+    ids=["last_winner_intvty", "last_total_drop_rejected", "last_duplicate_recorded"],
 )
 async def test_promote_explore_cumulative_uses_last_lifted_measurement(
     session_dir, monkeypatch, last_tput, last_total, last_intvty, rejected
