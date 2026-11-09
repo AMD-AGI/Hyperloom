@@ -671,7 +671,8 @@ def _point_into_sandbox(place: LaunchPlace, env: dict[str, str]) -> None:
 def _default_hf_home(env: Mapping[str, str]) -> Path | None:
     """Hugging Face's directory as ``env`` leaves it to its default (``$XDG_CACHE_HOME/huggingface``, else
     ``~/.cache/huggingface``), when that is a directory; ``None`` when ``env`` names one of :data:`HF_VARIABLES`, and
-    when the app cannot look there (a home it cannot search): a cache it cannot read is no cache to show."""
+    when the app cannot look there (a home it cannot search): a cache it cannot read is no cache to show. Resolved: a
+    sandbox binds what a link names, never the link, so only the directory it leads to is there inside."""
     if any(env.get(name) for name in HF_VARIABLES):
         return None
     cache, home = env.get("XDG_CACHE_HOME", ""), env.get("HOME", "")
@@ -681,7 +682,7 @@ def _default_hf_home(env: Mapping[str, str]) -> Path | None:
         found = Path(home, ".cache", "huggingface")
     else:
         return None
-    return found if os.path.isdir(found) else None
+    return Path(os.path.realpath(found)) if os.path.isdir(found) else None
 
 
 def _scratch_where_free(policy: BwrapPolicy, version: tuple[int, int, int] | None) -> BwrapPolicy:
