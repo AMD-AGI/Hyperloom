@@ -706,6 +706,48 @@ def test_the_rewrite_keeps_exactly_what_the_loader_lends_from_a_shared_dotenv(tm
     )
 
 
+# A long s: under a UTF-8 locale bash's ${1^^} and str.upper() both fold it to S, so this name folds to a lent one.
+_LONG_S_NAME = "hf_data\u017fets_offline"
+
+
+def test_a_name_that_folds_to_a_lent_one_is_neither_lent_nor_kept_by_the_rewrite(tmp_path):
+    """A name that is not ASCII is refused before it is folded, so the rewrite drops it and the .env it leaves loads."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    checkout.chmod(0o777)
+    dotenv = checkout / ".env"
+    dotenv.write_text(f"FRAMEWORK=vllm\n{_LONG_S_NAME}=1\n", encoding="utf-8")
+    env = {"PATH": os.environ["PATH"], "REPO_ROOT": str(checkout), "LC_ALL": "C.UTF-8"}
+
+    folded = _shell('printf "%s" "${1^^}"', _LONG_S_NAME, env=env)
+    lent = _shell('runtime_env_dotenv_lent "$1" 1', _LONG_S_NAME, env=env)
+    rewrite = _shell('runtime_env_keep_lent_dotenv_lines "$1"', str(dotenv), env=env)
+    load = _shell('load_dotenv_no_clobber && printf "%s" "$FRAMEWORK"', env=env)
+
+    assert folded.stdout == "HF_DATASETS_OFFLINE"
+    assert lent.returncode == 1
+    assert rewrite.returncode == 0, rewrite.stderr
+    assert dotenv.read_bytes() == b"FRAMEWORK=vllm\n"
+    assert load.returncode == 0, load.stderr
+    assert load.stdout == "vllm"
+
+
+def test_preflight_lends_no_name_that_folds_to_a_lent_one(tmp_path):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    checkout.chmod(0o777)
+    dotenv = checkout / ".env"
+    dotenv.write_text("FRAMEWORK=vllm\n", encoding="utf-8")
+
+    assert _LONG_S_NAME.upper() == "HF_DATASETS_OFFLINE"
+    assert not env_safety.is_lent_not_private_dotenv_assignment(_LONG_S_NAME, "1")
+    assert not env_safety.is_allowed_not_private_dotenv_key(_LONG_S_NAME)
+    assert not env_safety.is_allowed_dotenv_key(_LONG_S_NAME)
+    assert env_safety.is_lent_not_private_dotenv_assignment("hf_datasets_offline", "1")
+    lent = preflight_env._allowed_dotenv_vars(dotenv, {"FRAMEWORK": "vllm", _LONG_S_NAME: "1"})
+    assert lent == {"FRAMEWORK": "vllm"}
+
+
 # Between the rewrite and the install's next write of .env, the other account appends a line to the file the rewrite
 # left, as it would from an inotify watch on the checkout; each attempt is recorded.
 _APPEND_AS_ANOTHER_ACCOUNT_AFTER = """
