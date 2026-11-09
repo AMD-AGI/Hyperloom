@@ -4,7 +4,7 @@
 """GEAK must measure the axis Hyperloom keeps candidates on.
 
 An interactivity-graded session keeps a candidate only on a gain in the median
-``e2e_norm_intvty_p50``, with the p90 tail and output throughput as noise-band
+``e2e_norm_intvty_p50``, with the p90 tail and total token throughput as noise-band
 guards; a fixed-ISL/OSL run is graded on output. GEAK measures whichever axis
 ``E2E_METRIC`` names and records the matching ``metric_basis``, so the flag has
 to follow the grader rather than sit pinned to one value.
@@ -38,8 +38,8 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.agentx_objective import AgentXObjective
 from hyperloom.common.perf_metric import (
-    AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
@@ -121,11 +121,15 @@ def test_an_explicit_override_wins_in_both_directions(native_benchmark, monkeypa
 
 
 def test_the_interactivity_handoff_carries_the_rule_the_rebench_keeps_on():
-    """GEAK's "ok" has to mean the rebench's KEEP, or every sub-threshold win is a wasted rebench."""
+    """GEAK's "ok" has to mean the rebench's KEEP, or every sub-threshold win is a wasted rebench.
+
+    Output throughput guards nothing, so GEAK must not refuse on it; GEAK records no total-throughput guard, and one
+    it did not record would fail every candidate.
+    """
     assert geak_acceptance(GEAK_METRIC_INTVTY[1], 7.5) == {
         "objective": "e2e_norm_intvty_p50",
-        "min_gain_pct": AGENTX_KEEP_P50_THRESHOLD_PCT,
-        "guard_max_drop_pct": {"e2e_norm_intvty_p90": 7.5, "aggregate_output_tok_s": 7.5},
+        "min_gain_pct": AgentXObjective.P50_INTERACTIVITY.bar_pct,
+        "guard_max_drop_pct": {"e2e_norm_intvty_p90": 7.5},
     }
     assert geak_acceptance(GEAK_METRIC_OUTPUT[1], 7.5) is None
 

@@ -65,7 +65,7 @@ _PERCENT = 100.0
 # slack admits more failures in a longer or more concurrent round and none in a round of fewer than 200 requests (an
 # MLPerf smoke run issues 150 samples). Percentiles are read over the same round's successful requests, so dropping a
 # fraction f of them moves any percentile by at most f in rank, and the slack cannot buy a median gain anywhere near
-# AGENTX_KEEP_P50_THRESHOLD_PCT.
+# the AgentX objective's bar (``agentx_objective``).
 ERROR_RATE_SLACK_PCT = 0.5
 
 # The axes ``graded_axes_of`` can carry, for a consumer that must publish all of them including the ones a
@@ -97,9 +97,6 @@ GRADED_AXIS_KEYS = (
 # Upstream reports run-to-run noise on this workload as 1-5% depending on the concurrency regime, so the band opens
 # to the top of that range instead of rejecting movement upstream would call noise.
 _DEFAULT_INTVTY_NOISE_PCT = 5.0
-
-# The median bar is a property of the objective, so the session's decaying threshold does not apply to it.
-AGENTX_KEEP_P50_THRESHOLD_PCT = 3.0
 
 # Median interactivity over the first half hour of profiling. On 808 graded rounds no KEEP trailed its reference here
 # by more than 0.47%, so a candidate behind by more than the drop is stopped instead of measured to the end.
@@ -247,6 +244,11 @@ def axis_of(snapshot: Mapping[str, float] | None, key: str) -> float:
 def intvty_of(snapshot: Mapping[str, float] | None) -> float:
     """Slow-tail interactivity from a perf snapshot; 0.0 when unavailable."""
     return axis_of(snapshot, GRADED_INTVTY)
+
+
+def snapshot_axis(metric: str) -> str:
+    """The key a perf snapshot carries round metric *metric* under: the snapshot normalises total token throughput."""
+    return GRADED_TOTAL if metric == TOTAL_TOKEN_THROUGHPUT else metric
 
 
 def total_tput_of(snapshot: Mapping[str, float] | None) -> float:
@@ -570,7 +572,6 @@ class GradingAnchor:
 __all__ = [
     "AGENTX_CHECKPOINT_MAX_DROP_PCT",
     "AGENTX_CHECKPOINT_SEC",
-    "AGENTX_KEEP_P50_THRESHOLD_PCT",
     "CONSTRAINT_FIELDS",
     "DURATION_DRIFT_PCT",
     "ERROR_RATE_SLACK_PCT",
@@ -611,6 +612,7 @@ __all__ = [
     "parse_intvty_noise_pct",
     "perf_snapshot_from_mapping",
     "resolve_grading_anchor_perf",
+    "snapshot_axis",
     "stamp_output_per_gpu",
     "with_output_per_gpu",
     "total_tput_of",

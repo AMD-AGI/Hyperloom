@@ -1257,17 +1257,19 @@ throughput moves along the frontier rather than violating a rule.
 Hyperloom's local KEEP rule (fixed concurrency, no ladder) approximates the
 per-concurrency arm selection maintainers apply before submitting:
 
-- **KEEP** — E2E normalised interactivity P50 (median) gain ≥ 3%, **and** the P90
-  slow tail and output throughput each no worse than the noise band, **and** the
+- **KEEP** — E2E normalised interactivity P50 (median) gain ≥ 2%, **and** the P90
+  slow tail and total token throughput each no worse than the noise band, **and** the
   pair is comparable: benchmark windows within 5% of each other and no more failed
   requests than the anchor.
 - **REVERT** — anything short of all of that.
 
-The median bar is the fixed `AGENTX_KEEP_P50_THRESHOLD_PCT` (3%), not
-`keep_threshold_pct`: it is a property of the objective rather than of how far
-into the session a round lands, so the decaying session threshold does not apply
-to it. Total token throughput no longer participates in the verdict — on this
-corpus it is almost entirely prefill, so it cannot see an output collapse.
+The median bar is the P50 objective's fixed `bar_pct` in
+`hyperloom.common.agentx_objective` (2%, the same bar and guards
+`hyperloom-multibranch` applies), not `keep_threshold_pct`: it is a property of
+the objective rather than of how far into the session a round lands, so the
+decaying session threshold does not apply to it. Output throughput is recorded
+but guards nothing: it follows the replayed window's output-length mix, not the
+server.
 
 Hyperloom reads `e2e_norm_intvty_p90` from the accepted `current_best` for both
 grading and advisory comparison. This is aiperf's summary **P10** of the
@@ -1288,8 +1290,8 @@ scriptable frameworks (xDiT, custom) keep output-throughput grading.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` for AgentX, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and output throughput each held as a guard. Reported in the final summary as `grading mode`. |
-| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or output throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value raises `EnvValueError` naming the variable, rather than grading against a band nobody chose. |
+| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` for AgentX, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and total token throughput each held as a guard. Reported in the final summary as `grading mode`. |
+| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or total token throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value raises `EnvValueError` naming the variable, rather than grading against a band nobody chose. |
 | `HYPERLOOM_AGENTX_EARLY_STOP`  | `enforce`                     | AgentX checkpoint after 1800 s of profiling: the round's median interactivity over the requests finished by then, against the reference's own first 1800 s. The ruling is written to `agentx_checkpoint.json` in the round's slot. `enforce` stops an explore decision round that trails by more than 2% and records it as REVERT; `shadow` only writes the ruling; `off` skips the checkpoint. Any other value raises `EnvValueError`. A reference measured without a checkpoint median is never compared. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Initial server-boot budget written by the persistent-server lifecycle configuration helper. Actual benchmark launches synchronize this field to `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`; this variable is not an additional benchmark deadline or a way to extend one. Non-benchmark lifecycle callers that do not perform that synchronization retain their own boot budget. |
 
