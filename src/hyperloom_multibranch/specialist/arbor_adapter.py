@@ -9,10 +9,11 @@ which a host never starts again. A checkout that has that mode, its entry point 
 (:func:`is_arbor`), and the preflight (:mod:`agent_onboarding`) takes its manifest from here instead of asking the
 model: the config follows from the branch's spec alone (:func:`arbor_config`), on Arbor's serving template pack, with
 the gate's client as its bench command (:func:`bench_command`), an AgentX round's report read by Arbor's harness at
-:data:`REPORT_PATHS`, and its session in its checkout, the directory the manifest's snapshots name. Before Arbor
-starts, the config is checked against what Arbor refuses at its start (:func:`refusals`): Arbor's ``--dry-run`` runs
-its loop on synthetic numbers and checks none of it. Another attempt would write the same config, so a refusal, this
-side's or Arbor's own, fails the preflight at once.
+:data:`REPORT_PATHS` when it is one MB's gate counts (:data:`REPORT_REQUIRE`), an AgentX session's keep rule as Arbor's
+objective (:data:`OBJECTIVE_KEY`), and its session in its checkout, the directory the manifest's snapshots name.
+Before Arbor starts, the config is checked against what Arbor refuses at its start (:func:`refusals`): Arbor's
+``--dry-run`` runs its loop on synthetic numbers and checks none of it. Another attempt would write the same config, so
+a refusal, this side's or Arbor's own, fails the preflight at once.
 
 The spec's ``plan``, the file of the branch's share of the session's directions, becomes ``component.plan``. Those
 shares come from one map, which Arbor's dossier pass writes on one lease before the branches open
@@ -138,16 +139,17 @@ ARBOR_METRICS = {
     TOTAL_TOKEN_THROUGHPUT: "total_token_throughput",
     GRADED_OUTPUT: "output_throughput",
 }
-#: The config key Arbor optimizes a metric by in place of its pack's (``arbor/objective.py``), and the key it reads as
-#: each AgentX objective MB keeps on: ``e2e_norm_intvty_p50`` as MB reads it, and the total token throughput per GPU,
-#: which ranks a change as MB's per-server figure does at a session's fixed TP. Another session's metric is its pack's.
+#: The config key that gives Arbor an AgentX session's keep rule in place of its pack's objective
+#: (``arbor/objective.py``), in its structured form: the objective, its bar and its guards, each held within the
+#: objective's band of the kept tree. The total token throughput Arbor reads per GPU ranks a change as MB's per-server
+#: figure does at a session's fixed TP. Another session's metric is its pack's.
 OBJECTIVE_KEY = "opt_objective"
-ARBOR_OBJECTIVES = {objective.metric: ARBOR_METRICS[objective.metric] for objective in AgentXObjective}
-#: Where an Arbor checkout lists the metrics it optimizes on :data:`OBJECTIVE_KEY` (``KNOWN``), and the commit from
-#: which it knows each: ``e8d31b7`` added the key but read P50 interactivity as decode alone until ``9c455df``, and
-#: ``df9b55a`` added the total token throughput.
+#: Where an Arbor checkout lists the forms :data:`OBJECTIVE_KEY` takes (``FORMS``), and the commit that added the
+#: structured one; an Arbor before it ignores or refuses the form.
 OBJECTIVE_MODULE = "arbor/objective.py"
-OBJECTIVE_SINCE = {"e2e_norm_intvty_p50": "9c455df", "total_token_throughput": "df9b55a"}
+OBJECTIVE_FORM = "structured"
+OBJECTIVE_SINCE = "29c72f9"
+_AGENTX_OBJECTIVES = {objective.metric: objective for objective in AgentXObjective}
 #: Where the gate's AgentX round report (``report.json``) holds each metric Arbor's harness reads from it
 #: (``component.bench_read``), by Arbor's key: either objective, every guard of either, and the output throughput MB
 #: records. Throughput is the server's, not per GPU.
@@ -156,6 +158,14 @@ REPORT_PATHS = {
     ARBOR_METRICS[GRADED_INTVTY]: "agentx.e2e_norm_intvty.p90",
     ARBOR_METRICS[TOTAL_TOKEN_THROUGHPUT]: "agentx.throughput.total_tokens_per_second",
     ARBOR_METRICS[GRADED_OUTPUT]: "agentx.throughput.output_tokens_per_second",
+}
+#: What a round's report must say for Arbor's harness to read its numbers (``component.bench_read.require``): the
+#: round completed, the client did not stop at its failed-request threshold, and it replayed the trace at its own
+#: pace. MB's gate refuses any other round, whose report still holds numbers.
+REPORT_REQUIRE = {
+    "run_status": RunStatus.COMPLETED.value,
+    "agentx.stopped_by_threshold": False,
+    "agentx.fast_mode": False,
 }
 #: SGLang reads its TP from these flags only. Arbor gives vLLM its TP itself, but MB names it too, so a vLLM branch's
 #: server_flags are never empty, which Arbor refuses (a plain baseline root has no launch of its own).
@@ -244,7 +254,8 @@ REVIEW_OFF = "off"
 REVIEW_GATE_KEY = "review_gate"
 #: Where an Arbor checkout declares its component block's keys, which says whether it has the review gate.
 COMPONENT_MODULE = "arbor/component.py"
-#: The Arbor commit that added each key MB writes, which a refusal names; the rest came with component mode (32bf0c7).
+#: The Arbor commit that added each key MB writes, a key of a key's object dotted, which a refusal names; the rest came
+#: with component mode (32bf0c7).
 KEY_SINCE = {
     "root": "4249384",
     "plan": "0a17a7b",
@@ -254,6 +265,7 @@ KEY_SINCE = {
     "base_launch": "ba2f5a8",
     "entrypoint": "ba2f5a8",
     "bench_read": "6a62def",
+    "bench_read.require": "1c6eef1",
 }
 COMPONENT_SINCE = "32bf0c7"
 #: The keys an Arbor that lacks them runs without, losing only an input or a check: left out, with a note, rather than
@@ -417,18 +429,42 @@ def has_review_gate(checkout: Path) -> bool:
 
 def declared_keys(checkout: Path) -> frozenset[str] | None:
     """The component keys the Arbor in ``checkout`` takes, as its :data:`COMPONENT_MODULE` declares ``BLOCK_KEYS``,
-    read without importing Arbor; ``None`` for a checkout without that module, or whose keys cannot be read."""
+    and those ``component.bench_read`` takes, dotted, as its ``bench_read_errors`` lists them; read without importing
+    Arbor. ``None`` for a checkout without that module, or whose keys cannot be read."""
 
     try:
         tree = ast.parse((checkout / COMPONENT_MODULE).read_text(encoding=ENCODING))
     except (OSError, SyntaxError, UnicodeDecodeError):
         return None
+    block = _assigned_strings(tree, "BLOCK_KEYS")
+    if block is None:
+        return None
+    return frozenset({*block, *(f"bench_read.{key}" for key in _bench_read_keys(tree))})
+
+
+def _assigned_strings(tree: ast.Module, name: str) -> frozenset[str] | None:
+    """The strings of the tuple or list ``tree`` assigns to ``name`` at its top level; ``None`` when it assigns none."""
+
     for node in tree.body:
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "BLOCK_KEYS" for t in node.targets):
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
             if isinstance(node.value, (ast.Tuple, ast.List)):
-                keys = [e.value for e in node.value.elts if isinstance(e, ast.Constant)]
-                return frozenset(key for key in keys if isinstance(key, str))
+                return frozenset(
+                    e.value for e in node.value.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)
+                )
     return None
+
+
+def _bench_read_keys(tree: ast.Module) -> frozenset[str]:
+    """The keys ``bench_read_errors`` lets ``component.bench_read`` have: its set of them, ``file`` and ``keys`` among
+    them; empty for an Arbor without the function."""
+
+    checks = (node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "bench_read_errors")
+    sets = (each for check in checks for each in ast.walk(check) if isinstance(each, ast.Set))
+    for each in sets:
+        keys = frozenset(e.value for e in each.elts if isinstance(e, ast.Constant) and isinstance(e.value, str))
+        if {"file", "keys"} <= keys:
+            return keys
+    return frozenset()
 
 
 def fit_keys(config: Mapping[str, Any], checkout: Path) -> tuple[dict[str, Any], tuple[str, ...]]:
@@ -592,9 +628,10 @@ def validator_script(pack: Path, key: str, default: str) -> str:
 def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, Any]:
     """Arbor's config for ``run`` of ``spec``: in component mode on the host, the recipe's launch on the pack the spec
     names in ``checkout`` (the serving template by default), ending by the spec's deadline, its patches made against
-    its root, the integration notes read every iteration, its measurements as :func:`_bench_keys` gives them, and the
-    host's plan when it gives one, which a run that stops at its map does not take. A spec with a launch file is served the file's launch with the
-    recipe's added to it, and measured by the file's client when the spec has none.
+    its root, the integration notes read every iteration, its measurements as :func:`_bench_keys` gives them, an AgentX
+    session's keep rule as its objective, and the host's plan when it gives one, which a run that stops at its map does
+    not take. A spec with a launch file is served the file's launch with the recipe's added to it, and measured by the
+    file's client when the spec has none.
 
     The cards are numbered from 0, as the sandbox shows them; Arbor never masks them itself in this mode."""
 
@@ -617,10 +654,10 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
         component["base_launch"] = {"path": launch.record, "digest": launch.digest}
     if launch.entrypoint and launch.entrypoint != ENTRYPOINTS.get(spec.framework):
         component["entrypoint"] = list(launch.entrypoint)
-    objective = ARBOR_OBJECTIVES.get(spec.metric)
+    objective = _AGENTX_OBJECTIVES.get(spec.metric)
     return {
         **({REVIEW_GATE_KEY: False} if gate == REVIEW_OFF else {}),
-        **({OBJECTIVE_KEY: objective} if objective else {}),
+        **({OBJECTIVE_KEY: _arbor_objective(objective)} if objective else {}),
         "pack": name,
         "identity": f"{HOST} {Path(spec.model).name}",
         "goal": f"{spec.metric} of {spec.model} on {spec.framework} at TP{spec.tp} on {spec.gpu_type}, as MB measures it",
@@ -647,14 +684,18 @@ def arbor_config(spec: AgentSpec, checkout: Path, run: ArborRun) -> dict[str, An
 
 def _bench_keys(spec: AgentSpec, client: str) -> dict[str, Any]:
     """The component keys of how Arbor measures ``spec``'s branch: every measurement by ``client`` when there is one,
-    the report of the gate's AgentX round read by Arbor's harness (:func:`_report_keys`), and its bench phase as long
-    as one measurement by the gate's client may take."""
+    the report of the gate's AgentX round read by Arbor's harness (:func:`_report_keys`) when it is one that counts
+    (:data:`REPORT_REQUIRE`), and its bench phase as long as one measurement by the gate's client may take."""
 
     keys: dict[str, Any] = {}
     if client:
         keys["bench_command"] = bench_command(client)
     if spec.client and spec.workload.get("kind") == AGENTX:
-        keys["bench_read"] = {"file": REPORT_FILE, "keys": _report_keys(_agentx_objective(spec.metric))}
+        keys["bench_read"] = {
+            "file": REPORT_FILE,
+            "keys": _report_keys(_AGENTX_OBJECTIVES[spec.metric]),
+            "require": dict(REPORT_REQUIRE),
+        }
     if spec.client_seconds:
         keys["phase_minutes"] = {BENCH_PHASE: math.ceil(spec.client_seconds / 60)}
     return keys
@@ -666,6 +707,19 @@ def _report_keys(objective: AgentXObjective) -> dict[str, str]:
 
     metrics = (objective.metric, *(guard.metric for guard in objective.guards), GRADED_OUTPUT)
     return {ARBOR_METRICS[metric]: REPORT_PATHS[ARBOR_METRICS[metric]] for metric in metrics}
+
+
+def _arbor_objective(objective: AgentXObjective) -> dict[str, Any]:
+    """``objective``'s keep rule as Arbor's structured :data:`OBJECTIVE_KEY`: its metric, its bar, and each guard held
+    within its band of the kept tree, by Arbor's keys."""
+
+    return {
+        "metric": ARBOR_METRICS[objective.metric],
+        "bar_pct": objective.bar_pct,
+        "guards": [
+            {"metric": ARBOR_METRICS[guard.metric], "band_pct": objective.guard_band_pct} for guard in objective.guards
+        ],
+    }
 
 
 def server_flags(spec: AgentSpec, resolved: str = "") -> str:
@@ -721,7 +775,7 @@ def host_rules(spec: AgentSpec) -> list[str]:
     point = ", ".join(f"{key} {value}" for key, value in _operating_point(spec.workload).items())
     owned = ", ".join(sorted({*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}))
     kind = str(spec.workload.get("kind") or "the session's workload")
-    objective = _agentx_objective(spec.metric) if kind == AGENTX else None
+    objective = _AGENTX_OBJECTIVES[spec.metric] if kind == AGENTX else None
     kept = _agentx_kept(objective) if objective is not None else "that a second measurement confirms"
     rules = [
         f"{HOST_RULE}: the workload is fixed: {kind}{f' at {point}' if point else ''}, measured by MB's client, the"
@@ -740,22 +794,12 @@ def host_rules(spec: AgentSpec) -> list[str]:
             f" Arbor's GSM8K reads on another scale, so Arbor holds the change to the same drop against the root it"
             f" measures itself, and to {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:g} when it could not."
         )
-    if objective is not None and spec.client:
-        rules.append(
-            f"{HOST_RULE}: MB's client is its own AgentX round, a replay of the workload's trace window, whose"
-            f" {REPORT_FILE} Arbor's harness reads: a run whose run_status there is not {RunStatus.COMPLETED.value}"
-            " measured nothing, whatever numbers it holds."
-        )
     if spec.source_unkept:
         rules.append(
             f"{HOST_RULE}: a change to {spec.framework}'s source cannot be kept on this image: {spec.source_unkept}."
             " Spend the work on launch flags and environment variables."
         )
     return rules
-
-
-def _agentx_objective(metric: str) -> AgentXObjective:
-    return {objective.metric: objective for objective in AgentXObjective}[metric]
 
 
 def _agentx_kept(objective: AgentXObjective) -> str:
@@ -893,8 +937,13 @@ def _pin_refusals(component: Mapping[str, Any], declared: frozenset[str] | None)
     """A key MB writes that the pinned Arbor lacks, naming the Arbor commit that added it: Arbor would refuse it too.
     An optional key is not refused: :func:`fit_keys` leaves it out, with a note, before Arbor starts."""
 
-    known = declared if declared is not None else set(BLOCK_KEYS)
-    lacking = sorted(set(component) & set(BLOCK_KEYS) - set(OPTIONAL_KEYS) - known)
+    pinned = {*BLOCK_KEYS, *KEY_SINCE}
+    known = declared if declared is not None else pinned
+    written = {
+        *component,
+        *(f"{key}.{sub}" for key, value in component.items() if isinstance(value, Mapping) for sub in value),
+    }
+    lacking = sorted(written & pinned - set(OPTIONAL_KEYS) - known)
     return [
         f"the pinned Arbor has no component.{key}: pin Arbor {KEY_SINCE.get(key, COMPONENT_SINCE)} or later"
         for key in lacking
@@ -902,39 +951,24 @@ def _pin_refusals(component: Mapping[str, Any], declared: frozenset[str] | None)
 
 
 def _objective_refusals(config: Mapping[str, Any], checkout: Path) -> list[str]:
-    """An :data:`OBJECTIVE_KEY` the Arbor in ``checkout`` cannot optimize: one whose :data:`OBJECTIVE_MODULE` does not
-    list it (``e8d31b7`` read P50 interactivity as decode alone), or, from an Arbor without that module, which ignores
-    the key and climbs its pack's metric, any but P50 interactivity, which a session ran on such pins before the key
-    existed (the vendored v0.9.3 among them)."""
+    """An :data:`OBJECTIVE_KEY` the Arbor in ``checkout`` cannot take: one whose :data:`OBJECTIVE_MODULE` does not
+    list the structured form among its ``FORMS``. An Arbor without that module ignores the key and keeps on its pack's
+    metric, bar and second axis, changes MB would refuse."""
 
-    wanted = config.get(OBJECTIVE_KEY)
-    known = _known_objectives(checkout)
-    if not wanted or (wanted in known if known is not None else wanted == ARBOR_OBJECTIVES[GRADED_INTVTY_P50]):
+    if config.get(OBJECTIVE_KEY) is None or OBJECTIVE_FORM in _objective_forms(checkout):
         return []
-    return [
-        f"the pinned Arbor cannot optimize {wanted} ({OBJECTIVE_KEY}): pin Arbor {OBJECTIVE_SINCE[wanted]} or later"
-    ]
+    return [f"the pinned Arbor has no structured {OBJECTIVE_KEY}: pin Arbor {OBJECTIVE_SINCE} or later"]
 
 
-def _known_objectives(checkout: Path) -> frozenset[str] | None:
-    """The metric keys :data:`OBJECTIVE_MODULE` lists as ``KNOWN``, read without importing Arbor; ``None`` for a
-    checkout without that module, empty when it does not read."""
+def _objective_forms(checkout: Path) -> frozenset[str]:
+    """The forms :data:`OBJECTIVE_MODULE` lists as ``FORMS``, read without importing Arbor; empty for a checkout
+    without that module, or whose forms cannot be read."""
 
     try:
-        text = (checkout / OBJECTIVE_MODULE).read_text(encoding=ENCODING)
-    except FileNotFoundError:
-        return None
-    except (OSError, UnicodeDecodeError):
+        tree = ast.parse((checkout / OBJECTIVE_MODULE).read_text(encoding=ENCODING))
+    except (OSError, SyntaxError, UnicodeDecodeError):
         return frozenset()
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return frozenset()
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "KNOWN" for t in node.targets):
-            if isinstance(node.value, ast.Dict):
-                return frozenset(k.value for k in node.value.keys if isinstance(k, ast.Constant))
-    return frozenset()
+    return _assigned_strings(tree, "FORMS") or frozenset()
 
 
 def _host_refusals(config: Mapping[str, Any]) -> list[str]:
