@@ -193,6 +193,12 @@ def _endpoint(url: str) -> tuple[str, int] | None:
     return host.lower(), port
 
 
+def _authority(target: tuple[str, int]) -> str:
+    """``host:port`` of ``target`` as a request line or ``Host`` header writes it: an IPv6 host in brackets."""
+    host, port = target
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
 def _is_loopback(host: str) -> bool:
     if host == "localhost":
         return True
@@ -351,7 +357,7 @@ def _read_head(conn: socket.socket) -> bytes:
 def _tunnel(remote: socket.socket, upstream: _Upstream, target: tuple[str, int]) -> bytes | None:
     """Open a tunnel to ``target`` through the app's proxy at the other end of ``remote``, with the ``CONNECT`` this
     process writes: the bytes that came after the proxy's ``200``, or ``None`` when it answered anything else."""
-    where = f"{target[0]}:{target[1]}".encode("ascii")
+    where = _authority(target).encode("ascii")
     remote.sendall(b"CONNECT " + where + b" HTTP/1.1\r\nHost: " + where + b"\r\n" + upstream.authorization + b"\r\n")
     remote.settimeout(_HEAD_TIMEOUT_SEC)
     try:
@@ -561,7 +567,7 @@ class NetworkBridge:
         target = _target(line)
         connect = line.upper().startswith("CONNECT ")
         if target is None or target not in (self.reach.remote if connect else self.reach.plain):
-            shown = f"{target[0]}:{target[1]}" if target else line[:200]
+            shown = _authority(target) if target else line[:200]
             _refuse(conn, "403 Forbidden", f"not reachable from the specialist's sandbox: {shown}")
             return
         upstream = _upstream(self._env, target, connect)
@@ -570,7 +576,7 @@ class NetworkBridge:
         if remote is None or early is None:
             if remote is not None:
                 self._drop(remote)
-            _refuse(conn, "502 Bad Gateway", f"cannot connect to {target[0]}:{target[1]}")
+            _refuse(conn, "502 Bad Gateway", f"cannot connect to {_authority(target)}")
             return
         end = data.index(b"\r\n\r\n") + 4
         if connect:
