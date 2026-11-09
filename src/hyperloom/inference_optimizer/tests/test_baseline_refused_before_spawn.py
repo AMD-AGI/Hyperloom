@@ -19,6 +19,9 @@ from .conftest import make_coordinator
 _OWN_STOP_REASONS = {FailedStep.FLAG_UNKNOWN: ARGV_INVALID, FailedStep.GPUS_UNAVAILABLE: HOST_GPUS_UNAVAILABLE}
 
 
+_TRANSIENT = frozenset({FailedStep.PORT_IN_USE, FailedStep.REUSE_NOT_OWNED})
+
+
 async def _fail_baseline(session_dir, phase: str, step: FailedStep, detail: str):
     coord = make_coordinator(session_dir, shared_state_overrides={"enablement_mode": "auto"})
     coord.shared_state.phase = phase
@@ -32,13 +35,22 @@ async def _fail_baseline(session_dir, phase: str, step: FailedStep, detail: str)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", [phase_state.PHASE_PRELUDE, phase_state.PHASE_ENABLEMENT])
-@pytest.mark.parametrize("step", sorted(STEPS_BEFORE_SPAWN, key=lambda s: s.value))
+@pytest.mark.parametrize("step", sorted(STEPS_BEFORE_SPAWN - _TRANSIENT, key=lambda s: s.value))
 async def test_a_refusal_before_spawn_stops_the_run_with_its_cause(session_dir, phase, step):
     state = await _fail_baseline(session_dir, phase, step, "/tmp/cache holds no staging manifest")
 
     assert state.stop_reason == _OWN_STOP_REASONS.get(step, "baseline_failed")
     assert state.last_action_failures[-1]["error_class"] == failed_step_error_class(step)
     assert "holds no staging manifest" in state.last_action_failures[-1]["error_excerpt"]
+    assert not (state.enablement.launch_log or "").strip()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", sorted(_TRANSIENT, key=lambda s: s.value))
+async def test_a_port_or_held_server_refusal_counts_toward_the_streak_without_a_launch_log(session_dir, step):
+    state = await _fail_baseline(session_dir, phase_state.PHASE_PRELUDE, step, "the next attempt may find it free")
+
+    assert not state.stop_reason
     assert not (state.enablement.launch_log or "").strip()
 
 
