@@ -25,6 +25,7 @@ from .._internal import process_image
 from .._internal.log import err, info, warn
 from .._internal.pd_cluster import (
     ENGINE_PORT,
+    PLATFORM_MANAGED,
     LaunchSpec,
     cmdline_needle,
     drop_unsupported_baseline_flags,
@@ -208,6 +209,7 @@ def _refresh_pods(state: dict[str, Any], spec: LaunchSpec) -> None:
         [str(ip) for ip in state.get("decode_pod_ips") or []],
         port_i,
         spec,
+        service_url=str(state.get("service_url") or ""),
     )
     state["pods"] = pods
     state["router_pods"] = [pod for pod in pods if pod["role"] == "router"]
@@ -370,8 +372,10 @@ def engines_not_running(state: dict[str, Any], *, timeout: int = 30) -> list[str
 
 
 def _ordered_pods(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Engines first, then the router, so the router restarts against live workers."""
-    pods = [pod for pod in (state.get("pods") or []) if isinstance(pod, dict)]
+    """Engines first, then the router, so the router restarts against live workers; platform-managed pods excluded."""
+    pods = [
+        pod for pod in (state.get("pods") or []) if isinstance(pod, dict) and pod.get("managed_by") != PLATFORM_MANAGED
+    ]
     return [pod for pod in pods if pod.get("role") != "router"] + [pod for pod in pods if pod.get("role") == "router"]
 
 

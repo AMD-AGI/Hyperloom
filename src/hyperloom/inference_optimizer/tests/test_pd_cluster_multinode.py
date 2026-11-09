@@ -27,7 +27,7 @@ from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import (
 from hyperloom.inference_optimizer.multi_node._internal.pd_cluster import LaunchSpec
 from hyperloom.inference_optimizer.multi_node._internal.process_image import replace_process_image
 from hyperloom.inference_optimizer.multi_node.commands import pd_cluster as pd_cmds
-from hyperloom.inference_optimizer.multi_node.state_paths import bind_state_file_to_session
+from hyperloom.inference_optimizer.multi_node.state_paths import bind_state_file_to_session, multi_node_state_env
 
 
 def _spec(**overrides: object) -> LaunchSpec:
@@ -121,6 +121,50 @@ def test_pods_record_the_engine_port_of_their_role() -> None:
     pods = pods_for(["10.0.0.9"], ["10.0.0.1"], ["10.0.0.2"], 29000, spec)
     ports = {pod["role"]: pod.get("enginePort") for pod in pods}
     assert ports == {"router": None, "prefill": 8010, "decode": 8020}
+
+
+def test_platform_router_is_recorded_from_the_service_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _resolve(host: str) -> str:
+        if host != "router-svc.ns":
+            raise socket.gaierror(host)
+        return "192.168.0.5"
+
+    monkeypatch.setattr(pd_internal.socket, "gethostbyname", _resolve)
+    spec = _spec(backend="sglangrouter")
+    pods = pods_for([], ["10.0.0.1"], ["10.0.0.2"], 29000, spec, service_url="http://router-svc.ns:8000")
+    assert [pod["role"] for pod in pods] == ["router", "prefill", "decode"]
+    router = pods[0]
+    assert router["podIP"] == "192.168.0.5"
+    assert router["managed_by"] == "platform"
+    assert router["sshPort"] == 29000
+    assert router["launch_command"].startswith("python3 -m sglang_router.launch_router ")
+    unresolved = pods_for([], ["10.0.0.1"], ["10.0.0.2"], 29000, spec, service_url="http://unknown-host:8000")
+    assert unresolved[0]["podIP"] == "unknown-host"
+    handed_off = pods_for(
+        ["10.0.0.9"], ["10.0.0.1"], ["10.0.0.2"], 29000, spec, service_url="http://router-svc.ns:8000"
+    )
+    assert [pod["podIP"] for pod in handed_off if pod["role"] == "router"] == ["10.0.0.9"]
+    assert "managed_by" not in handed_off[0]
+
+
+def test_restart_and_stop_skip_the_platform_router() -> None:
+    state = {
+        "pods": [
+            {"role": "router", "podIP": "192.168.0.5", "managed_by": "platform"},
+            {"role": "prefill", "podIP": "10.0.0.1"},
+            {"role": "decode", "podIP": "10.0.0.2"},
+        ]
+    }
+    assert [pod["role"] for pod in pd_cmds._ordered_pods(state)] == ["prefill", "decode"]
+
+
+def test_multi_node_state_env_names_the_bound_state_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("MULTI_NODE_STATE", raising=False)
+    monkeypatch.delenv("MULTI_NODE_STATE_FILE", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", raising=False)
+    assert multi_node_state_env() == {}
+    path = bind_state_file_to_session(tmp_path / "session")
+    assert multi_node_state_env() == {"MULTI_NODE_STATE": str(path), "MULTI_NODE_STATE_FILE": str(path)}
 
 
 def test_atom_handoff_keeps_ssh_env_and_uses_one_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

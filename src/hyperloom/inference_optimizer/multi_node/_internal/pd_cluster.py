@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import socket
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -24,6 +25,8 @@ PD_ROUTER_BACKENDS = ("atom", "sglangrouter")
 ENGINE_PORT = 8000
 PREFILL_BOOTSTRAP_PORT = 8998
 DECODE_BOOTSTRAP_PORT = 9098
+# ``managed_by`` value of a pod whose process the platform owns; it is recorded, never restarted.
+PLATFORM_MANAGED = "platform"
 # Engine flags that newer SGLang splits into ``<flag>-decode`` and ``<flag>-prefill``.
 SPLIT_ROLE_FLAGS = ("--cuda-graph-bs", "--cuda-graph-max-bs")
 # Device files whose open handles mean a process still holds GPU memory.
@@ -357,17 +360,37 @@ def _pod(role: str, index: int, ip: str, port: int | None, spec: LaunchSpec) -> 
     return pod
 
 
+def _service_ip(service_url: str) -> str:
+    """IP the service host resolves to, or the host itself when it does not resolve."""
+    host = urlsplit(service_url).hostname or ""
+    if not host:
+        return ""
+    try:
+        return socket.gethostbyname(host)
+    except OSError:
+        return host
+
+
 def pods_for(
     router: list[str],
     prefill: list[str],
     decode: list[str],
     port: int | None,
     spec: LaunchSpec,
+    *,
+    service_url: str = "",
 ) -> list[dict[str, Any]]:
-    """One pod record per host, router then prefill then decode."""
+    """One pod record per host, router then prefill then decode.
+
+    Without hand-off router IPs, the router is recorded from ``service_url`` and
+    marked ``managed_by: platform``; restart and stop leave it alone.
+    """
     pods: list[dict[str, Any]] = []
     for index, ip in enumerate(router):
         pods.append(_pod("router", index, ip, port, spec))
+    service_ip = "" if router else _service_ip(service_url)
+    if service_ip:
+        pods.append({**_pod("router", 0, service_ip, port, spec), "managed_by": PLATFORM_MANAGED})
     for index, ip in enumerate(prefill):
         pods.append(_pod("prefill", index, ip, port, spec))
     for index, ip in enumerate(decode):
@@ -449,7 +472,7 @@ def stamp_pd_cluster(state: dict[str, Any], get: Lookup) -> None:
     state["worker_pod_ips"] = []
     state["worker_pods"] = []
     spec = spec_from_env(state, get)
-    pods = pods_for(router, prefill, decode, port, spec)
+    pods = pods_for(router, prefill, decode, port, spec, service_url=str(state.get("service_url") or ""))
     state["pods"] = pods
     state["router_pods"] = [pod for pod in pods if pod["role"] == "router"]
     state["prefill_pods"] = [pod for pod in pods if pod["role"] == "prefill"]
