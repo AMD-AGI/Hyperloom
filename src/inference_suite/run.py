@@ -210,7 +210,7 @@ def _measured_invocation(config: SuiteConfig, client: ClientTool | AgentxTool) -
 
 def _provisional_check(base: BaseLaunch) -> VersionCheck:
     """The version check a launch is composed with before the probe answers; :meth:`_Round._hold_framework` replaces it."""
-    return VersionCheck.NOT_APPLICABLE if base.image.framework_version is None else VersionCheck.PASSED
+    return framework_version.unheld(base.image) or VersionCheck.PASSED
 
 
 @dataclass(frozen=True)
@@ -379,21 +379,23 @@ class _Round:
         every flag (D7).
 
         An external round holds nothing: it never starts ``launch``, and the server it reaches may run on another host.
+        A base whose image settles the check by itself (no recipe version, or an assumed one) keeps that verdict.
         """
         if self.config.lifecycle.mode is LifecycleMode.EXTERNAL:
-            return replace(launch, framework=replace(launch.framework, version_check=VersionCheck.NOT_HELD))
+            check = framework_version.unheld(launch.base.image) or VersionCheck.NOT_HELD
+            return replace(launch, framework=replace(launch.framework, version_check=check))
         python = self.config.server.framework_python
         try:
-            install = probe_install(python, launch.framework.name, env)
+            install = probe_install(python, launch.framework.name, env, cwd=self.layout.framework_cwd)
         except FrameworkProbeError as exc:
             return Stop(FailedStep.FRAMEWORK_VERSION_UNKNOWN, str(exc))
-        verdict = framework_version.check(install.version, launch.framework.recipe_min_version)
+        verdict = framework_version.check(install.version, launch.base.image)
         if isinstance(verdict, VersionRefusal):
             return Stop(verdict.step, verdict.detail)
         held = replace(launch.framework, installed_version=install.version or UNVERSIONED, version_check=verdict)
         launch = replace(launch, framework=held)
         try:
-            refusal = parser_check.check(launch, python, env)
+            refusal = parser_check.check(launch, python, env, cwd=self.layout.framework_cwd)
         except parser_check.ParserCheckError as exc:
             return Stop(FailedStep.FLAG_UNKNOWN, str(exc))
         except FrameworkProbeError as exc:

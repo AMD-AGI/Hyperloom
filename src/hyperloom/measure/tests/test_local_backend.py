@@ -552,6 +552,24 @@ def test_a_flag_the_suite_refused_names_the_refusal_its_report_records(grid, ser
     assert [c["grid"][0].name for c in grid.calls] == ["warmup"]
 
 
+@pytest.mark.parametrize(
+    ("framework_changed", "failure_class", "reason"),
+    [(False, "infra", "framework_unimportable"), (True, "candidate", "import_error")],
+)
+def test_a_framework_the_serving_interpreter_cannot_import_is_the_images_unless_the_test_rebuilt_it(
+    grid, server, tmp_path, framework_changed, failure_class, reason
+):
+    detail = "/opt/venv/bin/python cannot import sglang"
+    workspace = write_run_dir(
+        grid.tmp_path / "ws" / "warmup", failed_step=FailedStep.FRAMEWORK_VERSION_UNKNOWN, failure_detail=detail
+    )
+    grid.answers["warmup"] = grid.result("warmup", status="failed", returncode=1, error="framework_version_unknown")
+
+    outcome = _run(_graded_call(tmp_path, framework_changed=framework_changed))
+
+    assert (outcome.failure_class, outcome.failure_reason) == (failure_class, f"{reason}: {detail}")
+
+
 @pytest.mark.parametrize("round_name", ["warmup", "test", "eval"])
 def test_a_graded_test_the_run_stops_in_a_round_reports_the_stop_and_runs_no_round_after_it(
     grid, server, tmp_path, round_name
@@ -1247,6 +1265,30 @@ def test_a_patched_test_measures_the_rebuilt_framework_that_the_compile_produced
     assert (package / "srt" / "a.py").read_text() == OLD_SOURCE  # and the image's was not written
     assert not Path(imported["path"]).exists()  # the farm is removed when the test ends
     assert outcome.sandbox.image_digest == IMAGE
+
+
+def test_a_patched_test_tells_the_rounds_verdict_that_it_changed_the_framework(
+    monkeypatch, tmp_path, installed_framework
+):
+    python, _ = installed_framework
+    seen: list[bool] = []
+    ended = local._ended
+
+    def record(run):
+        seen.append(run.call.framework_changed)
+        return ended(run)
+
+    async def look(**kwargs):
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+    monkeypatch.setattr(local, "_ended", record)
+    point = _point_with_python(tmp_path, python)
+
+    _run(_call(tmp_path, point, environment=_compile(tmp_path, installed_framework)))
+    _run(_call(tmp_path, point))
+
+    assert seen[0] is True and seen[-1] is False
 
 
 def _agentx_point(tmp_path, monkeypatch, conc: int = 4, **launch_envs: str) -> Path:

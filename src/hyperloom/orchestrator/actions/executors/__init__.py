@@ -36,7 +36,7 @@ from ._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless
 from ._launch_evidence import RequestedLaunch, build_launch_evidence
 from ._round_folder import RoundFolder, is_round_folder
 from ._suite.config import fixed_workload
-from ._suite.rounds import TOOL_CACHE_ENV, staged_tool_cache
+from ._suite.rounds import TOOL_CACHE_ENV, SuiteRoundRefused, external_agentx_config, staged_tool_cache
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 from ._spec_decode_pin import SpeculativeDecodingPinnedError, refuse_unpinned_speculative_change
 from ._patch_laying import PatchedServer, is_patched_copy
@@ -67,6 +67,7 @@ __all__ = [
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "SpeculativeDecodingPinnedError",
+    "SuiteRoundRefused",
     "TOOL_CACHE_ENV",
     "TargetAnalysisExecutor",
     "VariantResult",
@@ -78,6 +79,7 @@ __all__ = [
     "context_copy_refusal",
     "default_baseline_config",
     "explore_executor",
+    "external_agentx_config",
     "fixed_workload",
     "harvest_leaked_artifacts",
     "is_round_folder",

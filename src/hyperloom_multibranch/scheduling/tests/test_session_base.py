@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 """A session freezes the base launch its tests run on once, resolved as ``hyperloom optimize`` resolves it, and a
-resumed session keeps the one it froze; an operator's base launch record is the base, frozen without reading any
-recipe source, and the Arbor agents are served the frozen base."""
+resumed session keeps the one it froze; the operator's ``--reference-script`` is the base, a base launch record frozen
+without reading any recipe source, and the Arbor agents are then served the frozen base."""
 
 from __future__ import annotations
 
@@ -24,7 +24,8 @@ from hyperloom_multibranch.scheduling.session_base import freeze_session_base, s
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.specialist.arbor_adapter import read_launch
 from hyperloom_multibranch.tests.base_records import MODEL_ID, base_record, write_record
-from inference_suite import SourceSnapshot
+from inference_suite import InferencexCommitRefused, SourceSnapshot
+from inference_suite.contracts import SourceKind
 from inference_suite.contracts import Workload as LaunchWorkload
 from inference_suite.recipe import sources
 from inference_suite.recipe.resolve import UnreadSource
@@ -44,7 +45,7 @@ def asked(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, object]]:
 
     calls: list[tuple[object, object]] = []
 
-    def fetch(query: object, *, user_file: object = None) -> SourceSnapshot:
+    def fetch(query: object, *, user_file: object = None, inferencex_commit: str = "") -> SourceSnapshot:
         calls.append((query, user_file))
         return SourceSnapshot(None, 1_793_000_000, user_file=user_file, unread=UnreadSource("InferenceX", "offline"))
 
@@ -130,25 +131,30 @@ def test_an_agentx_session_no_source_serves_is_refused_and_freezes_nothing(tmp_p
     assert frozen_base(tmp_path) is None
 
 
-def test_an_agent_launch_that_is_a_base_launch_record_is_the_base_and_an_arbor_launch_file_is_not(
-    tmp_path: Path, asked: list
-) -> None:
+def test_a_reference_script_record_is_the_base_and_no_source_is_asked(tmp_path: Path, asked: list) -> None:
     record = tmp_path / "record.json"
     record.write_text(json.dumps(base_launch().to_document()))
-    arbor = tmp_path / "launch.json"
-    arbor.write_text(json.dumps({"server_flags": "--tp 1", "server_env": {}}))
     workload = replace(WORKLOAD, tp=1)
 
-    freeze_session_base(tmp_path / "with-record", workload, str(record))
-    freeze_session_base(tmp_path / "with-arbor-file", workload, str(arbor))
+    freeze_session_base(tmp_path / "toolbox", workload, str(record))
 
-    [(_, user_file), (_, none)] = asked
-    assert user_file.location == str(record) and none is None
-    frozen = frozen_base(tmp_path / "with-record")
+    [(_, user_file)] = asked
+    assert user_file.location == str(record)
+    frozen = frozen_base(tmp_path / "toolbox")
     assert frozen is not None
     assert dataclasses.replace(frozen.launch, query=base_launch().query) == dataclasses.replace(
         base_launch(), model=dataclasses.replace(base_launch().model, path=workload.model)
     )
+
+
+def test_a_reference_script_shell_launch_is_the_base_of_a_fixed_session(tmp_path: Path, offline: None) -> None:
+    script = tmp_path / "launch.sh"
+    script.write_text("python3 -m sglang.launch_server --model-path /models/llama --tp 2 --mem-fraction-static 0.7\n")
+
+    frozen = freeze_session_base(tmp_path / "toolbox", WORKLOAD, str(script))
+
+    assert frozen.launch.source.kind is SourceKind.USER_FILE and frozen.launch.source.path == str(script)
+    assert "--mem-fraction-static" in frozen.launch.args and frozen.launch.topology.tp == WORKLOAD.tp
 
 
 def test_a_base_on_another_topology_than_the_workloads_is_refused(tmp_path: Path, asked: list) -> None:
@@ -168,11 +174,11 @@ def test_a_record_is_frozen_as_the_base_without_a_source_and_arbor_is_served_the
     frozen = freeze_session_base(tmp_path / "toolbox", RECORDED, str(record))
 
     assert (frozen.launch.args, frozen.launch.golden_al) == (base_record().args, base_record().golden_al)
-    assert served_launch(frozen, str(record)) == str(frozen.path)
+    assert served_launch(frozen, str(record), "") == str(frozen.path)
     assert read_launch(frozen.path).digest == frozen.launch.digest()
 
 
-def test_a_resumed_session_keeps_its_base_and_serves_it_for_a_record(tmp_path: Path, offline: None) -> None:
+def test_a_resumed_session_keeps_its_base_and_serves_it_for_a_reference_script(tmp_path: Path, offline: None) -> None:
     toolbox = tmp_path / "toolbox"
     first = freeze_session_base(toolbox, RECORDED, str(write_record(tmp_path / "first.json")))
     other = write_record(tmp_path / "other.json", base_record(env={"VLLM_ROCM_USE_AITER": "0"}))
@@ -180,13 +186,45 @@ def test_a_resumed_session_keeps_its_base_and_serves_it_for_a_record(tmp_path: P
     resumed = freeze_session_base(toolbox, RECORDED, str(other))
 
     assert resumed.launch == first.launch
-    assert served_launch(resumed, str(other)) == str(first.path)
+    assert served_launch(resumed, str(other), "") == str(first.path)
 
 
-def test_an_arbor_launch_file_is_served_as_it_is(tmp_path: Path) -> None:
+def test_without_a_reference_script_the_arbor_launch_file_is_served_as_it_is(tmp_path: Path) -> None:
     launch = tmp_path / "launch.json"
     launch.write_text(json.dumps({"server_flags": "--max-num-seqs 64", "server_env": {}}), encoding="utf-8")
     frozen = FrozenBase(tmp_path / "toolbox" / "base_launch.json", base_record())
 
-    assert served_launch(frozen, str(launch)) == str(launch)
-    assert served_launch(frozen, "") == ""
+    assert served_launch(frozen, "", str(launch)) == str(launch)
+    assert served_launch(frozen, "", "") == ""
+
+
+def test_a_fresh_session_reads_inferencex_at_the_commit_it_was_given_and_a_resumed_one_reads_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commits: list[str] = []
+
+    def fetch(query: object, *, user_file: object = None, inferencex_commit: str = "") -> SourceSnapshot:
+        commits.append(inferencex_commit)
+        return SourceSnapshot(None, 1_793_000_000, user_file=user_file, unread=UnreadSource("InferenceX", "offline"))
+
+    monkeypatch.setattr(cli_base_launch, "fetch_sources", fetch)
+
+    first = freeze_session_base(tmp_path, WORKLOAD, "", "8a76a78e41")
+    resumed = freeze_session_base(tmp_path, WORKLOAD, "", "0123456789")
+    freeze_session_base(tmp_path / "unpinned", WORKLOAD, "")
+
+    assert commits == ["8a76a78e41", ""]
+    assert resumed == first
+
+
+def test_a_refused_inferencex_commit_leaves_the_session_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(query: object, *, user_file: object = None, inferencex_commit: str = "") -> NoReturn:
+        raise InferencexCommitRefused(f"InferenceX {inferencex_commit} lacks infx.srt_slurm.x.verifier")
+
+    monkeypatch.setattr(cli_base_launch, "fetch_sources", refuse)
+
+    with pytest.raises(PeersUnavailable, match="8a76a78e41 lacks infx.srt_slurm.x.verifier"):
+        freeze_session_base(tmp_path, WORKLOAD, "", "8a76a78e41")
+    assert frozen_base(tmp_path) is None

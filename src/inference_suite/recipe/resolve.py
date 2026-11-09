@@ -117,6 +117,7 @@ class SourceSnapshot:
     tag, which stands for a recipe image that names no version. ``user_file``, when the operator gave one, is the
     base. ``fetched_unix`` is when the snapshot was taken, and so when the base was resolved. ``unread`` names the
     source reading stopped at, when one could not be read; what it and every later source hold is missing.
+    ``inferencex_pin`` is the full sha InferenceX was read at when the operator pinned it, ``""`` for its ``main``.
     """
 
     inferencex: InferencexSnapshot | None
@@ -129,6 +130,7 @@ class SourceSnapshot:
     base_model: str | None = None
     latest_releases: Mapping[str, str] = field(default_factory=dict)
     unread: UnreadSource | None = None
+    inferencex_pin: str = ""
 
     def __post_init__(self) -> None:
         _FIELDS.integer(self.fetched_unix, "the snapshot's fetch time", minimum=0)
@@ -473,8 +475,8 @@ def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> 
     """The base launch of a session asking ``query`` on ``gpus`` visible GPUs, read from ``snapshot`` alone.
 
     A :class:`Miss` names why each source holds no launch: always for an AgentX query no recipe serves or whose
-    snapshot could not read a source, for a fixed one the default table has no row for either, and for a user file
-    or default row that needs more than ``gpus`` GPUs.
+    snapshot could not read a source, for a fixed one the default table has no row for either or InferenceX is pinned,
+    and for a user file or default row that needs more than ``gpus`` GPUs.
     """
     _FIELDS.integer(gpus, "the visible GPU count", minimum=1)
     if snapshot.unread is not None and query.workload is Workload.AGENTX:
@@ -496,6 +498,9 @@ def resolve_base(query: LaunchQuery, snapshot: SourceSnapshot, *, gpus: int) -> 
         return _recipe_base(query, snapshot, choice, misses)
     if query.workload is Workload.AGENTX:
         return Miss(tuple(misses))
+    if snapshot.inferencex_pin:
+        pinned = f"not taken while InferenceX is pinned at commit {snapshot.inferencex_pin}"
+        return Miss((*misses, SourceMiss(SourceKind.DEFAULT_TABLE, pinned)))
     return _fitted(_default_base(query, snapshot, tuple(misses)), SourceKind.DEFAULT_TABLE, gpus, tuple(misses))
 
 

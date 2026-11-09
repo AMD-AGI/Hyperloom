@@ -391,7 +391,7 @@ dropped it on that result and took the next operator the profile ranked.
 
 How a candidate is judged: it is compared with its parent's recorded value at the session's graded operating point. A \
 gain must clear the session's bar, set on InferenceX from the spread of the baseline measurements and on AgentX a \
-fixed threshold on the P50, and hold when it is measured again on another node; every commit must also pass the accuracy gate. A gain lands on your branch only while your \
+fixed threshold on the metric the workload is graded on, and hold when it is measured again on another node; every commit must also pass the accuracy gate. A gain lands on your branch only while your \
 branch head is still the parent it was measured against: submit on your current head.
 
 A test that failed as hip_runtime_error quotes the HIP error, and it is not a missing kernel: an illegal memory \

@@ -4,7 +4,8 @@
 """Take the snapshot a session's base launch is resolved from: the one module that reaches the network or runs a
 source's own code.
 
-Every repository is read at the head of its ``main`` and recorded with that commit. The vLLM recipes site, the
+Every repository is read at the head of its ``main`` and recorded with that commit; InferenceX alone may instead be
+pinned to an operator-given commit, which must still hold the code the resolver runs. The vLLM recipes site, the
 model's HF card and the framework's latest release are recorded as the responses they were. Which variant an
 InferenceX point binds, its acceptance length, its golden overrides and the golden length of a cookbook launch are
 InferenceX's own code: they run here once, in an isolated interpreter of a throwaway virtual environment holding
@@ -12,14 +13,17 @@ InferenceX's ``recipes`` dependencies, and their answers are recorded as data th
 built on the pinned CPython build (:func:`inference_suite.client_env.pinned_python`), never on the interpreter running
 this module, and only once that build satisfies the checkout's ``requires-python``.
 
-A source that cannot be read, InferenceX included, stops the reading there, and the snapshot names it. The
+A source that cannot be read, InferenceX included, stops the reading there, and the snapshot names it; with InferenceX
+pinned to a commit it refuses instead, since a pinned base may come from no table or source the commit did not choose. The
 operator's own launch file needs no source read: the load client is pinned in :mod:`inference_suite.pins`.
 """
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import json
+import re
 import subprocess
 import tempfile
 import time
@@ -59,7 +63,7 @@ from inference_suite.recipe.shell_launch import ShellLaunch
 from inference_suite.recipe.user_file import UserFile
 from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot, vllm_recipes_launches, vllm_recipes_requests
 
-#: The only branch a source is read from: what it has merged, never a pull request or a tag.
+#: The only branch a source is read from unless InferenceX is pinned: what it has merged, never a pull request or a tag.
 MAIN = "main"
 VLLM_REPO = "https://github.com/vllm-project/vllm"
 HF_MODELS_API = "https://huggingface.co/api/models"
@@ -68,19 +72,40 @@ SRT_SLURM = f"{PROJECT}/utils/srt-slurm"
 
 _FRAMEWORK_REPOS = {"sglang": SGLANG_REPO, "vllm": VLLM_REPO, "atom": ATOM_REPO}
 _INFERENCEX_SOURCE = "InferenceX"
+# What git says when the remote holds no object for the sha asked for, as opposed to failing to reach it.
+_NO_SUCH_OBJECT = re.compile(r"not our ref|unadvertised object")
 _RECIPES_EXTRA = "recipes"
 _QUIET = "--quiet"
+_REV_PARSE = "rev-parse"
 _OK = 200
 # HF answers 401, not 404, for a repository it does not know when asked anonymously.
 _NO_MODEL_CARD = frozenset({401, 404})
 _HTTP_TIMEOUT_S = 60
 _COMMAND_TIMEOUT_S = 900
 _OUTPUT_TAIL = 2000
+_PINNED_COMMIT = re.compile(r"[0-9a-f]{7,40}")
+_FULL_COMMIT_LENGTH = 40
+
+#: What the resolver below imports from InferenceX, by module: a commit that lacks any of it cannot answer.
+_INFERENCEX_API: Mapping[str, tuple[str, ...]] = {
+    "infx.golden_al_distribution": ("GOLDEN_DIR", "curve_name", "golden_length"),
+    "infx.srt_slurm.single_node": ("select_recipe",),
+    "infx.srt_slurm.synthetic_acceptance": (
+        "ENGINES",
+        "acceptance_length",
+        "build_overrides",
+        "generation_role",
+        "spec_parameters",
+        "verifier",
+    ),
+    "infx.srt_slurm.workload": ("NATIVE_TELEMETRY_BLOCK", "SHARED_BLOCKS"),
+}
 
 # Run as ``python -I -c`` in the project directory of an InferenceX checkout: reads a request on stdin and writes the
 # answers as JSON on stdout. Upstream output is sent to stderr so stdout carries the answers alone. A ValueError is
 # how InferenceX refuses a point or a draft config, so it is recorded as the answer.
-_INFERENCEX_CHILD = """
+_INFERENCEX_CHILD = (
+    """
 import hashlib
 import json
 import sys
@@ -91,13 +116,9 @@ answers, sys.stdout = sys.stdout, sys.stderr
 project = Path(request["project"])
 sys.path[:0] = [str(project), str(project / "utils" / "srt-slurm" / "src")]
 
-from infx.golden_al_distribution import GOLDEN_DIR, curve_name, golden_length
-from infx.srt_slurm.single_node import select_recipe
-from infx.srt_slurm.synthetic_acceptance import (
-    ENGINES, acceptance_length, build_overrides, generation_role, spec_parameters, verifier,
-)
-from infx.srt_slurm.workload import NATIVE_TELEMETRY_BLOCK, SHARED_BLOCKS
-
+"""
+    + "".join(f"from {module} import {', '.join(names)}\n" for module, names in _INFERENCEX_API.items())
+    + """
 
 def selection(recipe_path, environment):
     variant, recipe = select_recipe(str(project / recipe_path), environment, root=project)
@@ -143,6 +164,7 @@ for point in request["points"]:
 lengths = {asked["key"]: golden(asked["request"]) for asked in request["golden"]}
 answers.write(json.dumps({"selections": selections, "rejections": rejections, "golden_lengths": lengths}))
 """
+)
 
 # Run as ``python -I -c`` with an InferenceX ``pyproject.toml``: the interpreter's version and the project's
 # ``requires-python`` ("" when it states none) as JSON. Run by the interpreter it asks about, which has tomllib.
@@ -160,6 +182,23 @@ print(json.dumps({"version": platform.python_version(), "requires": requires}))
 
 class SourceFetchError(RuntimeError):
     """A source could not be read, or its own code failed rather than answer."""
+
+
+class InferencexCommitRefused(ValueError):
+    """The commit InferenceX is pinned to cannot be resolved from: it is no commit, InferenceX does not have it, or it
+    lacks code the resolver runs."""
+
+
+def parse_inferencex_commit(value: str) -> str:
+    """``value`` as a commit InferenceX can be pinned to: 7 to 40 hex digits, in lower case.
+
+    Raises:
+        InferencexCommitRefused: ``value`` is not one.
+    """
+    commit = value.strip().lower()
+    if not _PINNED_COMMIT.fullmatch(commit):
+        raise InferencexCommitRefused(f"--inferencex-commit {value!r} is not a commit: give 7 to 40 hex digits")
+    return commit
 
 
 def _run(command: Sequence[str], *, cwd: Path | None = None, stdin: str | None = None) -> str:
@@ -214,7 +253,47 @@ def checkout_main(repo: str, directories: Sequence[str], into: Path) -> Checkout
         *("--single-branch", "--branch", MAIN, repo, str(into)),
     )
     _git("sparse-checkout", "set", *directories, cwd=into)
-    return Checkout(repo, _git("rev-parse", "HEAD", cwd=into), into)
+    return Checkout(repo, _git(_REV_PARSE, "HEAD", cwd=into), into)
+
+
+def checkout_commit(repo: str, commit: str, directories: Sequence[str], into: Path) -> Checkout:
+    """``repo`` at the commit ``commit`` names, checked out in ``into`` with only ``directories`` (and the root's files).
+
+    ``commit`` is a full sha, which ``repo`` is asked for whatever ref holds it, or a prefix of one on a branch of
+    ``repo`` or at the head of a ref it advertises, a pull request's included.
+
+    Raises:
+        InferencexCommitRefused: ``repo`` has no commit ``commit`` names, or more than one.
+        SourceFetchError: ``repo`` cannot be read, the commit's fetch included when git does not say the commit is
+            missing.
+    """
+    _git(*("clone", _QUIET, "--no-tags", "--filter=tree:0", "--no-checkout", repo, str(into)))
+    full = _full_commit(repo, commit, into)
+    _git("sparse-checkout", "set", *directories, cwd=into)
+    try:
+        _git("fetch", _QUIET, "--filter=blob:none", "origin", full, cwd=into)
+    except SourceFetchError as error:
+        if _NO_SUCH_OBJECT.search(str(error)):
+            raise InferencexCommitRefused(f"{repo} has no commit {full}: {error}") from error
+        raise
+    _git("checkout", _QUIET, full, cwd=into)
+    return Checkout(repo, full, into)
+
+
+def _full_commit(repo: str, commit: str, clone: Path) -> str:
+    """The full sha ``commit`` names among the commits on ``clone``'s branches and the heads of ``repo``'s refs."""
+    on_branches = _git(_REV_PARSE, f"--disambiguate={commit}", cwd=clone).split()
+    heads = (line.split()[0] for line in _git("ls-remote", repo).splitlines())
+    found = sorted({*on_branches, *(head for head in heads if head.startswith(commit))})
+    if len(found) == 1:
+        return found[0]
+    if found:
+        raise InferencexCommitRefused(f"{commit} names more than one commit of {repo}: {', '.join(found)}")
+    if len(commit) == _FULL_COMMIT_LENGTH:
+        return commit
+    raise InferencexCommitRefused(
+        f"{repo} has no commit {commit} on a branch or at the head of a ref; give the full sha of a commit no ref heads"
+    )
 
 
 def fetch_response(url: str) -> ApiResponse:
@@ -312,11 +391,78 @@ def inferencex_answers(
     )
 
 
-def _inferencex(into: Path) -> tuple[Checkout, InferencexSnapshot]:
-    checkout = checkout_main(INFERENCEX_REPO, (PROJECT,), into)
+def _inferencex(into: Path, commit: str) -> tuple[Checkout, InferencexSnapshot]:
+    """InferenceX at ``commit``, the head of its ``main`` when ``commit`` is ``""``."""
+    checkout = (
+        checkout_commit(INFERENCEX_REPO, commit, (PROJECT,), into)
+        if commit
+        else checkout_main(INFERENCEX_REPO, (PROJECT,), into)
+    )
     _git("submodule", "update", _QUIET, "--init", "--depth=1", "--", SRT_SLURM, cwd=into)
     bundle = checkout.bundle((MASTER, RUNNERS, *checkout.paths(GOLDEN_DIR, ".yaml", nested=False)))
-    return checkout, InferencexSnapshot(bundle, _git("rev-parse", f"HEAD:{SRT_SLURM}", cwd=into))
+    return checkout, InferencexSnapshot(bundle, _git(_REV_PARSE, f"HEAD:{SRT_SLURM}", cwd=into))
+
+
+def _require_resolver_api(checkout: Checkout) -> None:
+    """Refuse a checkout whose InferenceX lacks a name the resolver imports, read from its source without running it.
+
+    A module that cannot be parsed here, or that star-imports, is left for the resolver to answer.
+    """
+    roots = (checkout.root / PROJECT, checkout.root / SRT_SLURM / "src")
+    missing = []
+    for module, names in _INFERENCEX_API.items():
+        bound = _module_names(roots, module)
+        missing += [f"{module}.{name}" for name in names if bound is not None and name not in bound]
+    if missing:
+        raise InferencexCommitRefused(
+            f"InferenceX {checkout.commit} lacks what the base launch resolver runs: {', '.join(missing)}; resolve the "
+            "base elsewhere and give it as a frozen base_launch.json instead"
+        )
+
+
+def _module_names(roots: Sequence[Path], module: str) -> frozenset[str] | None:
+    """The names ``module`` binds at its top level, found under the first of ``roots`` that holds it; ``None`` when
+    they cannot be known without running it."""
+    relative = module.replace(".", "/")
+    for path in (path for root in roots for path in (root / f"{relative}.py", root / relative / "__init__.py")):
+        if path.is_file():
+            try:
+                return _bound_names(ast.parse(path.read_bytes()).body)
+            except SyntaxError:
+                return None
+    return frozenset()
+
+
+def _bound_names(statements: Sequence[ast.stmt]) -> frozenset[str] | None:
+    names: set[str] = set()
+    for statement in statements:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(statement.name)
+        elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            names.update(node.id for target in targets for node in ast.walk(target) if isinstance(node, ast.Name))
+        elif isinstance(statement, (ast.Import, ast.ImportFrom)):
+            if any(alias.name == "*" for alias in statement.names):
+                return None
+            names.update((alias.asname or alias.name).partition(".")[0] for alias in statement.names)
+        else:
+            nested = _bound_names(_nested_statements(statement))
+            if nested is None:
+                return None
+            names |= nested
+    return frozenset(names)
+
+
+def _nested_statements(statement: ast.stmt) -> list[ast.stmt]:
+    """The statements an ``if``, ``try`` or ``with`` at a module's top level runs there; none for anything else."""
+    if isinstance(statement, ast.If):
+        return [*statement.body, *statement.orelse]
+    if isinstance(statement, ast.With):
+        return list(statement.body)
+    if isinstance(statement, ast.Try):
+        handlers = [line for handler in statement.handlers for line in handler.body]
+        return [*statement.body, *handlers, *statement.orelse, *statement.finalbody]
+    return []
 
 
 def _sglang_cookbook(into: Path) -> RepoBundle:
@@ -445,39 +591,62 @@ def _recipe_reads(
     return tuple(reads)
 
 
-def _with_corpus_source(fetched_unix: int, user_file: UserFile) -> SourceSnapshot:
+def _pinned_unreadable(source: str, commit: str, error: SourceFetchError) -> InferencexCommitRefused:
+    return InferencexCommitRefused(
+        f"{source} cannot be read with InferenceX pinned at commit {commit}, and a pinned base falls back to no "
+        f"default: {error}"
+    )
+
+
+def _with_corpus_source(fetched_unix: int, user_file: UserFile, commit: str) -> SourceSnapshot:
     with tempfile.TemporaryDirectory(prefix="inference-suite-sources-") as scratch_dir:
         try:
-            _, inferencex = _inferencex(Path(scratch_dir) / "inferencex")
+            _, inferencex = _inferencex(Path(scratch_dir) / "inferencex", commit)
         except SourceFetchError as error:
+            if commit:
+                raise _pinned_unreadable(_INFERENCEX_SOURCE, commit, error) from error
             unread = UnreadSource(_INFERENCEX_SOURCE, str(error))
             return SourceSnapshot(None, fetched_unix, user_file=user_file, unread=unread)
     return SourceSnapshot(inferencex, fetched_unix, user_file=user_file)
 
 
-def fetch_sources(query: LaunchQuery, *, user_file: UserFile | None = None) -> SourceSnapshot:
-    """Read every source ``query`` resolves from, at the head of its ``main`` and as of now.
+def fetch_sources(
+    query: LaunchQuery, *, user_file: UserFile | None = None, inferencex_commit: str = ""
+) -> SourceSnapshot:
+    """Read every source ``query`` resolves from, at the head of its ``main`` and as of now; InferenceX at
+    ``inferencex_commit`` instead when one is given (a full sha or a prefix of one).
 
     With the operator's ``user_file``, which is the base, only InferenceX is read, and only when the file is a shell
     launch of an AgentX query: InferenceX names the corpus the replay runs. A source that cannot be read is named as
     the snapshot's ``unread``, and nothing after it is read.
+
+    Raises:
+        InferencexCommitRefused: ``inferencex_commit`` is no commit InferenceX has, a source cannot be read while it is
+            given, or, when the recipes are read, its InferenceX lacks code the resolver runs.
     """
+    commit = parse_inferencex_commit(inferencex_commit) if inferencex_commit else ""
     fetched_unix = int(time.time())
     if user_file is not None:
         if query.workload is Workload.AGENTX and isinstance(user_file.launch, ShellLaunch):
-            return _with_corpus_source(fetched_unix, user_file)
+            return _with_corpus_source(fetched_unix, user_file, commit)
         return SourceSnapshot(None, fetched_unix, user_file=user_file)
     with tempfile.TemporaryDirectory(prefix="inference-suite-sources-") as scratch_dir:
         scratch = Path(scratch_dir)
         try:
-            checkout, inferencex = _inferencex(scratch / "inferencex")
+            checkout, inferencex = _inferencex(scratch / "inferencex", commit)
         except SourceFetchError as error:
+            if commit:
+                raise _pinned_unreadable(_INFERENCEX_SOURCE, commit, error) from error
             return SourceSnapshot(None, fetched_unix, unread=UnreadSource(_INFERENCEX_SOURCE, str(error)))
-        snapshot = SourceSnapshot(inferencex, fetched_unix)
+        if commit:
+            _require_resolver_api(checkout)
+        snapshot = SourceSnapshot(inferencex, fetched_unix, inferencex_pin=checkout.commit if commit else "")
         for source, read in _recipe_reads(query, checkout, inferencex, scratch):
             try:
                 snapshot = read(snapshot)
             except SourceFetchError as error:
+                if commit:
+                    raise _pinned_unreadable(source, commit, error) from error
                 return dataclasses.replace(snapshot, unread=UnreadSource(source, str(error)))
         return snapshot
 
@@ -489,11 +658,14 @@ __all__ = [
     "VLLM_REPO",
     "Checkout",
     "InferencexAnswers",
+    "InferencexCommitRefused",
     "SourceFetchError",
+    "checkout_commit",
     "checkout_main",
     "fetch_response",
     "fetch_sources",
     "inferencex_answers",
     "inferencex_python",
     "latest_release",
+    "parse_inferencex_commit",
 ]

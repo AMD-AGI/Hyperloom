@@ -44,8 +44,10 @@ _EXTRA = {
     "vllm": ("EXTRA_VLLM_ARGS", "--max-num-seqs 64 --gpu-memory-utilization 0.9"),
     "atom": ("EXTRA_ATOM_ARGS", "--trust-remote-code"),
 }
-_SGLANG_ENTRY = ("python3", "-m", "sglang.launch_server")
-_ATOM_ENTRY = ("python3", "-m", "atom.entrypoints.openai_server")
+_PYTHON = "/opt/venv/bin/python"
+_SGLANG_ENTRY = (_PYTHON, "-m", "sglang.launch_server")
+_VLLM_ENTRY = (_PYTHON, "-m", "vllm.entrypoints.cli.main", "serve")
+_ATOM_ENTRY = (_PYTHON, "-m", "atom.entrypoints.openai_server")
 _SERVED = ("--model", _MODEL, "--host", "127.0.0.1", "--port", "8888", "--served-model-name", _MODEL)
 _SGLANG_ARGV = (
     *("--trust-remote-code", "--mem-fraction-static", "0.8", "--tensor-parallel-size", "2"),
@@ -62,12 +64,12 @@ _ATOM_ARGV = (
 )
 #: The server environment every framework gets from ``_point``: its non-knob variables and the round's GPU mask.
 _POINT_ENV = {"PATH": "/opt/venv/bin:/usr/bin", "AITER_LOG_TUNED_CONFIG": "1", "HIP_VISIBLE_DEVICES": "4,5"}
-#: (entrypoint, argv after it, server environment) per framework and board.
+#: (server command under the framework python, argv after it, server environment) per framework and board.
 _LAUNCH = {
     ("sglang", "mi300x"): (_SGLANG_ENTRY, _SGLANG_ARGV, {"SGLANG_USE_AITER": "1", "SGLANG_AITER_MLA_PERSIST": "1"}),
     ("sglang", "mi355x"): (_SGLANG_ENTRY, _SGLANG_ARGV, {"SGLANG_USE_AITER": "1"}),
-    ("vllm", "mi300x"): (("vllm", "serve"), _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1"}),
-    ("vllm", "mi355x"): (("vllm", "serve"), _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1"}),
+    ("vllm", "mi300x"): (_VLLM_ENTRY, _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1"}),
+    ("vllm", "mi355x"): (_VLLM_ENTRY, _VLLM_ARGV, {"VLLM_ROCM_USE_AITER": "1"}),
     ("atom", "mi300x"): (_ATOM_ENTRY, _ATOM_ARGV, {}),
     ("atom", "mi355x"): (_ATOM_ENTRY, _ATOM_ARGV, {}),
 }
@@ -107,7 +109,7 @@ def _settings(mode: LifecycleMode = LifecycleMode.OWN) -> RoundSettings:
     return RoundSettings(
         base_path="/session/base_launch.json",
         paths=RunPaths("/session/runs/r0", "/tools", _SHA),
-        framework_python="/opt/venv/bin/python",
+        framework_python=_PYTHON,
         lifecycle=Lifecycle(mode, None if mode is LifecycleMode.OWN else "/session/server"),
         telemetry=Telemetry(GpuTelemetry(True, 1.0), kv=True),
         silence_sec=600,
@@ -137,8 +139,8 @@ def test_the_translated_launch_is_the_base_under_the_points_server_layer(framewo
     launch = _launch(suite_config(_point(framework), base, _settings()), base)
     entry, argv, env = _LAUNCH[(framework, board)]
 
-    assert launch.argv[: len(base.entrypoint)] == entry
-    assert _flags(launch.argv[len(base.entrypoint) :]) == _flags(argv)
+    assert launch.entrypoint == entry
+    assert _flags(launch.argv[len(entry) :]) == _flags(argv)
     assert dict(launch.env) == {**env, **_POINT_ENV}
 
 
@@ -241,7 +243,7 @@ def test_an_explicit_context_length_replaces_the_launcher_default() -> None:
     del point["benchmark"]["envs"]["MAX_MODEL_LEN"]
     launch = _launch(suite_config(point, base, _settings()), base)
 
-    assert ("max-model-len", ("16384",)) in _flags(launch.argv[len(base.entrypoint) :])
+    assert ("max-model-len", ("16384",)) in _flags(launch.argv[len(launch.entrypoint) :])
     assert launch.argv.count("--max-model-len") == 1
 
 

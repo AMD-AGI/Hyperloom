@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_TOTAL
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_TOTAL, TOTAL_TOKEN_THROUGHPUT
 from hyperloom.contracts.recipe import (
     DIGEST_PREFIX,
     ComponentPatches,
@@ -28,12 +28,13 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
+from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteRecipeValidationError
 from hyperloom.orchestrator.knowledge.remote_recipe.values import knowledge_to_warm_recipe
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.contracts.repo import ResolvedPatch
 from hyperloom_multibranch.blackboard.knowledge.recipe_kb import from_recipe_kb_value, to_recipe_kb_value
 from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import (
-    AGENTX_METRIC,
+    AGENTX_COLUMNS,
     AGENTX_OBJECTIVE_SCHEMA,
     KB_METRIC,
     OBJECTIVE_SCHEMA,
@@ -44,6 +45,8 @@ from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import (
 from hyperloom_multibranch.blackboard.knowledge.tests.fakes import FakeRecipeStore
 from hyperloom_multibranch.blackboard.tests.factories import profile
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC
+
+AGENTX_METRIC = AGENTX_COLUMNS[GRADED_INTVTY_P50].gain
 
 PATCH = b"diff --git a/moe.py b/moe.py\n"
 KERNEL = b'{"tile": [128, 128]}\n'
@@ -268,7 +271,9 @@ def test_an_agentx_session_writes_its_interactivity_gain_as_the_main_flow_does(
 ) -> None:
     store = FakeRecipeStore(champion={"metric": AGENTX_METRIC, "session_id": "older", "value": 5.0})
     agentx = _agentx(
-        snapshot, {GRADED_INTVTY_P50: 10.0, GRADED_TOTAL: 2000.0}, {GRADED_INTVTY_P50: 11.0, GRADED_TOTAL: 2100.0}
+        snapshot,
+        {GRADED_INTVTY_P50: 10.0, TOTAL_TOKEN_THROUGHPUT: 2000.0},
+        {GRADED_INTVTY_P50: 11.0, TOTAL_TOKEN_THROUGHPUT: 2100.0},
     )
 
     outcome = publish_final_recipe(
@@ -309,6 +314,42 @@ def test_an_agentx_session_without_total_throughput_carries_interactivity_alone_
         "baseline_total_throughput": None,
     }
     assert (outcome.status, outcome.reason, kept.promoted) == ("skipped", "not_better_than_champion", None)
+
+
+def test_a_total_throughput_session_writes_its_total_token_throughput_gain_and_never_an_interactivity_one(
+    snapshot: BlackboardSnapshot, final: FinalRecipe
+) -> None:
+    store = FakeRecipeStore()
+    values = (
+        {GRADED_INTVTY_P50: 10.0, TOTAL_TOKEN_THROUGHPUT: 2000.0},
+        {GRADED_INTVTY_P50: 10.0, TOTAL_TOKEN_THROUGHPUT: 2200.0},
+    )
+    agentx = _agentx(snapshot, *values)
+
+    outcome = publish_final_recipe(
+        RemoteRecipeClient(store), agentx, dataclasses.replace(final, metric=TOTAL_TOKEN_THROUGHPUT)
+    )
+
+    assert (outcome.status, outcome.primary_metric) == ("written", "total_throughput_gain_pct")
+    assert store.objective_schema == AGENTX_OBJECTIVE_SCHEMA
+    knowledge = store.knowledge
+    assert knowledge is not None
+    assert knowledge["total_throughput_gain_pct"] == pytest.approx(10.0)
+    assert (knowledge[GRADED_TOTAL], knowledge["baseline_total_throughput"]) == (2200.0, 2000.0)
+    assert not {AGENTX_METRIC, "candidate_interactivity", "baseline_interactivity"} & set(knowledge)
+
+
+def test_a_total_throughput_session_does_not_replace_an_interactivity_champion(
+    snapshot: BlackboardSnapshot, final: FinalRecipe
+) -> None:
+    store = FakeRecipeStore(champion={"metric": AGENTX_METRIC, "session_id": "older", "value": 5.0})
+    agentx = _agentx(snapshot, {TOTAL_TOKEN_THROUGHPUT: 2000.0}, {TOTAL_TOKEN_THROUGHPUT: 2200.0})
+
+    with pytest.raises(RemoteRecipeValidationError, match="cannot compare or replace champion"):
+        publish_final_recipe(
+            RemoteRecipeClient(store), agentx, dataclasses.replace(final, metric=TOTAL_TOKEN_THROUGHPUT)
+        )
+    assert store.promoted is None
 
 
 @pytest.mark.parametrize(

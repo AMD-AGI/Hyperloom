@@ -15,6 +15,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 from inference_suite.contracts.launch import Launch, LaunchArg, LayerSource
 from inference_suite.contracts.report import FailedStep
@@ -168,8 +169,9 @@ def _refused_flags(launch: Launch, answer: ParserAnswer) -> tuple[RefusedFlag, .
     return tuple(RefusedFlag(arg.flag, arg.source) for arg in launch.args if arg.flag in answer.rejected_option)
 
 
-def check(launch: Launch, python: str, env: Mapping[str, str]) -> FlagRefusal | None:
-    """Run the installed parser over ``launch``'s server flags in ``python`` with ``env``; ``None`` when it accepts.
+def check(launch: Launch, python: str, env: Mapping[str, str], *, cwd: Path) -> FlagRefusal | None:
+    """Run the installed parser over ``launch``'s server flags in ``python`` with ``env``, started in ``cwd``; ``None``
+    when it accepts.
 
     Raises:
         ParserCheckError: The framework has no parser, or the parser's answer cannot be read.
@@ -179,7 +181,7 @@ def check(launch: Launch, python: str, env: Mapping[str, str]) -> FlagRefusal | 
     probe = parser_probe(framework, [token for arg in launch.args for token in arg.tokens()])
     if probe is None:
         raise ParserCheckError(f"{framework.value} has no server parser to hold the launch to")
-    answer = read_answer(run_probe(python, probe.program, probe.args, env))
+    answer = read_answer(run_probe(python, probe.program, probe.args, env, cwd=cwd))
     if answer.status is ParseStatus.ACCEPTED:
         return None
     return FlagRefusal(flags=_refused_flags(launch, answer), detail=answer.detail)

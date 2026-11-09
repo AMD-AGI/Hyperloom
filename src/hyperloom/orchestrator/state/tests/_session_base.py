@@ -46,7 +46,7 @@ def session_base(
         point=LaunchPoint(conc=4, exact=True),
         image=ImageFacts(run=None, recipe=None, framework_version=None, version_basis=VersionBasis.NOT_APPLICABLE),
         framework="sglang",
-        entrypoint=("sglang", "serve"),
+        entrypoint=("python3", "-m", "sglang.launch_server"),
         model=LaunchModel("org/model", "/models/model"),
         topology=Topology(tp=1),
         args=tuple(args),

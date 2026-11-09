@@ -68,7 +68,7 @@ from ._proposal_identity import (
 )
 from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
-from ._grid_base import variant_config_of
+from ._grid_base import importable_overlay_dir, variant_config_of
 from ._agentx_checkpoint import round_checkpoint
 from ._subprocess_kill import AGENTX_EARLY_STOP_ERROR_CLASS
 from .benchmark_result import double_run_requested
@@ -645,6 +645,7 @@ def _outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str
         "error_class": str(te.get("error_class") or ""),
         "failure_attribution": classify_failure_attribution(
             error_class=te.get("error_class"),
+            framework_changed=bool(te.get("framework_changed")),
             error_excerpt=te.get("error_excerpt"),
             reason=reason,
         )
@@ -1295,6 +1296,7 @@ class _ExploreRound:
             "extra_envs": dict(gv.extra_envs),
             **controls_of(vars(gv)),
             **_decision_fields(gv),
+            "framework_changed": bool(importable_overlay_dir(gv)),
         }
 
     def _graded_verdict(self, gv: GridVariant, r: Any, variant_meas: dict[str, Any]) -> dict[str, Any]:

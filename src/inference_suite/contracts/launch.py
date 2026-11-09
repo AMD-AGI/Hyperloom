@@ -25,6 +25,7 @@ from inference_suite.contracts.base_launch import (
     EnvValue,
     GoldenAcceptance,
     Redacted,
+    VersionBasis,
 )
 from inference_suite.contracts.config import GoldenUse
 from inference_suite.frameworks import Framework
@@ -66,6 +67,8 @@ class VersionCheck(str, Enum):
     NOT_APPLICABLE = "not_applicable"
     #: The round runs against a server it does not start, whose install is on another host than this round's.
     NOT_HELD = "not_held"
+    #: The recipe's image tag names no version, so the base's version is an assumed latest release, not a floor.
+    ASSUMED_NOT_HELD = "assumed_not_held"
 
 
 def _canonical(document: object) -> str:
@@ -181,7 +184,8 @@ class Removal:
 
 @dataclass(frozen=True)
 class FrameworkCheck:
-    """The framework the round ran: the interpreter, its installed version and the recipe version it reached (D6)."""
+    """The framework the round ran: the interpreter, its installed version, the recipe's version and how the install
+    was held to it (D6); the recipe's version is a floor only when the check passed."""
 
     name: Framework
     installed_version: str
@@ -303,13 +307,15 @@ _DERIVED_KEYS = ("base_digest", "argv", "env", "golden", "forced_acceptance", "d
 class Launch:
     """The launch one round ran.
 
-    ``golden`` is the golden layer when the round applied it; such a launch forces acceptance, so its output is not the
-    target model's own text.
+    ``entrypoint`` is the server command before its flags: the framework's server module under the framework python
+    the round probed, not the base's ``PATH`` spelling. ``golden`` is the golden layer when the round applied it; such
+    a launch forces acceptance, so its output is not the target model's own text.
     """
 
     base: BaseLaunch
     config_sha256: str
     golden_use: GoldenUse
+    entrypoint: tuple[str, ...]
     args: tuple[LaunchArg, ...]
     env_sources: tuple[LaunchEnv, ...]
     framework: FrameworkCheck
@@ -321,6 +327,8 @@ class Launch:
 
     def __post_init__(self) -> None:
         _FIELDS.sha256(self.config_sha256, "the config sha256")
+        if not _FIELDS.string_tuple(self.entrypoint, "the launch entrypoint") or not all(self.entrypoint):
+            raise LaunchError(f"the launch entrypoint must be non-empty words, got {self.entrypoint!r}")
         object.__setattr__(self, "golden_use", _FIELDS.enum(GoldenUse, self.golden_use, "the golden use"))
         if self.golden_use is GoldenUse.EXCLUDE and self.base.golden_al is None:
             raise LaunchError("golden exclude needs a base with a golden layer")
@@ -332,12 +340,20 @@ class Launch:
                 f"the recipe version checked, {self.framework.recipe_min_version!r}, is not the base's "
                 f"{self.base.image.framework_version!r}"
             )
+        if (
+            self.framework.version_check is VersionCheck.ASSUMED_NOT_HELD
+            and self.base.image.version_basis is not VersionBasis.ASSUMED_LATEST
+        ):
+            raise LaunchError(
+                f"the version check is assumed_not_held, but the base's version basis is "
+                f"{self.base.image.version_basis.value}"
+            )
         for path, sha256 in _FIELDS.string_map(self.source_files, "the source files").items():
             _FIELDS.sha256(sha256, f"the sha256 of source file {path}")
 
     @property
     def argv(self) -> tuple[str, ...]:
-        return (*self.base.entrypoint, *(token for arg in self.args for token in arg.tokens()))
+        return (*self.entrypoint, *(token for arg in self.args for token in arg.tokens()))
 
     @property
     def env(self) -> dict[str, EnvValue]:
@@ -374,6 +390,7 @@ class Launch:
             "env_sources": [entry.to_document() for entry in self.env_sources],
             "removed": [removal.to_document() for removal in self.removed],
             "golden_use": self.golden_use.value,
+            "entrypoint": list(self.entrypoint),
             "golden": None if golden is None else golden.to_document(),
             "forced_acceptance": self.forced_acceptance,
             "framework": self.framework.to_document(),
@@ -392,10 +409,14 @@ class Launch:
         if fields.get("schema") != LAUNCH_SCHEMA:
             raise LaunchError(f"launch schema {fields.get('schema')!r} is not {LAUNCH_SCHEMA}")
         client, eval_ = fields.get("client"), fields.get("eval")
+        base = BaseLaunch.from_document(fields.get("base"))
+        # A round folder written before the entrypoint was recorded ran the base's; resumed sessions read those.
+        entrypoint = fields.get("entrypoint", list(base.entrypoint))
         launch = cls(
-            base=BaseLaunch.from_document(fields.get("base")),
+            base=base,
             config_sha256=fields.get("config_sha256"),
             golden_use=fields.get("golden_use"),
+            entrypoint=_FIELDS.strings(entrypoint, "the launch entrypoint"),
             args=tuple(LaunchArg.from_document(item) for item in _FIELDS.items(fields.get("args"), "the args")),
             env_sources=tuple(
                 LaunchEnv.from_document(item) for item in _FIELDS.items(fields.get("env_sources"), "the env sources")

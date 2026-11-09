@@ -76,6 +76,7 @@ from .config import (
     _bench,
     _envs,
     accuracy_config,
+    agentx_client_config,
     suite_config,
 )
 
@@ -315,6 +316,24 @@ def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable
     return _run_config(config, request.serving_lease, on_poll, checkpoint)
 
 
+def external_agentx_config(
+    session_dir: Path, document: Mapping[str, object], server_url: str, run_dir: Path, timeout_sec: float
+) -> SuiteConfig:
+    """The replay of the AgentX point ``document`` against the server at ``server_url``, which serves a launch of its
+    own (:func:`~.config.agentx_client_config`), on the frozen base and staged tools of the session at
+    ``session_dir`` as its rounds run, written into ``run_dir`` and bounded by ``timeout_sec``.
+
+    Raises:
+        SuiteRoundRefused: When the session froze no base, nothing is staged, or the point has no such replay.
+    """
+    route = suite_route(session_dir)
+    settings = replace(_settings(route, run_dir, Lifecycle(LifecycleMode.EXTERNAL), None), server_url=server_url)
+    try:
+        return agentx_client_config(document, route.base, settings, timeout_sec)
+    except ConfigError as exc:
+        raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc
+
+
 @dataclass(frozen=True)
 class AccuracyRound:
     """The D9 accuracy round of one slot: the AgentX point the slot ran, and the slot it writes ``accuracy/`` into.
@@ -429,6 +448,7 @@ __all__ = [
     "SuiteRoundRefused",
     "SuiteRoute",
     "deadline_unix",
+    "external_agentx_config",
     "inherited_env_names",
     "point_server",
     "round_lifecycle",

@@ -676,14 +676,18 @@ AGENTX_PARENT = {
 
 
 def test_an_agentx_foundation_fix_whose_p50_falls_with_its_guards_intact_may_be_merged() -> None:
-    judged = agentx.compare({**AGENTX_PARENT, GRADED_INTVTY_P50: 50.0}, AGENTX_PARENT, "r1")
+    judged = agentx.compare(
+        {**AGENTX_PARENT, GRADED_INTVTY_P50: 50.0}, AGENTX_PARENT, "r1", agentx.AgentXObjective.P50_INTERACTIVITY
+    )
 
     assert judged.verdict is Verdict.REGRESSED and judged.accuracy is AccuracyVerdict.PASSED
     assert not_stackable_reason(judged, foundation_fix=True) == ""
 
 
 def test_an_agentx_foundation_fix_that_breaks_a_guard_is_not_stackable() -> None:
-    judged = agentx.compare({**AGENTX_PARENT, GRADED_OUTPUT: 500.0}, AGENTX_PARENT, "r1")
+    judged = agentx.compare(
+        {**AGENTX_PARENT, GRADED_OUTPUT: 500.0}, AGENTX_PARENT, "r1", agentx.AgentXObjective.P50_INTERACTIVITY
+    )
 
     assert judged.verdict is Verdict.REGRESSED and judged.accuracy is AccuracyVerdict.PASSED
     reason = not_stackable_reason(judged, foundation_fix=True)

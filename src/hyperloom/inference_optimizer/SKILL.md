@@ -971,7 +971,8 @@ runtime with `--model` / `$MODEL_PATH`.
 
 These YAMLs carry the workload, not the server launch. A fresh session
 resolves its base launch once, before the first round: `--reference-script`,
-else InferenceX main, else the framework cookbook, else (fixed workloads only)
+else InferenceX main (or the commit `--inferencex-commit` pins), else the
+framework cookbook, else (fixed workloads with no `--inferencex-commit` only)
 the default table, with a warning. It is frozen as `<session>/base_launch.json`;
 resume reads that file and resolves nothing. Every round composes the base,
 the operator's `--server-args` / `--extra-env`, and the candidate's change,

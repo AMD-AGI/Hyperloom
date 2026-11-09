@@ -19,8 +19,7 @@ from typing import Any
 from inference_suite.contracts import FailedStep
 
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom.common.outside_facts import PY_IMPORT_ERROR, PY_MODULE_NOT_FOUND_ERROR
-from hyperloom.common.failure_signature import SERVE_FLAG
+from hyperloom.common.failure_signature import SERVE_FLAG, framework_unimportable_line
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID, HOST_GPUS_UNAVAILABLE
 
 FAILURE_STAGE_WARMUP: str = "warmup"
@@ -104,17 +103,6 @@ _ENVIRONMENT_ERROR_CLASSES = frozenset(
         FailedStep.SERVER_SILENT_BEFORE_READY.value,
         FailedStep.TEARDOWN_INCOMPLETE.value,
     }
-)
-# What the suite's framework probe says (``FailedStep.FRAMEWORK_VERSION_UNKNOWN``) when the serving interpreter finds no
-# package of the framework, or importing it raised: the candidate's, as a server that died on the same import is, and
-# as ``hyperloom.measure.failures`` settles a test that stopped there (``import_error``). A probe that ran too long or
-# could not start, or a version it could not read, says nothing of the candidate and stays the environment's. The probe
-# says ``<python> cannot import <package>`` as the whole detail, so that is taken only at the end of the evidence, never
-# from a line inside it, as ``hyperloom.measure.failures`` takes it.
-_FRAMEWORK_UNIMPORTABLE_RE = re.compile(
-    r"\scannot import [A-Za-z_][\w.]*\s*\Z"
-    r"|(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:" + PY_IMPORT_ERROR + "|" + PY_MODULE_NOT_FOUND_ERROR + r"):\s*\S",
-    re.MULTILINE,
 )
 _HARNESS_ERROR_CLASSES = frozenset(
     {
@@ -226,6 +214,7 @@ def make_failure_id(*, task_id: str, fingerprint: str, variant_name: str = "") -
 def classify_failure_attribution(
     *,
     error_class: Any,
+    framework_changed: bool,
     error_excerpt: Any = "",
     reason: Any = "",
     explicit: Any = "",
@@ -236,6 +225,12 @@ def classify_failure_attribution(
     benchmark failures remain outside the Experience corpus unless the producer
     supplies candidate-specific evidence. The full failure still remains in
     SBD V6 regardless of this result.
+
+    ``framework_changed`` is whether the attempt put changed framework code on the
+    server's import path (a patch, an artifact, an installed package, a kernel
+    overlay). A framework the suite's probe cannot import is the candidate's only
+    then; on an unchanged install it is the environment's, as
+    ``hyperloom.measure.failures`` settles it.
     """
     authored = str(explicit or "").strip().lower()
     if authored in FAILURE_ATTRIBUTIONS:
@@ -244,7 +239,7 @@ def classify_failure_attribution(
     kind = str(error_class or "").strip().lower()
     evidence = f"{reason or ''}\n{error_excerpt or ''}"
     if kind == FailedStep.FRAMEWORK_VERSION_UNKNOWN.value:
-        unimportable = _FRAMEWORK_UNIMPORTABLE_RE.search(evidence)
+        unimportable = framework_changed and framework_unimportable_line(evidence) is not None
         return FAILURE_ATTRIBUTION_CANDIDATE if unimportable else FAILURE_ATTRIBUTION_ENVIRONMENT
     if kind in _ENVIRONMENT_ERROR_CLASSES or _ENVIRONMENT_EVIDENCE_RE.search(evidence):
         return FAILURE_ATTRIBUTION_ENVIRONMENT
@@ -292,7 +287,7 @@ def classify_root_cause_type(error_class: str, error_text: str) -> str:
         return "engine_core_init"
     if any(marker in blob for marker in WORKER_DEATH_MARKERS) or _SIGNAL_EXIT_RE.search(blob):
         return "worker_crash"
-    if classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_HARNESS:
+    if classify_failure_attribution(error_class=error_class, framework_changed=False) == FAILURE_ATTRIBUTION_HARNESS:
         return "benchmark_harness"
     return "unknown"
 

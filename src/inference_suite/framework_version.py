@@ -5,7 +5,8 @@
 
 Only the release segment is compared, so ``0.5.23.dev4`` and ``0.5.23+rocm700`` both reach ``0.5.23``: a nightly
 and the release of one version number are not told apart. An installed version that cannot be read is refused,
-never let through.
+never let through. A version assumed because the recipe's image tag names none is recorded, never held: refusing a
+run on an assumption would refuse the very image the recipe names.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from dataclasses import dataclass
 
 from packaging.version import InvalidVersion, Version
 
+from inference_suite.contracts.base_launch import ImageFacts, VersionBasis
 from inference_suite.contracts.launch import VersionCheck
 from inference_suite.contracts.report import FailedStep
 
@@ -34,11 +36,23 @@ def _release(version: str) -> tuple[int, ...]:
     return tuple(release)
 
 
-def check(installed: str | None, recipe: str | None) -> VersionCheck | VersionRefusal:
-    """Whether the ``installed`` framework version reaches the ``recipe`` one; ``recipe`` is ``None`` when the base
-    names no recipe image, and ``installed`` is ``None`` when the install carries no version."""
-    if recipe is None:
+def unheld(image: ImageFacts) -> VersionCheck | None:
+    """The check ``image`` settles without asking the install: none when it names no recipe version, none when its
+    version is assumed; ``None`` when its version is a floor the install must reach."""
+    if image.framework_version is None:
         return VersionCheck.NOT_APPLICABLE
+    if image.version_basis is VersionBasis.ASSUMED_LATEST:
+        return VersionCheck.ASSUMED_NOT_HELD
+    return None
+
+
+def check(installed: str | None, image: ImageFacts) -> VersionCheck | VersionRefusal:
+    """Whether the ``installed`` framework version reaches the recipe version of ``image``; ``installed`` is ``None``
+    when the install carries no version."""
+    settled = unheld(image)
+    if settled is not None:
+        return settled
+    recipe = image.framework_version
     try:
         held = _release(installed) if installed is not None else None
     except InvalidVersion:
@@ -52,4 +66,4 @@ def check(installed: str | None, recipe: str | None) -> VersionCheck | VersionRe
     return VersionCheck.PASSED
 
 
-__all__ = ["VersionRefusal", "check"]
+__all__ = ["VersionRefusal", "check", "unheld"]
