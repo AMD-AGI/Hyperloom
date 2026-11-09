@@ -328,10 +328,14 @@ def test_a_bottleneck_without_shares_to_compare_has_not_moved() -> None:
 class _HeadRecipes:
     """An experiment repository in which every commit holds a recipe of its own, as heads a large merge moved between
     do, except that each commit ``merged`` maps to holds the recipe of the commit it merged; the toolbox keys a
-    profile by its recipe, so heads sharing one share a profile."""
+    profile by its recipe, so heads sharing one share a profile. Its root is ``c-root``, the head every merge here
+    moves from."""
 
     def __init__(self, merged: Mapping[str, str] | None = None) -> None:
         self._merged = dict(merged or {})
+
+    async def root(self) -> str:
+        return "c-root"
 
     async def read_recipe(self, commit: str) -> Recipe:
         recipe_of = self._merged.get(commit, commit)
