@@ -785,6 +785,22 @@ def test_an_external_round_measures_a_server_it_neither_starts_nor_holds_to_the_
     assert not runtime_server.stop(pid_dir).survivors
 
 
+def test_an_external_round_on_a_base_with_no_recipe_version_records_the_check_as_not_applicable(rig):
+    pid_dir = rig.tmp / "pids"
+    _user_file_base(rig)
+    boot = rig.config(
+        "boot", workload=WorkloadKind.NONE, fixed=None, lifecycle=Lifecycle(LifecycleMode.BOOT, str(pid_dir))
+    )
+    assert run.run_round(boot).report.run_status is RunStatus.COMPLETED
+
+    result = run.run_round(rig.config("external", lifecycle=Lifecycle(LifecycleMode.EXTERNAL)))
+
+    assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
+    launch = Launch.from_document(json.loads(result.layout.launch.read_text()))
+    assert launch.framework.version_check is VersionCheck.NOT_APPLICABLE
+    assert not runtime_server.stop(pid_dir).survivors
+
+
 def _scriptable_round(rig, run_id: str, body: str, *, profile: bool = False) -> SuiteConfig:
     script = rig.tmp / f"{run_id}.sh"
     script.write_text(body)
