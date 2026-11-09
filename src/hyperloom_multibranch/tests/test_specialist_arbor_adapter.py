@@ -446,13 +446,17 @@ def test_arbor_runs_the_pack_the_spec_names_and_one_its_checkout_lacks_is_refuse
 #: Arbor's arbor/objective.py as far as the adapter reads it: the metric keys it optimizes on opt_objective.
 OBJECTIVE_9C455DF = 'KNOWN = {"e2e_norm_intvty_p50": ("max", ""), "total_throughput": ("max", "")}\n'
 OBJECTIVE_E8D31B7 = 'KNOWN = {"p50_interactivity": ("max", ""), "total_throughput": ("max", "")}\n'
+OBJECTIVE_DF9B55A = (
+    'KNOWN = {"e2e_norm_intvty_p50": ("max", ""), "total_throughput": ("max", ""), '
+    '"total_token_throughput": ("max", "")}\n'
+)
 
 
 @pytest.mark.parametrize(
     ("metric", "written"),
     [
         (GRADED_INTVTY_P50, "e2e_norm_intvty_p50"),
-        (TOTAL_TOKEN_THROUGHPUT, "total_throughput"),
+        (TOTAL_TOKEN_THROUGHPUT, "total_token_throughput"),
         ("output_throughput", None),
     ],
 )
@@ -465,14 +469,25 @@ def test_arbor_optimizes_the_metric_the_session_keeps_on(tmp_path: Path, metric:
 @pytest.mark.parametrize(
     ("objective", "metric", "refused"),
     [
+        (OBJECTIVE_DF9B55A, GRADED_INTVTY_P50, False),
+        (OBJECTIVE_DF9B55A, TOTAL_TOKEN_THROUGHPUT, False),
         (OBJECTIVE_9C455DF, GRADED_INTVTY_P50, False),
-        (OBJECTIVE_9C455DF, TOTAL_TOKEN_THROUGHPUT, False),
+        (OBJECTIVE_9C455DF, TOTAL_TOKEN_THROUGHPUT, True),
         (OBJECTIVE_E8D31B7, GRADED_INTVTY_P50, True),
-        (OBJECTIVE_E8D31B7, TOTAL_TOKEN_THROUGHPUT, False),
+        (OBJECTIVE_E8D31B7, TOTAL_TOKEN_THROUGHPUT, True),
         (None, GRADED_INTVTY_P50, False),
         (None, TOTAL_TOKEN_THROUGHPUT, True),
     ],
-    ids=["9c455df-p50", "9c455df-total", "e8d31b7-p50", "e8d31b7-total", "older-p50", "older-total"],
+    ids=[
+        "df9b55a-p50",
+        "df9b55a-total",
+        "9c455df-p50",
+        "9c455df-total",
+        "e8d31b7-p50",
+        "e8d31b7-total",
+        "older-p50",
+        "older-total",
+    ],
 )
 def test_an_arbor_that_cannot_optimize_the_session_s_objective_is_refused_naming_the_commit(
     tmp_path: Path, objective: str | None, metric: str, refused: bool
@@ -484,7 +499,8 @@ def test_an_arbor_that_cannot_optimize_the_session_s_objective_is_refused_naming
     )
 
     if refused:
-        with pytest.raises(ArborRefused, match=f"cannot optimize .*pin Arbor {OBJECTIVE_SINCE} or later"):
+        since = OBJECTIVE_SINCE[ARBOR_OBJECTIVES[metric]]
+        with pytest.raises(ArborRefused, match=f"cannot optimize .*pin Arbor {since} or later"):
             run()
     else:
         assert run().config.get(OBJECTIVE_KEY) == ARBOR_OBJECTIVES[metric]

@@ -123,14 +123,15 @@ HOST_RULE = "Host rule (MB)"
 #: The workload kind whose recipe the round resolves, the root's launch holding only what is added to it.
 AGENTX = "agentx"
 #: The config key Arbor optimizes a metric by in place of its pack's (``arbor/objective.py``), and the key it reads as
-#: each AgentX objective MB keeps on: ``e2e_norm_intvty_p50`` as MB reads it, and the total throughput per GPU, which
-#: ranks a change as MB's per-server figure does at a session's fixed TP. Another session's metric is its pack's own.
+#: each AgentX objective MB keeps on: ``e2e_norm_intvty_p50`` as MB reads it, and the total token throughput per GPU,
+#: which ranks a change as MB's per-server figure does at a session's fixed TP. Another session's metric is its pack's.
 OBJECTIVE_KEY = "opt_objective"
-ARBOR_OBJECTIVES = {GRADED_INTVTY_P50: "e2e_norm_intvty_p50", TOTAL_TOKEN_THROUGHPUT: "total_throughput"}
+ARBOR_OBJECTIVES = {GRADED_INTVTY_P50: "e2e_norm_intvty_p50", TOTAL_TOKEN_THROUGHPUT: "total_token_throughput"}
 #: Where an Arbor checkout lists the metrics it optimizes on :data:`OBJECTIVE_KEY` (``KNOWN``), and the commit from
-#: which it has both: ``e8d31b7`` added the key, and read P50 interactivity as decode alone until ``9c455df``.
+#: which it knows each: ``e8d31b7`` added the key but read P50 interactivity as decode alone until ``9c455df``, and
+#: ``df9b55a`` added the total token throughput.
 OBJECTIVE_MODULE = "arbor/objective.py"
-OBJECTIVE_SINCE = "9c455df"
+OBJECTIVE_SINCE = {"e2e_norm_intvty_p50": "9c455df", "total_token_throughput": "df9b55a"}
 #: SGLang reads its TP from these flags only. Arbor gives vLLM its TP itself, but MB names it too, so a vLLM branch's
 #: server_flags are never empty, which Arbor refuses (a plain baseline root has no launch of its own).
 SGLANG = "sglang"
@@ -842,7 +843,9 @@ def _objective_refusals(config: Mapping[str, Any], checkout: Path) -> list[str]:
     known = _known_objectives(checkout)
     if not wanted or (wanted in known if known is not None else wanted == ARBOR_OBJECTIVES[GRADED_INTVTY_P50]):
         return []
-    return [f"the pinned Arbor cannot optimize {wanted} ({OBJECTIVE_KEY}): pin Arbor {OBJECTIVE_SINCE} or later"]
+    return [
+        f"the pinned Arbor cannot optimize {wanted} ({OBJECTIVE_KEY}): pin Arbor {OBJECTIVE_SINCE[wanted]} or later"
+    ]
 
 
 def _known_objectives(checkout: Path) -> frozenset[str] | None:

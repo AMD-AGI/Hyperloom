@@ -61,7 +61,7 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
   band, a retest of a gain a guard holds back, and the error-rate threshold. The manifest records it, so a resumed
   session keeps it; the frontier, FINAL, the dashboard, `MB-report.md` and the Recipe KB record
   (`total_throughput_gain_pct`) all read that metric. Each Arbor is told to optimize it (`opt_objective`); a
-  `total_token_throughput` session needs Arbor `9c455df` or later.
+  P50 session needs Arbor `9c455df` or later, a `total_token_throughput` one `df9b55a` or later.
 - **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for
   `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source, and every
   Arbor is served the frozen base. Without it the base comes from the recipe sources.
