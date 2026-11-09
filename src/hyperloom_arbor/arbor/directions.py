@@ -10,7 +10,7 @@ again, then continues like new, with a checklist on the dashboard.
 How it works:
 
 - The map lives in ``<session>/directions.json``. Only the harness writes it
-  (an agent hand-writing harness state once crashed every wake of a mesh); an
+  (state an agent writes by hand can crash every later wake); an
   older driver, which drops unknown ``session.json`` keys, leaves it alone.
 - The agent states the map with one ``DIRECTIONS: [...]`` line, and settles a
   direction with ``DIRECTION: {"id": ..., "status": ..., "why": ...}``. A
@@ -69,7 +69,7 @@ no DIRECTIONS list, reopens nothing, sends a direction the agent adds to
         line or list (a dossier's part 11)
     python3 -m arbor.directions generate --profile PROFILE --out MAP [--min-share PCT]
         a map without a dossier pass: the host's root profile's op families, ranked
-        by share, framed by the v2 pack's roadmap (arbor/mapgen.py); exit 1 when
+        by share, framed by a serving pack's roadmap (arbor/mapgen.py); exit 1 when
         the profile cannot be used
 """
 
@@ -86,7 +86,7 @@ from pathlib import Path
 FILE = "directions.json"
 HARNESS_COPY = ".directions.harness.json"   # save()'s own copy: a FILE that differs was edited by hand
 STOP_FILE = "MAP_STOP.md"
-STOP_PREFIX = "map-stop:"   # never "chunk-timer": scripts/cluster/chunk_lib.sh deletes those
+STOP_PREFIX = "map-stop:"   # never "chunk-timer": a cluster launcher's chunk library deletes those
 LANE_FILE = "LANE_CLOSED.json"
 LANE_STOP_PREFIX = "lane-closed:"
 VERSION = 2
@@ -419,9 +419,8 @@ def load(root) -> tuple[dict | None, str | None]:
     """(the map, None); (None, None) when there is none; (None, why) when it cannot be read.
 
     Only the harness writes the map (``save``, which keeps its own copy beside it). A file
-    that differs from that copy was edited by hand: one campaign's agent wrote its own map
-    into it after its DIRECTIONS list was rejected, then worked
-    from it while the harness waited for the list, and the fresh start ran out. The copy is
+    that differs from that copy was edited by hand: an agent whose DIRECTIONS list was rejected
+    can write its own map into it, then work from it while the harness waits for the list. The copy is
     put back, and the map says so (``hand_edit``) until the next map is accepted.
     """
     p = map_path(root)
@@ -1143,7 +1142,7 @@ def render(doc: dict, state=None, campaign=None) -> str:
     phase = doc.get("phase")
     k = doc.get("map_round", 0)
     # While the map is being written, a rejected list stays shown until a map is accepted:
-    # an agent saw its rejection once, then worked from a map the harness never took.
+    # otherwise an agent can work from a map the harness never took.
     last = doc.get("last_events")
     writing = phase in ("bootstrap", "unmapped", "updating", "fresh")
     rejected = [e for e in (doc.get("events") or []) if not e.get("ok") and (

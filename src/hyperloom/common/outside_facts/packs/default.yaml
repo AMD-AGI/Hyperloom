@@ -326,13 +326,15 @@ facts:
     project: InferenceX
     reason: >-
       The names of the workload, the request and the evaluation in benchmark.envs, as InferenceX's benchmark scripts read
-      them; a renamed variable is silently ignored by the script and the point measures another workload.
+      them; a renamed variable is silently ignored by the script and the point measures another workload. EVAL_ONLY is
+      the switch benchmark_lib.sh's run_benchmark_serving returns on before the bench, so a round only evaluates.
     names:
       isl: ISL
       osl: OSL
       random_range_ratio: RANDOM_RANGE_RATIO
       conc: CONC
       run_eval: RUN_EVAL
+      eval_only: EVAL_ONLY
       num_prompts: NUM_PROMPTS
       num_warmups: NUM_WARMUPS
       max_model_len: MAX_MODEL_LEN

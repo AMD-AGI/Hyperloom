@@ -30,7 +30,6 @@ the skeletons below.
 | 6 | [Baseline and noise floor](06-baseline.md) | | | | |
 | 7 | [Profile](07-profile.md) | | | | |
 | 8 | [Kernel usage](08-kernels.md) | | | | |
-| 9 | [Reference platform](09-reference.md) | optional | | | |
 | 10 | [Earlier optimizations](10-history.md) | | | | |
 | 11 | [Directions](11-directions.md) | | | | |
 | 12 | [Fast bench](12-fast-bench.md) | non-blocking | | | |
@@ -47,7 +46,6 @@ the dossier"), a part's row links its newest round, `[Code reading](03.u1-code.m
 
 ## Open asks
 
-- [ ] Reference-platform traces, or access to take them (part 9). Asked <date>; answer: <...>
 - [ ] Where earlier optimizations are recorded (part 10). Asked <date>; answer: <...>
 - [ ] The target, if not given (part 4).
 

@@ -20,7 +20,7 @@ for f in "$ws"/reports/*; do
     [ "$(wc -c < "$f")" -lt 400000 ] || fail "$(basename "$f") is over 400 KB"
 done
 
-# Credentials: Hugging Face, Anthropic, GitHub, Azure gateway keys, docker auth.
+# Credentials: Hugging Face, Anthropic, GitHub, LLM gateway subscription keys, docker auth.
 hits=$(git -C "$ws" grep -I -l -E 'hf_[A-Za-z0-9]{30,}|sk-ant-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|Ocp-Apim-Subscription-Key|ANTHROPIC_(API_KEY|AUTH_TOKEN)[[:space:]]*=[[:space:]]*[^[:space:]$]|"auth"[[:space:]]*:[[:space:]]*"[A-Za-z0-9+/=]{20,}"' HEAD -- . ':(exclude)inputs/' 2>/dev/null | sed 's/^HEAD://' | head -3 | tr '\n' ' ')
 [ -z "$hits" ] || fail "possible credential in: $hits"
 

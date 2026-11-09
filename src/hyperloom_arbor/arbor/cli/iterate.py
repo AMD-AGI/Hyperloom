@@ -323,8 +323,8 @@ def cmd_gate(args: argparse.Namespace) -> int:
             # history lives only in the container, and a container lives only on
             # one node whose docker store is not persistent. A campaign can lose the
             # patches of changes the gate scored as primary WINS and rejected for
-            # mechanical faults (a draw-contaminated secondary bar, or a
-            # correctness.sh crash on a null `content` field): once the node's
+            # mechanical faults (a contaminated secondary bar, or a
+            # crashing correctness script): once the node's
             # containers and images are gone, nothing of them is left to look at.
             #
             # Best-effort on purpose: a REVERT must still revert even if the

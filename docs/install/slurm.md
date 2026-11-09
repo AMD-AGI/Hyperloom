@@ -202,7 +202,7 @@ The artifact directory `<data-root>/<model_key>/<CLAW_SESSION_ID>/` contains:
 - `manifest.json`: Session manifest;
 - `ci_metrics.json`: Baseline/optimized throughput plus `gain_pct`;
 - `optimizer_runs/`: `launch_<sid>.json` and logs;
-- `runtime/`: `kernel-agent.env.sh` and other files produced by the installer.
+- `runtime/`: files produced by the installer. The `kernel-agent.env.sh` it writes, which carries credentials, stays in the job container's own temporary directory (`KERNEL_AGENT_ENV`) and is not copied here.
 
 A healthy run logs in this order:
 
