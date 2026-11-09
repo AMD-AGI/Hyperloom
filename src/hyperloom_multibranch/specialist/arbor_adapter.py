@@ -64,7 +64,11 @@ from hyperloom.common.gain_math import (
     AGENTX_ERROR_RATE_THRESHOLD_PCT,
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
 )
-from hyperloom.common.perf_metric import GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT
+from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    TOTAL_TOKEN_THROUGHPUT,
+)
 from hyperloom.inference_optimizer.framework_registry import expert_parallel_flag
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.measure.compile import (
@@ -74,6 +78,7 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.measure.surface import POINT_ENV_KEYS, REQUEST_ENV_KEYS, SURFACE_ENV_KEYS
 from hyperloom_multibranch.repo.isolated_git import pinned_git
+from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.worktree import SKIPPED
@@ -134,10 +139,11 @@ ARBOR_OBJECTIVES = {GRADED_INTVTY_P50: "e2e_norm_intvty_p50", TOTAL_TOKEN_THROUG
 #: ``df9b55a`` added the total token throughput.
 OBJECTIVE_MODULE = "arbor/objective.py"
 OBJECTIVE_SINCE = {"e2e_norm_intvty_p50": "9c455df", "total_token_throughput": "df9b55a"}
-#: Where the gate's AgentX round report (``report.json``) holds each metric an AgentX session keeps on; throughput is
-#: the server's, not per GPU.
+#: Where the gate's AgentX round report (``report.json``) holds each metric an AgentX session keeps on or guards;
+#: throughput is the server's, not per GPU.
 REPORT_PATHS = {
     GRADED_INTVTY_P50: "agentx.e2e_norm_intvty.p50",
+    GRADED_INTVTY: "agentx.e2e_norm_intvty.p90",
     TOTAL_TOKEN_THROUGHPUT: "agentx.throughput.total_tokens_per_second",
 }
 #: SGLang reads its TP from these flags only. Arbor gives vLLM its TP itself, but MB names it too, so a vLLM branch's
@@ -683,12 +689,8 @@ def host_rules(spec: AgentSpec) -> list[str]:
     point = ", ".join(f"{key} {value}" for key, value in _operating_point(spec.workload).items())
     owned = ", ".join(sorted({*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}))
     kind = str(spec.workload.get("kind") or "the session's workload")
-    kept = (
-        "in one measurement, which is final unless a guard (p90 interactivity, output throughput, failed requests)"
-        " holds it for a retest"
-        if kind == AGENTX
-        else "that a second measurement confirms"
-    )
+    objective = _agentx_objective(spec.metric) if kind == AGENTX else None
+    kept = _agentx_kept(objective) if objective is not None else "that a second measurement confirms"
     rules = [
         f"{HOST_RULE}: the workload is fixed: {kind}{f' at {point}' if point else ''}, measured by MB's client, the"
         f" only bench of record. A change never sets {owned}: MB owns them and refuses a launch that does.",
@@ -706,12 +708,13 @@ def host_rules(spec: AgentSpec) -> list[str]:
             f" Arbor's GSM8K reads on another scale, so Arbor holds the change to the same drop against the root it"
             f" measures itself, and to {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:g} when it could not."
         )
-    if kind == AGENTX and spec.client:
+    if objective is not None and spec.client:
+        guards = ", ".join(f"{REPORT_PATHS[guard.metric]} the {guard.metric}" for guard in objective.guards)
         rules.append(
             f"{HOST_RULE}: MB's client is its own AgentX round, a replay of the workload's trace window: each run"
             f" writes {REPORT_FILE} in its output directory. Its {REPORT_PATHS[spec.metric]} is the {spec.metric} MB"
-            " keeps a change on, and agentx.throughput.output_tokens_per_second the output throughput; a run whose"
-            f" run_status is not {RunStatus.COMPLETED.value} measured nothing."
+            f" keeps a change on, and {guards} it guards; a run whose run_status is not {RunStatus.COMPLETED.value}"
+            " measured nothing."
         )
     if spec.source_unkept:
         rules.append(
@@ -719,6 +722,18 @@ def host_rules(spec: AgentSpec) -> list[str]:
             " Spend the work on launch flags and environment variables."
         )
     return rules
+
+
+def _agentx_objective(metric: str) -> AgentXObjective:
+    return {objective.metric: objective for objective in AgentXObjective}[metric]
+
+
+def _agentx_kept(objective: AgentXObjective) -> str:
+    guards = " and ".join(guard.metric for guard in objective.guards)
+    return (
+        f"of +{objective.bar_pct:g}% in one measurement, which is final unless a guard holds it for a retest: {guards}"
+        f" within {objective.guard_band_pct:g}% of the parent, and no more failed requests"
+    )
 
 
 def bench_command(client: str) -> str:

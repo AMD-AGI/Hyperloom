@@ -128,7 +128,7 @@ from inference_suite.contracts import BaseLaunch
 from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
 from hyperloom_multibranch.specialist.gate_client import AgentxGateClient, GateClient
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions
-from hyperloom_multibranch.specialist.prompts import role_prompt
+from hyperloom_multibranch.specialist.prompts import RoleWorkload, role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionStart, SpecialistRuntime
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
 from hyperloom_multibranch.toolbox import local_hosted
@@ -235,8 +235,10 @@ def test_the_agents_are_asked_for_the_metric_the_session_is_graded_on() -> None:
 def test_the_specialists_are_told_an_agentx_workload_and_no_sequence_lengths() -> None:
     assert _specialist_role(WORKLOAD) == "Llama-3-8B on sglang, bf16, TP 2, ISL 1024, OSL 512, concurrency 16, mi355x"
     assert _specialist_role(AGENTX) == (
-        "Llama-3-8B on sglang, bf16, TP 2, AgentX trace replay graded on e2e_norm_intvty_p50, concurrency 16, mi355x"
+        "Llama-3-8B on sglang, bf16, TP 2, AgentX trace replay graded on P50 interactivity (e2e_norm_intvty_p50), "
+        "concurrency 16, mi355x"
     )
+    assert "graded on total token throughput (total_token_throughput)," in _specialist_role(TOTAL_AGENTX)
 
 
 def test_the_agents_spec_names_the_pack_the_session_gives_its_arbors_and_none_by_default() -> None:
@@ -1126,6 +1128,52 @@ async def test_a_session_without_agents_reads_no_canonical(built: _Built, monkey
     assert clients == [None]
 
 
+async def test_an_agentx_session_s_specialists_are_told_its_objective(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[AgentSetup] = []
+
+    def sessions(setup: AgentSetup, **_: object) -> ModelSessions:
+        built.append(setup)
+        return ModelSessions(lambda start: None, lambda branch: None)
+
+    monkeypatch.setattr(model_sessions_module, "model_sessions", sessions)
+    layout = SimpleNamespace(logs=tmp_path, source=tmp_path, branch_dir=lambda branch: tmp_path)
+    setup = SimpleNamespace(
+        layout=layout,
+        workload=TOTAL_AGENTX,
+        references={},
+        processes=None,
+        agents=(),
+        agent_pack="",
+        agent_launch="",
+        agent_port=AGENT_PORT,
+        agent_dossier="",
+        agent_review="",
+        agent_maps=None,
+        agent_share_minutes=SHARE_MINUTES,
+    )
+    wiring = SimpleNamespace(
+        setup=setup,
+        tokens=None,
+        repo=None,
+        briefs=SimpleNamespace(text=None),
+        toolbox=None,
+        blackboards=None,
+        dev_leases=None,
+        native={},
+        agent_sandboxes=None,
+        base=BASE,
+    )
+    model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
+
+    objective = AgentXObjective.TOTAL_TOKEN_THROUGHPUT
+    assert built[0].role == role_prompt(
+        RoleWorkload(_specialist_role(TOTAL_AGENTX), objective), references={}, base=BASE
+    )
+    assert objective.description in " ".join(built[0].role.split())
+
+
 async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_session_lends(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1168,10 +1216,12 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
 
     without, lending = built
     assert (without.dev_leases, lending.dev_leases) == (None, leases)
-    assert without.role == role_prompt(_specialist_role(WORKLOAD), references={}, base=BASE)
+    assert without.role == role_prompt(RoleWorkload(_specialist_role(WORKLOAD)), references={}, base=BASE)
     assert "Server arguments: --tp-size 2 --enable-hierarchical-cache --hicache-size 180." in without.role
     assert (
-        lending.role == role_prompt(_specialist_role(WORKLOAD), references={}, base=BASE, dev_leases=1) != without.role
+        lending.role
+        == role_prompt(RoleWorkload(_specialist_role(WORKLOAD)), references={}, base=BASE, dev_leases=1)
+        != without.role
     )
     # A hosted lease's sandbox roots in the branch's directory: the branch's specialist is shown that area alone.
     assert without.lease_area is None and lending.lease_area is not None
@@ -1419,4 +1469,4 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
     assert laid["without"] == ["python/sglang/__init__.py"]
     with_native, without = roles[0], roles[-1]
     assert "python/sglang/kernels/aot" in with_native and "pending_build" in with_native
-    assert without == role_prompt(_specialist_role(WORKLOAD), references={}, base=BASE)
+    assert without == role_prompt(RoleWorkload(_specialist_role(WORKLOAD)), references={}, base=BASE)

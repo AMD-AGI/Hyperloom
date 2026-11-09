@@ -666,8 +666,11 @@ def test_arbor_is_held_to_mb_s_accuracy_floor_unless_the_launch_or_the_recipe_se
     assert [config["server_env"][floor] for config in configs] == ["0.5", "0.85", "0.8"]
 
 
-def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Path) -> None:
+def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # The benchmark's rules are considered in validation, and are part of the dossier.
+    monkeypatch.delenv("HYPERLOOM_PERF_NOISE_PCT", raising=False)
     spec = _spec(tmp_path)
     agentx = replace(spec, workload={"kind": "agentx", "conc": 8}, metric=GRADED_INTVTY_P50)
 
@@ -680,12 +683,20 @@ def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Pa
     assert "output_throughput" in kept and "a second measurement confirms" in kept
     agentx_kept = agentx_rules[1]
     assert "in one measurement, which is final unless a guard" in agentx_kept and "second" not in agentx_kept
+    assert "bar of +2%" in agentx_kept and "output" not in agentx_kept
+    assert "e2e_norm_intvty_p90 and total_token_throughput within 5%" in agentx_kept
     assert "at least 0.5" in accuracy and "at most 0.05" in accuracy
     assert "the root it measures itself" in accuracy
     assert "error rate stays at or under 10%" in agentx_rules[2]
     assert "agentx.e2e_norm_intvty.p50" in agentx_rules[3] and "report.json" in agentx_rules[3]
     total = host_rules(replace(agentx, metric=TOTAL_TOKEN_THROUGHPUT))
+    assert (
+        "agentx.e2e_norm_intvty.p90" in agentx_rules[3]
+        and "agentx.throughput.total_tokens_per_second" in agentx_rules[3]
+    )
+    assert "output_tokens_per_second" not in agentx_rules[3]
     assert "agentx.throughput.total_tokens_per_second is the total_token_throughput" in total[3]
+    assert "e2e_norm_intvty_p90 and e2e_norm_intvty_p50 within 5%" in total[1] and "output" not in total[1]
     unmeasured = host_rules(replace(agentx, client=""))
     assert len(unmeasured) == 3 and "error rate stays at or under 10%" in unmeasured[-1]
 
