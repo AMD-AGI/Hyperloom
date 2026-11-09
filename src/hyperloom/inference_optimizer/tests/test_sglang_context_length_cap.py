@@ -29,7 +29,6 @@ _HUGE_MAX_POS = 1_024_000
 @pytest.fixture(autouse=True)
 def _hermetic_env(monkeypatch):
     """Clear the workload env knobs and disable the TP clamp so the rendered YAML is hermetic."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     for key in (
         "SGLANG_CONTEXT_HEADROOM_TOKENS",
         "SGLANG_CONTEXT_FLOOR_TOKENS",

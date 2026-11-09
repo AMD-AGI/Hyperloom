@@ -22,8 +22,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
@@ -659,57 +657,6 @@ class FrameworkScriptMismatchError(ValueError):
     """
 
 
-def _visible_gpu_count() -> int:
-    """Return how many GPUs are visible to this pod (0 = none / unknown).
-
-    Prefers ``torch.cuda.device_count`` (no shell-out, keeps subprocess-mock
-    tests happy), falls back to ``rocm-smi --showid``. Returns 0 on every
-    failure so callers skip the clamp. Override via
-    ``$INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT``.
-
-    Returns:
-        The number of visible GPUs, or 0 when none/unknown.
-    """
-    override = os.environ.get("INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT", "").strip()
-    if override:
-        try:
-            return max(0, int(override))
-        except ValueError:
-            log.warning(
-                "INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT=%r is not an int; ignoring override.",
-                override,
-            )
-    try:
-        import torch  # type: ignore[import-not-found]
-
-        count = int(torch.cuda.device_count() or 0)
-        if count > 0:
-            return count
-    except (ImportError, RuntimeError):
-        pass
-    if shutil.which("rocm-smi"):
-        try:
-            proc = subprocess.run(
-                ["rocm-smi", "--showid"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        except (subprocess.TimeoutExpired, PermissionError, OSError):
-            return 0
-        if proc.returncode == 0:
-            # ``rocm-smi --showid`` emits multiple ``GPU[N]`` lines per device;
-            # dedup by index.
-            indices: set[str] = set()
-            for line in (proc.stdout or "").splitlines():
-                stripped = line.strip()
-                idx, _, _ = stripped[4:].partition("]")
-                if stripped.startswith("GPU[") and idx:
-                    indices.add(idx)
-            return len(indices)
-    return 0
-
-
 def _coerce_workload_int_env(env_key: str, raw: str) -> int:
     """Coerce workload env values, accepting ``CONC`` comma ladders."""
     text = str(raw or "").strip()
@@ -874,21 +821,6 @@ def _pin_workload_shape_envs(envs: dict[str, Any]) -> None:
             len(mask_tokens(envs.get("ROCR_VISIBLE_DEVICES")) or mask_tokens(os.environ.get("ROCR_VISIBLE_DEVICES")))
             or 1
         )
-    # Auto-clamp TP to the visible GPU count. Override via
-    # $INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1.
-    if os.environ.get("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "").strip() != "1":
-        visible = _visible_gpu_count()
-        if visible and resolved_tp > visible:
-            log.warning(
-                "TP=%d but only %d GPU(s) visible to this pod; clamping "
-                "TP=%d so sglang/vllm can actually load weights. Export "
-                "INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1 to opt out (the "
-                "subprocess will then fail at server launch).",
-                resolved_tp,
-                visible,
-                visible,
-            )
-            resolved_tp = visible
     envs["TP"] = resolved_tp
     pin_rocr_visible_devices(envs, cards=session_cards(session_dir(), resolved_tp))
 

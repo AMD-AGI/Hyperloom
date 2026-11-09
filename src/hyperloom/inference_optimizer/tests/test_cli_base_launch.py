@@ -70,6 +70,14 @@ def _no_io(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def visible_gpus(monkeypatch) -> list[int]:
+    """The GPU count this host reports, ``0`` (cannot tell) unless a test sets it."""
+    count = [0]
+    monkeypatch.setattr(bl, "detect_gpu_count", lambda: count[0])
+    return count
+
+
+@pytest.fixture(autouse=True)
 def _session_topology_env(monkeypatch) -> None:
     monkeypatch.setenv("TP", "1")
     monkeypatch.setenv("EP", "1")
@@ -374,20 +382,40 @@ def test_an_open_topology_takes_the_largest_recipe_that_fits_the_gpus_per_node(t
     assert wide.topology.tp <= 4 < full.topology.tp
 
 
-def test_a_single_node_session_is_resolved_for_eight_gpus_without_probing_the_host(
-    tmp_path, fetched, spans, monkeypatch
+def test_a_single_node_session_is_resolved_for_eight_gpus_whatever_the_host_sees(
+    tmp_path, fetched, spans, visible_gpus
 ):
-    from hyperloom.common import visible_devices
-
-    def probe():
-        raise AssertionError("the base launch probed this host's GPUs")
-
-    monkeypatch.setattr(visible_devices, "detect_gpu_count", probe)
+    visible_gpus[0] = 16
 
     base = _resolve(tmp_path, _args(operator_tp=None, operator_ep=None))
 
     assert spans == [8]
     assert base is not None and base.topology.tp == 8
+
+
+@pytest.mark.parametrize(
+    ("overrides", "needed"),
+    [
+        (dict(model="Kimi-K2.6", gpu_type="mi300x", operator_tp=2), 2),
+        (dict(operator_tp=None, operator_ep=None), 8),
+    ],
+)
+def test_a_single_node_session_whose_base_needs_more_gpus_than_the_host_sees_exits_2(
+    tmp_path, fetched, visible_gpus, capsys, overrides, needed
+):
+    visible_gpus[0] = 1
+
+    err = _refused(tmp_path, _args(**overrides), capsys)
+
+    assert f"needs {needed} GPUs" in err and "this host sees 1" in err
+
+
+def test_a_host_that_sees_the_cards_the_base_needs_runs_it(tmp_path, fetched, visible_gpus):
+    visible_gpus[0] = 2
+
+    base = _resolve(tmp_path, _args(model="Kimi-K2.6", gpu_type="mi300x", operator_tp=2))
+
+    assert base.cards == 2 and (tmp_path / BASE_LAUNCH_FILE).exists()
 
 
 def test_an_explicit_gpus_per_node_sizes_the_span(tmp_path, fetched, spans):
@@ -410,8 +438,11 @@ def test_an_operator_file_sets_the_topology_the_command_line_left_open(tmp_path,
     assert args.tp == 8 and os.environ["TP"] == "8"
 
 
-def test_a_multi_node_session_fits_the_base_to_eight_gpus_on_every_node(tmp_path, fetched, spans, monkeypatch):
+def test_a_multi_node_session_fits_the_base_to_eight_gpus_on_every_node(
+    tmp_path, fetched, spans, monkeypatch, visible_gpus
+):
     monkeypatch.delenv("TOPOLOGY_HANDOFF_FILE", raising=False)
+    visible_gpus[0] = 1
     args = _args(nodes=2, tp=16, operator_tp=16, operator_ep=None)
 
     base = _resolve(tmp_path, args)

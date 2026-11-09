@@ -78,7 +78,6 @@ def clean_process_env(monkeypatch, tmp_path):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("FRAMEWORK", "sglang")
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "userdata"))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
 
 
 @pytest.fixture()

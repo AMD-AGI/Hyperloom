@@ -28,7 +28,6 @@ _PATCHED = PatchedServer(None)
 
 @pytest.fixture(autouse=True)
 def profile_environment(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "patched")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
     for name in (

@@ -240,7 +240,6 @@ def test_materialize_config_tp_env_overrides_yaml_hardcode(tmp_path, monkeypatch
     import yaml
 
     monkeypatch.setenv("TP", "8")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     out = materialize_benchmark_config(_PROFILE_SGLANG_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -269,7 +268,6 @@ def test_materialize_config_rocr_visible_devices_auto_expands_when_tp_overridden
     import yaml
 
     monkeypatch.setenv("TP", "8")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     out = materialize_benchmark_config(_PROFILE_SGLANG_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())
@@ -302,7 +300,6 @@ def test_materialize_config_rocr_visible_devices_stays_on_session_cards_when_und
     import yaml
 
     monkeypatch.setenv("TP", "8")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
     out = materialize_benchmark_config(_PROFILE_SGLANG_CONFIG, tmp_path)
     rendered = yaml.safe_load(out.read_text())

@@ -27,6 +27,7 @@ from hyperloom.common.agentx_workload import is_mlperf_backend
 from hyperloom.common.launch_credentials import credentials_in_the_clear, redact_credential_env
 from hyperloom.common.model_paths import hf_repo_id
 from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.visible_devices import detect_gpu_count
 from inference_suite import (
     LaunchQuery,
     Miss,
@@ -220,7 +221,8 @@ def resolve_base_launch(
 
     The session then runs at the base's TP and EP, so this runs before anything records them. Exits 2 when the
     operator's launch file cannot serve as the base, the query is malformed, no source and no default serves the
-    session (an AgentX session has no default), or a scriptable session has no script to run.
+    session (an AgentX session has no default), a scriptable session has no script to run, or a single-node session's
+    base needs more GPUs than this host sees.
     """
     if is_scriptable(framework):
         launch = _session_launch(args, framework=framework, workload=Workload.SCRIPTABLE, concurrencies=concurrencies)
@@ -241,7 +243,26 @@ def resolve_base_launch(
     return _freeze(args, session_dir, base)
 
 
+def _refuse_a_base_this_host_cannot_hold(args: argparse.Namespace, base: BaseLaunch) -> None:
+    """Exit 2 when a single-node session's base needs more GPUs than this host sees.
+
+    Every round of the session runs at the base's topology, so a host short of its cards can run none of them. A host
+    whose GPUs cannot be counted may be planning a session that runs elsewhere, and a multi-node base spans other
+    hosts' cards, so neither is checked.
+    """
+    if int(args.nodes) >= 2:
+        return
+    visible = detect_gpu_count()
+    if 0 < visible < base.cards:
+        _refuse(
+            f"the base launch runs TP {base.topology.tp} and needs {base.cards} GPUs, but this host sees {visible} "
+            "(its visible-device mask, else rocm-smi); expose more GPUs, or pass --tp or --gpus-per-node to resolve a "
+            "base that fits"
+        )
+
+
 def _freeze(args: argparse.Namespace, session_dir: Path, base: BaseLaunch) -> BaseLaunch:
+    _refuse_a_base_this_host_cannot_hold(args, base)
     write_base_launch(session_dir, base)
     _run_at_base_topology(args, base)
     _announce(base)

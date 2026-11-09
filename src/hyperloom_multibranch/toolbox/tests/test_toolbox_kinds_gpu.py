@@ -74,7 +74,7 @@ READY_LINE = "The server is fired up and ready to roll"
 #: The log of the one server a sweep arm shares; each round's ``server.log`` is the slice of it the round ran over.
 ARM_LOG = "server_arm/server.log"
 FLEXIBLE = "exact_match,flexible-extract"
-_WORKLOAD = {"FRAMEWORK": "sglang", "ISL": "256", "OSL": "64", "INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP": "1"}
+_WORKLOAD = {"FRAMEWORK": "sglang", "ISL": "256", "OSL": "64"}
 _CLEARED = ("CONC", "RUN_EVAL", "TP", "EP", "PORT", "MAX_MODEL_LEN", "PRECISION", "RANDOM_RANGE_RATIO")
 
 
