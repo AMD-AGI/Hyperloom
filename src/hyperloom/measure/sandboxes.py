@@ -822,7 +822,7 @@ class SandboxPool:
             return
         try:
             self._end_parked(parked, why)
-        except Exception:  # the create waits for room either way; a sandbox that did not close is counted by the service
+        except Exception:  # the create waits for room either way; the service still counts a sandbox it did not close
             log.exception("sandbox %s, kept for the next test, could not be closed", parked.runner.sandbox_id)
 
     def _end_parked(self, parked: _Parked, why: str) -> None:
