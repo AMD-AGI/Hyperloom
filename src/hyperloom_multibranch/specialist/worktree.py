@@ -13,9 +13,11 @@ against its head, a patch the toolbox applies where it applies every other.
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import importlib.metadata
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -36,7 +38,16 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, meta_sections, source_roots
-from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
+from hyperloom_common.git_safety import app_git, trusted_admin_dir
+from hyperloom_multibranch.repo.isolated_git import (
+    INIT,
+    NO_EXCLUDES_FILE,
+    blank_driver_programs,
+    git_argv,
+    git_env,
+    leading_options,
+    trusting,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +82,12 @@ _FIXED_CONFIG = (
     "-c",
     "diff.mnemonicPrefix=false",
 )
-_STAGE = ("add", "--all", "--")
+_ADD = "add"
+_STAGE = (_ADD, "--all", "--")
+#: Paths per ``add -N``: at PATH_MAX each, 1 MiB, inside the kernel's 2 MiB for arguments.
+_ADD_BATCH = 256
+#: A repository nested in a worktree, tracked or not, is no part of a change: a diff never looks into one.
+_NO_NESTED = "--ignore-submodules=all"
 _HEAD = "HEAD"
 #: The commit the worktree's last sync made, kept apart for each worktree as ``refs/worktree/*`` is: an agent may commit
 #: its change on top, and the change is everything since.
@@ -81,8 +97,8 @@ _GIT_DIR = ".git"
 _QUIET = "--quiet"
 _DIFF = "diff"
 _CACHED = "--cached"
-#: A diff as the toolbox applies it, whatever colour or external diff driver the user's git config asks for.
-_PLAIN = ("--no-color", "--no-ext-diff")
+#: A diff as the toolbox applies it, whatever colour, external diff driver or text conversion a config asks for.
+_PLAIN = ("--no-color", "--no-ext-diff", "--no-textconv")
 
 
 class WorktreeError(RuntimeError):
@@ -212,13 +228,29 @@ def source_unkept(component: str, recipe: Recipe) -> str:
     )
 
 
-def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None = None) -> str:
+def _git(cwd: Path, *args: str, index: Path | None = None, common: Path | None = None) -> str:
+    """``git <args>`` in ``cwd``.
+
+    With ``common``, ``cwd`` is a branch's worktree, which the agent writes, made from the repository whose git
+    directory is ``common``: git runs by :func:`~hyperloom_common.git_safety.app_git`, against the worktree's admin
+    directory only once it is proven the app's and ``common``'s, never against one the worktree's gitfile was pointed
+    at. Otherwise ``cwd`` is the source base or an image's checkout: every driver program its config defines is blanked
+    (:func:`~hyperloom_multibranch.repo.isolated_git.blank_driver_programs`) and the tree is trusted whoever owns it
+    (``safe.directory``), as an earlier leg that made it may have been another account. Either way no program the
+    config names runs."""
     pinned = _GIT_IDENTITY if index is None else {**_GIT_IDENTITY, "GIT_INDEX_FILE": str(index)}
+    if common is not None:
+        return _worktree_git(cwd, common, args, pinned)
+    env = git_env(**pinned)
+    trusted = trusting(cwd)
+    try:
+        blanked = blank_driver_programs(cwd, env, *trusted, *leading_options(args))
+    except (OSError, subprocess.SubprocessError) as error:
+        raise WorktreeError(f"git config in {cwd} cannot be read to blank its filter drivers: {error}") from error
     done = subprocess.run(
-        git_argv(*_FIXED_CONFIG, *args),
+        git_argv(*trusted, *_FIXED_CONFIG, *blanked, *args),
         cwd=cwd,
-        env=git_env(**pinned),
-        input=stdin,
+        env=env,
         capture_output=True,
         timeout=GIT_TIMEOUT_S,
         check=False,
@@ -228,7 +260,40 @@ def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None =
     return done.stdout.decode()
 
 
+def _worktree_git(worktree: Path, common: Path, args: Sequence[str], pinned: Mapping[str, str]) -> str:
+    """``git <args>`` in the branch worktree ``worktree`` by ``app_git``; raises :class:`WorktreeError` when it fails
+    or is refused, the worktree's git metadata not being the app's. ``app_git`` allows no transport, so a promisor
+    remote's lazy fetch starts nothing either."""
+    env = {**pinned, "LC_ALL": "C"}
+    try:
+        done = app_git(
+            worktree, *NO_EXCLUDES_FILE, *_FIXED_CONFIG, *args, timeout=GIT_TIMEOUT_S, env=env, common=common
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise WorktreeError(f"git {args[0]} in {worktree} was refused: {error}") from error
+    if done.returncode != 0:
+        raise WorktreeError(
+            f"git {args[0]} in {worktree} exited {done.returncode}: {done.stderr.strip()}{_blanked(worktree, common)}"
+        )
+    return done.stdout
+
+
+def _blanked(worktree: Path, common: Path) -> str:
+    """What a failed command in ``worktree`` was not allowed to run: the driver programs the repository's config names,
+    which ``app_git`` ran as empty, so a command that needs one (a required filter) fails; ``""`` when it names none."""
+    try:
+        admin = trusted_admin_dir(worktree, common)
+        pairs = blank_driver_programs(worktree, git_env(), "--git-dir", str(admin))
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    keys = sorted({setting.partition("=")[0] for setting in pairs[1::2]})
+    if not keys:
+        return ""
+    return f" (the app runs no program a repository's config names; it ran these as empty: {', '.join(keys)})"
+
+
 def _commit_all(cwd: Path, message: str) -> None:
+    """Commit the whole tree at ``cwd``: the source base as it builds it, before any agent writes there."""
     _git(cwd, *_STAGE)
     _git(cwd, "commit", _QUIET, "--allow-empty", "-m", message)
 
@@ -294,12 +359,11 @@ class SourceBase:
         """The worktree of ``branch`` at ``path``, added at the installed packages the first time; every call for
         ``path`` returns the same one, so all its callers share its :attr:`~BranchWorktree.lock`."""
         if not path.exists():
-            _git(self.path, "worktree", "add", "-b", f"mb/{branch}", str(path), BASE_BRANCH)
-        for prefix, target in linked_paths(path):
-            if not (path / prefix).exists():
-                (path / prefix).parent.mkdir(parents=True, exist_ok=True)
-                (path / prefix).symlink_to(target)
-        return self._worktrees.setdefault(path, BranchWorktree(path, self._native))
+            _git(self.path, "worktree", _ADD, "-b", f"mb/{branch}", str(path), BASE_BRANCH)
+        common = self.path / _GIT_DIR
+        for prefix, target in linked_paths(common):
+            _link(path, PurePosixPath(prefix), target)
+        return self._worktrees.setdefault(path, BranchWorktree(path, self._native, common=common))
 
     def _lay_native(self, native: SourceRoot, laid: Sequence[SourceRoot]) -> None:
         """Copy ``native`` to its upstream path, but for what ``laid`` already put there: the package a test loads is
@@ -314,6 +378,48 @@ class SourceBase:
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout; its source cannot be laid out")
         return layout
+
+
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _link(worktree: Path, prefix: PurePosixPath, target: str) -> None:
+    """Link ``target`` at ``prefix`` in ``worktree`` unless something is there, making the directories on the way.
+
+    The agent writes the worktree and may have made a directory on the way a symlink to somewhere else: each directory
+    is opened without following one, and the next made and opened relative to it, so nothing is made outside.
+
+    Raises:
+        WorktreeError: A directory on the way is a symlink or no directory.
+    """
+    fd = os.open(worktree, _DIRECTORY_FLAGS)
+    try:
+        _link_below(fd, worktree / prefix, prefix.parts[:-1], target)
+    finally:
+        os.close(fd)
+
+
+def _link_below(dir_fd: int, link: Path, parts: tuple[str, ...], target: str) -> None:
+    """Link ``target`` at ``link``, whose directories still to make and open below ``dir_fd`` are ``parts``.
+
+    Raises:
+        WorktreeError: A directory on the way is a symlink or no directory.
+    """
+    if not parts:
+        with contextlib.suppress(FileExistsError):
+            os.symlink(target, link.name, dir_fd=dir_fd)
+        return
+    part = parts[0]
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(part, dir_fd=dir_fd)
+    try:
+        fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=dir_fd)
+    except OSError as error:
+        raise WorktreeError(f"{link} cannot be linked: {part} is no directory: {error}") from error
+    try:
+        _link_below(fd, link, parts[1:], target)
+    finally:
+        os.close(fd)
 
 
 def _file_sections(patch: str) -> list[tuple[tuple[str, ...], str]]:
@@ -332,11 +438,10 @@ def _within(path: str, trees: Sequence[str]) -> bool:
     return any(path == tree or path.startswith(f"{tree}/") for tree in trees)
 
 
-def linked_paths(worktree: Path) -> list[tuple[str, str]]:
-    """The paths the worktree at ``worktree`` links rather than holds, as its source base recorded them: ``3rdparty``
-    trees from the base's copies (:func:`_third_party`) and compiled extensions from the installed package
-    (:func:`_extensions`)."""
-    common = Path(_git(worktree, _REV_PARSE, "--path-format=absolute", "--git-common-dir").strip())
+def linked_paths(common: Path) -> list[tuple[str, str]]:
+    """The paths each worktree of the source base whose git directory is ``common`` links rather than holds, as the
+    base recorded them: ``3rdparty`` trees from the base's copies (:func:`_third_party`) and compiled extensions from
+    the installed package (:func:`_extensions`). Read from the base, never from where a worktree's gitfile points."""
     links = common / LINKED_PATHS
     lines = links.read_text().splitlines() if links.exists() else []
     return [(prefix, target) for prefix, target in (line.split("\t") for line in lines)]
@@ -401,17 +506,27 @@ class BranchWorktree:
     the commit that sync made.
 
     Whoever runs git in it or reads its files as a change holds :attr:`lock` for the whole of that work: a sync's
-    reset, apply and commit, and a diff's stage, all go through the worktree's one tree and index.
+    reset, apply and commit, and a diff's marking of new files, all go through the worktree's one tree and index.
+
+    The agent writes the worktree, its gitfile included, so git runs in it only against an admin directory of the
+    source base's repository, ``common`` (:func:`_git`), and never stages it whole: an ``add`` of a path the index
+    tracks runs git in a repository nested there, under that repository's own config.
     """
 
     def __init__(
         self,
         path: Path,
         native: Mapping[str, NativeTree] | None = None,
+        *,
+        common: Path,
     ) -> None:
         self.path = path
         self._native = dict(native or {})
+        self._common = common
         self.lock = threading.Lock()
+
+    def _git(self, *args: str, index: Path | None = None) -> str:
+        return _git(self.path, *args, index=index, common=self._common)
 
     def holds(self, component: str) -> bool:
         """Whether the source base laid out ``component``; a recipe's patches to any other component are not here."""
@@ -427,9 +542,7 @@ class BranchWorktree:
     def head(self) -> str | None:
         """The experiment commit the worktree was last synced to, or ``None`` before its first sync."""
         synced = self._synced()
-        return (
-            None if synced is None else _git(self.path, "log", "-1", "--format=%s", synced).strip()[len(HEAD_SUBJECT) :]
-        )
+        return None if synced is None else self._git("log", "-1", "--format=%s", synced).strip()[len(HEAD_SUBJECT) :]
 
     def sync(self, head: str, patches: Sequence[bytes]) -> tuple[str, ...]:
         """Make the worktree ``head``: the installed packages with its ``patches`` applied in order; returns the
@@ -437,7 +550,7 @@ class BranchWorktree:
 
         Uncommitted edits are dropped too, so a change made against an older head never reaches a diff against this one.
         """
-        dropped = tuple(_git(self.path, "rev-list", "--reverse", f"{self._since()}..{_HEAD}").split())
+        dropped = tuple(self._git("rev-list", "--reverse", f"{self._since()}..{_HEAD}").split())
         if self.head() == head:
             self._reset(_SYNCED)
             return dropped
@@ -446,19 +559,21 @@ class BranchWorktree:
             for index, patch in enumerate(patches):
                 patch_file = Path(scratch) / f"{index:04d}.patch"
                 patch_file.write_bytes(patch)
-                _git(self.path, "apply", "--whitespace=nowarn", str(patch_file))
-        _commit_all(self.path, f"{HEAD_SUBJECT}{head}")
-        _git(self.path, "update-ref", _SYNCED, _HEAD)
+                self._git("apply", "--index", "--whitespace=nowarn", str(patch_file))
+        # The patches went to the index as they were applied: nothing is staged from the tree, which may hold a
+        # repository the agent nested in it.
+        self._git("commit", _QUIET, "--allow-empty", "-m", f"{HEAD_SUBJECT}{head}")
+        self._git("update-ref", _SYNCED, _HEAD)
         return dropped
 
     def diff(self, component: str) -> str:
         """The worktree's change to ``component`` against its head, committed in the worktree or not, as the patch the
         toolbox applies; empty when none."""
-        return self._staged_diff(component, *_PLAIN)
+        return self._diff_since(component, *_PLAIN)
 
     def commit(self) -> str:
         """The git commit the worktree's HEAD is at."""
-        return _git(self.path, _REV_PARSE, _HEAD).strip()
+        return self._git(_REV_PARSE, _HEAD).strip()
 
     def diff_from(self, commit: str, component: str) -> str:
         """The worktree's files of ``component`` against its git commit ``commit``, whatever was committed on top of it
@@ -470,9 +585,8 @@ class BranchWorktree:
         paths = self._paths(component)
         with tempfile.TemporaryDirectory(prefix="mb-diff-") as scratch:
             index = Path(scratch) / "index"
-            _git(self.path, "read-tree", commit, index=index)
-            _git(self.path, *_STAGE, *paths, index=index)
-            return _git(self.path, _DIFF, _CACHED, *_PLAIN, commit, "--", *paths, index=index)
+            self._git("read-tree", commit, index=index)
+            return self._change(commit, paths, *_PLAIN, index=index)
 
     def diff_between(self, commit: str, before: Sequence[str], after: str, component: str) -> str:
         """The patch that takes ``component``'s files from ``commit`` with the patches ``before`` applied in order to
@@ -484,7 +598,7 @@ class BranchWorktree:
         with tempfile.TemporaryDirectory(prefix="mb-between-") as scratch:
             start = self._tree(commit, before, Path(scratch) / "before")
             end = self._tree(commit, (after,), Path(scratch) / "after")
-            return _git(self.path, _DIFF, *_PLAIN, start, end, "--", *paths)
+            return self._git(_DIFF, *_PLAIN, start, end, "--", *paths)
 
     def diff_applied(self, commit: str, patches: Sequence[str], component: str) -> str:
         """The patch that takes ``component``'s files from ``commit`` to ``commit`` with ``patches`` applied in order,
@@ -493,22 +607,22 @@ class BranchWorktree:
         paths = self._paths(component)
         with tempfile.TemporaryDirectory(prefix="mb-applied-") as scratch:
             end = self._tree(commit, patches, Path(scratch) / "after")
-            return _git(self.path, _DIFF, *_PLAIN, commit, end, "--", *paths)
+            return self._git(_DIFF, *_PLAIN, commit, end, "--", *paths)
 
     def _tree(self, commit: str, patches: Sequence[str], scratch: Path) -> str:
         """The git tree of ``commit`` with ``patches`` applied in order, written through the index under ``scratch``."""
         scratch.mkdir()
         index = scratch / "index"
-        _git(self.path, "read-tree", commit, index=index)
+        self._git("read-tree", commit, index=index)
         for number, patch in enumerate(text for text in patches if text):
             patch_file = scratch / f"{number:04d}.patch"
             patch_file.write_text(patch, encoding="utf-8")
-            _git(self.path, "apply", _CACHED, "--whitespace=nowarn", str(patch_file), index=index)
-        return _git(self.path, "write-tree", index=index).strip()
+            self._git("apply", _CACHED, "--whitespace=nowarn", str(patch_file), index=index)
+        return self._git("write-tree", index=index).strip()
 
     def changed(self, component: str) -> Changes:
         """The files the worktree's change to ``component`` writes and deletes against its head."""
-        listing = self._staged_diff(component, "--no-renames", "--name-status")
+        listing = self._diff_since(component, "--no-renames", "--name-status")
         rows = [line.split("\t", 1) for line in listing.splitlines() if line.strip()]
         return Changes(
             written=tuple(path for status, path in rows if status != "D"),
@@ -516,9 +630,10 @@ class BranchWorktree:
         )
 
     def _reset(self, commit: str) -> None:
-        _git(self.path, "reset", "--hard", commit)
-        kept = [f"--exclude=/{prefix}" for prefix, _target in linked_paths(self.path)]
-        _git(self.path, "clean", "-fdx", _QUIET, *kept)
+        self._git("reset", "--hard", commit)
+        kept = [f"--exclude=/{prefix}" for prefix, _target in linked_paths(self._common)]
+        # Twice forced: a repository the agent nested in the tree goes too, or it would outlive the sync.
+        self._git("clean", "-ffdx", _QUIET, *kept)
 
     def source_only(self, component: str, patch: str) -> tuple[str, tuple[str, ...]]:
         """``patch`` less its files outside ``component``'s paths, and the paths it left out: an agent's scratch (logs,
@@ -534,13 +649,23 @@ class BranchWorktree:
                 outside.append(names[-1])
         return "".join(kept), tuple(outside)
 
-    def _staged_diff(self, component: str, *options: str) -> str:
-        paths = self._paths(component)
-        _git(self.path, *_STAGE, *paths)
-        return _git(self.path, _DIFF, _CACHED, *options, self._since(), "--", *paths)
+    def _diff_since(self, component: str, *options: str) -> str:
+        return self._change(self._since(), self._paths(component), *options)
+
+    def _change(self, since: str, paths: Sequence[str], *options: str, index: Path | None = None) -> str:
+        """The diff of the worktree's files under ``paths`` against ``since``, a new file shown as created: each
+        untracked one is marked intent-to-add by name (:data:`_ADD_BATCH` at a time), never by an ``add`` over a path
+        the index tracks. A repository nested in the tree is neither marked (``ls-files`` lists one as its directory)
+        nor looked into by the diff (:data:`_NO_NESTED`)."""
+        listed = self._git("ls-files", "--others", "--exclude-standard", "-z", "--", *paths, index=index)
+        untracked = [path for path in listed.split("\0") if path and not path.endswith("/")]
+        for start in range(0, len(untracked), _ADD_BATCH):
+            batch = untracked[start : start + _ADD_BATCH]
+            self._git("--literal-pathspecs", _ADD, "-N", "--", *batch, index=index)
+        return self._git(_DIFF, *options, _NO_NESTED, since, "--", *paths, index=index)
 
     def _synced(self) -> str | None:
-        return _git(self.path, "for-each-ref", "--format=%(objectname)", _SYNCED).strip() or None
+        return self._git("for-each-ref", "--format=%(objectname)", _SYNCED).strip() or None
 
     def _since(self) -> str:
         """The commit a change in the worktree is made on: its last sync's, or the installed packages before one."""
@@ -555,7 +680,7 @@ class BranchWorktree:
         native = self._native.get(component)
         trees = [section.prefix for section in meta_sections(layout)] + ([native.root.prefix] if native else [])
         # A pathspec that names nothing fails the stage, and an install may ship no meta tree.
-        held = _git(self.path, "ls-tree", "--name-only", BASE_BRANCH, "--", *trees).splitlines() if trees else []
+        held = self._git("ls-tree", "--name-only", BASE_BRANCH, "--", *trees).splitlines() if trees else []
         own = (layout.upstream_prefix, *held)
         return (*own, *(f"{_EXCLUDE}{tree}" for tree in self._nested(component, own)))
 

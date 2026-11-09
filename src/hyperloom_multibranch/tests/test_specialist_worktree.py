@@ -1,12 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import os
+import shutil
 import subprocess
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from hyperloom.contracts.recipe import ComponentPatches, PatchRef
+from hyperloom_common import git_safety
+from hyperloom_common.git_safety import trusted_admin_dir
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
     LocalBlobStore,
@@ -419,3 +424,486 @@ def test_a_wheel_neither_the_image_nor_its_repository_resolves_names_no_upstream
 
     assert installed_upstream(wheel) is None
     assert "names no upstream commit a checkout holds" in source_unkept("vllm", replace(ROOT, components=()))
+
+
+def _recording_filter(where: Path, ran: Path) -> Path:
+    """A program that notes it ran in ``ran`` and passes its input through, as a filter or a text conversion would."""
+    program = where / "recording-filter"
+    program.write_text(f"#!/bin/sh\necho ran >> {ran}\ncat\n")
+    program.chmod(0o755)
+    return program
+
+
+def _plant_programs(base_git: Path, tree: Path, ran: Path) -> None:
+    """What a sandbox that writes the worktree and its repository can plant: a config naming a program for every hook
+    of git it can name -- filter drivers under names of its own, an fsmonitor, a text conversion, a signing program on
+    commit, a pager -- an attributes file that applies them to every path, and executable hooks."""
+    program = _recording_filter(base_git.parent.parent, ran)
+    marker = f"#!/bin/sh\necho ran >> {ran}\n"
+    with (base_git / "config").open("a") as config:
+        config.write(
+            f'[filter "own"]\n\tclean = {program}\n\tsmudge = {program}\n'
+            f'[filter "other.name"]\n\tprocess = {program}\n'
+            f"[core]\n\tfsmonitor = {base_git / 'hooks' / 'fsmonitor'}\n\tpager = {program}\n"
+            f'[diff "own"]\n\ttextconv = {program}\n\tcommand = {program}\n'
+            f"[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = {base_git / 'hooks' / 'fsmonitor'}\n"
+        )
+    (base_git / "hooks").mkdir(exist_ok=True)
+    for hook in ("fsmonitor", "pre-commit", "post-commit", "post-checkout", "reference-transaction"):
+        (base_git / "hooks" / hook).write_text(marker)
+        (base_git / "hooks" / hook).chmod(0o755)
+    (tree / ".gitattributes").write_text("* filter=own diff=own\n*.py filter=other.name\n")
+
+
+def _as_another_accounts(*trees: Path) -> None:
+    for path in (path for tree in trees for path in (tree, *tree.rglob("*"))):
+        os.lchown(path, 65534, 65534)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a repository of another owner needs root to chown")
+def test_a_worktree_another_account_wrote_is_synced_and_diffed_with_no_program_of_it_run(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    _plant_programs(base.path / ".git", worktree.path, ran)
+    # Another account wrote the worktree, its gitfile included; the source base, its admin directories among it, is
+    # still the app's.
+    _as_another_accounts(worktree.path)
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    patch = worktree.diff("vllm")
+    worktree.sync("c1", [patch.encode()])
+
+    assert "+max_num_seqs = 256" in patch
+    assert worktree.head() == "c1"
+    assert base.worktree("s2", tmp_path / "s2").head() is None
+    assert not ran.exists(), ran.read_text()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="a repository of another owner needs root to chown")
+def test_a_worktree_whose_admin_directory_another_account_made_runs_no_git_at_all(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    _plant_programs(base.path / ".git", worktree.path, ran)
+    _as_another_accounts(base.path / ".git" / "worktrees" / "s1")
+
+    with pytest.raises(worktree_module.WorktreeError, match="not a directory owned by the app"):
+        worktree.diff("vllm")
+
+    assert not ran.exists(), ran.read_text()
+    _plain_git(worktree.path, "-c", "safe.directory=*", "add", "--all")
+    assert ran.exists(), "plain git runs what the repository's config names, so the plant is live"
+
+
+def test_no_program_a_sandbox_writes_into_the_worktree_s_repository_runs_as_the_app(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    root = worktree.commit()
+    ran = tmp_path / "ran"
+    _plant_programs(base.path / ".git", worktree.path, ran)
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    patch = worktree.diff("vllm")
+    changed = worktree.changed("vllm")
+    since = worktree.diff_from(root, "vllm")
+    worktree.sync("c1", [patch.encode()])
+
+    assert not ran.exists(), ran.read_text()
+    assert "+max_num_seqs = 256" in patch and "+max_num_seqs = 256" in since
+    assert changed.written == ("vllm/config.py",)
+    assert worktree.head() == "c1"
+    assert (worktree.path / "vllm" / "config.py").read_bytes() == b"max_num_seqs = 256\n"
+
+
+def test_a_repository_made_a_partial_clone_by_its_config_fetches_nothing_behind_the_app_s_command(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    transport = tmp_path / "transport"
+    transport.write_text(f"#!/bin/sh\necho ran >> {ran}\nexit 1\n")
+    transport.chmod(0o755)
+    git = base.path / ".git"
+    with (git / "config").open("a") as config:
+        config.write(
+            "[core]\n\trepositoryformatversion = 1\n"
+            f"\tsshCommand = {transport}\n[extensions]\n\tpartialClone = promisor\n"
+            '[remote "promisor"]\n\turl = ssh://example.invalid/repo\n\tpromisor = true\n'
+        )
+    blob = subprocess.run(
+        ["git", "-C", str(base.path), "rev-parse", "installed:vllm/config.py"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    (git / "objects" / blob[:2] / blob[2:]).unlink()
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    with pytest.raises(worktree_module.WorktreeError):
+        worktree.diff("vllm")
+
+    assert not ran.exists()
+
+
+def _plain_git(cwd: Path, *argv: str, stdin: str | None = None) -> str:
+    """git as a user runs it, with nothing but the repository's config: what proves a plant is live."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t")
+    env.update(GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+    done = subprocess.run(["git", *argv], cwd=cwd, env=env, input=stdin, capture_output=True, text=True, check=False)
+    return done.stdout
+
+
+def test_a_signed_head_the_worktree_was_synced_to_starts_no_signature_program(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    synced = _plain_git(worktree.path, "rev-parse", "refs/worktree/hyperloom/synced").strip()
+    content = _plain_git(worktree.path, "rev-parse", f"{synced}^{{tree}}").strip()
+    forged = (
+        f"tree {content}\nparent {synced}\nauthor t <t@t> 1 +0000\ncommitter t <t@t> 1 +0000\n"
+        "gpgsig -----BEGIN PGP SIGNATURE-----\n iQ==\n -----END PGP SIGNATURE-----\n\nhead c0\n"
+    )
+    signed = _plain_git(worktree.path, "hash-object", "-t", "commit", "-w", "--stdin", stdin=forged).strip()
+    _plain_git(worktree.path, "update-ref", "refs/worktree/hyperloom/synced", signed)
+    with (base.path / ".git" / "config").open("a") as config:
+        config.write(f"[log]\n\tshowSignature = true\n[gpg]\n\tprogram = {_recording_filter(tmp_path, ran)}\n")
+
+    assert worktree.head() == "c0"
+    assert not ran.exists(), ran.read_text()
+    _plain_git(worktree.path, "log", "-1", "--format=%s", signed)
+    assert ran.exists(), "plain git runs the signature program, so the plant is live"
+
+
+def test_a_submodule_the_installed_branch_holds_is_not_recursed_into_by_a_sync(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    source = tmp_path / "subsource"
+    _plain_git(tmp_path, "init", "-q", str(source))
+    (source / "f.txt").write_text("a\n")
+    (source / ".gitattributes").write_text("* filter=evil\n")
+    _plain_git(source, "add", "-A")
+    _plain_git(source, "commit", "-qm", "sub")
+    # A sandbox moves the installed branch to a commit with a submodule, whose repository lies in the worktree's admin
+    # directory with a filter of its own, has every command recurse into submodules, and has git check the submodule
+    # for local changes whatever the app's config says (a .gitmodules outranks it).
+    _plain_git(worktree.path, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(source), "sub")
+    _plain_git(worktree.path, "config", "-f", ".gitmodules", "submodule.sub.ignore", "none")
+    _plain_git(worktree.path, "add", ".gitmodules")
+    _plain_git(worktree.path, "commit", "-qm", "with a submodule")
+    _plain_git(worktree.path, "update-ref", "refs/heads/installed", "HEAD")
+    sub = worktree.path / "sub"
+    for key in ("filter.evil.smudge", "filter.evil.clean"):
+        _plain_git(sub, "config", key, str(_recording_filter(tmp_path, ran)))
+    (sub / "f.txt").write_text("changed\n")
+    _plain_git(base.path, "config", "submodule.recurse", "true")
+
+    worktree.sync("c1", [])
+
+    assert not ran.exists(), ran.read_text()
+    _plain_git(worktree.path, "reset", "-q", "--hard", "installed")
+    assert ran.exists(), "plain git recurses into the submodule and runs its smudge, so the plant is live"
+
+
+def test_a_repository_nested_in_the_worktree_runs_nothing_as_the_change_is_read(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    root = worktree.commit()
+    ran = tmp_path / "ran"
+    # The agent commits a repository of its own inside the package, then gives it a filter and a local change.
+    nested = worktree.path / "vllm" / "vendored"
+    _plain_git(tmp_path, "init", "-q", str(nested))
+    (nested / "f.txt").write_text("a\n")
+    _plain_git(nested, "add", "-A")
+    _plain_git(nested, "commit", "-qm", "nested")
+    _plain_git(worktree.path, "add", "vllm/vendored")
+    # Its .gitmodules has git check the nested repository for local changes, whatever the app's config says.
+    (worktree.path / ".gitmodules").write_text(
+        '[submodule "vendored"]\n\tpath = vllm/vendored\n\turl = ./vendored\n\tignore = none\n'
+    )
+    _plain_git(worktree.path, "add", ".gitmodules")
+    _plain_git(worktree.path, "commit", "-qm", "an agent's commit")
+    _plain_git(nested, "config", "filter.inner.clean", str(_recording_filter(tmp_path, ran)))
+    (nested / ".gitattributes").write_text("* filter=inner\n")
+    (nested / "f.txt").write_text("b\n")
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    # And one it never committed, with a driver of its own.
+    untracked = worktree.path / "vllm" / "scratch"
+    _plain_git(tmp_path, "init", "-q", str(untracked))
+    (untracked / "g.txt").write_text("a\n")
+    _plain_git(untracked, "add", "-A")
+    _plain_git(untracked, "commit", "-qm", "untracked")
+    for key in ("diff.inner.textconv", "filter.inner.clean"):
+        _plain_git(untracked, "config", key, str(_recording_filter(tmp_path, ran)))
+    (untracked / ".gitattributes").write_text("* diff=inner filter=inner\n")
+    (untracked / "g.txt").write_text("b\n")
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    patch = worktree.diff("vllm")
+    changed = worktree.changed("vllm")
+    since = worktree.diff_from(root, "vllm")
+
+    assert not ran.exists(), ran.read_text()
+    assert "+max_num_seqs = 256" in patch and "+max_num_seqs = 256" in since
+    assert changed.written == ("vllm/config.py",) and changed.deleted == ()
+    for diff in (patch, since):
+        assert diff.count("diff --git") == 1 and "vendored" not in diff and "scratch" not in diff, diff
+    assert "vllm/scratch" not in _plain_git(worktree.path, "ls-files"), "the untracked nested repository was marked"
+    _plain_git(worktree.path, "add", "--all", "--", "vllm")
+    assert ran.exists(), "plain git's add checks the nested repository with its own filter, so the plant is live"
+
+
+def test_a_command_that_needs_a_driver_program_fails_naming_what_the_app_did_not_run(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    program = _recording_filter(tmp_path, ran)
+    with (base.path / ".git" / "config").open("a") as config:
+        config.write(f'[filter "own"]\n\tclean = {program}\n\tsmudge = {program}\n\trequired = true\n')
+    (worktree.path / ".gitattributes").write_text("* filter=own\n")
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+
+    with pytest.raises(worktree_module.WorktreeError, match="filter 'own' failed") as failed:
+        worktree.diff("vllm")
+
+    assert "it ran these as empty: filter.own.clean, filter.own.smudge" in str(failed.value)
+    assert not ran.exists(), ran.read_text()
+    _plain_git(worktree.path, "diff", "HEAD")
+    assert ran.exists(), "plain git runs the required filter, so the plant is live"
+
+
+def _plant_admin_dir(worktree: Path, where: Path, ran: Path) -> Path:
+    """What an agent that writes the worktree and ``where``, and files the app's uid owns, can plant: an admin directory
+    of its own, in a repository of its own under ``where`` whose config names a filter, its ``gitdir`` naming the
+    worktree's gitfile back, and the gitfile pointed at it."""
+    fake = where / ".agent-git"
+    _plain_git(worktree, "init", "-q", "--bare", str(fake))
+    admin = fake / "worktrees" / "s1"
+    admin.mkdir(parents=True)
+    (admin / "HEAD").write_text("ref: refs/heads/agent\n")
+    (admin / "commondir").write_text("../..\n")
+    (admin / "gitdir").write_text(f"{worktree / '.git'}\n")
+    with (fake / "config").open("a") as config:
+        config.write(f'[core]\n\tbare = false\n[filter "own"]\n\tclean = {_recording_filter(worktree.parent, ran)}\n')
+    (worktree / ".gitattributes").write_text("* filter=own\n")
+    (worktree / ".git").write_text(f"gitdir: {admin}\n")
+    return admin
+
+
+_PLANTED_WHERE = pytest.mark.parametrize(
+    ("in_worktree", "refusal"),
+    [(True, "lies in the worktree"), (False, "is not one of the repository")],
+    ids=["in-the-worktree", "elsewhere-the-agent-writes"],
+)
+
+
+@_PLANTED_WHERE
+def test_a_gitfile_pointed_at_an_admin_directory_outside_the_source_base_runs_no_git(
+    tmp_path, base, in_worktree, refusal
+):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    where = worktree.path if in_worktree else tmp_path / "agent-home"
+    where.mkdir(exist_ok=True)
+    admin = _plant_admin_dir(worktree.path, where, ran)
+
+    with pytest.raises(worktree_module.WorktreeError, match=refusal):
+        worktree.diff("vllm")
+
+    assert not ran.exists(), ran.read_text()
+    if not in_worktree:
+        assert trusted_admin_dir(worktree.path) == admin, "ownership alone would have trusted it"
+    _plain_git(worktree.path, "add", "--all")
+    assert ran.exists(), "plain git follows the gitfile to the planted config and runs its filter, so the plant is live"
+
+
+def _bwrap() -> str | None:
+    """A bubblewrap that can give a command a user namespace mapping its user to this process's, or ``None``."""
+    found = shutil.which("bwrap")
+    if found is None or os.geteuid() != 0:
+        return None
+    probe = [found, "--unshare-user", "--uid", str(os.geteuid()), "--ro-bind", "/", "/", "true"]
+    return found if subprocess.run(probe, capture_output=True, check=False).returncode == 0 else None
+
+
+def _in_bwrap(bwrap: str, worktree: Path, script: str, *writes: Path) -> None:
+    """Run ``script`` as an agent's sandbox would: a user namespace whose user maps to the app's uid, the host read-only
+    but for the worktree, which it writes, and ``writes``."""
+    argv = [bwrap, "--unshare-user", "--uid", str(os.geteuid()), "--gid", str(os.getegid())]
+    argv += ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+    for path in (worktree, *writes):
+        argv += ["--bind", str(path), str(path)]
+    argv += ["--chdir", str(worktree), "/bin/sh", "-ec", script]
+    subprocess.run(argv, check=True, env={"PATH": os.environ["PATH"], "HOME": str(worktree)})
+
+
+@pytest.mark.skipif(_bwrap() is None, reason="needs root and a bwrap that can map a user namespace to its uid")
+@_PLANTED_WHERE
+def test_an_agent_under_bwrap_mapped_to_the_app_s_uid_cannot_point_the_worktree_at_an_admin_directory_of_its_own(
+    tmp_path, base, in_worktree, refusal
+):
+    bwrap = _bwrap()
+    assert bwrap is not None
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    program = _recording_filter(tmp_path, ran)
+    wt = worktree.path
+    home = tmp_path / "agent-home"
+    home.mkdir()
+    fake = (wt if in_worktree else home) / ".agent-git"
+    # The agent works in its sandbox: a change, a new file, then an admin directory of its own and the gitfile at it.
+    _in_bwrap(
+        bwrap,
+        wt,
+        """
+        printf 'max_num_seqs = 256\\n' > vllm/config.py
+        printf 'policy = 1\\n' > vllm/lpm.py
+        """,
+    )
+    honest = worktree.diff("vllm")
+    _in_bwrap(
+        bwrap,
+        wt,
+        f"""
+        git init -q --bare {fake}
+        mkdir -p {fake}/worktrees/s1
+        printf 'ref: refs/heads/agent\\n' > {fake}/worktrees/s1/HEAD
+        printf '../..\\n' > {fake}/worktrees/s1/commondir
+        printf '%s\\n' {wt}/.git > {fake}/worktrees/s1/gitdir
+        printf '[core]\\n\\tbare = false\\n[filter "own"]\\n\\tclean = {program}\\n' >> {fake}/config
+        printf '* filter=own\\n' > .gitattributes
+        printf 'gitdir: %s\\n' {fake}/worktrees/s1 > .git
+        """,
+        home,
+    )
+
+    # Harvested outside: what the sandbox wrote is the app's uid's, so ownership alone proves nothing.
+    admin = fake / "worktrees" / "s1"
+    assert {path.lstat().st_uid for path in (fake, admin, admin / "gitdir", wt / ".git")} == {os.geteuid()}
+    if not in_worktree:
+        assert trusted_admin_dir(wt) == admin, "ownership alone trusts the sandbox's admin directory"
+    with pytest.raises(worktree_module.WorktreeError, match=refusal):
+        worktree.diff("vllm")
+    assert "+max_num_seqs = 256" in honest and "+policy = 1" in honest
+    assert not ran.exists(), ran.read_text()
+    _plain_git(wt, "add", "--all")
+    assert ran.exists(), "plain git follows the sandbox's gitfile and runs its filter, so the plant is live"
+
+
+def test_a_filter_driver_git_cannot_be_told_to_blank_refuses_the_command(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    with (base.path / ".git" / "config").open("a") as config:
+        config.write('[filter "a=b"]\n\tclean = false\n')
+
+    with pytest.raises(worktree_module.WorktreeError, match="'='"):
+        worktree.sync("c0", [])
+
+
+def test_a_symlink_the_agent_flips_on_the_way_to_the_admin_directory_after_the_check_reaches_no_git(
+    tmp_path, base, monkeypatch
+):
+    """The agent names the admin directory through a symlink in the worktree, at the real one while it is checked and
+    at a repository of its own, laid out in the worktree, when git runs: git is given the path the check resolved."""
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    ran = tmp_path / "ran"
+    wt = worktree.path
+    own = wt / ".agent" / "src"
+    shutil.copytree(base.path / ".git", own / ".git", symlinks=True)
+    with (own / ".git" / "config").open("a") as config:
+        config.write(f'[filter "own"]\n\tclean = {_recording_filter(tmp_path, ran)}\n')
+    (wt / "lnk").symlink_to(base.path)
+    (wt / ".git").write_text(f"gitdir: {wt}/lnk/.git/worktrees/s1\n")
+    (wt / ".gitattributes").write_text("* filter=own\n")
+    (wt / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+    checked = git_safety.trusted_admin_dir
+
+    def point(at: Path) -> None:
+        flipped = wt / "lnk.next"
+        flipped.symlink_to(at)
+        os.replace(flipped, wt / "lnk")
+
+    def check_then_flip(path: Path, common: Path | None = None) -> Path:
+        point(base.path)
+        admin = checked(path, common)
+        point(own)
+        return admin
+
+    monkeypatch.setattr(git_safety, "trusted_admin_dir", check_then_flip)
+
+    patch = worktree.diff("vllm")
+    assert not ran.exists(), ran.read_text()
+    _plain_git(wt, "add", "--all")
+    assert ran.exists(), "plain git follows the flipped link to the agent's config and runs its filter, so it is live"
+    ran.unlink()
+    (wt / "vllm" / "config.py").write_bytes(b"max_num_seqs = 512\n")
+    worktree.sync("c1", [patch.encode()])
+
+    assert not ran.exists(), ran.read_text()
+    assert "+max_num_seqs = 256" in patch
+    assert (worktree.head(), (wt / "vllm" / "config.py").read_bytes()) == ("c1", b"max_num_seqs = 256\n")
+
+
+def test_a_gitfile_naming_another_worktree_s_admin_directory_runs_no_git(tmp_path, base):
+    """Each worktree's admin directory is the source base's, so only its ``gitdir`` back-pointer keeps one worktree's
+    sync, reset and diff off another's index, head and synced commit."""
+    mine = base.worktree("s1", tmp_path / "s1")
+    theirs = base.worktree("s2", tmp_path / "s2")
+    mine.sync("c0", [])
+    theirs.sync("c0", [])
+    (theirs.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+    (mine.path / ".git").write_text(f"gitdir: {base.path / '.git' / 'worktrees' / 's2'}\n")
+
+    with pytest.raises(worktree_module.WorktreeError, match="does not belong to this worktree"):
+        mine.sync("c1", [])
+
+    assert theirs.head() == "c0"
+    assert "+max_num_seqs = 256" in theirs.diff("vllm")
+
+
+def test_a_gitfile_naming_a_directory_of_the_source_base_that_is_no_worktree_s_runs_no_git(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    git = base.path / ".git"
+    elsewhere = git / "elsewhere" / "s1"
+    shutil.copytree(git / "worktrees" / "s1", elsewhere)
+    (worktree.path / ".git").write_text(f"gitdir: {elsewhere}\n")
+
+    with pytest.raises(worktree_module.WorktreeError, match="not an admin dir of a linked worktree"):
+        worktree.diff("vllm")
+
+
+def test_an_untracked_repository_the_agent_nested_in_the_worktree_does_not_outlive_a_sync(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    nested = worktree.path / "vllm" / "scratch"
+    _plain_git(tmp_path, "init", "-q", str(nested))
+    (nested / "g.txt").write_text("a\n")
+
+    worktree.sync("c1", [])
+
+    assert not nested.exists()
+    assert sorted(path.name for path in (worktree.path / "vllm").iterdir()) == ["config.py", "scheduler.py"]
+
+
+def test_a_directory_the_agent_made_a_symlink_makes_no_link_outside_the_worktree(tmp_path, base):
+    git = base.path / ".git"
+    target = tmp_path / "installed.so"
+    target.write_bytes(b"\x7fELF")
+    with (git / worktree_module.LINKED_PATHS).open("a") as links:
+        links.write(f"vllm/deep/inner/_ext.abi3.so\t{target}\n")
+    worktree = base.worktree("s1", tmp_path / "s1")
+    assert (worktree.path / "vllm" / "deep" / "inner" / "_ext.abi3.so").resolve() == target
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    shutil.rmtree(worktree.path / "vllm" / "deep")
+    (worktree.path / "vllm" / "deep").symlink_to(outside)
+
+    with pytest.raises(worktree_module.WorktreeError, match="deep is no directory"):
+        base.worktree("s1", tmp_path / "s1")
+
+    assert list(outside.iterdir()) == []

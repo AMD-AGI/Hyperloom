@@ -377,6 +377,9 @@ class BaselinePromotionMixin:
             parsed = _parse_baseline_workload_extra(materialized)
             if parsed:
                 state.baseline_workload_extra = parsed
+        corpus_shape = result.get("agentx_corpus_shape")
+        if corpus_shape:
+            state.agentx_corpus_shape = dict(corpus_shape)
         # ExploreExecutor derives the overtime kill deadline from this wall-clock.
         runtime_sec = result.get("subprocess_runtime_sec")
         if isinstance(runtime_sec, (int, float)) and runtime_sec > 0:

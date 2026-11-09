@@ -17,7 +17,8 @@
 #   3. puts the layer's claude CLI on PATH,
 #   4. trusts the layer's extra CA certificate (if any) through a bundle written to ${TMPDIR:-/tmp}/hyperloom-host
 #      (local to the container: not the layer, not the state dir, not /etc),
-#   5. execs the layer's app_bootstrap.sh, which does the rest.
+#   5. makes the container's root mount private once, so bwrap can bind it (a failure only logs a line),
+#   6. execs the layer's app_bootstrap.sh, which does the rest.
 # Every refusal here is a plain failure (exit 1) of an image that cannot host a run, not an exit.json.
 
 set -eu
@@ -133,6 +134,14 @@ if [ -f "$ca" ]; then
   NODE_EXTRA_CA_CERTS="$bundle"
   GIT_SSL_CAINFO="$bundle"
   export SSL_CERT_FILE REQUESTS_CA_BUNDLE NODE_EXTRA_CA_CERTS GIT_SSL_CAINFO
+fi
+
+# apptainer marks the root mount unbindable, and bwrap's bind of / then fails with EINVAL: make it private once. Not
+# fatal: without CAP_SYS_ADMIN (plain docker) the caller wraps each bwrap call in `unshare --mount` instead.
+if ! command -v mount >/dev/null 2>&1; then
+  echo "hosted layer: the image has no mount (util-linux), so the root mount stays as it is; wrap each bwrap call in 'unshare --mount'" >&2
+elif ! why="$(mount --make-rprivate / 2>&1)"; then
+  echo "hosted layer: mount --make-rprivate / failed (${why:-no message}), so the root mount stays as it is; wrap each bwrap call in 'unshare --mount'" >&2
 fi
 
 exec "$layer/app_bootstrap.sh"
