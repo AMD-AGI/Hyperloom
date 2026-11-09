@@ -38,9 +38,13 @@ class IntegrateAttempt:
     output_root: Path | None = None
     framework_root: Path | None = None
     applied: list[Path] = field(default_factory=list)
+    #: One ``{patch, strategy, steps}`` row per applied patch that had to be merged onto the kept stack.
+    merged_patches: list[dict[str, Any]] = field(default_factory=list)
     applied_artifacts: list[dict[str, Any]] = field(default_factory=list)
     extra_envs_applied: dict[str, str] = field(default_factory=dict)
     extra_server_args_applied: str = ""
+    #: The round's non-default ``remove_args`` / ``unset_envs`` / ``args_mode``, applied over the base at the bench.
+    launch_controls: dict[str, Any] = field(default_factory=dict)
     dropped_env_overrides: list[str] = field(default_factory=list)
     setup_commands_applied: list[str] = field(default_factory=list)
     switch_manifest: list[dict[str, Any]] = field(default_factory=list)

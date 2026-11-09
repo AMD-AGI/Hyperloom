@@ -1698,6 +1698,7 @@ async def test_431_nonzero_hot_never_flags_degraded(tmp_path):
         (["kernel_source_unresolved"], True),
         (["trace_split_phase_unconfirmed"], True),
         (["trace_split_manifest_missing"], True),
+        (["gpu_arch_json_vendor_peak"], True),
         (["trace_analysis_input_promoted"], False),
         ([], False),
     ],

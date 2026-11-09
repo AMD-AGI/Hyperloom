@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.agentx_workload import find_aiperf_artifact
 from hyperloom.common.launch_log_evidence import (
     engine_adjusted_settings_from_log,
     observed_server_config_from_log,
@@ -56,7 +57,7 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
         "total_token_throughput": throughput.get("total_tokens_per_second"),
         "total_throughput": throughput.get("total_tokens_per_second"),
         "completed_requests": requests.get("successful"),
-        "requested_requests": requests.get("total"),
+        "requested_requests": requests.get("profiled_total"),
         "duration_seconds": throughput.get("duration_seconds"),
         "request_error_rate": None if requests.get("error_rate") is None else requests["error_rate"] * 100,
         "e2e_norm_intvty_p50": intvty.get("p50"),
@@ -119,6 +120,31 @@ def native_launch_evidence(
         "warm_reuse": {"reused": False},
         "magpie_server_launch": launch,
     }
+
+
+_SHAPE_PERCENTILES = ("avg", "p50", "p75", "p90", "p99")
+# Magpie's AgentX report carries no sequence lengths; the aiperf summary it leaves in the round's workspace does.
+_AIPERF_SUMMARY = "profile_export_aiperf.json"
+
+
+def measured_corpus_shape(workspace: Path | None) -> dict[str, Any]:
+    """The ISL/OSL percentiles the round replayed, from aiperf's export; ``{}`` when it does not carry both."""
+    path = None if workspace is None else find_aiperf_artifact(workspace, _AIPERF_SUMMARY)
+    if path is None:
+        return {}
+    try:
+        export = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(export, dict):
+        return {}
+    shape: dict[str, Any] = {}
+    for key, name in (("isl", "input_sequence_length"), ("osl", "output_sequence_length")):
+        metric = export.get(name)
+        if not isinstance(metric, dict):
+            return {}
+        shape[key] = {p: int(metric[p]) for p in _SHAPE_PERCENTILES if isinstance(metric.get(p), (int, float))}
+    return {**shape, "source": "measured"} if all(shape.values()) else {}
 
 
 def read_agentx_report(workspace: Path) -> dict[str, Any] | None:

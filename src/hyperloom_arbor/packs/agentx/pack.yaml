@@ -1,0 +1,34 @@
+name: agentx
+description: "AgentX agentic-coding inference optimization via InferenceX trace replay"
+
+objective:
+  kind: maximize_perf
+  metric: output_throughput
+  direction: max
+  unit: "tok/s"
+  measurement:
+    count: 1
+    threshold_rel: 1.01
+
+validator:
+  bench: validator/bench_agentx.sh
+  correctness: validator/correctness.sh
+  protected:
+    - validator/
+
+workload:
+  kind: serving
+
+tools:
+  kv_trace_collector: "tools/kv_trace_collector.py"
+  kv_trace_analyze: "tools/kv_trace_analyze.py"
+  kv_trace_simulator: "tools/kv_trace_simulator.py"
+
+constraints:
+  - "Profile the decode step (rocprofv3) before proposing any change. A change that does not address one of the top-3 ops by GPU time will not move the AgentX metric."
+  - "Profile again after every KEEP to see if the bottleneck shifted."
+  - "The real work is deep: trace critical paths, edit framework source, write kernels. Knobs are warmup only — exhaust in 2-3 iterations then go deeper permanently."
+  - "Every code change must address a real hardware bottleneck confirmed by rocprofv3."
+  - "Do not modify InferenceX, AIPerf, or the validator scripts — they are outside the workspace."
+  - "One change at a time. Gate it before touching anything else."
+  - "Before proposing any code change, search for whether another backend already solved it (the framework's other GPU paths, public kernel libraries). Port proven techniques first."

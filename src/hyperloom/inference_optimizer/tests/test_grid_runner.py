@@ -360,6 +360,7 @@ class TestVariantResultToDict:
         expected = asdict(result)
         expected["e2e_norm_intvty_p90"] = expected.pop("intvty_p90")
         expected["e2e_norm_intvty_p50"] = expected.pop("intvty_p50")
+        expected["e2e_norm_intvty_p50_1800s"] = expected.pop("intvty_p50_checkpoint")
         assert encoded == expected
 
     def test_preserves_unmeasured_axes(self):
@@ -707,6 +708,58 @@ async def test_run_grid_failure_reused_ready_server_uses_same_warmup_fallback(tm
     assert Path(result.server_log_path).parts[-3:] == ("warmup_round", "variant_00_prior", "server.log")
     assert result.launch_evidence["actual_server_log_path"] == result.server_log_path
     assert result.launch_evidence["warm_reuse"]["reused_ready_server"] is True
+
+
+def _evaluated_workspace(slot: Path) -> Path:
+    """What a round that only evaluated leaves: a report that succeeded and holds no throughput."""
+    workspace = slot / "benchmark_sglang_20260513_001122"
+    workspace.mkdir(parents=True)
+    (workspace / "benchmark_report.json").write_text(json.dumps({"success": True, "framework": "sglang"}))
+    return workspace
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("evaluation_only", "returncode", "status"),
+    [(True, 0, "succeeded"), (True, 1, "failed"), (False, 0, "failed")],
+    ids=["evaluated", "evaluation-failed", "a-measuring-round-without-throughput"],
+)
+async def test_a_round_that_only_evaluates_succeeds_by_its_exit_code_and_waits_for_no_throughput(
+    tmp_path, monkeypatch, evaluation_only, returncode, status
+):
+    base = tmp_path / "base.yaml"
+    write_benchmark_yaml(base)
+    settled: list[float] = []
+    real_settle = gr._settled_measurement
+
+    async def recording(*args, **kwargs):
+        settled.append(kwargs["settle_seconds"])
+        return await real_settle(*args, **{**kwargs, "settle_seconds": 0.0})
+
+    monkeypatch.setattr(gr, "_settled_measurement", recording)
+
+    def fake_run(cmd, *args, **kwargs):
+        _evaluated_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
+        return subprocess.CompletedProcess(cmd, returncode, "", "" if returncode == 0 else "run_eval failed")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        (result,) = await run_grid(
+            grid=[GridVariant("eval")],
+            output_root=tmp_path / "out",
+            recipe=GridRecipe(base_yaml_path=base),
+            launch=GridLaunch(server_already_ready=True, warmup_before_measure=False, evaluation_only=evaluation_only),
+        )
+
+    assert (result.status, result.returncode) == (status, returncode)
+    assert settled == [0.0 if evaluation_only else gr.REPORT_SETTLE_SECONDS], (
+        "an evaluation leaves no throughput to wait for"
+    )
+    if status == "succeeded":
+        assert (result.note, result.output_throughput) == ("evaluation_only", None)
+        assert Path(result.workspace).name == "benchmark_sglang_20260513_001122"
 
 
 def _write_baseline_yaml_overrides(path: Path) -> None:

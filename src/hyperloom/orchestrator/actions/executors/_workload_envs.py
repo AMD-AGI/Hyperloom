@@ -31,6 +31,7 @@ from typing import Any, Mapping, NamedTuple
 import yaml
 
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
+from hyperloom.common.visible_devices import mask_tokens
 from hyperloom_common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
@@ -72,6 +73,7 @@ from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from ._gpu_pin import pin_rocr_visible_devices
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
@@ -553,13 +555,19 @@ def _resolve_framework_repo_path(
 VLLM_SOURCE_ROOT_ENVS: tuple[str, ...] = ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR")
 
 
+def _vllm_image_source(bench: dict[str, Any], envs: dict[str, Any]) -> str:
+    """The prepared image checkout ``install.sh`` activates (``HYPERLOOM_VLLM_IMAGE_SOURCE=1``), which the server of a
+    vLLM ``bench`` imports ahead of the installed wheel; ``""`` when there is none."""
+    if str(bench.get("framework") or "").strip().lower() != "vllm":
+        return ""
+    if os.environ.get("HYPERLOOM_VLLM_IMAGE_SOURCE", "").strip() != "1":
+        return ""
+    return _resolve_framework_repo_path(envs, framework="vllm")
+
+
 def _apply_vllm_source_runtime(bench: dict[str, Any], envs: dict[str, Any]) -> None:
     """Route a prepared image checkout into the vLLM server launch."""
-    if str(bench.get("framework") or "").strip().lower() != "vllm":
-        return
-    if os.environ.get("HYPERLOOM_VLLM_IMAGE_SOURCE", "").strip() != "1":
-        return
-    repo_path = _resolve_framework_repo_path(envs, framework="vllm")
+    repo_path = _vllm_image_source(bench, envs)
     if not repo_path:
         return
     for name in VLLM_SOURCE_ROOT_ENVS:
@@ -898,6 +906,8 @@ class _RequestWindow(NamedTuple):
     vllm_profiler_cap: int
     atom_caps: _AtomTracelensCaps | None
     xdit_profiler_args: tuple[str, ...] = ()
+    #: The copy of the framework TraceLens's patch was laid in (``_server_patcher``), which the server must import.
+    patched_copy: Path | None = None
 
 
 def _pin_benchmark_target(bench: dict[str, Any], target: BenchmarkTarget) -> None:
@@ -950,17 +960,15 @@ def _pin_workload_shape_envs(envs: dict[str, Any]) -> None:
     r_env = os.environ.get("RANDOM_RANGE_RATIO", "").strip()
     if r_env:
         envs["RANDOM_RANGE_RATIO"] = float(r_env)
-    rocr_env = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
-    if rocr_env:
-        envs["ROCR_VISIBLE_DEVICES"] = rocr_env
     tp_from_yaml = envs.get("TP")
-    rocr_yaml = str(envs.get("ROCR_VISIBLE_DEVICES") or "").strip()
-    rocr_devices = [d.strip() for d in rocr_yaml.split(",") if d.strip()]
-    if rocr_yaml and not tp_from_yaml:
-        # Derive TP from the user-pinned GPU list when the YAML doesn't set TP.
-        resolved_tp = len(rocr_devices)
+    if tp_from_yaml:
+        resolved_tp = int(tp_from_yaml)
     else:
-        resolved_tp = int(tp_from_yaml or 1)
+        # Derive TP from the pinned GPU list when the YAML doesn't set TP.
+        resolved_tp = (
+            len(mask_tokens(envs.get("ROCR_VISIBLE_DEVICES")) or mask_tokens(os.environ.get("ROCR_VISIBLE_DEVICES")))
+            or 1
+        )
     # Auto-clamp TP to the visible GPU count. Override via
     # $INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP=1.
     if os.environ.get("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "").strip() != "1":
@@ -977,19 +985,7 @@ def _pin_workload_shape_envs(envs: dict[str, Any]) -> None:
             )
             resolved_tp = visible
     envs["TP"] = resolved_tp
-    if not rocr_yaml or len(rocr_devices) < resolved_tp:
-        derived = ",".join(str(i) for i in range(resolved_tp))
-        if rocr_yaml and rocr_yaml != derived:
-            log.warning(
-                "ROCR_VISIBLE_DEVICES=%r has %d devices but TP=%d; "
-                "expanding to %r so SGLang sees enough GPUs. Set "
-                "ROCR_VISIBLE_DEVICES explicitly to override.",
-                rocr_yaml,
-                len(rocr_devices),
-                resolved_tp,
-                derived,
-            )
-        envs["ROCR_VISIBLE_DEVICES"] = derived
+    pin_rocr_visible_devices(envs, tp=resolved_tp)
 
 
 def _apply_xdit_profile(envs: dict[str, Any]) -> tuple[str, ...]:
@@ -1051,15 +1047,19 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     atom_caps: _AtomTracelensCaps | None = None
     vllm_flags: list[tuple[str, str]] = []
     vllm_cap = 0
+    patched_copy: Path | None = None
     if is_profile and serves_requests:
         from ._profile_setup import prepare_profile
 
-        outcome = prepare_profile(bench, envs)
+        checkout = _vllm_image_source(bench, envs)
+        # The copy TraceLens's patch is laid in goes ahead of that checkout (``materialize_config_with_envs``).
+        outcome = prepare_profile(bench, envs, vllm_checkout=Path(checkout) if checkout else None)
         osl_val = int(envs["OSL"])
         profile_num_prompts = outcome.num_prompts
         atom_caps = outcome.atom_caps
         vllm_flags = outcome.vllm_flags
         vllm_cap = outcome.vllm_cap
+        patched_copy = outcome.patched_copy
     if serves_requests:
         # NUM_PROMPTS / NUM_WARMUPS are serving-request concepts; xDiT drives its
         # own iteration count, so leave them untouched.
@@ -1072,7 +1072,7 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
         if "NUM_WARMUPS" not in envs:
             envs["NUM_WARMUPS"] = min(conc_val, 8)
     return _RequestWindow(
-        isl_val, osl_val, is_profile, serves_requests, vllm_flags, vllm_cap, atom_caps, xdit_saved_args
+        isl_val, osl_val, is_profile, serves_requests, vllm_flags, vllm_cap, atom_caps, xdit_saved_args, patched_copy
     )
 
 
@@ -1585,13 +1585,15 @@ def materialize_config_with_envs(
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
-    The process env wins over the YAML defaults, and the body is the order the phases run
+    The process env wins over the YAML defaults, except a point's own ``ROCR_VISIBLE_DEVICES``
+    (see :func:`pin_rocr_visible_devices`), and the body is the order the phases run
     in: what the run launches, the request shape it serves, the server arguments composed
     from every source, the per-framework and per-model envs, and the caller's own removals.
 
     Raises:
         FrameworkScriptMismatchError: If ``target.benchmark_script`` targets a
             different known framework than the run's framework.
+        ValueError: If the point's ROCR mask names a card outside the process's.
     """
     server_args = (launch.extra_server_args or "").strip()
     operator_server_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
@@ -1629,6 +1631,9 @@ def materialize_config_with_envs(
     _apply_caller_removals(envs, framework_env, launch.remove_args, launch.unset_envs, stale)
     _restate_profile_capture(envs, framework_env, window, replace_args)
     _apply_vllm_source_runtime(bench, envs)
+    if window.patched_copy is not None:
+        # Last, as a vLLM source checkout put first on the path above would shadow the copy.
+        prepend_launch_path(envs, "PYTHONPATH", str(window.patched_copy))
     _drop_benchmark_credentials(envs)
     seal_server_argv(envs, bench.get("framework"))
     output_dir.mkdir(parents=True, exist_ok=True)
