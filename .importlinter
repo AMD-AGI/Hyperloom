@@ -233,6 +233,83 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
+# The brain boundary: hyperloom.brain is what a run decides, everything else is
+# the body. They meet only in hyperloom.brain_api, which the body owns.
+
+[importlinter:contract:brain-api-is-leaf]
+name = hyperloom.brain_api imports only the standard library
+type = forbidden
+source_modules = hyperloom.brain_api
+forbidden_modules =
+    hyperloom.agents
+    hyperloom.brain
+    hyperloom.cli
+    hyperloom.common
+    hyperloom.contracts
+    hyperloom.hosted
+    hyperloom.inference_optimizer
+    hyperloom.measure
+    hyperloom.orchestrator
+    hyperloom.plugs
+    hyperloom.sandbox
+    hyperloom_common
+    hyperloom_kb
+    hyperloom_multibranch
+    kernelforge
+ignore_imports =
+    hyperloom.**.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:brain-sees-contract-only]
+name = hyperloom.brain imports only hyperloom.brain_api, hyperloom.common and hyperloom_common
+type = forbidden
+source_modules = hyperloom.brain
+forbidden_modules =
+    hyperloom.agents
+    hyperloom.cli
+    hyperloom.contracts
+    hyperloom.hosted
+    hyperloom.inference_optimizer
+    hyperloom.measure
+    hyperloom.orchestrator
+    hyperloom.plugs
+    hyperloom.sandbox
+    hyperloom_kb
+    hyperloom_multibranch
+    kernelforge
+ignore_imports =
+    hyperloom.**.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:body-blind-to-brain]
+name = the body never imports hyperloom.brain (it loads one by name through brain_api.loader)
+type = forbidden
+# A new top-level package under hyperloom/, or a new root package, must be added here.
+source_modules =
+    hyperloom.agents
+    hyperloom.brain_api
+    hyperloom.cli
+    hyperloom.common
+    hyperloom.contracts
+    hyperloom.hosted
+    hyperloom.inference_optimizer
+    hyperloom.measure
+    hyperloom.orchestrator
+    hyperloom.plugs
+    hyperloom.sandbox
+    hyperloom_common
+    hyperloom_kb
+    hyperloom_multibranch
+    kernelforge
+forbidden_modules = hyperloom.brain
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
 [importlinter:contract:kf-backends-independent]
 name = kernel backends are independent
 type = independence

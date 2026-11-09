@@ -35,11 +35,13 @@ _SOCKETS = (
     Socket("knowledge", object),
     Socket("gpu_token", object),
     Socket("credentials", object),
+    Socket("brain", object),
 )
 
 _IMPLEMENTATIONS = (
     Implementation(_EVENTS, "local", lazy("hyperloom.plugs.events_local:create")),
     Implementation(_EVENTS, "hosted", lazy("hyperloom.hosted.events:create")),
+    Implementation("brain", "v0", lazy("hyperloom.brain_api.loader:create")),
 )
 
 
