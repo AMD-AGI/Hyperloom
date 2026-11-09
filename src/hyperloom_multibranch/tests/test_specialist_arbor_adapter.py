@@ -872,6 +872,22 @@ async def test_a_map_is_split_into_one_plan_per_share_by_arbor_s_command_line(tm
         await split_directions(checkout, map_file, 4, tmp_path / "four")
 
 
+async def test_arbor_s_directions_command_reads_no_settings_file_of_the_user_running_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arbor reads its settings file on import (``arbor/__init__.py``); this one refuses any but the empty one.
+    reads = (
+        'import os, sys\nif os.environ.get("ARBOR_SETTINGS") != "/dev/null":\n    sys.exit("read a settings file")\n'
+    )
+    checkout = _write(tmp_path / "checkout", {**CHECKOUT_FILES, "arbor/__init__.py": reads})
+    map_file = _write(tmp_path / "pass", {"directions.json": json.dumps(MAP)}) / "directions.json"
+    monkeypatch.setenv("ARBOR_SETTINGS", str(tmp_path / "user.env"))
+
+    shares = await split_directions(checkout, map_file, 2, tmp_path / "shares")
+
+    assert len(shares) == 2
+
+
 #: A real Arbor checkout to split with, when the environment names one; its split runs offline, on the standard
 #: library alone.
 ARBOR_CHECKOUT = os.environ.get("HYPERLOOM_TEST_ARBOR_CHECKOUT", "")
