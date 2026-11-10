@@ -142,11 +142,22 @@ for pct in ("p50", "p90"):
     value = norm.get(pct)
     if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
         result[f"e2e_norm_intvty_{pct}"] = value
+# The counts the critic weighs (Check 3): the aggregate's total includes the replay's warmup phase, its successes only
+# the measured window. The window's own total and the warmup, from the aggregate's accounting, when it has one.
+acct = agg.get("request_accounting")
+if isinstance(acct, dict):
+    profiled, errors = acct.get("records_profiled"), acct.get("records_error_dropped") or 0
+    if isinstance(profiled, int) and isinstance(errors, int):
+        result["num_requests_measured"] = profiled + errors
+    if isinstance(acct.get("records_warmup_dropped"), int):
+        result["num_requests_warmup"] = acct["records_warmup_dropped"]
 
 with open(out_path, "w") as f:
     json.dump(result, f, indent=2)
 
 print(f"[bench_agentx] output_throughput={output_throughput:.1f} tok/s/GPU  "
       f"total={total_throughput:.1f} tok/s/GPU  "
-      f"requests={result['num_requests_successful']}/{result['num_requests_total']}")
+      f"requests={result['num_requests_successful']}/{result['num_requests_total']}"
+      + (f" (window {result['num_requests_measured']}, warmup {result.get('num_requests_warmup', '?')})"
+         if "num_requests_measured" in result else ""))
 PYEOF

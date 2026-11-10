@@ -198,8 +198,10 @@ it. Turning the switch on is held to the accuracy gate.
 - **The campaign:**
   - one rewrite per campaign;
   - its config sets `"space": {"levels": ["kernel"]}`;
-  - its pack raises `policy.max_consecutive_probes` to cover S1–S3, which
-    are probes;
+  - it runs as the plan's lane (`python3 -m arbor.stages seed`, below), where
+    the harness waives the LEARN cap while the next item is S1–S3, which are
+    probes; a campaign not seeded as a lane raises
+    `policy.max_consecutive_probes` instead;
   - its pack knowledge is this plan plus the dossier's digest.
 - **Checkpoints the operator sees:** the end of each stage, with its
   numbers.

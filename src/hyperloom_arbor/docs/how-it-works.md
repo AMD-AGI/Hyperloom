@@ -172,7 +172,8 @@ With the `dossier-v1` skill enabled (and a serving workload), a campaign plans b
 **Kernel plans:** a rewrite worth planning becomes a chain of stages with their own gates
 (`arbor/stages.py`): S1–S3 run as LEARN (the kernel built and proven on its own), S4 as FIX (wired
 in behind its flag, and it must KEEP), S5 needs a booked WIN. `STAGE:` lines are read only in a
-lane's map (parallel mode, or `python3 -m arbor.stages seed`).
+lane's map (parallel mode, or `python3 -m arbor.stages seed`). The steps, from a plan to the lane's
+end: [quickstart-kernel.md](quickstart-kernel.md).
 
 **Round ends and the target:** a campaign's `target` (a number, or a dict) ends a round when it is
 reached, and so does a closed map. With a round-end hook (`ARBOR_ROUND_AB`, or the config's

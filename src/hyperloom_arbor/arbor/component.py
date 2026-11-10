@@ -99,8 +99,10 @@ NOTES_RULE = ("The host has already measured and merged the following; never red
 # "ordered" and "reported": the master's and a worker's commands (arbor master, arbor worker; arbor/roles.py) handed
 # over: a work order is ready, a worker has reported. Component interface 2. "retraction_conflict": a KEEP the
 # agent found invalid that could not be reverted (arbor/retraction.py). Component interface 3.
+# "paused": `arbor pause` stopped the run at a pass boundary, its checkpoint written (arbor/checkpoints.py); the
+# process exits 76. Component interface 5.
 REASONS = ("deadline", "map_exhausted", "done", "sigterm", "mapped", "aborted", "unreachable",
-           "review_rejected", "ordered", "reported", "retraction_conflict")
+           "review_rejected", "ordered", "reported", "retraction_conflict", "paused")
 
 # The host sets the GPU masks; Arbor never sets or passes them (design §2).
 MASK_KEYS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
@@ -135,6 +137,16 @@ _SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 # turn with no bound at all can hang for hours.
 PHASE_MINUTES = {"agent": 90, "server": 45, "bench": 60, "critic": 15, "correctness": 30,
                  "short_prompts": 10}
+
+# Standalone, an agent turn has a cap too (a critic's `find /` over network storage once ran 46 min,
+# and a bench agent's wait loop never ended). A backstop against a hang, not a budget: a dossier's measure turn ran up
+# to 108 min. The config's `phase_minutes` sets one (0: none); the bench's is never shorter than the config's
+# bench_timeout plus 30 min, since the bench runs inside the turn.
+STANDALONE_TURN_MINUTES = {"agent": 240, "server": 60, "bench": 90, "critic": 20}
+# A pack may declare how long its bench runs (``measurement.bench_minutes``; -1: no cap). The bench turn's default cap
+# is never under it plus this margin, in either mode: a 3600 s AgentX replay with its warmup ran 64 min against a
+# 60 min cap, so every bench was NOT MEASURED. A cap the host or config sets itself still wins.
+DECLARED_MARGIN_MIN = 15
 
 # Every phase ends this long before the deadline, and an iteration starts only
 # if it ends by then: time to stop our own server (up to two minutes, never
@@ -313,8 +325,9 @@ def config_errors(config) -> list[str]:
             for k, v in pm.items():
                 if k not in PHASE_MINUTES:
                     errors.append(f"component.phase_minutes.{k} is not a phase ({', '.join(PHASE_MINUTES)})")
-                elif not _positive(v):
-                    errors.append(f"component.phase_minutes.{k} must be a positive number of minutes")
+                elif not (_positive(v) or (v == -1 and not isinstance(v, bool))):
+                    errors.append(f"component.phase_minutes.{k} must be a positive number of minutes, or -1 for "
+                                  f"no cap")
     return errors
 
 
@@ -755,20 +768,64 @@ class PhaseTimeout(Exception):
                                 f"(component mode: its cap, or the deadline)")
 
 
-def phase_seconds(config, phase_name: str, session_dir=None, now: float | None = None) -> float | None:
+def _capped_minutes(given: dict, phase_name: str, default, floor_minutes) -> float | None:
+    """A phase's minutes: the host's or config's own value wins; else the default, never under a pack's declared length
+    (``floor_minutes``) plus DECLARED_MARGIN_MIN. None for no cap: a negative value (-1), given or declared."""
+    if phase_name in given:
+        minutes = float(given[phase_name])
+    else:
+        if default is None:
+            return None
+        minutes = float(default)
+        try:
+            floor = None if isinstance(floor_minutes, bool) else float(floor_minutes)
+        except (TypeError, ValueError):     # none declared, or not a number: the default stands
+            floor = None
+        if floor is not None:
+            minutes = -1.0 if floor < 0 else max(minutes, floor + DECLARED_MARGIN_MIN)
+    return None if minutes < 0 else minutes
+
+
+def phase_seconds(config, phase_name: str, session_dir=None, now: float | None = None,
+                  floor_minutes: float | None = None) -> float | None:
     """The phase's timeout: min(its cap, seconds left before the deadline less the margin).
 
-    None in standalone, where phases have no timeout. Zero or less: no time is left.
+    None in standalone, where phases have no timeout. Zero or less: no time is left. A cap of -1 (the host's, or a
+    pack's declared length, ``floor_minutes``) is none: the deadline alone bounds the phase.
     """
     if not is_component(config):
         return None
-    minutes = (block(config).get("phase_minutes") or {}).get(phase_name, PHASE_MINUTES[phase_name])
-    cap = float(minutes) * 60
+    given = block(config).get("phase_minutes") or {}
+    minutes = _capped_minutes(given if isinstance(given, dict) else {}, phase_name, PHASE_MINUTES[phase_name],
+                              floor_minutes)
+    cap = float("inf") if minutes is None else minutes * 60
     dl = deadline_of(session_dir if session_dir is not None else session_root(config))
     if dl is None:
-        return cap
+        return None if minutes is None else cap
     now = time.time() if now is None else now
     return min(cap, dl - DEADLINE_MARGIN_S - now)
+
+
+def turn_seconds(config, phase_name: str, session_dir=None, now: float | None = None,
+                 floor_minutes: float | None = None) -> float | None:
+    """An agent turn's timeout: component mode's ``phase_seconds``; standalone, ``STANDALONE_TURN_MINUTES`` or the
+    config's ``phase_minutes``, never under a pack's declared length (``floor_minutes``). None for no cap: -1 (or 0
+    standalone)."""
+    if is_component(config):
+        return phase_seconds(config, phase_name, session_dir, now, floor_minutes)
+    raw = (config or {}).get("phase_minutes")
+    given = raw if isinstance(raw, dict) else {}
+    try:
+        minutes = _capped_minutes(given, phase_name, STANDALONE_TURN_MINUTES.get(phase_name), floor_minutes)
+    except (TypeError, ValueError):
+        minutes = STANDALONE_TURN_MINUTES.get(phase_name)
+    if not minutes or minutes <= 0:
+        return None
+    if phase_name == "bench":
+        bt = (config or {}).get("bench_timeout")
+        if isinstance(bt, (int, float)) and not isinstance(bt, bool) and bt > 0:
+            minutes = max(minutes, bt / 60 + 30)
+    return minutes * 60
 
 
 # ── the serving path's files ───────────────────────────────────────────────────

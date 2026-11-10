@@ -119,6 +119,50 @@ split: loop
 | `note` | `--note` | string |  |  | why, for the record |
 | `skill` | (positional) | string |  | for pick | the skill to keep |
 
+### `restore`
+
+`python3 -m arbor restore`
+
+| Key | Flag | Type | Default | Required | Meaning |
+| --- | --- | --- | --- | --- | --- |
+| `config` | `--config` | string |  | yes | the campaign's config: its session, container and workspace |
+| `checkpoint` | `--checkpoint` | string |  |  | the checkpoint: an iteration, a name, or latest (the default) |
+| `force` | `--force` | boolean | `false` |  | restore onto another image's tree, reset a workspace that is not at its root first, and put the checkpoint's dossier in place of a different one |
+| `json` | `--json` | boolean | `false` |  | what was done, as JSON |
+
+### `pause`
+
+`python3 -m arbor pause`
+
+| Key | Flag | Type | Default | Required | Meaning |
+| --- | --- | --- | --- | --- | --- |
+| `config` | `--config` | string |  |  | the campaign's config |
+| `session` | `--session` | string |  |  | the campaign's session directory |
+| `reason` | `--reason` | string |  |  | why, for the record |
+| `cancel` | `--cancel` | boolean | `false` |  | take back a pause not yet acted on |
+
+### `checkpoint`
+
+`python3 -m arbor checkpoint`
+
+| Key | Flag | Type | Default | Required | Meaning |
+| --- | --- | --- | --- | --- | --- |
+| `action` | (positional) | `list` \| `show` \| `verify` \| `create` \| `fork` |  | yes | list, show or verify a session's checkpoints, create one now, or fork a new session from one |
+| `all` | `--all` | boolean | `false` |  | every checkpoint and name |
+| `branch` | `--branch` | string |  |  | the branch's id (default: the session directory's name) |
+| `checkpoint` | `--checkpoint` | string |  | for show, verify | show: an iteration, a name, or latest; verify: an iteration, a name, or latest; fork: the parent's checkpoint: an iteration, a name, or latest |
+| `config` | `--config` | string |  | for create, fork | list: the campaign's config; show: the campaign's config; verify: the campaign's config; create: the campaign's config; fork: the fork's config: its own session_root, container, workspace and dossier |
+| `directions` | `--directions` | string |  |  | exploratory: a map (directions.json) in place of the parent's |
+| `force` | `--force` | boolean | `false` |  | share the parent's workspace or dossier, or restore onto another image's tree |
+| `fork_policy` | `--fork-policy` | `exact` \| `exploratory` | `exact` |  | exact (the default): bars, counters and map kept; exploratory: also --directions, --reset |
+| `name` | `--name` | string |  |  | a name that pins it (letters, digits, . _ -) |
+| `no_restore` | `--no-restore` | boolean | `false` |  | do not restore the tree into the fork's workspace now (`arbor restore` later) |
+| `prompt_profile` | `--prompt-profile` | string |  |  | a directory with claude_loop_prompt.md and/or critic_prompt.md, copied into the fork |
+| `reason` | `--reason` | string |  |  | why, for the record |
+| `reset` | `--reset` | string | `[]` |  | exploratory: set a scheduling counter to 0 (null_streak, probe_streak, tier_iters, barren_streak, secondary_only_streak, invalid_streak, or all); repeatable |
+| `session` | `--session` | string |  |  | the session directory |
+| `source` | `--from` | string |  | for fork | the parent: its session directory, or its config |
+
 ### `iterate`
 
 `python3 -m arbor iterate`

@@ -34,6 +34,7 @@ or agent. A first campaign on a node: [docs/getting-started.md](docs/getting-sta
 | [docs/quickstart-master-worker.md](docs/quickstart-master-worker.md) | the environment in full (packages, credentials, the container, the workspace, the session mount, the GPUs), the config, then the master, a worker, and several workers |
 | [docs/quickstart-hyperloom.md](docs/quickstart-hyperloom.md) | Arbor inside Hyperloom's multi-branch mode: the container, the venv and the environment MB needs, which Arbor runs, the flags of `run`, the map's review, two-stage runs, and what goes wrong |
 | [docs/quickstart-skills.md](docs/quickstart-skills.md) | a new skill from idea to campaign: where it takes part, its layout and header, checking it, loading it in a pack, seeing it run |
+| [docs/quickstart-kernel.md](docs/quickstart-kernel.md) | kernel work: a rewrite's plan, checked, then run as one campaign's kernel-plan lane, stage by stage to a booked gain; what the harness checks at each stage, and what goes wrong |
 | [docs/how-it-works.md](docs/how-it-works.md) | the loop, the agents, intents and the gate, planning, the records |
 | [docs/packs.md](docs/packs.md) | the pack format, validators, skills, the packs here, writing one |
 | [docs/dossier-and-profiler.md](docs/dossier-and-profiler.md) | using the dossier and profiler skills; whether a dossier's directions can go into a pack |

@@ -1,4 +1,5 @@
-"""python3 -m arbor run|master|worker|review|conflicts|iterate|version|schema|directions [--payload FILE]"""
+"""python3 -m arbor run|master|worker|review|conflicts|restore|pause|checkpoint|iterate|version|schema|directions
+[--payload FILE]"""
 
 import sys
 
@@ -18,6 +19,9 @@ USAGE = """Usage:
   python3 -m arbor worker --order <work_order.json>       # one worker's stretch, from its order to its report
   python3 -m arbor review --session <dir> show|approve|reject   # review a new campaign before it runs
   python3 -m arbor conflicts --session <dir> show|pick|merge    # decide two skills that write the same thing
+  python3 -m arbor restore --config <path> [--checkpoint REF]   # lay a checkpoint into the workspace, any node
+  python3 -m arbor pause --config <path> [--reason TEXT]        # pause at the next pass boundary (exit 76)
+  python3 -m arbor checkpoint list|show|verify|create|fork ...  # a session's checkpoints; a new session from one
   python3 -m arbor iterate init|begin|gate         # internal harness API
   python3 -m arbor version [--json]                # the version, and each interface's, for callers
   python3 -m arbor directions generate|split ...  # the map step a host runs (python3 -m arbor.directions)
@@ -59,6 +63,18 @@ if cmd == "run":
         sys.exit(main(rest))
     from arbor.driver import main
     sys.exit(main(sys.argv[2:]))
+
+if cmd == "restore":
+    from arbor.checkpoints import main_restore
+    sys.exit(main_restore(sys.argv[2:]))
+
+if cmd == "pause":
+    from arbor.checkpoints import main_pause
+    sys.exit(main_pause(sys.argv[2:]))
+
+if cmd == "checkpoint":
+    from arbor.checkpoints import main as main_checkpoint
+    sys.exit(main_checkpoint(sys.argv[2:]))
 
 if cmd == "master":
     from arbor.driver import main_master

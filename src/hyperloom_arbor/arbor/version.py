@@ -12,16 +12,24 @@ checkout and refuse one it cannot drive:
     workers`` (a config's ``workers`` block, ``arbor/dealer.py``) and ``master --deal``; 4 adds ``--opt-objective``
     and the config's ``opt_objective``, described in ``objective`` (``arbor/objective.py``); 5 adds ``--payload`` on
     every command and ``python3 -m arbor.directions``, the ``schema`` and ``directions`` commands, and
-    ``<session>/invocation.json``, described in ``payload`` (``arbor/cli/payload.py``);
+    ``<session>/invocation.json``, described in ``payload`` (``arbor/cli/payload.py``); 6 adds ``restore``, ``pause``
+    (exit 76 for a paused run) and ``checkpoint list|show|verify|create|fork`` (``arbor/checkpoints.py``);
   - ``pack``: ``pack.yaml``'s skills. 1 is ``v0.9.x`` (``skills:``, ``plugins:``, per-chapter ``lifecycle:``); 2 is
     ``lifecycle.load``, each skill placed by its own metadata;
   - ``component``: the config's component block, its keys in ``component_keys``, and the exit record's reasons in
     ``exit_reasons`` (``arbor/component.py``). 2 adds the reasons ``ordered`` and ``reported``; 3 adds the reason
     ``retraction_conflict`` and a KEEP snapshot's ``retracts`` (``arbor/retraction.py``); 4 adds ``bench_read``, the
-    metrics read by path from the host client's report;
+    metrics read by path from the host client's report; 5 adds the reason ``paused`` (``arbor pause``);
   - ``roles``: the master's work order, the worker's report and a command's ``role_exit.json``, their schemas in
     ``records`` (``arbor/roles.py``). 2 gives the order an ``id``, which the report names, and adds ``role_exit``; 3
-    lets a worker of its own session end ``spent``, its spent directions closed ``killed`` with ``spent`` set.
+    lets a worker of its own session end ``spent``, its spent directions closed ``killed`` with ``spent`` set;
+  - ``session``: the session's own format, what a checkpoint holds (``arbor/checkpoints.py``). 0 is a session with no
+    checkpoint; 1 adds ``checkpoints/`` and ``restore``; 2 makes a checkpoint immutable and verified (its ``id``), and
+    adds the workspace's exact history, the prompts, the dossier, the fingerprint, the bars, named checkpoints,
+    ``pause`` and ``fork`` (``fork.json``).
+- ``continues``: the range of each format this Arbor continues, ``{"session": [low, high]}``. ``run``, ``master`` and
+  ``worker`` refuse a session outside it, and ``restore`` a checkpoint outside it. A new format raises ``high``; ``low``
+  moves only when an Arbor can no longer read the oldest format, which its release notes say.
 - ``chapters`` and ``events``: the lifecycle's (``arbor/lifecycle.py``); ``roles``: which side runs each chapter.
 - ``objective``: how a caller names the metric to optimize in place of the pack's, checked before it writes it: the
   config key, the flag, the variable, the metric keys and names Arbor knows, and the record a run writes.
@@ -40,10 +48,12 @@ from pathlib import Path
 #: The release line. ``v0.9.2`` was tagged at ``cfbb7b9``; the pack format changed after it (interface ``pack`` 2).
 VERSION = "0.10.0.dev0"
 #: Each interface's version. Raise one when it changes in a way a caller written for the old one would break on.
-INTERFACES: dict[str, int] = {"cli": 5, "pack": 2, "component": 4, "roles": 3}
+INTERFACES: dict[str, int] = {"cli": 6, "pack": 2, "component": 5, "roles": 3, "session": 2}
+#: The formats this Arbor continues, each a range ``(low, high)``: a session written in a format outside it is refused.
+CONTINUES: dict[str, tuple[int, int]] = {"session": (0, 2)}
 #: What ``python3 -m arbor`` accepts.
-COMMANDS: tuple[str, ...] = ("run", "master", "worker", "review", "conflicts", "iterate", "version", "schema",
-                             "directions")
+COMMANDS: tuple[str, ...] = ("run", "master", "worker", "review", "conflicts", "restore", "pause", "checkpoint",
+                             "iterate", "version", "schema", "directions")
 #: The oldest Python this checkout runs on, for a host to check before it starts Arbor (``import arbor.version``
 #: needs nothing else). 3.10 is what serving images ship; a checkout without this name needs 3.11.
 PYTHON_MIN: tuple[int, int] = (3, 10)
@@ -76,6 +86,7 @@ def info(root: Path = ROOT) -> dict:
         "python": ".".join(map(str, PYTHON_MIN)),
         "commands": list(COMMANDS),
         "interfaces": dict(INTERFACES),
+        "continues": {name: list(span) for name, span in CONTINUES.items()},
         "component_keys": list(component.BLOCK_KEYS),
         "exit_reasons": list(component.REASONS),
         "records": {"work_order": roles.ORDER_SCHEMA, "worker_report": roles.REPORT_SCHEMA,

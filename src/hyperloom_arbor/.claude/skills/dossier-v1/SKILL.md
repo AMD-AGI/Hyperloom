@@ -374,8 +374,9 @@ The procedure is [kernels.md](kernels.md).
     plan for each of the top ones;
   - then a campaign spent on one rewrite:
     - its config sets `"space": {"levels": ["kernel"]}`;
-    - its pack raises `policy.max_consecutive_probes`, so build stages that
-      can't serve yet aren't cut off;
+    - it runs as the plan's lane (`python3 -m arbor.stages seed`), so build
+      stages that can't serve yet aren't cut off: the harness waives the LEARN
+      cap while the next item is S1–S3 (docs/quickstart-kernel.md);
     - each stage is judged by the plan's gate for it, until the last stage,
       where the campaign's own A/B gate decides.
 - **Check structural directions before ranking.** A campaign that works one

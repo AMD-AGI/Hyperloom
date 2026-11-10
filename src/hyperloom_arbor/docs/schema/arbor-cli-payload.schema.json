@@ -19,6 +19,9 @@
         "worker",
         "review",
         "conflicts",
+        "restore",
+        "pause",
+        "checkpoint",
         "iterate",
         "version",
         "directions"
@@ -41,6 +44,15 @@
     },
     {
       "$ref": "#/$defs/conflicts"
+    },
+    {
+      "$ref": "#/$defs/restore"
+    },
+    {
+      "$ref": "#/$defs/pause"
+    },
+    {
+      "$ref": "#/$defs/checkpoint"
     },
     {
       "$ref": "#/$defs/iterate"
@@ -439,6 +451,480 @@
       "required": [
         "action",
         "session"
+      ],
+      "additionalProperties": false
+    },
+    "restore": {
+      "title": "python3 -m arbor restore",
+      "type": "object",
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "restore"
+        },
+        "config": {
+          "type": "string",
+          "description": "the campaign's config: its session, container and workspace"
+        },
+        "checkpoint": {
+          "type": "string",
+          "description": "the checkpoint: an iteration, a name, or latest (the default)"
+        },
+        "force": {
+          "type": "boolean",
+          "default": false,
+          "description": "restore onto another image's tree, reset a workspace that is not at its root first, and put the checkpoint's dossier in place of a different one"
+        },
+        "json": {
+          "type": "boolean",
+          "default": false,
+          "description": "what was done, as JSON"
+        }
+      },
+      "required": [
+        "config"
+      ],
+      "additionalProperties": false
+    },
+    "pause": {
+      "title": "python3 -m arbor pause",
+      "type": "object",
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "pause"
+        },
+        "config": {
+          "type": "string",
+          "description": "the campaign's config"
+        },
+        "session": {
+          "type": "string",
+          "description": "the campaign's session directory"
+        },
+        "reason": {
+          "type": "string",
+          "description": "why, for the record"
+        },
+        "cancel": {
+          "type": "boolean",
+          "default": false,
+          "description": "take back a pause not yet acted on"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "checkpoint": {
+      "title": "python3 -m arbor checkpoint",
+      "type": "object",
+      "oneOf": [
+        {
+          "properties": {
+            "action": {
+              "const": "list"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "all"
+                ]
+              },
+              {
+                "required": [
+                  "branch"
+                ]
+              },
+              {
+                "required": [
+                  "checkpoint"
+                ]
+              },
+              {
+                "required": [
+                  "directions"
+                ]
+              },
+              {
+                "required": [
+                  "force"
+                ]
+              },
+              {
+                "required": [
+                  "fork_policy"
+                ]
+              },
+              {
+                "required": [
+                  "name"
+                ]
+              },
+              {
+                "required": [
+                  "no_restore"
+                ]
+              },
+              {
+                "required": [
+                  "prompt_profile"
+                ]
+              },
+              {
+                "required": [
+                  "reason"
+                ]
+              },
+              {
+                "required": [
+                  "reset"
+                ]
+              },
+              {
+                "required": [
+                  "source"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "action": {
+              "const": "show"
+            }
+          },
+          "required": [
+            "action",
+            "checkpoint"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "all"
+                ]
+              },
+              {
+                "required": [
+                  "branch"
+                ]
+              },
+              {
+                "required": [
+                  "directions"
+                ]
+              },
+              {
+                "required": [
+                  "force"
+                ]
+              },
+              {
+                "required": [
+                  "fork_policy"
+                ]
+              },
+              {
+                "required": [
+                  "name"
+                ]
+              },
+              {
+                "required": [
+                  "no_restore"
+                ]
+              },
+              {
+                "required": [
+                  "prompt_profile"
+                ]
+              },
+              {
+                "required": [
+                  "reason"
+                ]
+              },
+              {
+                "required": [
+                  "reset"
+                ]
+              },
+              {
+                "required": [
+                  "source"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "action": {
+              "const": "verify"
+            }
+          },
+          "required": [
+            "action",
+            "checkpoint"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "branch"
+                ]
+              },
+              {
+                "required": [
+                  "directions"
+                ]
+              },
+              {
+                "required": [
+                  "force"
+                ]
+              },
+              {
+                "required": [
+                  "fork_policy"
+                ]
+              },
+              {
+                "required": [
+                  "name"
+                ]
+              },
+              {
+                "required": [
+                  "no_restore"
+                ]
+              },
+              {
+                "required": [
+                  "prompt_profile"
+                ]
+              },
+              {
+                "required": [
+                  "reason"
+                ]
+              },
+              {
+                "required": [
+                  "reset"
+                ]
+              },
+              {
+                "required": [
+                  "source"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "action": {
+              "const": "create"
+            }
+          },
+          "required": [
+            "action",
+            "config"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "all"
+                ]
+              },
+              {
+                "required": [
+                  "branch"
+                ]
+              },
+              {
+                "required": [
+                  "checkpoint"
+                ]
+              },
+              {
+                "required": [
+                  "directions"
+                ]
+              },
+              {
+                "required": [
+                  "force"
+                ]
+              },
+              {
+                "required": [
+                  "fork_policy"
+                ]
+              },
+              {
+                "required": [
+                  "no_restore"
+                ]
+              },
+              {
+                "required": [
+                  "prompt_profile"
+                ]
+              },
+              {
+                "required": [
+                  "reset"
+                ]
+              },
+              {
+                "required": [
+                  "session"
+                ]
+              },
+              {
+                "required": [
+                  "source"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "action": {
+              "const": "fork"
+            }
+          },
+          "required": [
+            "action",
+            "source",
+            "config"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "all"
+                ]
+              },
+              {
+                "required": [
+                  "name"
+                ]
+              },
+              {
+                "required": [
+                  "reason"
+                ]
+              },
+              {
+                "required": [
+                  "session"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "arbor_payload": {
+          "const": 1
+        },
+        "command": {
+          "const": "checkpoint"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "show",
+            "verify",
+            "create",
+            "fork"
+          ],
+          "description": "list, show or verify a session's checkpoints, create one now, or fork a new session from one"
+        },
+        "all": {
+          "type": "boolean",
+          "default": false,
+          "description": "every checkpoint and name"
+        },
+        "branch": {
+          "type": "string",
+          "description": "the branch's id (default: the session directory's name)"
+        },
+        "checkpoint": {
+          "type": "string",
+          "description": "show: an iteration, a name, or latest; verify: an iteration, a name, or latest; fork: the parent's checkpoint: an iteration, a name, or latest"
+        },
+        "config": {
+          "type": "string",
+          "description": "list: the campaign's config; show: the campaign's config; verify: the campaign's config; create: the campaign's config; fork: the fork's config: its own session_root, container, workspace and dossier"
+        },
+        "directions": {
+          "type": "string",
+          "description": "exploratory: a map (directions.json) in place of the parent's"
+        },
+        "force": {
+          "type": "boolean",
+          "default": false,
+          "description": "share the parent's workspace or dossier, or restore onto another image's tree"
+        },
+        "fork_policy": {
+          "type": "string",
+          "enum": [
+            "exact",
+            "exploratory"
+          ],
+          "default": "exact",
+          "description": "exact (the default): bars, counters and map kept; exploratory: also --directions, --reset"
+        },
+        "name": {
+          "type": "string",
+          "description": "a name that pins it (letters, digits, . _ -)"
+        },
+        "no_restore": {
+          "type": "boolean",
+          "default": false,
+          "description": "do not restore the tree into the fork's workspace now (`arbor restore` later)"
+        },
+        "prompt_profile": {
+          "type": "string",
+          "description": "a directory with claude_loop_prompt.md and/or critic_prompt.md, copied into the fork"
+        },
+        "reason": {
+          "type": "string",
+          "description": "why, for the record"
+        },
+        "reset": {
+          "type": "string",
+          "default": [],
+          "description": "exploratory: set a scheduling counter to 0 (null_streak, probe_streak, tier_iters, barren_streak, secondary_only_streak, invalid_streak, or all); repeatable"
+        },
+        "session": {
+          "type": "string",
+          "description": "the session directory"
+        },
+        "source": {
+          "type": "string",
+          "description": "the parent: its session directory, or its config"
+        }
+      },
+      "required": [
+        "action"
       ],
       "additionalProperties": false
     },

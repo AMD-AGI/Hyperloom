@@ -7,9 +7,9 @@ multi-branch (MB) runs as a component when a session is given `--autonomous-agen
 | | |
 | --- | --- |
 | Source | `AMD-AGI/Arbor` (internal) |
-| Tag | `v0.9.6` |
-| Commit | `1c6eef1` |
-| Files | 347 |
+| Tag | `v0.9.7` |
+| Commit | `a2b3706` |
+| Files | 350 |
 | Licence | Apache-2.0, [`LICENSE`](LICENSE) (`REUSE.toml` at the repository root says so per file) |
 
 ## What it holds

@@ -53,6 +53,7 @@ Only `knowledge/`, `validator/`, `eval/` and `tools/` belong in a pack.
 | `stability_collapse_pct` | 10.0 | a cited iteration this far below the best counts as the failure |
 | `stability_signals` | collective watchdogs and timeouts, GPU faults, a dead engine | regular expressions for a failure in a server log (`arbor/measure/stability.py`) |
 | `bench_repeats` | 1 | replays per measurement |
+| `bench_minutes` | | how long one bench runs, in minutes; -1: no end. The bench turn's default cap is never under it plus 15 min, standalone and under a host (`agentx`: 75). A cap the config or the host sets (`phase_minutes`) still wins |
 
 Some packs carry keys nothing reads (`tools:`, `measurement.count`, a `roadmap.yaml`); they are
 notes for people.

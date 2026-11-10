@@ -23,6 +23,9 @@ own parsers. Each command also takes them as one JSON or YAML document, `--paylo
 | `python3 -m arbor.ab --config C --out DIR --deadline EPOCH [--base REF] [--current REF] [--rounds 3]` | a same-node A/B of two workspace commits for any pack: the round-end hook, or an integration's A/B; writes `DIR/summary.json` ([how-it-works.md](how-it-works.md)) |
 | `python3 -m arbor version [--json]`, `python3 -m arbor --version` | the version; with `--json`, each interface's version, for callers ([master-worker.md](master-worker.md#for-callers-the-version)) |
 | `python3 -m arbor review --session D show\|approve\|reject [--note T] [--by NAME] [--config C]` | review a new campaign before it runs: `show` prints `REVIEW.md` and the status; `approve` checks the edited campaign and lets the run go on; `reject` ends it (`review_rejected`) |
+| `python3 -m arbor restore --config C [--checkpoint REF] [--force] [--json]` | lay a checkpoint of C's session (the latest by default; REF an iteration, a name or `latest`) into C's workspace, on any node: the exact HEAD from its history, else its patches; verified first, checked byte for byte (docs/operations.md, "Checkpoints, pause and fork") |
+| `python3 -m arbor pause (--config C \| --session D) [--reason TEXT] [--cancel]` | pause at the next pass boundary: the server stopped, the checkpoint `pause-NNNN`, exit 76; `run` continues |
+| `python3 -m arbor checkpoint list\|show\|verify\|create\|fork ...` | a session's checkpoints; `create --name` one now; `fork --from P --config F` a new session from one (`--fork-policy exact\|exploratory`, `--directions`, `--reset`, `--prompt-profile`) |
 | `python3 -m arbor run --config C --dry-run [--max-iters 10] [--seed 42]` | the loop on synthetic numbers in a temporary git repo: no GPU, no container, no agent |
 | `python3 -m arbor --help` | the usage |
 | `python3 -m arbor iterate init\|begin\|gate ...` | the harness's internal steps, used by the loop |
@@ -52,6 +55,9 @@ people.
 | `opt_objective` | none | the metric to optimize in place of the pack's, as `--opt-objective` takes it; a host writes it here. Or the structured form, `{metric, direction, bar_pct, guards: [{metric, band_pct} or {metric, max_pct}]}`: the bar replaces `threshold_rel`, and a broken guard is a REVERT ([hosts.md](hosts.md#the-hosts-objective)). The flag and `ARBOR_OPT_OBJECTIVE` win over it |
 | `time_budget_minutes` | none | a wall clock for the session (ignored in component mode). A resume counts what the session already spent (`<session>/clock.json`, written at each iteration's start), so a session that dies and resumes still ends at its budget; to give it more, raise the budget |
 | `review_gate` | `true` | a new session waits for a human's approval before it runs anything; `ARBOR_REVIEW_GATE` and `run --[no-]review-gate` override it |
+| `checkpoints` | `true` | a checkpoint at every pass boundary (`<session>/checkpoints/`); `false` writes none |
+| `prompt_profile` | none | a directory with `claude_loop_prompt.md` and/or `critic_prompt.md` in place of the built-ins (`arbor/prompts.py`) |
+| `prompt_overrides` | none | `{"main": FILE, "critic": FILE}`, each in place of the built-in; relative to `prompt_profile`, else to the config's directory |
 | `baseline_record` | none | a JSON file `{mean, runs, mean_secondary}` with a measured baseline |
 | `directives` | `[]` | lines rendered into the program, for the agent |
 | `directions_length` | `long` | how many open directions the dossier's map aims at: `short` 4 to 6, `medium` 8 to 12, `long` 15 to 25. Part 11 and an update round's 11.uK read it from their brief or the program; it is part of the directions skill's reuse key, so a change re-runs part 11 |
@@ -89,6 +95,7 @@ people.
 | `bench_script`, `correctness_script` | | absolute paths to the pack's validator scripts, as the container sees them |
 | `bench_serving_script` | | an optional serving client the bench script calls |
 | `bench_timeout` | 600 | seconds, for the bench and the correctness script |
+| `phase_minutes` | agent 240, server 60, bench 90, critic 20 | standalone: each agent turn's cap in minutes (`{"critic": 30}`; 0 or -1 is none); the bench's is never shorter than `bench_timeout` plus 30 min, nor than the pack's `measurement.bench_minutes` plus 15. Past it the turn is cancelled and the iteration NOT MEASURED. Component mode reads `component.phase_minutes` instead |
 | `concurrency`, `num_prompts`, `isl`, `osl` | 14, 640, 1024, 1024 | passed to the bench script |
 | `bench_repeats` | 1 | measured replays per iteration; the pack's `measurement.bench_repeats` wins |
 | `bench_metric_from_agent` | `false` | book the bench agent's `METRIC:` line when the bench wrote no `bench_output.json`. Off, such an iteration is NOT_MEASURED: the file carries the pack's failure checks and `duration_seconds`, and a missing file is usually a `session_mount` that is not the container's path of the session's parent. Under a host's bench command, the agent's number is always taken |
@@ -146,6 +153,10 @@ Parallel mode reads a separate run config ([operations.md](operations.md)).
 | `work_order.json`, `worker_report.json`, `WORKER_REPORT.md`, `roles/` | a worker's stretch | what it starts from and what it did, each stretch's pair kept in `roles/` ([master-worker.md](master-worker.md)) |
 | `role_exit.json` | `arbor master`, `arbor worker` | how the command ended: `ordered`, `reported` or `ended` |
 | `STOP` | a person, or the harness | stop after the iteration in flight |
+| `checkpoints/` | every pass boundary, unless `"checkpoints": false` | `NNNN.json`, the checkpoint after iteration NNNN (`arbor.checkpoint/2`: the state files, the logs' lengths, the served tree and its history, the prompts, the dossier, the fingerprint and bars, its `id`); `objects/`, each file once by its sha256; `names/`, the named ones, frozen; `LATEST`; `restores.jsonl` |
+| `PAUSE`, `paused.json` | `arbor pause`; the driver at the boundary | a pause asked; the pause done (its checkpoint, the server, whether the tree was clean) |
+| `fork.json`, `prompt_profile/` | `arbor checkpoint fork` | a fork's lineage (parent session, checkpoint and id, policy, resets, map, prompts' digest); its own prompt profile |
+| `session.lock` | the driver (shared); `create`, `restore`, `fork` (exclusive) | who holds the session |
 | `ABORTED.md`, `ROUND_STOP.md`, `MAP_STOP.md` | the harness | why it stopped |
 | `chain/` | rolling chunks | the lease, handoffs, iteration times, `CHAIN_STOP` |
 | `component.json`, `component_exit.json`, `component_refused.json`, `heartbeat.json`, `server/`, `keeps/`, `short_prompts/` | component mode | [hosts.md](hosts.md) |

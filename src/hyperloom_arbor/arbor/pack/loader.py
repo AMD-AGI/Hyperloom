@@ -85,6 +85,9 @@ class Campaign:
     mode: str = "standalone"
     # Why the asked objective (arbor/objective.py) could not be read; the start refuses it. "" otherwise.
     objective_error: str = ""
+    # The config file this campaign was loaded from: relative paths in the config (prompt_profile) resolve against
+    # its directory (arbor/prompts.py). "" for a campaign built in memory.
+    config_path: str = ""
 
 
 def load_pack(pack_dir: str | Path) -> Pack:
@@ -156,6 +159,7 @@ def load_campaign(config_path: str | Path, arbor_root: str | Path) -> Campaign:
         session_root=Path(os.path.expandvars(os.path.expanduser(config.get("session_root", "")))),
         mode=component.mode_of(config),
         objective_error=objective_error,
+        config_path=str(config_path.resolve()),
     )
 
 

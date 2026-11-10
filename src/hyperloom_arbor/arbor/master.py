@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import json
 import os
+import shlex
 import sys
 import time
 from dataclasses import dataclass, field
@@ -30,7 +31,7 @@ import yaml
 
 from arbor import component, conflicts, directions, lifecycle, retraction, review, revisit, roles, rounds, triggers
 from arbor.cli.iterate import _find_arbor_root, cmd_init
-from arbor.pack import load_campaign, validate_campaign
+from arbor.pack import load_campaign, validate_campaign, validate_pack
 from arbor.pack.loader import PACK_RESULTS_CONCERNS, PACK_RESULTS_DIR, PACK_RESULTS_FLAG
 from arbor.policy.claude_loop import KNOWLEDGE_SKILL, _run_claude
 from arbor.rebaseline import current as rebase_scale
@@ -152,6 +153,130 @@ def _root_accuracy(campaign, state_path: Path, comp) -> None:
     state.save(state_path)
 
 
+def _root_baseline(campaign, state_path: Path, comp, session_dir: Path) -> None:
+    """Component mode: the root's own measurement, once, before iteration 1, when the host gives no baseline_record.
+
+    Without it the first iteration's measurement became the bar, with nothing to compare it to: a change that gained
+    nothing was kept as the baseline (one host's iteration 1, 49,668 against the root's 49,693). The bench is the one
+    the gate uses: the host's command read by ``component.bench_read``, else the pack's bench script. The boot and the
+    bench are the run's time, within the deadline. A host that measured the root with the same client can pass its
+    number as ``baseline_record`` instead (``{"mean": ...}``), and nothing is booted: ``_seed_baseline`` runs first,
+    and a bar it seeded ends this.
+    """
+    from arbor.policy import claude_loop
+    state = CampaignState.load(state_path)
+    cfg = campaign.config
+    if state.baseline is not None or state.iteration > 0 or component.stops_at_map(cfg):
+        return
+    obj = campaign.pack.objective
+    meas = obj.get("measurement") or {}
+    metric, secondary = obj.get("metric", "output_throughput"), meas.get("secondary_metric") or None
+    host, read = component.bench_command(cfg), component.bench_read(cfg)
+    if host and not read:
+        print("[arbor] Root baseline: not measured: the host's bench command comes without bench_read, so the harness "
+              "cannot read its report; iteration 1's measurement is the bar")
+        return
+    if not host and not cfg.get("bench_script"):
+        print("[arbor] Root baseline: not measured: no bench_script; iteration 1's measurement is the bar")
+        return
+    server_cap = component.phase_seconds(cfg, "server")
+    bench_cap = component.turn_seconds(cfg, "bench", floor_minutes=meas.get("bench_minutes"))
+    if (server_cap is not None and server_cap <= 0) or (bench_cap is not None and bench_cap <= 0):
+        print("[arbor] Root baseline: not measured: no time is left before the deadline")
+        return
+    repeats = max(1, int(meas.get("bench_repeats", cfg.get("bench_repeats", 1)) or 1))
+    out = session_dir / "root_baseline"
+    out.mkdir(parents=True, exist_ok=True)
+    print(f"[arbor] Root baseline: serving the root and benching it {repeats}x with the gate's bench: the bar for "
+          f"iteration 1 ({out})", flush=True)
+
+    def stop() -> None:
+        claude_loop._stop_server(cfg, cfg.get("docker_container", ""), cfg.get("gpu_ids"))
+
+    runs: list[dict] = []
+    try:
+        stop()
+        component.phase("server")
+        if not claude_loop._start_server(cfg) or not claude_loop._wait_healthy(cfg, int(server_cap or 600)):
+            print("[arbor] Root baseline: not measured: the root did not serve; iteration 1's measurement is the bar")
+            return
+        component.phase("bench")
+        port = cfg.get("port", 8888)
+        for i in range(1, repeats + 1):
+            run_dir = out if repeats == 1 else out / f"run{i}"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            dest = run_dir / "bench_output.json"
+            dest.unlink(missing_ok=True)
+            if host:
+                report = run_dir / "host_bench"
+                report.mkdir(parents=True, exist_ok=True)
+                script = (component.fill_bench(host, port, report) + "\n"
+                          + claude_loop._read_block(report, str(dest), read, [metric]))
+                env = dict(os.environ)
+            else:
+                script = f"bash {shlex.quote(str(cfg['bench_script']))}"
+                env = {**os.environ, **claude_loop._bench_env(cfg, port, str(dest))}
+            why = _run_bench_group(script, env, bench_cap, run_dir / "bench.log")
+            res = _json_or(dest, {"status": "failed", "error": why or "the bench wrote no output"})
+            res.setdefault("status", "ok")
+            runs.append(res)
+    finally:
+        stop()
+    ok = [r for r in runs if r.get("status") == "ok" and _number(r.get(metric))]
+    if not ok:
+        last = runs[-1] if runs else {}
+        print(f"[arbor] Root baseline: not measured ({str(last.get('error', ''))[:200]}); iteration 1's measurement "
+              f"is the bar")
+        return
+    value = sum(r[metric] for r in ok) / len(ok)
+    secs = [r[secondary] for r in ok if secondary and _number(r.get(secondary))]
+    state = CampaignState.load(state_path)
+    state.record_baseline(float(value))
+    if secs:
+        state.secondary_name = secondary
+        state.secondary_direction = meas.get("secondary_direction", "max")
+        state.baseline_secondary = state.best_secondary = float(sum(secs) / len(secs))
+    state.iteration_notes["root_baseline"] = {"metric": metric, "value": value, "replays": len(ok),
+                                              "runs": [r[metric] for r in ok]}
+    state.save(state_path)
+    print(f"[arbor] Root baseline: {metric}={value:.3f} over {len(ok)} replay(s)"
+          + (f", {secondary}={state.baseline_secondary:.3f}" if secs else "") + ": the bar for iteration 1")
+
+
+def _number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _json_or(path: Path, default: dict) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return dict(default)
+
+
+def _run_bench_group(script: str, env: dict, cap: float | None, log: Path) -> str | None:
+    """Run ``script`` under bash in a process group of its own, its output in ``log``; past ``cap`` seconds stop the
+    whole group (a replay's client and its workers). None, or why it did not finish."""
+    import signal
+    import subprocess
+    with open(log, "wb") as fh:
+        proc = subprocess.Popen(["bash", "-c", script], env=env, stdout=fh, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, start_new_session=True)
+        try:
+            rc = proc.wait(timeout=cap)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=30)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            return f"the bench ran past its {cap / 60:.0f}-min cap"
+    return None if rc == 0 else f"the bench exited {rc} (its log: {log})"
+
+
 def _seed_baseline(state_path: Path, campaign, direction: str) -> None:
     """Seed campaign state from the frozen baseline record, if there is one.
 
@@ -167,8 +292,9 @@ def _seed_baseline(state_path: Path, campaign, direction: str) -> None:
     record_path = campaign.config.get("baseline_record")
     if not record_path:
         return
-    p = Path(record_path)
-    if not p.is_file():
+    # A host may give the record itself, an object, rather than its file (arbor/measure/accuracy.py reads both).
+    p = Path("baseline_record") if isinstance(record_path, dict) else Path(record_path)
+    if not isinstance(record_path, dict) and not p.is_file():
         print(f"[arbor] baseline_record not found: {p} — campaign will seed "
               f"from iteration 1 instead")
         return
@@ -178,7 +304,7 @@ def _seed_baseline(state_path: Path, campaign, direction: str) -> None:
         return  # already seeded; never overwrite a running campaign's bar
 
     try:
-        rec = json.loads(p.read_text())
+        rec = dict(record_path) if isinstance(record_path, dict) else json.loads(p.read_text())
     except Exception as e:
         print(f"[arbor] baseline_record unreadable ({e}) — not seeding")
         return
@@ -363,9 +489,26 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
     # touches the session. In component mode so does a campaign that does not validate
     # (a missing script, a broken pack): it would only crash later, and a host resumes a crash.
     refused = component.refusals(campaign.config, os.environ, session_dir)
+    # A session written in a format this Arbor does not continue (arbor/checkpoints.py, version.CONTINUES).
+    from arbor import checkpoints
+    refused += [r for r in checkpoints.refusals(session_dir) if r not in refused]
+    # A prompt profile or override that names a file that is not there (arbor/prompts.py): refused now, not at the
+    # first agent turn, and never a silent fall back to the built-in instructions.
+    from arbor import prompts
+    for role in prompts.ROLES:
+        try:
+            prompts.template(campaign.config, role, session_dir, prompts.base_dir(campaign))
+        except prompts.PromptError as exc:
+            refused.append(str(exc))
     if component.is_component(campaign):
         refused += [e for e in validate_campaign(campaign, allow_results=args.allow_pack_results)
                     if e not in refused]
+    else:
+        # The pack's own check standalone too, as warnings: a pack that runs standalone and that a host would refuse
+        # (a tools/ directory once was) is found here, not first under the host. The config's keys are not checked:
+        # standalone configs differ (a document campaign has no bench).
+        for problem in validate_pack(campaign.pack, allow_results=args.allow_pack_results):
+            print(f"[arbor] WARNING: a host would refuse this pack: {problem}", file=sys.stderr, flush=True)
     # The objective (arbor/objective.py): one Arbor cannot read, or another than the session started on.
     from arbor import objective as _objective
     wrong = _objective.problem(campaign, session_dir)
@@ -562,6 +705,7 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
             st.save(state_path)
             print(f"[arbor] Resumed after the model could not be reached: ABORTED.md is now "
                   f"{moved}, and the not-measured streak starts again")
+        _root_baseline(campaign, state_path, comp, session_dir)
         _root_accuracy(campaign, state_path, comp)
     exit_reason, exit_detail = "done", ""
 
@@ -583,7 +727,18 @@ def prepare(args: argparse.Namespace, held: dict) -> Session | int:
     if time_budget is not None:
         print(f"[arbor] Time budget: {time_budget} min")
     print(f"[arbor] Stop: touch {session_dir}/STOP")
+    print(f"[arbor] Pause: python3 -m arbor pause --session {session_dir}")
     print()
+    # The session lock, shared (arbor/checkpoints.py): checkpoint create, restore and fork refuse while it is held.
+    checkpoints.hold_session(session_dir, held)
+    paused = session_dir / checkpoints.PAUSED
+    if paused.is_file() and state_path.exists():
+        try:
+            rec = json.loads(paused.read_text(encoding="utf-8"))
+            print(f"[arbor] Resuming a session paused after iteration {rec.get('iteration')} "
+                  f"(checkpoint {rec.get('checkpoint') or 'not written'}; {paused})")
+        except (OSError, ValueError):
+            pass
 
     s = Session(args=args, held=held, config_path=config_path, arbor_root=arbor_root, campaign=campaign,
                 session_dir=session_dir, state_path=state_path, roll=roll, comp=comp, start_time=start_time,
@@ -649,6 +804,15 @@ def before_pass(s: Session) -> Step:
     s.map_set()
     if (s.session_dir / "STOP").exists():
         print("[arbor] STOP file — exiting.")
+        return Step("exit")
+
+    # `arbor pause` (arbor/checkpoints.py): at this boundary, the driver's loop stops the server, writes the checkpoint
+    # pause-NNNN and exits 76; `arbor run` with the same config continues.
+    from arbor import checkpoints
+    asked = checkpoints.pause_requested(s.session_dir)
+    if asked is not None:
+        print(f"[arbor] PAUSE asked{(': ' + asked['reason']) if asked.get('reason') else ''} — pausing here.")
+        s.exit_reason, s.exit_detail = "paused", str(asked.get("reason") or "")
         return Step("exit")
 
     # Checked here, not only inside the pass: a run of not-measured iterations writes
@@ -776,6 +940,7 @@ def finish(s: Session) -> int:
     s.map_set()
     s.fire("end", CampaignState.load(s.state_path).iteration, reason=s.exit_reason, detail=s.exit_detail)
     rc = 0
+    from arbor import checkpoints
     if s.comp:
         # Every component-mode exit says why (decision 1): `done` for STOP, max iterations
         # and an interrupt; `aborted` for ABORTED.md, a harness that stopped measuring, with
@@ -783,5 +948,8 @@ def finish(s: Session) -> int:
         # that harness was a model that could not be reached; the gate's reason when time ran
         # out; `mapped` when a dossier pass has set its map.
         rc = s.comp.finish(s.exit_reason, s.exit_detail)
+    if s.exit_reason == "paused":
+        print(f"[arbor] Paused ({s.exit_detail}); exit {checkpoints.EXIT_PAUSED}.")
+        return checkpoints.EXIT_PAUSED
     print("[arbor] Done.")
     return rc

@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import re
 import shlex
+import sys
+
+# The bare JSON values launch_cmd has quoted, each reported once per process.
+_QUOTED: set[str] = set()
 
 # Where the server's stdout and stderr go inside the container. The launch
 # redirects there, armcheck tails it, and the server agent is told to watch it.
@@ -99,7 +103,18 @@ class FrameworkAdapter:
         then stops that group and nothing else: inside MB, standalone's pattern
         ``pkill`` stopped MB's own servers. Without either, the command is byte for
         byte what it always was (arbor/tests/test_frameworks_parity.py).
+
+        A bare JSON value in the flags is single-quoted first (``quote_bare_json``): the
+        command runs under a shell, which would strip its quotes and split it. A host may
+        write JSON flags compact and unquoted (MB does), so every launch, the restart
+        shown to agents included, is quoted here. Flags without one are unchanged.
         """
+        server_flags, bare = quote_bare_json(server_flags or "")
+        for word in bare:
+            if word not in _QUOTED:
+                _QUOTED.add(word)
+                print(f"[arbor] server_flags: quoted a bare JSON value for the shell: {word[:80]}",
+                      file=sys.stderr, flush=True)
         serve = f"{env_prefix(server_env)}{self.serve_cmd(config, server_flags)}"
         if pid_file is None:
             log = self.server_log if log_path is None else shlex.quote(str(log_path))
@@ -143,3 +158,54 @@ class FrameworkAdapter:
         ids = [g.strip() for g in str(gpu_ids).split(",") if g.strip()]
         return {**env, "ROCR_VISIBLE_DEVICES": ",".join(ids),
                 "HIP_VISIBLE_DEVICES": ",".join(str(k) for k in range(len(ids)))}
+
+
+def quote_bare_json(flags: str) -> tuple[str, list[str]]:
+    """``flags`` with every bare JSON value (a ``{...}`` or ``[...]`` outside quotes) single-quoted, and those values.
+
+    The launch runs the flags under ``bash -c``: a bare JSON value loses its quotes and has its braces expanded, so
+    ``--attention-config {"a":"x","b":true}`` reaches the server as two words, ``a:x`` and ``b:true``, and the server
+    refuses it. A host that writes JSON flags unquoted, or an agent's edit, would otherwise break every launch. A value
+    runs to its closing bracket (spaces inside it included), then to the next space. Quoted words are left as they are.
+    """
+    out, found, i, n = [], [], 0, len(flags)
+
+    def quoted_end(k: int) -> int:      # the index after the quoted run that starts at k
+        q, k = flags[k], k + 1
+        while k < n and flags[k] != q:
+            k += 2 if (q == '"' and flags[k] == "\\") else 1
+        return min(k + 1, n)
+
+    while i < n:
+        c = flags[i]
+        if c == "\\":
+            out.append(flags[i:i + 2])
+            i += 2
+            continue
+        if c in "'\"":
+            j = quoted_end(i)
+            out.append(flags[i:j])
+            i = j
+            continue
+        if c in "{[" and (i == 0 or flags[i - 1].isspace() or flags[i - 1] == "="):
+            k, depth = i, 0
+            while k < n:
+                ch = flags[k]
+                if ch in "'\"":
+                    k = quoted_end(k)
+                    continue
+                if ch in "{[":
+                    depth += 1
+                elif ch in "}]":
+                    depth -= 1
+                elif ch.isspace() and depth <= 0:
+                    break
+                k += 1
+            word = flags[i:k]
+            out.append(shlex.quote(word))
+            found.append(word)
+            i = k
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out), found

@@ -3,7 +3,8 @@
 Each agent turn's CLI runs with ``ARBOR_TURN=<tag>`` in its environment, and every process it starts inherits it: a
 ``torchrun`` eval sent to the background, a profiled server, a bench client. When the turn ends, Arbor stops every
 process of its own user that still carries the tag. The server turn is the one exception: the server it starts is
-meant to outlive it, and is stopped with the server (``end_kept``, from ``claude_loop._stop_server``).
+meant to outlive it, and is stopped with the server (``end_kept``, from ``claude_loop._stop_server``). The bench turn
+stops all it started but Arbor's own server, which its agent may have restarted after a crash (``SPARES_SERVER``).
 
 Never SIGKILL: SGLang holds KFD memory until its Python process exits cleanly, and a killed server leaves the card
 full (``preflight.stop_server``). SIGTERM goes first to the tree's roots, whose servers take their workers down, then
@@ -30,6 +31,16 @@ KEPT = ("server",)
 #: not follow a process into it: ``docker exec`` starts it from the daemon, with the container's environment. So the
 #: container's processes are listed when such a turn starts, and what is new when it ends is stopped there.
 CONTAINER: str | None = None
+#: The turns that leave Arbor's own server running when they end, though they stop everything else they started: the
+#: bench turn, whose agent restarts a server that crashed under load. Stopped with the turn, it left the checks after the
+#: bench (correctness, short prompts, a KEEP's) with no server, and the iteration was booked "correctness failed".
+#: Never the bench's own processes: a replay cut off by its turn would load the next server.
+SPARES_SERVER = ("bench",)
+#: Arbor's own server, as the loop sets it for the iteration: in component mode the PID file whose process group it is
+#: (SERVER_GROUP_FILE), and standalone the framework's process pattern inside the container (SERVER_PATTERN, as
+#: ``frameworks`` gives it, ``[v]llm serve``).
+SERVER_GROUP_FILE: Path | None = None
+SERVER_PATTERN: str | None = None
 
 
 def new_tag(label: str) -> str:
@@ -111,7 +122,31 @@ def end_turn(tag: str, label: str, grace: float = 30.0) -> tuple[list[int], list
     if label in KEPT:
         return [], []
     pids = leftovers(tag)
+    if label in SPARES_SERVER:
+        group = server_group()
+        pids = [pid for pid in pids if group is None or _pgid(pid) != group]
     return stop(pids, grace) if pids else ([], [])
+
+
+def server_group(pid_file: Path | None = None) -> int | None:
+    """The process group of Arbor's own server, by its PID file (component mode's launch writes the PID of the process
+    that leads the group), when it runs; else None."""
+    pid_file = pid_file or SERVER_GROUP_FILE
+    if pid_file is None:
+        return None
+    try:
+        pid = int(Path(pid_file).read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    group = _pgid(pid)
+    return group if group == pid else None
+
+
+def _pgid(pid: int) -> int | None:
+    try:
+        return os.getpgid(pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        return None
 
 
 def end_kept(label: str = "server", grace: float = 30.0) -> tuple[list[int], list[int]]:
@@ -157,17 +192,41 @@ def _new(before: dict, now: dict) -> dict[int, tuple[int, str]]:
             if (pid, start) not in before and not cmd.startswith(" ".join(_PS))}
 
 
+def server_tree(new: dict[int, tuple[int, str]], pattern: str | None) -> set[int]:
+    """Among ``new`` (``{pid: (parent, command)}``), the server's processes: those whose command matches ``pattern``
+    (``[v]llm serve``, brackets as ``pgrep`` takes them) and every one descended from them."""
+    if not pattern:
+        return set()
+    import re
+    needle = re.sub(r"\[(.)\]", r"\1", pattern)
+    tree = {pid for pid, (_, cmd) in new.items() if needle in cmd}
+    grew = True
+    while grew:
+        more = {pid for pid, (ppid, _) in new.items() if ppid in tree and pid not in tree}
+        tree |= more
+        grew = bool(more)
+    return tree
+
+
 def end_container_turn(before: dict | None, container: str | None, label: str,
                        grace: float = 30.0) -> tuple[list[int], list[int]]:
     """Stop, inside ``container``, what started there during the turn whose start listing is ``before``: SIGTERM to the
     roots (whose parent is not new too) first, then to the rest after up to ``grace`` seconds; never SIGKILL. The
-    container's pids stopped, and those still running. Nothing for a kept turn, or one that could not be listed."""
+    container's pids stopped, and those still running. Nothing for a kept turn, or one that could not be listed. A turn
+    in SPARES_SERVER leaves the server it started (``server_tree``) running."""
     if before is None or not container or label in KEPT:
         return [], []
+    pattern = SERVER_PATTERN if label in SPARES_SERVER else None
+
+    def to_stop(listing: dict) -> dict[int, tuple[int, str]]:
+        new = _new(before, listing)
+        spared = server_tree(new, pattern)
+        return {pid: v for pid, v in new.items() if pid not in spared}
+
     now = container_procs(container)
     if now is None:
         return [], []
-    new = _new(before, now)
+    new = to_stop(now)
     if not new:
         return [], []
     roots = sorted(p for p, (ppid, _) in new.items() if ppid not in new)
@@ -176,13 +235,13 @@ def end_container_turn(before: dict | None, container: str | None, label: str,
     deadline = time.time() + grace
     while time.time() < deadline:
         left = container_procs(container)
-        if left is None or not _new(before, left):
+        if left is None or not to_stop(left):
             break
         time.sleep(1)
     left = container_procs(container) or {}
-    alive = sorted(_new(before, left))
+    alive = sorted(to_stop(left))
     if alive:
         _docker(container, ["kill", "-TERM", *map(str, alive)])
         time.sleep(min(grace, 5))
-        alive = sorted(_new(before, container_procs(container) or {}))
+        alive = sorted(to_stop(container_procs(container) or {}))
     return roots + rest, alive

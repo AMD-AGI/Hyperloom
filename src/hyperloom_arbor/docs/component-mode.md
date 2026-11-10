@@ -202,6 +202,26 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
   block aggregates, as with the pack's bench. The same command also takes the pack's
   `secondary_metric` when the client gives it; without it, the gate would see only the primary
   (`secondary: None` on every KEEP).
+- **The bench runs detached.** A command the agent's CLI ends takes its children with it, and
+  one host's replays died at 30 min that way. Where step 1 is all fixed commands (the pack's
+  bench, or the host's with `bench_read`), the harness writes them to `iter_N/bench_run.sh`; the
+  agent starts it with `setsid nohup`, its output in `iter_N/bench.log` and its PID in
+  `iter_N/bench.pid`, and waits on the output or the PID. When the turn ends, a bench still
+  running is stopped with its process group, so it never loads the next server.
+- **The server after the bench.** The bench turn stops everything it started except Arbor's own
+  server (its PID file's process group; standalone, the framework's server inside the
+  container), which its agent may have restarted after a crash. Before correctness the harness
+  checks it: if the bench turn restarted a server that was the arm and is not any more (a flag
+  changed to get it up), the iteration is NOT MEASURED; if the server is gone, the harness
+  relaunches it from the live config, and NOT MEASURED only if it does not come back. Without
+  this, correctness ran with no server and the change was booked as broken. The next
+  iteration's server turn restarts the server as before.
+- **The root's baseline.** With no `baseline_record` (or one with no `mean`), the harness
+  serves the root before iteration 1 and benches it with the same bench (`bench_repeats`
+  times, the mean): that is the bar iteration 1 must clear. A host that measured the root with
+  the same client passes `baseline_record` (a file, or the record itself: `{"mean": ...}`)
+  and nothing is booted. A host bench without `bench_read` cannot be read by the harness, so
+  there iteration 1's measurement is still the bar.
 - **`component.root`** (MB's request): MB's worktree is at the branch's start
   commit with the experiment repository's history behind it, so the first commit is not what MB
   gave. A sha in `component.root` is the base of `served.patch`, the first `change.patch`,

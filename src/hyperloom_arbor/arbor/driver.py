@@ -183,7 +183,10 @@ def _loop(s: master.Session, stretch: worker.Stretch, sides: tuple[str, ...] = B
                 return master.Step("handover", step.iteration, step.state)
             stretch.end(*stretch.handover(step.state))   # a round's end is the master's
             step = master.round_end(s, step.iteration)
+            _checkpoint(s)
         if step.kind == "exit":
+            if s.exit_reason == "paused":
+                _pause(s)
             return step
         if step.kind == "return":
             stretch.end("handoff", "the rolling chunk hands the session to the next")
@@ -194,8 +197,43 @@ def _loop(s: master.Session, stretch: worker.Stretch, sides: tuple[str, ...] = B
         if side not in sides or (side == lifecycle.WORKER and stretch.spend(step.state)):
             return master.Step("handover", step.iteration, step.state)
         stretch.switch(side, step.state)
-        if _run_pass(s, step.iteration, step.state) == "exit":
+        ran = _run_pass(s, step.iteration, step.state)
+        _checkpoint(s)
+        if ran == "exit":
             return master.Step("exit")
+
+
+def _checkpoint(s: master.Session) -> None:
+    """The session's checkpoint at this pass boundary (arbor/checkpoints.py); never fails the run."""
+    from arbor import checkpoints
+
+    try:
+        iteration = CampaignState.load(s.state_path).iteration
+    except (OSError, ValueError) as exc:
+        print(f"[arbor] checkpoint not written: session.json unreadable ({exc})", file=sys.stderr, flush=True)
+        return
+    checkpoints.write_safely(s.campaign.config, s.session_dir, iteration, s.campaign, s.arbor_root)
+
+
+def _pause(s: master.Session) -> None:
+    """``arbor pause`` at this boundary: the server stopped, the tree checked committed, the checkpoint pause-NNNN
+    written, ``paused.json`` recorded (arbor/checkpoints.py)."""
+    from arbor import checkpoints
+    from arbor.policy import claude_loop
+
+    try:
+        iteration = CampaignState.load(s.state_path).iteration
+    except (OSError, ValueError):
+        iteration = 0
+    done = checkpoints.pause_now(
+        s.campaign.config, s.session_dir, iteration, s.campaign, s.arbor_root,
+        stop=None if s.comp else (lambda cfg: claude_loop._stop_server(cfg, cfg.get("docker_container", ""),
+                                                                       cfg.get("gpu_ids"))))
+    s.exit_detail = (f"after iteration {iteration}, checkpoint {done.get('checkpoint') or 'not written'}"
+                     + (f" ({done['checkpoint_error']})" if done.get("checkpoint_error") else "")
+                     + ("" if done.get("tree_clean") is not False else "; the tree had uncommitted changes")
+                     + (f"; {s.exit_detail}" if s.exit_detail else ""))
+    print(f"[arbor] Paused {s.exit_detail}. Continue: python3 -m arbor run --config {s.config_path}")
 
 
 def _main(argv: list[str] | None, held: dict) -> int:
@@ -433,9 +471,12 @@ def _run_pass(s: master.Session, iteration: int, state: CampaignState) -> str:
           f"null_streak={state.null_streak}")
     # The agents' shells inherit these: arbor.knowledge logs and budgets each call per iteration (arbor/knowledge/),
     # and arbor.dossier.check holds a dossier to its knowledge citations when the pack loads knowledge:search.
-    # Names of their own: ARBOR_SESSION_DIR already tells evals/arbor_trace.py where to write its traces.
+    # ARBOR_SESSION_DIR tells the trace hooks (evals/arbor_trace.py) where to write. Without it they followed the
+    # pointer `init` writes, which a resume on another node does not have, and filed a whole resumed run under
+    # ~/.arbor/trajectories/.
     plan = lifecycle.declared(campaign)
-    os.environ.update(ARBOR_KNOWLEDGE_SESSION=str(session_dir), ARBOR_KNOWLEDGE_ITERATION=str(iteration),
+    os.environ.update(ARBOR_SESSION_DIR=str(session_dir),
+                      ARBOR_KNOWLEDGE_SESSION=str(session_dir), ARBOR_KNOWLEDGE_ITERATION=str(iteration),
                       ARBOR_KNOWLEDGE_CONFIG=str(s.config_path),
                       ARBOR_KNOWLEDGE_LOADED="1" if plan is not None and KNOWLEDGE_SKILL in plan.load
                       else "0")
