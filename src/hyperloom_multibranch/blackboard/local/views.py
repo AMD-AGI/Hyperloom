@@ -228,6 +228,7 @@ def committed(state: BlackboardState, view: LineageView) -> tuple[CommittedCommi
                 merged_into=next((merge.commit_id for merge in merges if node.commit_id in merge.merged_from), None),
                 last_merge=attempts[-1] if attempts else None,
                 merge_attempts=len(attempts),
+                not_stackable=sum(item.outcome is MergeOutcome.NOT_STACKABLE for item in attempts),
                 first_failed_at=next((item.at for item in attempts if item.outcome in FAILED_MERGES), None),
             )
         )
