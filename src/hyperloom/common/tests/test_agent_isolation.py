@@ -22,6 +22,7 @@ from hyperloom.common.agent_isolation import (
     NO_LAYER_BWRAP,
     RAY_ACTOR_PATH,
     SANDBOX_ACCOUNT,
+    TEST_ACCOUNT,
     AccountIsolation,
     BwrapIsolation,
     IsolationRefused,
@@ -32,6 +33,7 @@ from hyperloom.common.agent_isolation import (
     bwrap_isolation,
     choose_agent_isolation,
     choose_sandbox_isolation,
+    choose_test_isolation,
     isolation_required,
     require_agent_isolation,
     session_isolation_lines,
@@ -307,6 +309,45 @@ def test_a_local_sandbox_is_never_refused_even_with_an_account_configured(accoun
     found = choose_sandbox_isolation()
     assert isinstance(found, NoIsolation)
     assert found.reasons[0] == f"running them as an account: {SANDBOX_ACCOUNT}"
+
+
+def test_a_local_test_sandbox_is_bubblewrapped_where_it_works_and_never_refused_even_with_an_account_configured(
+    account, probe
+):
+    probe.answer = ON_PATH
+    assert choose_test_isolation() == BwrapIsolation(ON_PATH, (f"running them as an account: {TEST_ACCOUNT}",))
+    probe.answer = DENIED
+    found = choose_test_isolation()
+    assert isinstance(found, NoIsolation) and found.reasons == (
+        f"running them as an account: {TEST_ACCOUNT}",
+        "bubblewrap (/usr/bin/bwrap, 0.11.1): bwrap: setting up uid map: Permission denied",
+    )
+
+
+def test_a_hosted_run_refuses_an_unconfined_test_sandbox_and_probes_only_its_layer_bubblewrap(probe):
+    probe.answer = IN_LAYER
+    require_agent_isolation(bwrap=LAYER, allow_account=True)
+    probe.answer = LAYER_DENIED
+    probe.asked.clear()
+    with pytest.raises(IsolationRefused) as refused:
+        choose_test_isolation()
+    assert refused.value.reasons[0] == f"running them as an account: {TEST_ACCOUNT}"
+    assert probe.asked == [LAYER]
+
+
+def test_an_answer_the_caller_already_has_is_decided_as_a_fresh_probe_s_and_probes_nothing(probe):
+    failed = BwrapProbe(LAYER, (0, 13, 1), ("the sandbox's own paths cannot be bound safely",))
+    found = choose_test_isolation(known=failed)
+    assert isinstance(found, NoIsolation) and found.reasons[1:] == (
+        f"bubblewrap ({LAYER}, 0.13.1): the sandbox's own paths cannot be bound safely",
+    )
+    assert isinstance(choose_sandbox_isolation(known=failed), NoIsolation)
+    probe.answer = IN_LAYER
+    require_agent_isolation(bwrap=LAYER)
+    probe.asked.clear()
+    with pytest.raises(IsolationRefused):
+        choose_sandbox_isolation(known=failed)
+    assert probe.asked == [], "the answer given, not a probe of the module's"
 
 
 def test_a_sandbox_runs_under_bubblewrap_where_it_works(account, probe):
