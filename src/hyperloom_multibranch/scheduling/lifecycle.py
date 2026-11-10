@@ -358,6 +358,7 @@ class Session:
             settings.agent_share_minutes,
             settings.inferencex_commit,
             settings.agentx_early_stop,
+            make_before_break=settings.make_before_break,
         )
 
     def _score_with_defaults(self) -> None:

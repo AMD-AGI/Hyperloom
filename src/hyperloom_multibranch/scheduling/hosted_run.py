@@ -9,7 +9,8 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``workload.conc`` and ``workload.precision``; ``multibranch.inferencex_commit`` is ``--inferencex-commit``,
 ``multibranch.reference_script`` ``--reference-script``, ``multibranch.max_branches`` ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
-``--autonomous-agent``, ``placement.measurement`` is ``--measurement``, and ``placement.max_parallel_tests`` is
+``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
+``--no-make-before-break``, ``placement.measurement`` is ``--measurement``, and ``placement.max_parallel_tests`` is
 ``--max-parallel-tests``, at most what runs at once where the session measures. The fields ``run`` has no option for --
 ``objective``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read. A spec that
 sets ``launch.server_args`` or ``launch.extra_env`` is refused rather than run without them: a multi-branch session's
@@ -179,7 +180,36 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "measurement": spec.measurement,
     }
     agents = [f"--autonomous-agent={source}" for source in _agent_sources(section.get("autonomous_agents"))]
-    return ["run", *(f"--{option}={value}" for option, value in values.items() if value is not None), *agents]
+    switches = _switches(section)
+    return [
+        "run",
+        *(f"--{option}={value}" for option, value in values.items() if value is not None),
+        *agents,
+        *switches,
+    ]
+
+
+def _switches(section: Mapping[str, Any]) -> list[str]:
+    """The on/off options of ``section``: ``multibranch.make_before_break`` as ``--[no-]make-before-break``, nothing
+    when the spec leaves it to ``run``'s default (on)."""
+
+    keep = _make_before_break(section)
+    return [] if keep is None else ["--make-before-break" if keep else "--no-make-before-break"]
+
+
+def spec_make_before_break(spec: CampaignSpec) -> bool:
+    """The operator's ``multibranch.make_before_break`` of ``spec``, on when it is not given; raises
+    :class:`HostedRefused` when it is neither true nor false."""
+
+    keep = _make_before_break(_multibranch_section(spec.multibranch))
+    return True if keep is None else keep
+
+
+def _make_before_break(section: Mapping[str, Any]) -> bool | None:
+    keep = section.get("make_before_break")
+    if keep is not None and not isinstance(keep, bool):
+        raise HostedRefused("multibranch.make_before_break must be true or false")
+    return keep
 
 
 def _inferencex_commit(commit: object) -> str | None:
@@ -304,14 +334,21 @@ def _multibranch_section(section: object) -> dict[str, Any]:
     return section
 
 
-def grant_tests_that_fit(host: HostInfo) -> Callable[[int], int]:
-    """How many tests of a TP the grant ``host`` holds runs at once; raises ValueError when one does not fit, and
-    ImportError when the ``hosted`` extra is not installed."""
+def grant_tests_that_fit(host: HostInfo, make_before_break: bool = True) -> Callable[[int], int]:
+    """How many tests of a TP the grant ``host`` holds runs at once, as the hosted toolbox runs them: with
+    ``make_before_break``, one fewer than the grant fits where a finished test's sandbox is kept for the next (where the
+    grant fits at least three); raises ValueError when one does not fit, and ImportError when the ``hosted`` extra is
+    not installed."""
 
     # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
-    from hyperloom_multibranch.toolbox.hosted_toolbox import parallel_tests_for
+    from hyperloom_multibranch.toolbox.hosted_toolbox import handover_for, parallel_tests_for
 
-    return partial(parallel_tests_for, toolbox_grant(host.grant_limits))
+    grant = toolbox_grant(host.grant_limits)
+
+    def tests_that_fit(tp: int) -> int:
+        return parallel_tests_for(grant, tp, handover_for(grant, tp) if make_before_break else None)
+
+    return tests_that_fit
 
 
 def toolbox_grant(limits: HostGrantLimits | None) -> GrantLimits | None:
@@ -596,6 +633,7 @@ __all__ = [
     "require_hosted_isolation",
     "require_local_image",
     "run_argv",
+    "spec_make_before_break",
     "storage_problems",
     "toolbox_grant",
     "write_final_exit",

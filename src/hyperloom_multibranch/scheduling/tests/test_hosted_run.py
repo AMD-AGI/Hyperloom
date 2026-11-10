@@ -8,6 +8,7 @@ through the command in ``test_cli``."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import signal
@@ -442,3 +443,26 @@ def test_a_hosted_run_with_no_account_and_a_real_layer_bubblewrap_measures_here_
     assert launch_isolation(local=True) == LaunchIsolation(
         agent_isolation.BWRAP, agent_isolation.BWRAP, agent_isolation.BWRAP, True, ()
     )
+
+
+@pytest.mark.parametrize(
+    ("given", "switches"),
+    [
+        ({}, []),  # run's default: on
+        ({"make_before_break": True}, ["--make-before-break"]),
+        ({"make_before_break": False}, ["--no-make-before-break"]),
+    ],
+)
+def test_the_operator_turns_make_before_break_on_or_off_in_the_spec(
+    given: dict[str, bool], switches: list[str]
+) -> None:
+    spec = dataclasses.replace(_spec("hosted"), multibranch={"workload": "inferencex", **given})
+    argv = run_argv(spec, 1.0, 8)
+    assert [arg for arg in argv if arg.endswith("make-before-break")] == switches
+
+
+@pytest.mark.parametrize("given", ["false", 0, 1])
+def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object) -> None:
+    spec = dataclasses.replace(_spec("hosted"), multibranch={"workload": "inferencex", "make_before_break": given})
+    with pytest.raises(HostedRefused, match="multibranch.make_before_break must be true or false"):
+        run_argv(spec, 1.0, 8)
