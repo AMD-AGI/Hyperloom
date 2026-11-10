@@ -530,8 +530,10 @@ def hosted_restart_leg(
     first start, when the session was measured in the grant's sandboxes and its baseline still measures what a test
     measured now would (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same
     build, ``MEASUREMENT_EPOCH``, image, base launch and runner template cards; not the node or the account, which a
-    reschedule changes by design); else ``finish`` (``cli.final_only``), and one warning names why. Writes nothing.
-    Blocks."""
+    reschedule changes by design); else ``finish`` (``cli.final_only``), and one warning names why. A file of the
+    session this account cannot read (:data:`CANNOT_READ_SESSION`) is such a why: the finish then meets it and ends the
+    run as it did before there was a resume, rather than this start crashing with no ``exit.json`` for the host to
+    start again. Writes nothing. Blocks."""
 
     root = persisted.layout.root
     isolation = read_manifest(persisted.layout.manifest).agent_isolation
@@ -541,7 +543,7 @@ def hosted_restart_leg(
     try:
         check_hosted_baseline_reusable(persisted.layout.toolbox, persisted.settings.workload.tp)
         deadline = hosted_resume_deadline(persisted, time.time())
-    except (BaselineNotReusable, ResumeRefused) as exc:
+    except (BaselineNotReusable, ResumeRefused, *CANNOT_READ_SESSION) as exc:
         log.warning("hosted run: finishing %s instead of resuming it: %s", root, exc)
         return finish
     log.info("hosted run: resuming %s up to the deadline its first start set", root)
