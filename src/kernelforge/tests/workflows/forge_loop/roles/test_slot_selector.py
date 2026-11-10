@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 
 import pytest
 
 from kernelforge.agent_backends import AgentCapabilities, AgentProviderError, AgentRunResult
+from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
 from kernelforge.workflows.forge_loop.roles.slot_selector import (
     SlotSelectionAnswer,
     SlotSelector,
@@ -97,6 +99,26 @@ def test_a_hook_capable_provider_gets_a_shell_fenced_to_read_only_git():
     denied = asyncio.run(hook.callback({"tool_name": "Bash", "tool_input": {"command": "git push"}}, None, None))
     allowed = asyncio.run(hook.callback({"tool_name": "Bash", "tool_input": {"command": "git log"}}, None, None))
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny" and allowed == {}
+
+
+@pytest.mark.parametrize("name, hooks", [("claude", True), ("codex", False)])
+def test_the_workspace_guard_admits_a_selector_with_a_shell_and_lets_it_change_nothing(tmp_path, name, hooks):
+    for args in (("init", "-q"), ("config", "user.name", "t"), ("config", "user.email", "t@t")):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+    (tmp_path / "kernel.py").write_text("KERNEL = 1\n")
+    for args in (("add", "."), ("commit", "-qm", "base")):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+    backend = _Backend(ANSWER, name=name, hooks=hooks)
+
+    asyncio.run(
+        SlotSelector(backend=backend, timeout_sec=60, max_turns=5).select(workspace=str(tmp_path), facts="", lanes=2)
+    )
+
+    guard = WorkspaceGuard(backend.specs[0])
+    guard.prepare()
+    (tmp_path / "kernel.py").write_text("KERNEL = 2\n")
+    with pytest.raises(WorkspaceSafetyError, match="protected tracked files changed: kernel.py"):
+        guard.verify()
 
 
 @pytest.mark.parametrize("name, shell", [("codex", True), ("deepseek", False)])

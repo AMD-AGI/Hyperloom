@@ -24,6 +24,7 @@ from kernelforge.agent_backends import (
     watchdog_timeout_sec,
 )
 from kernelforge.agent_backends.structured_output import AgentAnswer, StructuredOutputError
+from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.workflows.forge_loop.roles.agent_response import (
     AgentResponseIncompleteError,
     AgentResponseInfrastructureError,
@@ -192,6 +193,7 @@ class SlotSelector:
             timeout_sec=self.timeout_sec,
             role="slot_selector",
             tool_policy=AgentToolPolicy(read=True, search=True, write=False, shell=shell, max_turns=self.max_turns),
+            protected_path_rules=FORGE_PROTECTED_PATHS,
             protected_globs=["*"],
             hooks=self._hooks() if runs_hooks else None,
             output_schema=SlotSelectionAnswer,
