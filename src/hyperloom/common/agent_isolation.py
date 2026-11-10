@@ -15,7 +15,8 @@ passed then and gave no answer in time at the launch), and in the session report
 
 Isolation is required in a hosted run (its entry calls :func:`require_agent_isolation` once at start-up, which marks
 the process) and, for a specialist, wherever ``HYPERLOOM_SPECIALIST_USER`` is set. An agent sandbox's commands
-(:func:`choose_sandbox_isolation`) never run as an account, so only a hosted run requires theirs.
+(:func:`choose_sandbox_isolation`) never run as an account, so only a hosted run requires theirs, and so do a local
+test sandbox's processes no account was named for (:func:`choose_test_isolation`).
 
 A hosted run launches only its hosting layer's bubblewrap, by the path its entry names, never one found on ``PATH``
 (the framework image may carry its own, possibly setuid); a local run uses the ``bwrap`` on ``PATH``, and the probe
@@ -53,6 +54,7 @@ __all__ = [
     "RAY_ACTOR_PATH",
     "REFUSED",
     "SANDBOX_ACCOUNT",
+    "TEST_ACCOUNT",
     "AccountIsolation",
     "AgentIsolation",
     "BwrapIsolation",
@@ -64,6 +66,7 @@ __all__ = [
     "bwrap_isolation",
     "choose_agent_isolation",
     "choose_sandbox_isolation",
+    "choose_test_isolation",
     "isolation_required",
     "require_agent_isolation",
     "session_isolation_lines",
@@ -76,6 +79,8 @@ log = logging.getLogger(__name__)
 RAY_ACTOR_PATH = "the Ray GPU actor path cannot run the specialist as another user"
 #: The account tier's reason for an agent sandbox, whose commands run as the app's own account.
 SANDBOX_ACCOUNT = "an agent sandbox runs its commands as the app's own account"
+#: The account tier's reason for a local test sandbox whose provider names no account for its processes.
+TEST_ACCOUNT = "a test sandbox runs as the app's own account where its provider names none for it"
 #: The bubblewrap tier's reason in a hosted run whose entry named no hosting layer bubblewrap.
 NO_LAYER_BWRAP = "bubblewrap: a hosted run launches agents only with its hosting layer's bubblewrap, and none was named"
 
@@ -163,8 +168,9 @@ class BwrapIsolation:
 
 @dataclass(frozen=True)
 class NoIsolation:
-    """Unconfined, as before: a launch that need not be isolated, where no tier works. ``reasons`` name both tiers'.
-    ``transient``: bubblewrap's probe gave no answer in time, so a later attempt may succeed."""
+    """Unconfined, as before: a launch that need not be isolated, where no tier works. ``reasons`` name both tiers';
+    ``transient``: bubblewrap's probe gave no answer in time, so this holds for this launch only and a later attempt
+    may succeed."""
 
     reasons: tuple[str, ...]
     transient: bool = False
@@ -262,18 +268,21 @@ def _account(name: str, allow_account: bool) -> tuple[RunAs | None, str]:
     return run_as, ""
 
 
-def _bwrap() -> BwrapProbe:
+def _bwrap(known: BwrapProbe | None = None) -> BwrapProbe:
     """The probe of the bubblewrap this process may use: a hosted run's layer one, else the one on ``PATH``. A hosted
     run whose layer path is empty or relative is refused without a probe, which takes an empty path for the
-    bubblewrap on ``PATH``."""
+    bubblewrap on ``PATH``. The probe is the module's :func:`bwrap_probe`, looked up at the call, the one source of
+    every answer, unless ``known`` is an answer the caller already has for this bubblewrap (a test sandbox whose own
+    paths it cannot bind safely, :func:`choose_test_isolation`)."""
+    probe = bwrap_probe if known is None else (lambda _path: known)
     if not _STATE.hosted:
-        return bwrap_probe(None)
+        return probe(None)
     layer = _STATE.layer_bwrap
     if not layer:
         return BwrapProbe(None, None, (NO_LAYER_BWRAP,))
     if not os.path.isabs(layer):
         return BwrapProbe(layer, None, (f"bubblewrap at {layer} is not an absolute path",))
-    return bwrap_probe(layer)
+    return probe(layer)
 
 
 def _bwrap_reasons(found: BwrapProbe) -> tuple[str, ...]:
@@ -283,10 +292,12 @@ def _bwrap_reasons(found: BwrapProbe) -> tuple[str, ...]:
     return tuple(line if line.startswith("bubblewrap") else prefix + line for line in found.problems)
 
 
-def _unaccounted(account_reason: str, *, required: bool, warn: bool) -> BwrapIsolation | NoIsolation:
+def _unaccounted(
+    account_reason: str, *, required: bool, warn: bool, known: BwrapProbe | None = None
+) -> BwrapIsolation | NoIsolation:
     """Bubblewrap, else a refusal (``required``) or unconfined; ``warn`` logs once that an account was asked for."""
     note = f"running them as an account: {account_reason}"
-    found = _bwrap()
+    found = _bwrap(known)
     if found.ok:
         if warn:
             _log_once(logging.WARNING, f"agents run under bubblewrap: {note}")
@@ -295,7 +306,7 @@ def _unaccounted(account_reason: str, *, required: bool, warn: bool) -> BwrapIso
     if required:
         raise IsolationRefused(reasons, transient=found.transient)
     _log_once(logging.INFO, "agents cannot run under bubblewrap here: " + "; ".join(reasons[1:]))
-    return NoIsolation(reasons)
+    return NoIsolation(reasons, transient=found.transient)
 
 
 def choose_agent_isolation(user: str | None = None, *, allow_account: bool = True) -> AgentIsolation:
@@ -319,6 +330,18 @@ def choose_sandbox_isolation() -> BwrapIsolation | NoIsolation:
         IsolationRefused: In a hosted run, where bubblewrap cannot run a sandbox.
     """
     return _unaccounted(SANDBOX_ACCOUNT, required=_STATE.hosted, warn=False)
+
+
+def choose_test_isolation(*, known: BwrapProbe | None = None) -> BwrapIsolation | NoIsolation:
+    """How to launch the processes of a local test sandbox no account was named for (the server a branch's patches
+    run in): bubblewrap, else unconfined, which only a hosted run refuses. ``known``: the probe's answer as the caller
+    already has it (one whose problems say why this sandbox's own paths cannot be bound safely,
+    :meth:`~hyperloom.sandbox.confined.SandboxConfiner.confine`), decided as a fresh probe's would be.
+
+    Raises:
+        IsolationRefused: In a hosted run, where bubblewrap cannot sandbox a test.
+    """
+    return _unaccounted(TEST_ACCOUNT, required=_STATE.hosted, warn=False, known=known)
 
 
 def bwrap_isolation() -> BwrapIsolation | NoIsolation:
