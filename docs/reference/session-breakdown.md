@@ -131,16 +131,12 @@ when its artefacts were written, and the KERNEL and BASELINE projections are no
 longer emitted. Consumers that ordered events around the old collapsed windows
 see a different ordering.
 
-The round ledger arrives inside v6, as an added section of `enablement` rather
-than a new version: the round lifecycle is read from the durable round ledger
-in `storage/coordinator.db` — the only record that outlives the process that
-took a round — and is reported through `rounds[]` and its counters. The three
-state-sourced fields that ledger replaces are no longer emitted; each one's
-disposition is under
-[`enablement`](#enablement--admission-round-lifecycle-builds--attempt-runtimes).
-That block reports on the runtime a session built rather than on its results,
-and is emitted as `{}` on every session that ran no enablement, so it has never
-carried a field a consumer could gate on.
+Enablement authoring rounds and targeted builds are recorded in the
+[`enablement` timeline event](#enablement-timeline-event). Its payload uses
+`ext.attempts.rows` and counters for authoring rounds and `ext.builds.rows`
+for targeted builds. Consumers must read this event shape rather than a
+top-level `enablement` block or `rounds[]` projection. The event describes
+runtime repair and provenance, not validated optimization results.
 
 V5 was the preceding cutover, for optimization results: consumers read only
 `optimizations`; the old `optimization_stack`, attribution, GEAK invocation,
@@ -420,6 +416,36 @@ ran and the `artifacts` it published.
 the fields of each; they are typed and versioned with the export.
 
 ---
+
+(enablement-timeline-event)=
+## `enablement` timeline event
+
+Enablement records the repair lane in a `timeline[]` event whose `type` is
+`enablement`. It is not a top-level result section. If the lane never ran,
+there is no enablement event; do not expect a top-level `enablement: {}`.
+
+The event's `ext` contains:
+
+| Field | Meaning |
+| --- | --- |
+| `mode`, `origin`, `engaged`, `trigger` | The selected mode, origin and triggering gap; a recorded event has `engaged: true` |
+| `attempts.rows` | Recorded authoring rounds and their outcomes |
+| `attempts.count`, `attempts.settled`, `attempts.advanced` | Counts of recorded rounds (including in-flight rounds), rounds with a verdict, and rounds that advanced to another gap |
+| `attempts.landed`, `attempts.validation_pending` | Landed KEEP rounds and KEEP rounds awaiting revalidation, when KEEP/window pairing is available |
+| `builds.rows` | Targeted component builds; each row may contain `installed_versions.source_pr_url` when its source was a discovered PR |
+| `builds.count`, `builds.failed` | Recorded build rows and rows whose `ok` is explicitly `false`; a build without a verdict is not counted as failed |
+| `revalidations.count`, `revalidations.promoted`, `revalidations.rows` | Recorded revalidation windows and how many were promoted; windows may still be open or may have stopped without a measurement |
+| `human_review.count`, `human_review.rows` | Recorded launch failures requiring human attention because the lane could not act on them; these are not human approval decisions |
+| `result`, `failure`, `recipe` | The recorded lane terminal result, fault and recipe verdict, when available |
+
+When KEEP/window pairing is unavailable, `attempts.landed` counts KEEP verdicts
+and `attempts.validation_pending` is omitted. A source PR URL identifies build
+provenance; it does not establish that the build succeeded.
+
+The lane's terminal verdict is under `ext.result.outcome`. Read validated
+optimization results from the top-level `outcome`; an enablement attempt or
+verified build alone does not establish a validated serving gain. Fields may
+be partial when the run stops before the lane settles.
 
 ## `critic`
 
@@ -701,11 +727,10 @@ The Hyperloom team commits to the following compatibility guarantees.
    optimization cutover did, and every removed or renamed field is given a
    disposition in the section it left. The 6.1 changes recorded under
    Versioning, each with its disposition, are a declared exception to this
-   rule. `enablement` is outside this guarantee:
-   it reports on the runtime a session built rather than on its results, is
-   emitted as `{}` whenever no enablement ran, and its fields move with the
-   runtime they describe — every field the round ledger replaced is still given
-   a disposition in that section.
+   rule. The [`enablement` timeline event](#enablement-timeline-event)
+   describes runtime repair and provenance rather than the result-section
+   guarantee above. Its payload follows the runtime it records; consumers
+   should tolerate optional fields and partial events.
 2. Never fabricating values for fields the runtime did not
    actually measure. Missing → null / `[]` / `{}`.
 3. Adding new optional fields freely. Consumers must tolerate
