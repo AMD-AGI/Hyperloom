@@ -2103,6 +2103,28 @@ def test_a_restart_that_cannot_read_the_session_before_its_baseline_leaves_it_an
 
 
 @pytest.mark.usefixtures("ready_environment")
+def test_a_restart_refused_a_file_outside_the_session_it_closes_ends_the_run(
+    host: Host, restart: Restart, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _killed_in_prelude(tmp_path / "MB-20260101T000000Z-0123abcd")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    outside = tmp_path / "workspace-cache" / "index.json"
+
+    async def closing(persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object) -> int:
+        raise PermissionError(errno.EACCES, "Permission denied", str(outside))
+
+    monkeypatch.setattr(cli, "final_only", CLOSING)
+    monkeypatch.setattr(cli, "_run_leg", closing)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    assert restart.calls == [], "no new session starts over a file that is not the earlier session's"
+    document = host.exit_document()
+    assert document["final"] is True and document["returncode"] == cli.EXIT_FAILED
+    assert str(outside) in document["error"]
+
+
+@pytest.mark.usefixtures("ready_environment")
 @pytest.mark.parametrize("ended", [SessionStopReason.SIGNAL, SessionStopReason.PRELUDE_FAILED])
 def test_a_restart_over_a_session_that_closed_before_its_baseline_ends_the_run_with_its_report(
     host: Host, restart: Restart, tmp_path: Path, ended: SessionStopReason

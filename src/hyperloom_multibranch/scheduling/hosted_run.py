@@ -443,18 +443,33 @@ CANNOT_READ_SESSION = (PermissionError, UnicodeDecodeError, json.JSONDecodeError
 def close_before_starting_again(close: Callable[[], int], left: PersistedRun) -> int | None:
     """Close ``left``, which ended before PRELUDE recorded its baseline, with ``close`` (which ends the sandboxes of the
     tests it left) before the run starts the spec's session again: the exit code the run ends with when a stop during
-    the close ended it, else ``None``. A close that cannot read ``left`` (:data:`CANNOT_READ_SESSION`) leaves it as it
-    is, one warning names the file and why, and ``None`` says the run goes on with a new session in a directory of its
-    own, as that session measured nothing a restart carries on from."""
+    the close ended it, else ``None``. A close that cannot read ``left`` (:data:`CANNOT_READ_SESSION`, and for a file
+    the OS refuses, one inside ``left``'s directory) leaves it as it is, one warning names the file and why, and
+    ``None`` says the run goes on with a new session in a directory of its own, as that session measured nothing a
+    restart carries on from. A file outside that directory the OS refuses is not the earlier session's to skip: it
+    raises, and ends the run as before."""
 
     root = left.layout.root
     log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", root)
     try:
         closed = close()
     except CANNOT_READ_SESSION as exc:
+        if not _names_a_file_of(root, exc):
+            raise
         log.warning("cannot read %s to close it, so it is left as it is and a new session starts: %s", root, _why(exc))
         return None
     return None if reported_stop_reason(root) == left.ended.value else closed
+
+
+def _names_a_file_of(root: Path, exc: BaseException) -> bool:
+    """Whether ``exc`` is about what the session in ``root`` left: a refused file inside ``root``, or text that is not
+    what was written (which names no file)."""
+
+    if not isinstance(exc, OSError):
+        return True
+    return exc.filename is not None and Path(os.path.abspath(os.fsdecode(exc.filename))).is_relative_to(
+        os.path.abspath(root)
+    )
 
 
 def _why(exc: BaseException) -> str:
