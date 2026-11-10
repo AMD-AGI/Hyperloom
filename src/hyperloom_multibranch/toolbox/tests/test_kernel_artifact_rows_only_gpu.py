@@ -9,8 +9,8 @@ own Qwen3-8B table tunes with ``triton``; qkv and o, which other models' tables 
 table does. Without the override aiter would rewrite the table files and raise ``Found N duplicate shape entries``
 before the server started. What must hold: the server boots and the test succeeds; ``framework_base.json`` says which
 rows were taken out of which of the image's tables, as many as the tables hold; the server's log shows the rows hit, the
-overridden shapes read as ``torch``; no duplicate-entry error in any log; the shared tables and ``/tmp/aiter_configs``
-as they were. What was measured is printed (``PROBE``).
+overridden shapes read as ``torch``; no duplicate-entry error in any log; the merged table the server read in a directory
+of the test's own; the shared tables and ``/tmp/aiter_configs`` as they were. What was measured is printed (``PROBE``).
 
 Needs what ``test_kernel_artifact_gpu`` needs, with ``HL_GPU_CARDS`` naming one card.
 """
@@ -27,16 +27,20 @@ from typing import Any
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, RecipeDelta
 from hyperloom.contracts.measurement import TABLE_EXERCISED, TABLE_NOT_EXERCISED, TestResult, Validity
 from hyperloom.measure.framework.base import DEFAULT_CONFIGS, tree_files
-from hyperloom.measure.framework.merge import PRIVATE
 from hyperloom_multibranch.toolbox.tests.integration_inputs import baseline_recipe
 from hyperloom_multibranch.toolbox.tests.integration_rig import Specialist, build_stack
-from hyperloom_multibranch.toolbox.tests.test_framework_isolation_parallel_gpu import AITER_MERGE_DIR, SHARED, VARIABLE
+from hyperloom_multibranch.toolbox.tests.test_framework_isolation_parallel_gpu import (
+    AITER_MERGE_DIR,
+    SHARED,
+    VARIABLE,
+)
 from hyperloom_multibranch.toolbox.tests import test_kernel_artifact_gpu
 from hyperloom_multibranch.toolbox.tests.test_kernel_artifact_gpu import (
     ENVS,
     SHAPE_ROW,
     TARGET,
     TORCH_ROW,
+    _assert_merged_view_is_the_tests_own,
     _facts,
     _linear_shapes,
     _named_tables,
@@ -49,6 +53,7 @@ from hyperloom_multibranch.toolbox.tests.test_toolbox_kinds_gpu import CARDS, MO
 #: The artifact test's skips, and its autouse fixture that sets the process environment, apply to the tests here too.
 pytestmark = test_kernel_artifact_gpu.pytestmark
 workload_environment = test_kernel_artifact_gpu.workload_environment
+USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 
 MODEL_TABLE = Path(DEFAULT_CONFIGS) / "model_configs" / "qwen3_8b_bf16_tuned_gemm.csv"
 #: What a row of a bf16 table is told apart by; the test's own reading of the image's tables, not the toolbox's.
@@ -186,8 +191,8 @@ async def test_rows_put_with_rows_only_are_read_over_the_image_tables_and_overri
         "the by-hand count of the hit lines of the rows put"
     )
     assert 1 <= hits.rows_hit <= len(rows) and len(result.runtime_findings) == 1
-    assert Path(base["merge_dir"]) in {Path(name).parent for name in _named_tables(facts["lookups"])}
-    assert base["merge_isolation"] == PRIVATE and base["isolation"] == "private_copies"
+    _assert_merged_view_is_the_tests_own(base, facts["lookups"])
+    assert base["isolation"] == "private_copies"
     assert base["framework_base_changed"] is False and base["matches_session"] is True
     assert tree_files(Path(DEFAULT_CONFIGS)) == tables_before, "the shared tables are as they were"
     assert tree_files(AITER_MERGE_DIR) == merged_before, "nothing reached /tmp/aiter_configs"

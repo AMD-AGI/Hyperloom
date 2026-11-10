@@ -29,7 +29,6 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -87,6 +86,8 @@ from hyperloom_multibranch.scheduling.settings import (
     Workload,
 )
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
+from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
+from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
 
 #: What the session's launcher sets to name the image the session runs on.
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
@@ -663,30 +664,17 @@ def test_a_benchmark_yaml_the_operator_names_exits_two(
     assert not any(tmp_path.iterdir())
 
 
-def _magpie(monkeypatch: pytest.MonkeyPatch, **pin: str) -> None:
-    """The installed Magpie's InferenceX module: ``pin`` its ``INFERENCEX_DEFAULT_REF`` (absent when empty), its
-    project at the checkout's root."""
-
-    magpie = SimpleNamespace(**pin, resolve_inferencex_root=str)
-    monkeypatch.setattr(local_peers, "_magpie_inferencex", lambda: magpie)
-
-
 @pytest.fixture
 def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
-    """No Experience KB, no Recipe KB, the launcher's image named, the shipped tool pins, an InferenceX checkout that is
-    also the one a Magpie pinning an AgentX commit runs on, a model the price sheet lists, a writable RSI archive
-    outside the test's workspace, and the framework's package installed in the image."""
+    """No Experience KB, no Recipe KB, the launcher's image named, the InferenceX client staged in the application's
+    tool cache, a model the price sheet lists, a writable RSI archive outside the test's workspace, and the
+    framework's package installed in the image."""
 
-    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", "MAGPIE_REF", "INFERENCEX_REF"):
+    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     for name, value in zip(IMAGE_VARS, IMAGE):
         monkeypatch.setenv(name, value)
-    inferencex = tmp_path_factory.mktemp("InferenceX")
-    (inferencex / "benchmarks").mkdir()
-    (inferencex / "benchmarks" / "benchmark_lib.sh").write_text("")
-    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
-    monkeypatch.setenv("MAGPIE_INFERENCEX_PATH", str(inferencex))
-    _magpie(monkeypatch, INFERENCEX_DEFAULT_REF="4" * 40)
+    verified_tool_cache(tmp_path_factory.mktemp("inference-suite-tools"), monkeypatch)
     monkeypatch.delenv("KB_STORE_URL", raising=False)
     monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL)
@@ -827,33 +815,19 @@ def test_an_image_check_mode_that_is_no_mode_exits_two_before_creating_anything(
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
-def test_tool_pins_that_cannot_be_read_fail_loudly_before_creating_anything(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("workload", [WORKLOAD_ARGS, AGENTX_ARGS], ids=["inferencex", "agentx"])
+def test_a_tool_cache_without_the_staged_client_fails_loudly_before_creating_anything(
+    workload: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv("MAGPIE_REF", "main")
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+    monkeypatch.setenv(TOOL_CACHE_ENV, str(tmp_path / "no-tools"))
 
-    assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
+    assert cli.main(["run", *workload]) == cli.EXIT_FAILED
 
     captured = capsys.readouterr()
-    assert "measurement pins" in captured.err and "MAGPIE_REF" in captured.err
+    assert f"no inference_suite staging that verifies is in {tmp_path / 'no-tools'}" in captured.err
     assert captured.out == ""
-    assert not any(tmp_path.iterdir())
-
-
-@pytest.mark.usefixtures("ready_environment", "agent_cli")
-def test_an_agentx_run_on_a_magpie_that_pins_no_inferencex_commit_fails_loudly_before_creating_anything(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    _magpie(monkeypatch)
-
-    assert cli.main(["run", *AGENTX_ARGS]) == cli.EXIT_FAILED
-
-    captured = capsys.readouterr()
-    assert "INFERENCEX_DEFAULT_REF" in captured.err and "MAGPIE_REF" in captured.err
-    assert captured.out == ""
-    assert not any(tmp_path.iterdir())
+    assert not (tmp_path / "workspace").exists()
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
@@ -867,7 +841,7 @@ def test_an_unnamed_image_fails_loudly_before_creating_anything(
     assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
 
     captured = capsys.readouterr()
-    assert "measurement pins" in captured.err and all(name in captured.err for name in IMAGE_VARS)
+    assert "measurement image cannot be pinned" in captured.err and all(name in captured.err for name in IMAGE_VARS)
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
 

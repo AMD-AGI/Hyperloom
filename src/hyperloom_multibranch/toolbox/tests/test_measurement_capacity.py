@@ -68,7 +68,7 @@ def _local_toolbox(
         LocalSession(session, "run-1", cards, hostname=NODE),
         blackboard,
         AcceptanceSetup(FakeRepo(), PointPlanner(_point(tmp_path)), IMAGE, WorkloadKind.AGENTX),
-        spec_context(tmp_path, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")),
+        spec_context(tmp_path, blob_root=str(session / "hosted" / "blobs")),
         options=options,
     )
 

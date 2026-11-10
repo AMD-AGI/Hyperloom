@@ -57,12 +57,8 @@ from hyperloom.common.gain_math import (
     AGENTX_ERROR_RATE_THRESHOLD_PCT,
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
 )
-from hyperloom.inference_optimizer.framework_registry import EXPERT_PARALLEL_FLAGS
-from hyperloom.inference_optimizer.grid_server_args import (
-    merge_server_args,
-    remove_server_args,
-    tokenize_server_args_preserving_json,
-)
+from hyperloom.inference_optimizer.framework_registry import expert_parallel_flag
+from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
     UnsupportedComponentError,
@@ -73,6 +69,7 @@ from hyperloom_multibranch.repo.isolated_git import pinned_git
 from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.worktree import SKIPPED
+from inference_suite.argv import remove_server_args, tokenize_server_args_preserving_json
 
 
 #: What makes a checkout Arbor's, run as a component: the mode, the entry point and the host's contract.
@@ -486,7 +483,7 @@ def server_flags(spec: AgentSpec, resolved: str = "") -> str:
         return args
     named = _flag_names(args)
     added = [] if named & set(tp_flags) else [f"{tp_flags[0]} {spec.tp}"]
-    flag, aliases, _ = EXPERT_PARALLEL_FLAGS[SGLANG]
+    flag, aliases, _ = expert_parallel_flag(SGLANG)
     if spec.framework == SGLANG and spec.ep > 1 and spec.tp % spec.ep == 0 and not named & set(aliases):
         added.append(f"{flag} {spec.ep}")
     return merge_server_args(args, *added)

@@ -5,9 +5,10 @@
 
 Each test submits a ``TestRequest`` to a toolbox built by ``build_local_toolbox`` whose planner is the real
 ``HostedPlanner`` (compile, points, surface check), and reads the result back from the blackboard. Needs SGLang, a model
-directory and an InferenceX checkout; set ``HL_GPU_MODEL``, ``HL_GPU_INFERENCEX`` and ``HL_GPU_OUT`` (an empty
-directory), and optionally ``HL_GPU_CARDS`` (default ``6,7``) and ``HL_GPU_BACKEND`` (``bypass``, the default, or
-``magpie``, which needs the pinned Magpie importable by the GPU venv's python). Anywhere else the module is skipped.
+directory and an InferenceX git repository the runner fetches the client commit inference_suite pins from
+(``inference_suite.pins.INFERENCEX_CLIENT_COMMIT``); set ``HL_GPU_MODEL``, ``HL_GPU_INFERENCEX`` and ``HL_GPU_OUT`` (an
+empty directory), and optionally ``HL_GPU_CARDS`` (default ``6,7``). Anywhere else the module is skipped. Each session
+freezes the base launch a multibranch session of its workload would, so resolving it reads the launch sources.
 The profile test also needs a TraceLens checkout (``TRACELENS_ROOT``), the agent runtime credentials the TraceLens
 skill route runs on, and ``HL_GPU_CARDS`` to be exactly two cards. ``HL_GPU_OUT`` must be on a filesystem that accepts
 ``:`` in file names.
@@ -17,11 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib.util
 import json
 import os
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +36,6 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.inference_optimizer.session import paths as session_paths
-from hyperloom.measure.pins import pinned_tool_commits
 from hyperloom.measure.points import default_canonical
 from hyperloom.measure.profile_traces import PROFILE_DIR
 from hyperloom.measure.spec import DEFAULT_MAX_TOTAL_BYTES
@@ -54,6 +52,7 @@ from hyperloom_multibranch.toolbox.local_hosted import (
     build_local_toolbox,
 )
 from hyperloom_multibranch.toolbox.planner import HostedPlanner
+from hyperloom_multibranch.toolbox.tests.gpu_session import freeze_gpu_session_base, gpu_inputs_missing
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, req
 from hyperloom_multibranch.toolbox.tools.op_shares import DEGRADED_NOTICE
@@ -62,24 +61,20 @@ MODEL = os.environ.get("HL_GPU_MODEL", "")
 INFERENCEX = os.environ.get("HL_GPU_INFERENCEX", "")
 OUT = os.environ.get("HL_GPU_OUT", "")
 CARDS = [int(card) for card in os.environ.get("HL_GPU_CARDS", "6,7").split(",")]
-BACKEND = os.environ.get("HL_GPU_BACKEND", "bypass")
-#: A baseline test always evaluates accuracy. On Magpie that is InferenceX's lm-eval step, which pip-installs a pinned
-#: lm-eval with ``--break-system-packages``, an option the GPU venv's pip refuses: the Magpie sweep is a health test.
-SWEEP_PURPOSE = Purpose.HEALTH if BACKEND == "magpie" else Purpose.BASELINE
-#: Magpie holds a server across rounds only for its own benchmark scripts, which a point names through its GPU type.
-CANONICAL_OPTIONS = {"gpu_type": "mi355x"} if BACKEND == "magpie" else {}
 USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("sglang") is None or not Path(MODEL).is_dir() or not Path(INFERENCEX, ".git").exists(),
-    reason="needs SGLang, HL_GPU_MODEL and HL_GPU_INFERENCEX (a git checkout)",
+    gpu_inputs_missing(MODEL, INFERENCEX, OUT),
+    reason="needs SGLang, HL_GPU_MODEL, HL_GPU_OUT and HL_GPU_INFERENCEX (a git checkout holding inference_suite.pins.INFERENCEX_CLIENT_COMMIT)",
 )
 
 LEVELS = (4, 16, 64)
 EVAL_LIMIT = "60"
 TARGET = "launch_server.py"
 READY_LINE = "The server is fired up and ready to roll"
+#: The log of the one server a sweep arm shares; each round's ``server.log`` is the slice of it the round ran over.
+ARM_LOG = "server_arm/server.log"
 FLEXIBLE = "exact_match,flexible-extract"
-_WORKLOAD = {"FRAMEWORK": "sglang", "ISL": "256", "OSL": "64", "INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP": "1"}
+_WORKLOAD = {"FRAMEWORK": "sglang", "ISL": "256", "OSL": "64"}
 _CLEARED = ("CONC", "RUN_EVAL", "TP", "EP", "PORT", "MAX_MODEL_LEN", "PRECISION", "RANDOM_RANGE_RATIO")
 
 
@@ -88,7 +83,7 @@ def workload_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     """The process environment the canonical point and the request points are rendered from."""
     for name in _CLEARED:
         monkeypatch.delenv(name, raising=False)
-    for name, value in {**_WORKLOAD, "MAGPIE_EVAL_LIMIT": EVAL_LIMIT, "USER_DATA_PATH": str(tmp_path)}.items():
+    for name, value in {**_WORKLOAD, "HYPERLOOM_EVAL_LIMIT": EVAL_LIMIT, "USER_DATA_PATH": str(tmp_path)}.items():
         monkeypatch.setenv(name, value)
 
 
@@ -111,9 +106,6 @@ def _toolbox(
 ) -> tuple[LocalHostedToolbox, LocalBlackboard, LocalBlobStore]:
     """The toolbox of one test; ``config_path`` names another workload than the shipped baseline (an AgentX one)."""
     session = root / "session"
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=INFERENCEX, capture_output=True, text=True, check=True
-    ).stdout.strip()
     blobs = LocalBlobStore(session / "hosted" / "blobs")
     compiler = EnvironmentCompiler(blobs, IMAGE)
     canonical = default_canonical(
@@ -121,7 +113,6 @@ def _toolbox(
         primary_concurrency=primary,
         config_path=config_path or default_baseline_config(),
         model_path=MODEL,
-        **CANONICAL_OPTIONS,
         **materialize,
     )
     blackboard = LocalBlackboard(root / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
@@ -129,14 +120,12 @@ def _toolbox(
         image_ref="local",
         image_digest=IMAGE,
         gpu_type="MI355X",
-        magpie_commit=pinned_tool_commits().magpie if BACKEND == "magpie" else "a" * 40,
-        inferencex_commit=commit,
         blobs=blobs,
         process_environ={},
         platform_env={},
-        benchmark_backend=BACKEND,
         blob_root=str(blobs.root),
     )
+    freeze_gpu_session_base(session, MODEL, spec.gpu_type, tp=tp, conc=primary)
     toolbox = build_local_toolbox(
         LocalSession(session, name, CARDS, tp=tp),
         blackboard,
@@ -203,7 +192,7 @@ async def test_a_concurrency_sweep_is_one_server_and_one_round_per_level() -> No
     root = _run_root("sweep")
     toolbox, blackboard, *_ = _toolbox(root, "kinds-sweep")
     try:
-        request = req(purpose=SWEEP_PURPOSE, change=RecipeDelta(), concurrency=LEVELS)
+        request = req(purpose=Purpose.BASELINE, change=RecipeDelta(), concurrency=LEVELS)
         request_id, result, landed = await _submit(toolbox, blackboard, request, root)
         measured = [r for r in result.rounds if r.phase == "measure"]
         logs = sorted(landed.rglob("server*.log"))
@@ -218,7 +207,9 @@ async def test_a_concurrency_sweep_is_one_server_and_one_round_per_level() -> No
             pid_files=pid_files,
         )
         assert sorted(r.concurrency for r in measured) == sorted(LEVELS)
-        assert sum(ready.values()) == 1, f"one server start for the arm, saw {ready}"
+        arm_log = (landed / ARM_LOG).read_text(errors="replace")
+        assert ready[ARM_LOG] == 1, f"one server start for the arm, saw {ready}"
+        assert all(p.read_text(errors="replace") in arm_log for p in logs), "every round's log is a slice of the arm's"
     finally:
         await toolbox.close()
 
