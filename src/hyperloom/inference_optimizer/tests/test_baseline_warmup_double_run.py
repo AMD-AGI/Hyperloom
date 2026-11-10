@@ -132,6 +132,9 @@ def _cold_then_hot_fake_run(
     clock: _AClockOnlyThePassesMove | None = None,
     boot_sec: float = 0.0,
     benchmark_sec: float = 0.0,
+    warmup_tput: float = _COLD_TPUT,
+    measure_tput: float = _HOT_TPUT,
+    warmup_accuracy: float | None = None,
 ):
     """Return a ``run_with_session_kill`` stand-in that emits a cold throughput on its first call and a hot throughput thereafter."""
     state = {"calls": 0}
@@ -146,7 +149,8 @@ def _cold_then_hot_fake_run(
             cfg_idx = cmd.index("--benchmark-config")
             cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
             captured.append(cfg)
-        tput = _COLD_TPUT if state["calls"] == 0 else _HOT_TPUT
+        is_warmup = state["calls"] == 0
+        tput = warmup_tput if is_warmup else measure_tput
         if clock is not None:
             server_log_path = kwargs.get("server_log_path")
             if state["calls"] == 0:
@@ -156,7 +160,11 @@ def _cold_then_hot_fake_run(
                     stamp_server_ready(server_log_path, boot_sec)
             clock.advance(benchmark_sec)
         state["calls"] += 1
-        _fake_workspace(slot, tput=tput)
+        workspace = _fake_workspace(slot, tput=tput)
+        if is_warmup and warmup_accuracy is not None:
+            (workspace / "results_gsm8k.json").write_text(
+                json.dumps({"results": {"gsm8k": {"exact_match,strict-match": warmup_accuracy}}})
+            )
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     return fake_run, state
@@ -1512,6 +1520,44 @@ def test_baseline_double_run_by_default(tmp_path, monkeypatch):
     assert "baseline_double_run_discarded_first" in result["nonfatal_warnings"]
     assert captured[0]["benchmark"]["server_lifecycle"]["cleanup"] is False
     assert captured[1]["benchmark"]["server_lifecycle"]["cleanup"] is True
+
+
+def test_genuine_baseline_keeps_the_higher_stock_anchor_after_downward_drift(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    fake_run, state = _cold_then_hot_fake_run(warmup_tput=544.38, measure_tput=333.71, warmup_accuracy=0.96)
+    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
+    ctx.task.kind = "baseline"
+
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
+        result = _run(_executor(base, tmp_path)(ctx))
+
+    assert state["calls"] == 2
+    assert result["status"] == "succeeded"
+    assert result["output_throughput"] == pytest.approx(544.38)
+    assert result["measure_round_rejected"]["output_throughput"] == pytest.approx(333.71)
+    assert result["measure_round_rejected"]["delta_pct"] == pytest.approx(-38.7, abs=0.01)
+    assert "baseline_downward_drift_anchor" in result["nonfatal_warnings"]
+    assert not result.get("measure_round_dropped")
+    assert (tmp_path / "ws" / "measure_round").is_dir()
+
+
+def test_quality_ref_exempt_baseline_keeps_its_measured_candidate(tmp_path):
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    fake_run, state = _cold_then_hot_fake_run(warmup_tput=544.38, measure_tput=333.71)
+    ctx = _make_ctx(
+        {"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x", "quality_ref_exempt": True}
+    )
+    ctx.task.kind = "baseline"
+
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
+        result = _run(_executor(base, tmp_path)(ctx))
+
+    assert state["calls"] == 2
+    assert result["status"] == "succeeded"
+    assert result["output_throughput"] == pytest.approx(333.71)
+    assert "measure_round_rejected" not in result
 
 
 def test_replay_warm_recipe_double_run_forces_warmup_eval(tmp_path):
