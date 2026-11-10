@@ -62,8 +62,9 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
     replaced,
 )
 from hyperloom_multibranch.blackboard.rsi.session import NO_PLAYBOOK_PLAYED, STOP_AUDIT_REPORT, WRITTEN
-from hyperloom_multibranch.blackboard.tools import CODE_TITLE, SETTINGS_TITLE
+from hyperloom_multibranch.blackboard.tools import CODE_TITLE, MAP_TITLE, SETTINGS_TITLE
 from hyperloom_multibranch.scheduling import lifecycle
+from hyperloom_multibranch.scheduling.agent_map import JUDGE_RULE
 from hyperloom_multibranch.scheduling.explore import PLAYBOOK_FALLBACK_REASON, PLAYBOOK_OPEN_CUT_REASON
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
 from hyperloom_multibranch.scheduling.judge_prompt import (
@@ -531,6 +532,49 @@ async def test_refills_the_judge_names_no_focus_for_take_the_open_areas_in_turn_
     assert cuts and all(detail["no_open_area"] and (detail["requested"], detail["opened"]) == (1, 0) for detail in cuts)
     rows = _rounds(stage)[-1]
     assert (rows["b02"]["focus"], rows["b03"]["focus"]) == ("moe_gemm", "attention")
+
+
+async def test_a_refill_leaves_the_op_a_running_arbor_branch_holds_and_its_brief_and_the_judge_read_the_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    moe = {"id": "m-moe", "kind": "increment", "title": "MoE: expert GEMMs", "status": "open", "why": "moe_gemm 41.5 %"}
+    fp8 = {"id": "m-fp8", "kind": "increment", "title": "FP8 weights", "status": "killed", "why": "root is BF16"}
+    map_file, share = tmp_path / "directions.json", tmp_path / "share-1.json"
+    map_file.write_text(json.dumps({"directions": [moe, fp8]}))
+    share.write_text(json.dumps({"directions": [moe]}))
+
+    async def split(agents: tuple[str, ...], map_file: str, work_dir: Path, *_given: object) -> tuple[str, ...]:
+        return (str(share),)
+
+    monkeypatch.setattr(lifecycle, "agent_plans", split)
+    stage = _focused_stage(tmp_path, monkeypatch, PlaybookJudge(opening=1, refill=1))
+    stage.settings = replace(
+        stage.settings, agents=("/agents/arbor",), agent_directions=str(map_file), review_gate=False
+    )
+    briefs: dict[str, str] = {}
+
+    async def briefed(branch: str) -> None:
+        if branch not in briefs:
+            briefs[branch] = await stage.briefs.text(branch, stage.sessions.started[branch])
+
+    stage.steps = {"b03": briefed}
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    focus = await _lineage_focus(stage)
+    assert (focus["b01"], focus["b02"], focus["b03"]) == ("", "", "attention")
+    assert "moe_gemm" not in focus.values()
+    entries = [
+        "- m-moe (held by b01): MoE: expert GEMMs",
+        "- m-fp8 (set aside, killed): FP8 weights",
+        "  why: root is BF16",
+    ]
+    assert MAP_TITLE in briefs["b03"] and all(line in briefs["b03"].splitlines() for line in entries)
+    steering = [prompt for prompt in _judge_prompts(stage) if not _judge_state(prompt)["opening"]]
+    assert steering and all(JUDGE_RULE in prompt for prompt in steering)
+    assert all(line in prompt.splitlines() for prompt in steering for line in entries)
+    assert all("moe_gemm, worked on by b01 (Arbor, m-moe)" in prompt for prompt in steering)
 
 
 async def test_with_no_op_left_open_only_the_refill_the_judge_names_opens_on_the_profile_op_its_text_names(

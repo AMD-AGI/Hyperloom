@@ -488,7 +488,7 @@ def is_allowed_external_env_key(key: object) -> bool:
     upper = str(key or "").strip().upper()
     if not valid_env_key(upper) or upper in BLOCKED_EXTERNAL_ENV_NAMES:
         return False
-    return not is_secret_shaped_env_name(upper)
+    return not is_credential_name(upper)
 
 
 def is_allowed_variant_env_key(key: object) -> bool:

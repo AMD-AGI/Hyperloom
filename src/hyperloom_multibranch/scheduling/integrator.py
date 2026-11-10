@@ -3,10 +3,13 @@
 
 """The integrator: carries specialist commits onto the integration branch, in rounds of up to K merge tests.
 
-Candidates are the blackboard's committed specialist commits, in the order it gives them (foundation fixes first, then
-by their own gain), whatever became of the branch that made them. Each is tried once per integration head, until it
-is merged or found already on the head, except that one the rule gate measured as not stackable waits until a later
-merge changes something its own change names: see :mod:`hyperloom_multibranch.scheduling.candidates`. A round
+Candidates are the blackboard's committed specialist commits, whatever became of the branch that made them: those no
+merge attempt took yet, then those coming back, each in the order the blackboard gives them (foundation fixes first,
+then by their own gain). Each is tried once per integration head, until it is merged or found already on the head,
+except that one the rule gate measured as not stackable waits until a later merge changes something its own change
+names, and is not offered again once measured not stackable on
+:data:`~hyperloom_multibranch.scheduling.candidates.NOT_STACKABLE_ANSWERS` heads; the merge-log entry of the answer
+that reaches the cap says so. See :mod:`hyperloom_multibranch.scheduling.candidates`. A round
 tests up to the integration branch's K candidates at once on the same head, and a slot it had nothing to fill takes
 the first commit committed while it runs rather than standing idle until the round ends; the round ends its tests in
 the order it started them, and the first of them that
@@ -88,7 +91,7 @@ from hyperloom_multibranch.blackboard.knowledge.warm_start import ChampionOutcom
 from hyperloom_multibranch.blackboard.rsi.stranded import StrandedLead
 from hyperloom_multibranch.rulegate.agentx import BELOW_THRESHOLD
 from hyperloom_multibranch.rulegate.inferencex import GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED
-from hyperloom_multibranch.scheduling.candidates import Candidates
+from hyperloom_multibranch.scheduling.candidates import NOT_STACKABLE_ANSWERS, Candidates, no_longer_offered
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.contracts.llm import STOPPED_AT_MAX_TOKENS, Completion, CompletionFailed, CompletionReply
@@ -101,6 +104,8 @@ ALREADY_ON_HEAD = "its change is already on the integration head"
 ADOPTING_LEAD = "adopting the lead of {}"
 #: How a bundle's reason begins, naming its members.
 BUNDLING = "a bundle of {}"
+#: Ends the reason of a not-stackable merge that took one of its commits to the cap, naming them.
+NOT_OFFERED_AGAIN = f"not offered again, not stackable on {NOT_STACKABLE_ANSWERS} integration heads"
 #: The fewest commits a merge test carries together as a bundle.
 BUNDLE_MIN_MEMBERS = 2
 #: A patch the three-way rebase could not settle and the resolver's answer did not resolve either.
@@ -740,6 +745,7 @@ class Integrator:
         reason = not_stackable_reason(judgement, foundation_fix=report.foundation_fix)
         if reason:
             await self._blackboard.write_judgement(str(report.request_id), judgement, Conclusion.NOT_STACKABLE)
+            reason += await self._no_longer_offered(report.sources)
             return self._logged_failure(replace(report, outcome=MergeOutcome.NOT_STACKABLE, reason=reason))
         if superseded:
             return self._logged(replace(report, reason=SUPERSEDED))
@@ -748,6 +754,16 @@ class Integrator:
             return self._logged_failure(replace(report, reason=failed))
         self._recording = asyncio.ensure_future(self._record_merge(report, tested.delta, judgement))
         return await asyncio.shield(self._recording)
+
+    async def _no_longer_offered(self, sources: Sequence[str]) -> str:
+        """The end of a not-stackable merge's reason that names those of ``sources`` it took to the cap, if any."""
+
+        capped = [
+            commit.commit_id
+            for commit in await self._blackboard.committed()
+            if commit.commit_id in sources and no_longer_offered(commit)
+        ]
+        return f"; {NOT_OFFERED_AGAIN}: {', '.join(capped)}" if capped else ""
 
     async def _regression_failure(self, report: MergeReport, delta: RecipeDelta) -> str:
         outcome = await self._regression.check(report.onto, delta, sources=report.sources)
@@ -929,6 +945,7 @@ __all__ = [
     "CONFLICT_UNRESOLVED",
     "FOUNDATION_FIX_VERDICTS",
     "GAIN_ONLY_REFUSALS",
+    "NOT_OFFERED_AGAIN",
     "RESOLVER_ATTEMPTS",
     "RESOLVER_UNREACHED",
     "RESOLVER_UNREACHED_RETRIES",

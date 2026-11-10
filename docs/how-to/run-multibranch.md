@@ -80,8 +80,8 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
   moves it (the same stack on GLM-5.3 TP4/EP4 gained +1.8% total per GPU at conc 4 and +7–14% at conc 8–16). The
   bar and guards are read from the code, so a resumed session judges by the current rule. The manifest records the
   objective, so a resumed session keeps it; the frontier, FINAL, the dashboard, `MB-report.md` and the Recipe KB record
-  (`total_throughput_gain_pct`) all read that metric. Each Arbor is told to optimize it (`opt_objective`); a
-  P50 session needs Arbor `9c455df` or later, a `total_token_throughput` one `df9b55a` or later.
+  (`total_throughput_gain_pct`) all read that metric. Each Arbor is given it with its bar and guards (`opt_objective`),
+  which needs Arbor `29c72f9` or later.
 - **Base launch:** `--reference-script FILE`, a shell launch script or a base launch record frozen elsewhere, as for
   `hyperloom optimize`; the session freezes it as its base, a record without reading any recipe source, and every
   Arbor is served the frozen base. Without it the base comes from the recipe sources.
