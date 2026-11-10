@@ -22,8 +22,8 @@ Arbor looks a dossier up. The root's op shares are not the adapter's: the prefli
 ``component.profile`` for Arbor as for any agent run as a component
 (:func:`~hyperloom_multibranch.specialist.agent_onboarding.component_config`).
 
-The spec's ``launch``, a launch file (:func:`read_launch`), stands in for what MB does not carry yet: the launch a
-Magpie AgentX recipe resolves from InferenceX, of which the root recipe holds only what is added to it. Without one,
+The spec's ``launch``, a launch file (:func:`read_launch`), stands in for what MB does not carry yet: the launch an
+AgentX recipe resolves from InferenceX, of which the root recipe holds only what is added to it. Without one,
 an AgentX branch is refused before Arbor starts, which would otherwise serve defaults MB does not measure.
 
 The spec's ``review`` hands Arbor's human review gate over: Arbor waits at the start of a new
@@ -106,7 +106,7 @@ EVAL_ENVS = (ACCURACY_FLOOR_ENV, "GSM8K_LIMIT")
 #: How each of MB's rules starts among Arbor's ``directives``, which every agent reads in its program and the dossier
 #: copies into part 4's rules table (Arbor's docs/hosts.md, the config's ``directives``).
 HOST_RULE = "Host rule (MB)"
-#: The workload kind whose recipe Magpie resolves, the root's launch holding only what is added to it.
+#: The workload kind whose recipe the round resolves, the root's launch holding only what is added to it.
 AGENTX = "agentx"
 #: SGLang reads its TP from these flags only. Arbor gives vLLM its TP itself, but MB names it too, so a vLLM branch's
 #: server_flags are never empty, which Arbor refuses (a plain baseline root has no launch of its own).
@@ -193,7 +193,7 @@ class SplitFailed(RuntimeError):
 class ResolvedLaunch:
     """A server's launch as the recipe's framework resolves it: its ``server_flags`` and ``server_env``, the
     ``model_name`` the server answers to and ``client``, the gate's client, each ``""`` when not given. The recipe's
-    own launch is added to it, as Magpie adds a root recipe's ``extra_server_args`` and ``extra_envs``."""
+    own launch is added to it, as a round adds a root recipe's ``extra_server_args`` and ``extra_envs``."""
 
     server_flags: str = ""
     server_env: Mapping[str, str] = field(default_factory=dict)
@@ -490,13 +490,13 @@ def server_flags(spec: AgentSpec, resolved: str = "") -> str:
 
 
 def _launch_refusals(spec: AgentSpec) -> list[str]:
-    """Why ``spec``'s branch cannot serve what MB measures: an AgentX recipe's launch, which holds only what Magpie
-    adds to the one it resolves from InferenceX, given without that launch."""
+    """Why ``spec``'s branch cannot serve what MB measures: an AgentX recipe's launch, which holds only what the
+    round adds to the one it resolves from InferenceX, given without that launch."""
 
     if spec.workload.get("kind") != AGENTX or spec.launch:
         return []
     return [
-        "an AgentX recipe's launch holds only what Magpie adds to the one it resolves from InferenceX, so Arbor would"
+        "an AgentX recipe's launch holds only what the round adds to the one it resolves from InferenceX, so Arbor would"
         " serve defaults MB does not measure: give the resolved launch with --agent-launch"
         " (examples/multibranch-arbor-launch)"
     ]
