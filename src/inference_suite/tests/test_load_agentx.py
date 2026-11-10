@@ -48,6 +48,8 @@ _FAKE_HARNESS = textwrap.dedent(
         shutil.copy(os.environ["FAKE_EXPORT"], os.path.join(artifacts, "profile_export.jsonl"))
         print(os.environ.get("FAKE_LOG", "replayed"))
         sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
+    with open(os.environ["FAKE_CALLS"] + ".aggregator_tp", "w") as seen:
+        seen.write(os.environ.get("TP", ""))
     target = os.path.join(os.environ["RESULT_DIR"], os.environ["RESULT_FILENAME"] + ".json")
     shutil.copy(os.environ["FAKE_AGGREGATE"], target)
     """
@@ -220,6 +222,13 @@ def test_run_replays_then_aggregates_and_keeps_counts_that_agree(tmp_path, harne
     assert result.latency_seconds["ttft_p99"] == 2.0 and result.e2e_norm_intvty["p50"] == 0.1
     assert not result.stopped_by_threshold and not result.fast_mode
     assert result.request_export == "client/aiperf_artifacts/profile_export.jsonl"
+
+
+def test_the_aggregator_divides_per_gpu_throughput_by_the_cards_the_server_holds(tmp_path, harness):
+    config = _config(tmp_path)
+    config = replace(config, server=replace(config.server, gpus=(4, 5)))
+    run_agentx(_round(tmp_path, harness, config))
+    assert (tmp_path / "calls.jsonl.aggregator_tp").read_text() == "2"
 
 
 def test_counts_that_disagree_with_the_aggregate_fail_the_output(tmp_path, harness):

@@ -35,7 +35,7 @@ from inference_suite.contracts.config import AGENTX_FAST_MODE_ENV, AgentxWorkloa
 from inference_suite.contracts.launch import ClientInvocation
 from inference_suite.contracts.layout import RunLayout
 from inference_suite.contracts.report import AgentxResult, FailedStep, ReportError
-from inference_suite.load import exit_stop, inherited_env, read_result
+from inference_suite.load import exit_stop, inherited_env, read_result, server_tp
 from inference_suite.load.fixed import OutputActivity
 from inference_suite.runtime.phases import Phase, PhaseClock
 from inference_suite.runtime.process import spawn
@@ -360,6 +360,7 @@ def _aggregator_env(agentx_round: AgentxRound, layout: RunLayout) -> dict[str, s
         "KV_OFFLOADING": "none",
         "CONC": str(_workload(config).concurrency),
         "MODEL": config.server.served_model_name,
+        "TP": server_tp(config.server),
     }
 
 
