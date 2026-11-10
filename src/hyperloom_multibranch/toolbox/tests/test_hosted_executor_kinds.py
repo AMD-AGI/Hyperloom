@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
@@ -15,6 +14,7 @@ from hyperloom.contracts.measurement import AccuracyValue, SandboxFacts, TestKin
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.tests.fake_runner import REPORT_PATH
+from hyperloom.measure.tests.run_dirs import write_run_dir
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
 from hyperloom_multibranch.contracts.blackboard.records import TestRecord
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
@@ -133,7 +133,7 @@ def _points(tmp_path: Path, *levels: int) -> tuple[Path, ...]:
 )
 async def test_several_points_or_a_sweep_request_run_as_one_server_arm(tmp_path, kind, levels, prep) -> None:
     backend = _Capture()
-    executor = HostedExecutor(backend, tmp_path)  # type: ignore[arg-type]
+    executor = HostedExecutor(backend, tmp_path / "session")  # type: ignore[arg-type]
     accepted = AcceptedMeasurement(None, _points(tmp_path, *levels))  # type: ignore[arg-type]
     await executor.run(TestJob(req(kind=kind).accepted("b1-000001"), 1, (), 2, 2, accepted))
     (seen,) = backend.calls
@@ -141,14 +141,8 @@ async def test_several_points_or_a_sweep_request_run_as_one_server_arm(tmp_path,
 
 
 def _round(tmp_path: Path, name: str, throughput: float) -> Path:
-    path = tmp_path / name / REPORT_PATH
-    path.parent.mkdir(parents=True)
-    report = {
-        "success": True,
-        "throughput": {"output_throughput": throughput, "completed_requests": 64, "num_prompts": 64},
-    }
-    path.write_text(json.dumps(report))
-    return path.parent
+    fixed = {"output_throughput": throughput, "completed_requests": 64, "requested_requests": 64}
+    return write_run_dir((tmp_path / name / REPORT_PATH).parent, fixed)
 
 
 def test_a_sweep_yields_one_measured_value_per_level_with_its_concurrency(tmp_path: Path) -> None:

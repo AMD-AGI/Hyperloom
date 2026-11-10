@@ -53,7 +53,7 @@ from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.framework.base import SESSION_SNAPSHOT_DIR, framework_envs, image_configs
-from hyperloom.measure.local_templates import image_env, local_runner_template
+from hyperloom.measure.local_templates import host_hf_env, image_env, local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
@@ -111,6 +111,7 @@ __all__ = [
     "MAX_CARDS_PER_NODE",
     "build_local_toolbox",
     "host_tool_repos",
+    "runner_cache_dir",
     "private_jit_store",
 ]
 
@@ -121,9 +122,9 @@ JIT_STORE_ENV = "HYPERLOOM_JIT_STORE"
 #: The shared compiled-code cache below this host's temporary directory when neither the options nor the environment
 #: name one, followed by ``-<uid>``: each account on the host keeps its own.
 DEFAULT_JIT_STORE = "hyperloom-jit-store"
-#: The variables that name where a runner clones the tools its tests run (InferenceX, Magpie) from. A local runner starts
-#: from an emptied environment, so :func:`host_tool_repos` carries them from this host's.
-HOST_TOOL_REPO_ENVS: Final = ("INFERENCEX_REPO", "MAGPIE_REPO")
+#: The variables that name where a runner clones the tools its tests run (InferenceX) from. A local runner starts from an
+#: emptied environment, so :func:`host_tool_repos` carries them from this host's.
+HOST_TOOL_REPO_ENVS: Final = ("INFERENCEX_REPO",)
 _SANDBOXES = "sandboxes"
 _BRANCH_SANDBOXES = "branch-sandboxes"
 _RULE_PACK = "rule-pack"
@@ -256,7 +257,7 @@ class LocalOptions:
 
     ``policy`` is the quota and priority policy; its ``global_concurrency`` is lowered to ``8 // tp`` when higher.
     ``runner_envs`` add to the image's variables the runner template carries (for example ``INFERENCEX_REPO``) and win
-    over the same name in the host's ``INFERENCEX_REPO`` and ``MAGPIE_REPO``, which the template carries when set.
+    over the same name in the host's ``INFERENCEX_REPO``, which the template carries when set.
     ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted. ``python`` is the interpreter the
     runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
     infrastructure retries per test before it ends as ``measurement_failed``, ``infra_backoff_seconds`` the wait before
@@ -377,33 +378,37 @@ def aiter_builds_missing(runner_envs: Mapping[str, str]) -> str | None:
 def host_tool_repos(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """The variables of :data:`HOST_TOOL_REPO_ENVS` that ``environ`` (this process's by default) sets to a value.
 
-    A local runner does not inherit the host's environment, yet it clones InferenceX and Magpie from the repositories
-    these name: without them a session whose commit exists only in a local mirror fails at the runner's start. Hosted
-    (sandbox) runners get theirs from their own template and never from here.
+    A local runner does not inherit the host's environment, yet it clones InferenceX from the repository these name:
+    without them a session whose commit exists only in a local mirror fails at the runner's start. Hosted (sandbox)
+    runners get theirs from their own template and never from here.
     """
     source = os.environ if environ is None else environ
     return {name: source[name] for name in HOST_TOOL_REPO_ENVS if source.get(name, "").strip()}
 
 
 def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTemplate:
-    """The runner template: the image's variables, the host's tool repositories (:func:`host_tool_repos`), ``runner_envs``
-    over both, and the variable that names the session's rule pack. ``runner_envs`` add to the image's variables, never
+    """The runner template: the image's variables, the host's Hugging Face settings
+    (:func:`~hyperloom.measure.local_templates.host_hf_env`) and tool repositories (:func:`host_tool_repos`),
+    ``runner_envs`` over them, and the variable that names the session's rule pack. ``runner_envs`` add to the image's variables, never
     replace them: without ``ROCM_PATH`` and ``LD_LIBRARY_PATH`` the runner cannot import torch on an image whose ROCm
     libraries are not in the loader's path."""
-    envs = {**image_env(), **host_tool_repos(), **(options.runner_envs or {})}
+    envs = {**image_env(), **host_hf_env(), **host_tool_repos(), **(options.runner_envs or {})}
     template = local_runner_template(f"runner-{session.tp}", gpus=session.tp, python=options.python, envs=envs)
     pack = rule_pack_envs(Path(session.session_dir) / _RULE_PACK)
     return replace(template, envs={**template.envs, **pack})
 
 
-def _shared_dirs(jit_store: Path | None, eval_sets: bool, environ: Mapping[str, str]) -> dict[str, str]:
-    """The host directories the runners are told, by the variable each reads, for the shared stores that are on: the
-    compiled-code cache, and the runner cache the check sets are read from when a check is on (made absolute: a runner
-    starts elsewhere)."""
-    named = {
-        JIT_CACHE_ENV: jit_store,
-        RUNNER_CACHE_ENV: cache_root(environ).expanduser().resolve() if eval_sets else None,
-    }
+def runner_cache_dir(environ: Mapping[str, str]) -> Path:
+    """This host's runner cache as its runners are told it, made absolute: a runner starts elsewhere. It holds the
+    inference_suite staging every test runs and the check sets."""
+    return cache_root(environ).expanduser().resolve()
+
+
+def _shared_dirs(jit_store: Path | None, environ: Mapping[str, str]) -> dict[str, str]:
+    """The host directories the runners are told, by the variable each reads, for the shared stores: the compiled-code
+    cache when it is on, and always the runner cache, which holds the inference_suite staging every test runs. The
+    runner's environment is cleared, so without it a runner reads the default cache, where nothing was published."""
+    named = {JIT_CACHE_ENV: jit_store, RUNNER_CACHE_ENV: runner_cache_dir(environ)}
     return {name: str(path) for name, path in named.items() if path is not None}
 
 
@@ -510,8 +515,7 @@ def build_local_toolbox(
         jit_store=DirJitStore(jit_root),
     )
     template = _runner_template(session, options)
-    eval_sets = acceptance.short_prompts is not None or acceptance.long_context is not None
-    shared_dirs = {**_shared_dirs(jit_root, eval_sets, os.environ), **(native.runner_envs if native else {})}
+    shared_dirs = {**_shared_dirs(jit_root, os.environ), **(native.runner_envs if native else {})}
     acceptance = replace(acceptance, aiter_builds_missing=aiter_builds_missing({**template.envs, **shared_dirs}))
     provider = _provider(session, cards, template, options, shared_dirs)
     backend = started_backend(provider, config)
@@ -520,7 +524,6 @@ def build_local_toolbox(
         backend,
         directory,
         timeout_sec=options.timeout_sec,
-        magpie_python=options.python,
         workload_kind=acceptance.workload_kind,
     )
     toolbox = LocalHostedToolbox(

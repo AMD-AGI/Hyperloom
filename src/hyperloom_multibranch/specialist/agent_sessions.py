@@ -47,7 +47,7 @@ from hyperloom_multibranch.specialist.dossier_pass import (
     DossierStart,
     run_dossier_pass,
 )
-from hyperloom_multibranch.specialist.gate_client import GateClient
+from hyperloom_multibranch.specialist.gate_client import FixedGateClient
 from hyperloom_multibranch.specialist.map_session import MapCalls, MapSession
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions, branch_place
 from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox, claude_config_dir, forwarded_env
@@ -138,7 +138,7 @@ class AgentSessions:
     toolbox: RealToolbox
     repo: ExperimentRepo
     sandboxes: AgentSandboxes | None
-    client: GateClient | None = None
+    client: FixedGateClient | None = None
     dossier: str | None = None
     maps: MapCalls | None = None
     least_run_seconds: float = 0.0
@@ -214,7 +214,7 @@ class AgentSessions:
 
         index = self._taken.setdefault(holder, len(self._taken))
         port = self.spec.port + index * PORTS_PER_AGENT
-        client = "" if self.client is None else self.client.command(port, place.workspace / AGENT_DIR / BENCH_DIR)
+        client = "" if self.client is None else self.client.stage(port, place.workspace / AGENT_DIR / BENCH_DIR)
         return replace(self.spec, port=port, client=client)
 
     def _sandbox(self, holder: str, place: BranchPlace) -> Callable[[BranchLease], AgentSandbox]:

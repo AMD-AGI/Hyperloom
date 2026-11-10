@@ -15,8 +15,9 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestResult, Validity
+from hyperloom.measure import hosted
 from hyperloom.measure.points import AcceptedMeasurement
-from hyperloom.measure.spec import MeasurementSpec, canonical_json
+from hyperloom.measure.spec import SPEC_SCHEMA_V1, MeasurementSpec, canonical_json
 from hyperloom.measure.tests.fake_runner import LEGACY_DECODE_IDENTITY, LEGACY_DECODE_PATH
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
 from hyperloom_multibranch.contracts.gate import ResultUnverified
@@ -83,13 +84,23 @@ async def test_an_output_edited_in_the_archived_bundle_is_still_caught_by_the_si
 async def test_a_sheet_that_carries_decode_pass_is_read_again_when_its_result_is_verified(
     tmp_path: Path, rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    keep = MeasurementSpec.to_bytes
+    build, keep = hosted.build_spec, MeasurementSpec.to_bytes
+
+    def built_then(*args: object, **kwargs: object) -> MeasurementSpec:
+        """The sheet the application built then: v1, measured through Magpie."""
+        document = build(*args, **kwargs).to_document()
+        document["schema"] = SPEC_SCHEMA_V1
+        document["tools"] = {"magpie": {"commit": "a" * 40}, "inferencex": document["tools"]["inferencex"]}
+        del document["procedure"]["base_launch"]
+        document["procedure"]["benchmark_backend"] = "bypass"
+        return MeasurementSpec.from_document(document)
 
     def written_then(self: MeasurementSpec) -> bytes:
         document = json.loads(keep(self))
         document["procedure"]["decode_pass"] = True
         return canonical_json(document).encode()
 
+    monkeypatch.setattr(hosted, "build_spec", built_then)
     monkeypatch.setattr(MeasurementSpec, "to_bytes", written_then)
     # a runner that cannot read the sheet never answers: the short limit ends the attempt instead of the test hanging
     executor = HostedExecutor(rig.backend, tmp_path / "session", timeout_sec=30)

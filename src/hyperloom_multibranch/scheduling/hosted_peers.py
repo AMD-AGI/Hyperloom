@@ -85,7 +85,7 @@ def load_hosted_peers(workload: Workload, inputs: ToolboxInputsFor) -> PeerFacto
     describe; raises :class:`~hyperloom_multibranch.scheduling.peers.PeersUnavailable` as
     :func:`~hyperloom_multibranch.scheduling.local_peers.load_peers` does, for the same reasons. Creates nothing."""
 
-    return peers_on(measurement_host(os.environ, workload, HostedSandboxes(inputs)), workload)
+    return peers_on(measurement_host(os.environ, HostedSandboxes(inputs)), workload)
 
 
 def runner_cache_pin(source: Path, sha: str, cache_root: Path, target: WheelTarget) -> str:

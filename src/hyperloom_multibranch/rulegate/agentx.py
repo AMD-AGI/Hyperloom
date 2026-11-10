@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
-    AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_DURATION,
     GRADED_ERROR_RATE,
     GRADED_INTVTY,
@@ -26,6 +25,8 @@ from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok
 from hyperloom_multibranch.rulegate.readings import GRADED_SHORT_REQUESTS
 
+#: The P50 interactivity gain that keeps a change.
+P50_BAR_PCT = 3.0
 P50_BELOW_THRESHOLD = "p50_gain_below_threshold"
 # Failing more requests than the parent is a defect of the candidate a repair can look at; the other reasons
 # ``incomparability_reason`` gives mean the pair did not measure the same work. Only unserved requests count: a short
@@ -57,7 +58,7 @@ class _Reading:
 
     @property
     def cleared(self) -> bool:
-        return self.gain >= AGENTX_KEEP_P50_THRESHOLD_PCT
+        return self.gain >= P50_BAR_PCT
 
     @property
     def blocked(self) -> bool:
@@ -111,7 +112,7 @@ def compare(candidate: Mapping[str, float], parent: Mapping[str, float], request
     reading = _read(candidate, parent)
     if reading.blocked:
         verdict = Verdict.NEEDS_CONFIRM
-    elif reading.incomparable or reading.defects or reading.gain <= -AGENTX_KEEP_P50_THRESHOLD_PCT:
+    elif reading.incomparable or reading.defects or reading.gain <= -P50_BAR_PCT:
         verdict = Verdict.REGRESSED
     elif reading.cleared:
         verdict = Verdict.IMPROVED
@@ -120,7 +121,7 @@ def compare(candidate: Mapping[str, float], parent: Mapping[str, float], request
     return Judgement(
         verdict,
         reading.gain,
-        AGENTX_KEEP_P50_THRESHOLD_PCT,
+        P50_BAR_PCT,
         (request_id,),
         _recorded(candidate),
         AccuracyVerdict.measured(reading.accuracy_ok),
@@ -142,7 +143,7 @@ def confirm(first: Judgement, retest: Mapping[str, float], parent: Mapping[str, 
     return Judgement(
         Verdict.BLOCKED if reading.blocked else Verdict.INCONCLUSIVE,
         (first.gain_pct + reading.gain) / 2.0,
-        AGENTX_KEEP_P50_THRESHOLD_PCT,
+        P50_BAR_PCT,
         (*first.request_ids, request_id),
         recorded,
         AccuracyVerdict.measured(first.accuracy is not AccuracyVerdict.FAILED and reading.accuracy_ok),

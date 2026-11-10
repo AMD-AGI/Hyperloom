@@ -203,14 +203,15 @@ def test_empty_server_flags_are_refused_with_why(tmp_path: Path) -> None:
 
 
 def test_the_gate_s_client_is_arbor_s_bench_command_with_only_its_port_and_result_dir_left_to_fill() -> None:
-    client = CLIENT.command(PORT, Path("/mb/a1/agent/mb-bench"))
+    client = CLIENT.stage(PORT, Path("/mb/a1/agent/mb-bench"))
 
     command = bench_command(client)
 
-    assert "--base-url http://0.0.0.0:{port} " in command and "--result-dir {out} " in command
-    assert "--num-warmups 16" in command, "the client's warm-up requests are kept"
-    words = shlex.split(client)
-    words[words.index("--base-url") + 1] = "http://0.0.0.0:8123"
+    warmup, measured = command.split(" && ")
+    assert "--base-url http://0.0.0.0:{port} " in warmup and "--base-url http://0.0.0.0:{port} " in measured
+    assert "--result-dir {out} " in measured
+    assert "--num-prompts 16 " in warmup, "the client's warm-up requests are kept"
+    words = shlex.split(client.replace("http://0.0.0.0:31110", "http://0.0.0.0:8123"))
     words[words.index("--result-dir") + 1] = "/s/iter_3/host bench"
     assert shlex.split(_filled(command, 8123, "/s/iter_3/host bench")) == words
 
