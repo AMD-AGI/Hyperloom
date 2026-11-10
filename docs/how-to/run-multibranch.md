@@ -7,7 +7,8 @@ myst:
 # Running a multi-branch session
 
 `hyperloom-multibranch` (also `python -m hyperloom_multibranch`) is installed with Hyperloom. `run` starts one
-session: PRELUDE, EXPLORE, FINAL and CLOSE. The other subcommands are `review` (see
+session: PRELUDE, EXPLORE, FINAL and CLOSE; `run --resume SESSION_DIR` continues one that stopped before FINAL (see
+[Resuming a stopped session](#resuming-a-stopped-session)). The other subcommands are `review` (see
 [Review the agent map](multibranch-review-gate.md)), `final-only SESSION_DIR` (emergency FINAL and CLOSE over a
 session that ended before FINAL) and `hosted run` (a session a host injects, measured in the grant's sandboxes or, when
 its spec says `placement.measurement: local`, on the app container's own cards; see
@@ -96,6 +97,28 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
   Each agent measures with the gate's own client: on `agentx`, the gate's replay run by
   `python -m inference_suite run` against the agent's server, so an Arbor needs no bench variables in its launch.
 - **Scheduling playbook:** `--playbook auto|champion|challenger` (default `auto`).
+
+## Resuming a stopped session
+
+`hyperloom-multibranch run --resume SESSION_DIR` continues a session that stopped before FINAL (signal, kill, crash,
+lost machine) with EXPLORE, FINAL and CLOSE, on the settings its manifest holds. It runs no PRELUDE. The baseline,
+the profile and the root commit are the ones the first PRELUDE recorded.
+
+- **What it continues:** the earlier run's unfinished tests are withdrawn and the branches it left open are stopped.
+  The roster and the integration branch open again (a `reopen` lineage event), and EXPLORE opens new branches, new
+  ids and worktrees, on the integration head. Specialist and Arbor branches alike start fresh.
+- **Deadline:** the session's deadline moves by its downtime, the time between the last decision the earlier run
+  recorded and the resume. The new deadline is written to the manifest and recorded as a `resume` phase in
+  `MB-decisions.jsonl` with `ended`, `downtime_seconds` and `deadline`.
+- **Knowledge steps:** a CLOSE of a session whose earlier CLOSE archived its search tree runs none of the knowledge
+  steps: no RSI archive, playbook proposal or lesson curation. Each is reported `skipped` with the reason
+  `an earlier CLOSE of this session archived its search tree`. The same holds for every later CLOSE of that
+  session, a second `--resume` or a `final-only` included.
+- **Refusals (exit 2, nothing changed):** `SESSION_DIR` is not a directory or holds no session that ran; the session
+  ran on another build, is still running, already chose in FINAL, failed in PRELUDE or recorded no baseline, or was
+  to stop once its map was made; or any other `run` option is given beside `--resume`.
+
+A session that cannot be resumed but stopped before FINAL can still be finished with `final-only SESSION_DIR`.
 
 ## Exit codes
 
