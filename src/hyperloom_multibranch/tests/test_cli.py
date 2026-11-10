@@ -221,9 +221,10 @@ def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivit
     assert (workload.kind, workload.metric, workload.final_concs) == (WorkloadKind.AGENTX, GRADED_INTVTY_P50, (16,))
 
 
-def test_an_agentx_run_is_served_at_the_ep_it_names_and_at_ep_1_by_default() -> None:
-    assert _settings(workload=AGENTX_ARGS).workload.ep == 1
-    assert _settings("--ep", "8", workload=AGENTX_ARGS).workload.ep == 8
+@pytest.mark.parametrize("workload", [WORKLOAD_ARGS, AGENTX_ARGS], ids=["inferencex", "agentx"])
+def test_a_run_is_served_at_the_ep_it_names_and_at_ep_1_by_default(workload: list[str]) -> None:
+    assert _settings(workload=workload).workload.ep == 1
+    assert _settings("--ep", "8", workload=workload).workload.ep == 8
 
 
 def test_an_agentx_run_replays_the_trace_window_it_names_and_the_harness_default_otherwise() -> None:
@@ -346,7 +347,7 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *AGENTX_ARGS, "--isl", "1024"],
         ["run", *AGENTX_ARGS, "--osl", "512"],
         ["run", *AGENTX_ARGS, "--ep", "0"],
-        ["run", *WORKLOAD_ARGS, "--ep", "2"],
+        ["run", *WORKLOAD_ARGS, "--ep", "0"],
         ["run", *AGENTX_ARGS, "--agentx-duration-sec", "0"],
         ["run", *WORKLOAD_ARGS, "--agentx-duration-sec", "600"],
         ["run", *WORKLOAD_ARGS, "--agentx-objective", "total_token_throughput"],

@@ -6,9 +6,10 @@
 ``run`` takes the fixed workload, spelled as ``hyperloom optimize`` spells it, the wall-clock budget and the kernel
 optimizer its recipes are scoped to, and the hard limits the judge works within. ``--workload`` names the workload
 kind: ``inferencex`` takes ``--isl`` and ``--osl``, and ``agentx`` refuses them, as the trace it replays fixes its
-requests; ``agentx`` takes ``--ep``, 1 when not given, and ``--agentx-duration-sec``, the trace window its tests
-replay (the measuring harness's default when not given), and ``--agentx-objective``, the axis it is graded on
-(``p50_interactivity`` when not given, or ``total_token_throughput``), and ``inferencex`` refuses all three. An agentx session serves its
+requests; either takes ``--ep``, the expert-parallel size its server runs at, 1 when not given; ``agentx`` takes
+``--agentx-duration-sec``, the trace window its tests replay (the measuring harness's default when not given), and
+``--agentx-objective``, the axis it is graded on (``p50_interactivity`` when not given, or
+``total_token_throughput``), and ``inferencex`` refuses both. An agentx session serves its
 model in the image ``HYPERLOOM_ACTIVE_IMAGE_REF`` names, and a ``--model`` that is a directory is recorded by its
 resolved path, which its benchmark pins. An operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than
 ``--workload``, or that names a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
@@ -274,12 +275,6 @@ def _add_agentx_options(run: argparse.ArgumentParser) -> None:
     """The options only an agentx workload takes."""
 
     run.add_argument(
-        "--ep",
-        type=int,
-        default=None,
-        help=f"Expert-parallel size of an agentx workload, default {DEFAULT_EP}; refused for inferencex.",
-    )
-    run.add_argument(
         "--agentx-duration-sec",
         type=int,
         default=None,
@@ -308,6 +303,9 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
     )
     run.add_argument("--workload", required=True, choices=[kind.value for kind in WorkloadKind], help="Workload kind.")
     run.add_argument("--tp", type=int, required=True, help="Tensor-parallel size; must fit the machine's cards.")
+    run.add_argument(
+        "--ep", type=int, default=None, help=f"Expert-parallel size the server runs at, default {DEFAULT_EP}."
+    )
     run.add_argument("--conc", type=int, required=True, help="Concurrency of the primary operating point.")
     for name in SEQUENCE_LENGTHS:
         run.add_argument(f"--{name}", type=int, default=None, help="Required for inferencex; refused for agentx.")
@@ -604,7 +602,7 @@ def _shape_errors(args: argparse.Namespace) -> list[str]:
 
 
 def _agentx_only_errors(args: argparse.Namespace) -> list[str]:
-    given = [name for name in ("ep", "agentx_duration_sec", "agentx_objective") if getattr(args, name) is not None]
+    given = [name for name in ("agentx_duration_sec", "agentx_objective") if getattr(args, name) is not None]
     if WorkloadKind(args.workload) is WorkloadKind.INFERENCEX:
         return [f"--{name.replace('_', '-')} is not taken by an inferencex workload" for name in given]
     return _positive(args, tuple(name for name in given if name != "agentx_objective"))
@@ -790,7 +788,8 @@ def settings_from(
     does not fit: this machine's cards for ``run``, the grant for ``hosted run``.
     """
 
-    errors = _shape_errors(args) + _agentx_only_errors(args) + _positive(args, ("tp", "conc"))
+    sizes = ("tp", "conc") if args.ep is None else ("tp", "ep", "conc")
+    errors = _shape_errors(args) + _agentx_only_errors(args) + _positive(args, sizes)
     errors += _limit_errors(args)
     if errors:
         raise ValueError("; ".join(errors))
