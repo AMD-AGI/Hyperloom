@@ -205,7 +205,7 @@ def test_a_commit_the_source_lacks_fails_the_run_and_leaves_no_clone(tmp_path: P
     with pytest.raises(CacheBuildError, match="f" * 40):
         runner_source(destination, str(origin), "f" * 40)
 
-    left = [path.name for path in tmp_path.iterdir() if path.name.startswith(destination.name)]
+    left = [path.name for path in tmp_path.iterdir() if destination.name in path.name]
     assert left == [], "no clone and no staging left"
 
 
