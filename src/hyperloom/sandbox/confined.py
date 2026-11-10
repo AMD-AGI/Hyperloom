@@ -50,9 +50,6 @@ from pathlib import Path
 from hyperloom_common.bwrap import NESTED_SAFE, BwrapPolicy, BwrapPolicyError, Holder, Scratch
 
 from hyperloom.common.agent_isolation import (
-    BWRAP,
-    NONE,
-    REFUSED,
     BwrapIsolation,
     IsolationRefused,
     NoIsolation,
@@ -70,7 +67,6 @@ __all__ = [
     "SandboxConfinement",
     "SandboxShape",
     "SandboxConfiner",
-    "local_test_isolation",
     "sandbox_confiner",
 ]
 
@@ -317,21 +313,3 @@ def sandbox_confiner(plan: RunnerPlan, *, base: Path, python: str) -> SandboxCon
     if isinstance(isolation, NoIsolation):
         _warn_once(f"{UNCONFINED_TESTS} ({isolation.why})")
     return SandboxConfiner(isolation, plan, base, python)
-
-
-def local_test_isolation() -> tuple[str, tuple[str, ...]]:
-    """How a local test sandbox no account is named for is launched now, as a session's record names it, and why it is
-    not isolated: :data:`~hyperloom.common.agent_isolation.BWRAP`; :data:`~hyperloom.common.agent_isolation.NONE`
-    (unconfined, as before) with the reasons of both tiers; or :data:`~hyperloom.common.agent_isolation.REFUSED` with
-    them, in a hosted run where bubblewrap cannot sandbox a test. Never raises.
-
-    This is the tier, as the chooser gives it: a sandbox whose own paths bubblewrap cannot bind safely
-    (:meth:`SandboxConfiner.confine`) runs as before even where this says
-    :data:`~hyperloom.common.agent_isolation.BWRAP`, which its own WARNING says; a hosted run refuses it."""
-    try:
-        found = choose_test_isolation()
-    except IsolationRefused as refused:
-        return REFUSED, refused.reasons
-    if isinstance(found, BwrapIsolation):
-        return BWRAP, ()
-    return NONE, found.reasons
