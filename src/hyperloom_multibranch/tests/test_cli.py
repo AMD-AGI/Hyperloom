@@ -68,7 +68,7 @@ from hyperloom.measure.points import PointError
 from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.blackboard import LocalBlackboard
-from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.codec import encode
@@ -78,6 +78,8 @@ from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, 
 from hyperloom_multibranch.scheduling import hosted_run as hosted_run_module
 from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
+from hyperloom_multibranch.scheduling.prelude import BASELINE_ESTABLISHED
 from hyperloom_multibranch.scheduling import review
 from hyperloom_multibranch.scheduling.layout import REVIEW_DIR, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
@@ -924,6 +926,7 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
 
     monkeypatch.setattr(cli, "run_session", run_session)
     monkeypatch.setattr(cli, "final_only", final_only)
+    monkeypatch.setattr(cli, "resume", final_only)
     return runs
 
 
@@ -1235,8 +1238,8 @@ def test_importing_the_command_and_the_session_loads_no_main_flow_runtime() -> N
 
 def _ended_before_final(root: Path, *, baseline: bool = True) -> SessionLayout:
     """A session directory as a run that ended before FINAL leaves it: the manifest of :func:`_settings`, the root
-    recipe PRELUDE committed, the baseline the rule gate wrote on the blackboard unless ``baseline`` is off, and the
-    report CLOSE wrote with no final choice in it."""
+    recipe PRELUDE committed, the baseline the rule gate wrote on the blackboard and the decision PRELUDE recorded it
+    with unless ``baseline`` is off, and the report CLOSE wrote with no final choice in it."""
 
     layout = SessionLayout(root)
     layout.reports.mkdir(parents=True)
@@ -1246,6 +1249,10 @@ def _ended_before_final(root: Path, *, baseline: bool = True) -> SessionLayout:
     if baseline:
         gate = LocalBlackboard(layout.blackboard, Writer(Role.GATE, "gate"))
         asyncio.run(gate.write_baseline(BaselineRecord("r0", {TOTAL_TOKEN_THROUGHPUT: 1.0}, {}, {}, ("t1",))))
+        established = Decision(
+            DecisionKind.PRELUDE, BASELINE_ESTABLISHED, INTEGRATION_BRANCH, {"longest_test_seconds": 60}
+        )
+        DecisionLog(layout.decisions, Clock(now=lambda: 0.0)).record(established)
     _report(layout)
     return layout
 
@@ -1371,12 +1378,13 @@ def test_a_final_only_holds_the_session_against_a_second_one_and_releases_it(
     layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
     persisted = persisted_run(layout.root)
 
-    async def while_it_runs(run: PersistedRun, peer_factory: object, services: object) -> int:
+    async def while_it_runs(run: PersistedRun, peer_factory: object, services: object, leg: object) -> int:
         assert layout.final_only_lock.read_text(encoding="utf-8") == f"{os.getpid()}\n"
         assert cli.final_only(run, peer_factory, services) == cli.EXIT_USAGE
+        assert cli.resume(run, peer_factory, services) == cli.EXIT_USAGE
         return 0
 
-    monkeypatch.setattr(cli, "_final_only", while_it_runs)
+    monkeypatch.setattr(cli, "_run_leg", while_it_runs)
 
     assert cli.final_only(persisted, None, None) == 0
 
@@ -1394,6 +1402,116 @@ def test_final_only_finishes_the_session_on_the_settings_its_manifest_holds(
     layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
 
     assert cli.main(["final-only", str(layout.root)]) == 0
+
+    assert agent_cli == [_settings()]
+    assert not any(workspace.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("damage", "error"),
+    [
+        (lambda layout: layout.manifest.unlink(), "is no multi-branch session that ran"),
+        (lambda layout: _manifest(layout, code_version={"package": "0.0", "git_sha": "beef"}), "ran on CodeVersion"),
+        (lambda layout: _killed(layout, local_owner_scope()), "is still running"),
+        (lambda layout: _report(layout, final={"chosen": {"commit": "c9"}}), "already chose c9"),
+        (lambda layout: _report(layout, stop_reason="prelude_baseline_failed"), "PRELUDE failed"),
+        (lambda layout: _manifest(layout, settings=encode(replace(_settings(), stop_after_map=True))), "its map"),
+        (lambda layout: _manifest(layout, agent_isolation=encode(ISOLATED[False])), "a grant's sandboxes"),
+        (lambda layout: layout.decisions.unlink(), "recorded no baseline to resume from"),
+    ],
+    ids=[
+        "no manifest",
+        "another build",
+        "still running",
+        "final ran",
+        "prelude failed",
+        "stop after map",
+        "measured in a grant",
+        "no baseline decision",
+    ],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_session_resume_cannot_continue_exits_two_and_changes_nothing(
+    damage: Callable[[SessionLayout], None],
+    error: str,
+    agent_cli: list[RunSettings],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+    damage(layout)
+    before = _tree(layout.root)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", "--resume", str(layout.root)])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    captured = capsys.readouterr()
+    assert error in captured.err and captured.out == ""
+    assert agent_cli == [] and _tree(layout.root) == before
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_resume_of_a_path_that_is_no_directory_exits_two(
+    agent_cli: list[RunSettings], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "no-such-session"
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", "--resume", str(missing)])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert f"{missing} is not a directory" in capsys.readouterr().err
+    assert agent_cli == [] and not missing.exists()
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_resume_of_a_session_with_no_baseline_exits_two(
+    agent_cli: list[RunSettings], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd", baseline=False)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", "--resume", str(layout.root)])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert "recorded no baseline to resume from" in capsys.readouterr().err
+    assert agent_cli == []
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_resume_takes_no_other_run_option(
+    agent_cli: list[RunSettings], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", "--resume", str(layout.root), "--tp", "2", "--max-hours", "3"])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert "no other option; given: tp, max_hours" in capsys.readouterr().err
+    assert agent_cli == []
+
+
+def test_run_without_resume_still_requires_the_workload(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", "--model", "m"])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert "required: --framework, --gpu-type, --workload, --tp, --conc, --precision" in capsys.readouterr().err
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_resume_continues_the_session_on_the_settings_its_manifest_holds(
+    agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+    _killed(layout, ANOTHER_POD)
+
+    assert cli.main(["run", "--resume", str(layout.root), "-v"]) == 0
 
     assert agent_cli == [_settings()]
     assert not any(workspace.iterdir())
