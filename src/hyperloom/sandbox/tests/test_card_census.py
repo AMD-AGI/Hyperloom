@@ -350,6 +350,26 @@ def test_a_second_holder_with_memory_is_crowded_even_when_the_tests_own_and_the_
     )
 
 
+def test_the_crowded_record_leaves_out_render_users_with_almost_no_memory(pod: KernelTree) -> None:
+    """Every torch process opens each render node with a few MiB; a neighbour's compile workers listed in the record
+    would crowd out the holders the verdict counts once the runner cuts the message to its limit."""
+    own = _test_server(pod, [101])
+    pod.holds(3001, _CARD, vram=_SERVER_VRAM, queues=6)
+    pod.holds(3003, _CARD, vram=_FOREIGN_VRAM, queues=2)
+    pod.renders(101, _CARD, kib=_SERVER_VRAM // 1024)
+    for worker in range(201, 209):
+        pod.process(worker, command=("python3", "compile_worker.py"))
+        pod.renders(worker, _CARD, kib=2048)
+
+    found = _read(pod).intrusions(own, before_test=False)
+
+    assert found[0].key == ("crowded", _CARD)
+    assert found[0].what.endswith(
+        "this container's processes with memory on its render node: "
+        "pid 101 (the test) with 200.0 GiB: python3 -m server --rank=101"
+    )
+
+
 def test_a_process_of_the_pod_that_is_not_the_tests_is_named_as_such_on_a_crowded_card(pod: KernelTree) -> None:
     """A second test's server on the same card, in the same container: visible, and still foreign."""
     own = _test_server(pod, [101])
