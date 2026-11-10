@@ -184,5 +184,7 @@ doc is the authority on where that boundary lives.
 - **The repo is public.** Code, comments, docs, commit messages (trailers included), and PR
   titles and descriptions name nothing a reader outside the team cannot open: no internal
   discussion-board topic, comment or link, no internal host name or cluster path, no
-  session or task id. Quote what such a reference showed — the error, the values, the
-  measurement — and state a decision itself rather than where it was taken.
+  session or task id. A product endpoint the reference docs document, such as
+  `KB_STORE_URL`'s default, may still be named. Quote what such a reference showed — the
+  error, the values, the measurement — and state a decision itself rather than where it
+  was taken.

@@ -5,7 +5,8 @@
 
 These pin the parts the risk grade adds: the card's Risk never falls below risk.txt and says when it was raised, and a
 medium- or high-risk card lists what a person must decide, naming every high-risk path. They also pin that a card,
-public text like the PR it reviews, names no internal-only reference.
+public text like the PR it reviews, names no internal-only reference, and that the scanner behind that check refuses
+an input it cannot read rather than calling it clean.
 """
 
 from __future__ import annotations
@@ -151,3 +152,17 @@ def test_a_card_naming_an_internal_reference_is_refused_by_its_kind_alone(
     assert code == 1
     assert f": {kind}; quote what it showed instead" in printed
     assert reference not in printed
+
+
+@pytest.mark.parametrize("name", [pytest.param("missing.txt", id="missing"), pytest.param(".", id="directory")])
+def test_the_scanner_refuses_an_input_it_cannot_read_rather_than_calling_it_clean(tmp_path: Path, name: str) -> None:
+    result = subprocess.run(
+        ["bash", str(_CHECK.with_name("internal-refs.sh")), str(tmp_path / name)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode == 2
+    assert "cannot read" in result.stderr

@@ -7,8 +7,9 @@
 # PR's title, description, commit messages and added lines; check-card.sh runs it over the card before it is posted.
 #
 # usage: internal-refs.sh FILE...
-#   prints '<file>:<line>: <kind>' for each hit and exits 1 when there is one. It names the kind, never the reference,
-#   so the output can go where the reference itself may not: a public CI log, a commit message.
+#   prints '<file>:<line>: <kind>' for each hit and exits 1 when there is one, 2 when a FILE cannot be read. It names
+#   the kind, never the reference, so the output can go where the reference itself may not: a public CI log, a commit
+#   message.
 
 set -euo pipefail
 
@@ -30,6 +31,10 @@ patterns=(
 
 status=0
 for file in "$@"; do
+  if [ ! -r "$file" ] || [ -d "$file" ]; then
+    echo "internal-refs.sh: cannot read ${file}" >&2
+    exit 2
+  fi
   for i in "${!patterns[@]}"; do
     while IFS=: read -r line _; do
       echo "${file}:${line}: ${kinds[$i]}"
