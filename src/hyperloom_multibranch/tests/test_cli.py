@@ -686,6 +686,12 @@ def test_an_agent_directions_map_without_an_agent_or_directions_is_a_usage_error
         _settings(*agents, "--agent-directions", str(path))
 
 
+def test_make_before_break_is_on_unless_the_command_line_turns_it_off() -> None:
+    assert _settings().make_before_break is True
+    assert _settings("--make-before-break").make_before_break is True
+    assert _settings("--no-make-before-break").make_before_break is False
+
+
 def test_dev_leases_lend_specialists_dev_sandboxes_and_default_to_none() -> None:
     assert _settings().dev_leases == 0
     assert _settings("--dev-leases", "2").dev_leases == 2
@@ -1590,6 +1596,27 @@ def test_a_hosted_session_runs_as_many_tests_at_once_as_the_grant_has_cards_and_
     )
 
 
+@pytest.mark.parametrize(("given", "keep", "tests"), [({}, True, 3), ({"make_before_break": False}, False, 4)])
+@pytest.mark.usefixtures("ready_environment")
+def test_the_spec_turns_make_before_break_off_and_the_session_runs_every_test_the_grant_fits(
+    given: dict[str, bool],
+    keep: bool,
+    tests: int,
+    host: Host,
+    agent_cli: list[RunSettings],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+    monkeypatch.setenv("HYPERLOOM_GRANT_LIMITS", json.dumps({**GRANT, "max_gpus": 8, "max_sandboxes": 8}))
+    host.spec(placement={"profile": "hosted-gpu"}, multibranch={**SPEC["multibranch"], **given})
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    [settings] = agent_cli
+    assert settings.make_before_break is keep
+    assert settings.caps.max_parallel_tests == tests, "TP=2 on 8 GPUs: four fit, one's room kept only when it is on"
+
+
 @pytest.mark.usefixtures("ready_environment")
 def test_a_grant_that_states_only_some_totals_ends_the_run_for_good_naming_them(
     host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
@@ -2093,6 +2120,15 @@ def test_a_hosted_run_measures_in_the_sandboxes_of_the_grant_handed_to_it(handed
     on_two_tests = cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 2)
     assert settings == replace(on_two_tests, max_hours=settings.max_hours), "the flags give the workload"
     assert "HYPERLOOM_SANDBOX_KEY_MEASUREMENT" not in os.environ, "no child process inherits a grant key"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_without_make_before_break_runs_every_test_the_handed_grant_fits(handed: Started) -> None:
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted", "--no-make-before-break"]) == 0
+
+    [(settings, _)] = handed.sessions
+    assert settings.make_before_break is False
+    assert settings.caps.max_parallel_tests == 3, "TP=2 on 8 GPUs and 3 sandboxes, no room kept"
 
 
 @pytest.mark.usefixtures("ready_environment")

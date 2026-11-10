@@ -32,7 +32,7 @@ them), those it is creating, the run's ``measurement`` sandboxes it does not hol
 exists, since their GPUs are not known) and what the branch leases hold or are promised (:attr:`Handover.reserved`).
 The overlap therefore needs one test's room in the grant that the tests do not use: whoever sizes
 ``max_parallel_tests`` leaves it free (the hosted toolbox runs one test fewer than the grant fits when make-before-break
-is on).
+is on, which it is only where the grant fits at least three tests).
 """
 
 from __future__ import annotations

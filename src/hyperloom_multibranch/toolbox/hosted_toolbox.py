@@ -43,6 +43,7 @@ from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
 from hyperloom_multibranch.toolbox.hosted_leases import (
+    HANDOVER_MIN_TESTS,
     DevSession,
     GrantLimits,
     HostedBranchLeases,
@@ -223,12 +224,10 @@ class HostedOptions:
     runner sandbox by ``HYPERLOOM_FRAMEWORK_SNAPSHOT`` and ``HYPERLOOM_FRAMEWORK_SESSION_SHA256``, which the runner
     template must therefore accept; without it a test that adds tuned rows to a default table is refused.
     ``make_before_break`` keeps the sandbox of a finished test until the next test's sandbox runs (:func:`handover_for`)
-    where the grant fits two tests; it costs one test of the grant's parallelism (:func:`parallel_tests_for`), so
-    ``False`` runs as many tests at once as the grant fits and closes each sandbox when its test ends.
-    ``handover_timeout_sec`` is how long the sandbox of a finished test is kept for the next test's sandbox to run,
-    bounded by the grant's ``max_runtime_sec``: by default
-    :data:`~hyperloom.measure.sandboxes.DEFAULT_HANDOVER_TIMEOUT_SEC`, which outlasts several gateway cuts of a create
-    that queues for a node.
+    where the grant fits at least :data:`~.hosted_leases.HANDOVER_MIN_TESTS` tests; there it costs one test of the
+    grant's parallelism (:func:`parallel_tests_for`). ``False`` runs as many tests at once as the grant fits and closes
+    each sandbox when its test ends. A hosted session sets it from the operator's ``multibranch.make_before_break`` of
+    the campaign spec (``PeerSetup.make_before_break``, :class:`~hyperloom_multibranch.scheduling.hosted_peers.HostedSandboxes`).
     """
 
     policy: QueuePolicy | None = None
@@ -242,7 +241,6 @@ class HostedOptions:
     short_prompts: ShortPromptSetup | None = None
     framework_configs: str | None = None
     make_before_break: bool = True
-    handover_timeout_sec: float = DEFAULT_HANDOVER_TIMEOUT_SEC
 
 
 class HostedToolbox(LeasedToolbox):
@@ -397,15 +395,16 @@ def handover_for(
     branch leases hold.
 
     The service counts the kept sandbox against the grant like any other (``max_sandboxes`` and ``max_gpus``, every
-    role), so the overlap needs the room of a second test of TP=``tp``: ``None`` (every sandbox is closed when its test
-    ends) for a grant that fits only one, as (3 sandboxes, 2 GPUs) at TP=2, and without grant limits, where the room
-    cannot be counted. Where it is on, :func:`parallel_tests_for` runs one test fewer than the grant fits, so that a
-    test that waits for a sandbox finds that room.
+    role), so the overlap needs the room of one test of TP=``tp``, which :func:`parallel_tests_for` then leaves free: one
+    test fewer runs at once. That is worth it only where it costs at most a third of the tests at once, so this is
+    ``None`` (every sandbox is closed when its test ends, and every test the grant fits runs) for a grant that fits
+    fewer than :data:`~.hosted_leases.HANDOVER_MIN_TESTS` tests, as (3 sandboxes, 2 GPUs) at TP=1 or TP=2, and without
+    grant limits, where the room cannot be counted.
 
-    The kept sandbox waits at most ``timeout_sec`` (:attr:`HostedOptions.handover_timeout_sec`), and never longer than
-    the grant's ``max_runtime_sec``, past which the platform ends any sandbox of the grant anyway.
+    The kept sandbox waits at most ``timeout_sec``, and never longer than the grant's ``max_runtime_sec``, past which the
+    platform ends any sandbox of the grant anyway.
     """
-    if grant is None or parallel_tests_for(grant, tp) < 2:
+    if grant is None or parallel_tests_for(grant, tp) < HANDOVER_MIN_TESTS:
         return None
     return Handover(
         grant.max_sandboxes,
@@ -421,7 +420,8 @@ def _none() -> tuple[int, int]:
 
 def parallel_tests_for(grant: GrantLimits | None, tp: int, handover: Handover | None = None) -> int:
     """How many tests of TP=``tp`` may run at once under ``grant``: ``min(max_gpus // tp, max_sandboxes)``, at least 1,
-    and one fewer with make-before-break on (``handover``, :func:`handover_for`), whose kept sandbox takes that room.
+    and one fewer with make-before-break on (``handover``, :func:`handover_for`), whose kept sandbox takes that room;
+    :func:`handover_for` gives one only where at least :data:`~.hosted_leases.HANDOVER_MIN_TESTS` tests fit.
 
     This is the one source of the grant's parallel-tests rule; the hosted toolbox sizes its
     measurement pool with it, and anything else that needs the number (a scheduler's cap, a planner) calls it rather
@@ -435,7 +435,7 @@ def parallel_tests_for(grant: GrantLimits | None, tp: int, handover: Handover | 
     if grant.max_gpus < tp:
         raise ValueError(f"a grant of {grant.max_gpus} GPUs cannot run a test of TP={tp}")
     fits = max(1, min(grant.max_gpus // tp, grant.max_sandboxes))
-    return fits - 1 if handover is not None and fits >= 2 else fits
+    return fits - 1 if handover is not None and fits >= HANDOVER_MIN_TESTS else fits
 
 
 def _acceptance_with_prompts(
@@ -484,7 +484,7 @@ def build_hosted_toolbox(
 
     The grant's GPUs are the cards: ``measurement_capacity`` reports them, with the cards of the branch sandboxes
     leased as ``leased_cards``, and at most ``min(max_gpus // tp, max_sandboxes)`` tests run at once, one fewer where a
-    finished test's sandbox is kept for the next (:attr:`HostedOptions.make_before_break`). Without grant
+    finished test's sandbox is kept for the next (:attr:`HostedOptions.make_before_break`, where at least three fit). Without grant
     limits the toolbox cannot count the cards: the capacity is unknown, ``lease_branch_sandbox`` refuses with
     ``unsupported_kind``, and at most as many tests run at once as the sandbox pool's default; the service's own quota
     still bounds them (a refused create waits). Sandboxes of other runs are never touched.
@@ -518,9 +518,7 @@ def build_hosted_toolbox(
     runner = _runner_template(inputs)  # refused before the lease templates are read
     provider = _service_provider(inputs, options.retry)
     leases = _leases(provider, inputs, options.lease_tuning)
-    handover = (
-        handover_for(grant, inputs.tp, leases, options.handover_timeout_sec) if options.make_before_break else None
-    )
+    handover = handover_for(grant, inputs.tp, leases) if options.make_before_break else None
     parallel = parallel_tests_for(grant, inputs.tp, handover)
     config = HostedConfig(
         session_dir=directory,

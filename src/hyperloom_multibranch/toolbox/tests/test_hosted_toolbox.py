@@ -462,6 +462,7 @@ def test_the_grants_sandboxes_and_gpus_bound_the_tests_at_once(tmp_path: Path) -
         (8, 8, 2, 4),  # the GPUs bound it: 8 // 2
         (3, 8, 2, 3),  # the sandboxes bound it
         (8, 7, 2, 3),  # a GPU short of a whole test does not count: 7 // 2
+        (3, 2, 1, 2),  # the grant of a hosted submission
         (1, 16, 1, 1),
         (8, 4, 4, 1),
     ],
@@ -473,8 +474,10 @@ def test_the_parallel_tests_rule_is_the_lesser_of_whole_tests_and_sandboxes(
     assert parallel_tests_for(grant, tp) == expected
     assert "parallel_tests_for" in hosted_toolbox.__all__
     handover = handover_for(grant, tp)
-    assert (handover is None) == (expected == 1), "a sandbox is kept only where the grant fits two tests"
-    assert parallel_tests_for(grant, tp, handover) == max(1, expected - 1), "and then one test's room is held for it"
+    assert (handover is None) == (expected < 3), "a sandbox is kept only where the grant fits three tests"
+    assert parallel_tests_for(grant, tp, handover) == (expected - 1 if expected >= 3 else expected), (
+        "and then one test's room is held for it; where two fit, both run"
+    )
 
 
 def test_the_parallel_tests_rule_without_a_grant_is_the_pools_default_and_refuses_a_grant_too_small() -> None:

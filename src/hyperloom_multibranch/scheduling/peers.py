@@ -87,7 +87,8 @@ class PeerSetup:
     does, or ``""`` for neither), ``agent_maps`` the scheduler's side of a mapping branch, ``None`` without agents, and
     ``agent_share_minutes`` the least an agent must have left to run for its branch to wait for cards its lease was
     refused. ``inferencex_commit`` is the commit a fresh session's base launch reads InferenceX at (``""`` for the
-    head of its ``main``).
+    head of its ``main``). ``make_before_break`` is the session's ``RunSettings.make_before_break``: whether a hosted
+    toolbox keeps a finished test's sandbox until the next test's runs (``HostedOptions.make_before_break``).
     """
 
     layout: SessionLayout
@@ -108,6 +109,7 @@ class PeerSetup:
     agent_maps: MapCalls | None = None
     agent_share_minutes: float = SHARE_MINUTES
     inferencex_commit: str = ""
+    make_before_break: bool = True
 
 
 PeerFactory = Callable[[PeerSetup], Peers]

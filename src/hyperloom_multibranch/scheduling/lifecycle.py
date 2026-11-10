@@ -338,6 +338,7 @@ class Session:
             MapCalls(self._map_start, self._map_split) if settings.agents else None,
             settings.agent_share_minutes,
             settings.inferencex_commit,
+            make_before_break=settings.make_before_break,
         )
 
     def _score_with_defaults(self) -> None:

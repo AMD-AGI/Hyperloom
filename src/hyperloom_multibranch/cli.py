@@ -155,6 +155,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     require_hosted_isolation,
     require_local_image,
     run_argv,
+    spec_make_before_break,
     write_final_exit,
 )
 from hyperloom_multibranch.scheduling import review
@@ -387,6 +388,17 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         default=0,
         metavar="N",
         help="Dev sandboxes lent to the specialists at once, from the cards tests are measured on; 0 = none.",
+    )
+    run.add_argument(
+        "--make-before-break",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Measured in the grant's sandboxes, keep a finished test's sandbox until the next test's runs, so that the"
+            " cluster does not give its node to another job between two tests; only where the grant fits at least three"
+            " tests at once, and it runs one test fewer at once there. --no-make-before-break runs every test the grant"
+            " fits and closes each sandbox when its test ends. Ignored where tests run on this machine's cards."
+        ),
     )
     run.add_argument(
         "--measurement",
@@ -818,6 +830,7 @@ def settings_from(
         reference_script=_reference_script(args.reference_script, args.framework),
         dev_leases=args.dev_leases,
         playbook=PlaybookMode(args.playbook),
+        make_before_break=args.make_before_break,
         agent_directions=_agent_directions(args.agent_directions, agents),
         agent_pack=_agent_pack(args.agent_pack, agents),
         agent_launch=_agent_launch(args.agent_launch, agents, args.reference_script),
@@ -1056,7 +1069,7 @@ def _stop_before_grant_ends(deadline: GrantDeadline) -> None:
 
 def _hosted_settings(host: HostInfo, spec: CampaignSpec, session_hours: Callable[[float], float]) -> RunSettings:
     local = spec.measurement == MEASUREMENT_LOCAL
-    tests_that_fit = machine_parallel_tests if local else grant_tests_that_fit(host)
+    tests_that_fit = machine_parallel_tests if local else grant_tests_that_fit(host, spec_make_before_break(spec))
     argv = run_argv(spec, session_hours(spec.max_hours), tests_that_fit(spec.tp))
     settings = settings_from(_parsed_run(argv), tests_that_fit)
     if not local:
@@ -1111,7 +1124,8 @@ def _handed_grant(args: argparse.Namespace) -> HandedGrant:
 def _run_settings(args: argparse.Namespace, grant: HandedGrant | None) -> RunSettings:
     if grant is None:
         return settings_from(args)
-    settings = replace(settings_from(args, grant_tests_that_fit(grant.host)), max_hours=grant.max_hours)
+    fits = grant_tests_that_fit(grant.host, args.make_before_break)
+    settings = replace(settings_from(args, fits), max_hours=grant.max_hours)
     refuse_unhosted_branches(settings, grant.host, os.environ)
     return settings
 
