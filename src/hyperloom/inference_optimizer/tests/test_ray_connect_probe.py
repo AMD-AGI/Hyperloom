@@ -204,8 +204,8 @@ class TestAHeadThisProcessStarts:
 
     @pytest.fixture(autouse=True)
     def _no_head_yet(self, fake_ray_head: FakeRayHead, monkeypatch: pytest.MonkeyPatch) -> None:
-        status = iter([False])
-        monkeypatch.setattr(rr, "ray_status_ok", lambda: next(status, True))
+        status = iter([rr.RayProbe.DOWN])
+        monkeypatch.setattr(rr, "ray_probe", lambda timeout=None: next(status, rr.RayProbe.UP))
         monkeypatch.setattr(rr, "ensure_ray_cluster", lambda num_gpus=None: None)
 
     def test_routing_does_not_probe_a_head_that_is_not_there(self, fake_ray_head: FakeRayHead):
