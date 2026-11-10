@@ -29,6 +29,10 @@ benchmark:
     SGLANG_GRAPH_BATCH_CAPTURE: "1"
     # --- Profiler: graph capture (#126; shape discovery is added only on a patched server) ---
     EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph"
+    # The graph-capture profile dumps the allocator's memory snapshot after the capture, naming every recorded C++ frame.
+    # PyTorch's default names them with addr2line and parses its answers with std::stoi, which killed the server with
+    # "RuntimeError: stoi" after the traces were written; dladdr names them from the loader's symbol table instead.
+    TORCH_SYMBOLIZE_MODE: "dladdr"
     # --- Profiler: graph replays ---
     # The HIP runtime replays a captured graph by dispatching its pre-recorded AQL packets, and the ROCm profiler then
     # records a replay's kernels only for the replay that a host sync follows (the profiler's stop, or a prefill step),

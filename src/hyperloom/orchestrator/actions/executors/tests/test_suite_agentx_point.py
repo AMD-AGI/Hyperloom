@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.common.outside_facts import TORCH_SYMBOLIZE_BY_LOADER, TORCH_SYMBOLIZE_MODE_ENV
 from hyperloom.common.agentx_workload import CANON_WARMUP_PER_LANE
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors._suite.config import MEASURED_SEED, WARMUP_SEED, suite_config
@@ -267,6 +268,18 @@ def test_an_annotated_sglang_agentx_profile_records_shapes_stacks_and_graph_repl
 
     assert _SGLANG_ANNOTATION_ENV.items() <= user.env_set.items()
     assert user.args_add[-1] == "--enable-profile-cuda-graph"
+
+
+def test_an_sglang_agentx_profile_of_the_graph_capture_names_its_snapshot_dumps_c_stacks_without_addr2line() -> None:
+    graphed = suite_config(_profiled(), _base(), _settings()).server.user
+    eager_point = _profiled()
+    eager_point["benchmark"]["agentx"]["launch_overrides"]["append_args"].append("--disable-cuda-graph")
+    eager = suite_config(eager_point, _base(), _settings()).server.user
+
+    assert graphed.env_set[TORCH_SYMBOLIZE_MODE_ENV] == TORCH_SYMBOLIZE_BY_LOADER
+    assert TORCH_SYMBOLIZE_MODE_ENV not in eager.env_set, "no graph-capture profile, no snapshot dump"
+    for point in (_profiled(detailed_annotations=False), _point()):
+        assert TORCH_SYMBOLIZE_MODE_ENV not in suite_config(point, _base(), _settings()).server.user.env_set
 
 
 def test_an_eager_sglang_agentx_profile_profiles_no_graph_capture() -> None:

@@ -24,7 +24,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "22"
+version: "23"
 facts:
   aiter_merged_view:
     kind: names
@@ -358,6 +358,41 @@ facts:
     value: "0"
     examples:
       - "hyperloom/inference_optimizer/assets/configs/profile_sglang.yaml, profile_vllm.yaml and profile_atom.yaml: the profile launch's env block"
+
+  torch_symbolize_mode:
+    kind: env_default
+    project: PyTorch (the C++ stack symbolizer of torch/csrc/profiler/unwind)
+    reason: >-
+      A CUDA-graph profile of SGLang (--enable-profile-cuda-graph) records the allocator's history with C++ stacks and
+      dumps it after the capture (torch.cuda.memory._dump_snapshot), which names every C++ frame. By default PyTorch
+      names them by running addr2line and reads the text after the last colon of each "file:line" answer with std::stoi,
+      which throws when that text is neither a number nor "?", and the server dies with "RuntimeError: stoi" after the
+      capture traces are written (seen on a ROCm PyTorch serving DeepSeek-V4-Flash). In dladdr mode PyTorch names a frame
+      from the loader's symbol table and parses no addr2line output; it accepts dladdr, addr2line and fast here.
+    env: TORCH_SYMBOLIZE_MODE
+    value: dladdr
+    examples:
+      - "hyperloom/inference_optimizer/assets/configs/profile_sglang.yaml: the profile launch's env block"
+      - "hyperloom.orchestrator.actions.executors._profile_setup: the env an annotated AgentX SGLang profile adds with its graph-capture flag"
+
+  torch_memory_snapshot_frame:
+    kind: log_regex
+    project: PyTorch (torch.cuda.memory) as SGLang's CUDA-graph profile calls it
+    reason: >-
+      SGLang's CUDA-graph profile dumps the allocator's memory snapshot after the capture
+      (torch.cuda.memory._dump_snapshot, which calls torch._C._cuda_memorySnapshot). A traceback through these frames is
+      the profiler's own bookkeeping failing after the capture ran, not the served model.
+    pattern: >-
+      \bin (?:_dump_snapshot|_post_process_after_profile)\s*$|\b_cuda_memorySnapshot\(
+    examples:
+      match:
+        - '  File "/opt/venv/lib/python3.10/site-packages/torch/cuda/memory.py", line 1059, in _dump_snapshot'
+        - "    return _C._cuda_memorySnapshot(None)"
+        - '  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py", line 872, in _post_process_after_profile'
+      no_match:
+        - "Memory Usage is saved to cuda_graph_runner_memory_usage.pickle"
+        - '  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py", line 1120, in capture'
+        - '  File "/opt/venv/lib/python3.10/site-packages/torch/cuda/memory.py", line 900, in memory_snapshot_summary'
 
   hip_undefined_symbol:
     kind: log_regex
