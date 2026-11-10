@@ -11,40 +11,16 @@ has one shape and one owner.
 
 from __future__ import annotations
 
-import importlib.metadata
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom_common.jsonio import read_json_strict
-from hyperloom.common.provenance import detect_code_revision
 from hyperloom_multibranch.blackboard.codec import decode, encode
+from hyperloom_multibranch.contracts.build import MB_DISTRIBUTION, CodeVersion, code_version
 from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.settings import RunSettings
-
-#: The distribution this package ships in (pyproject.toml ``[project] name``).
-MB_DISTRIBUTION = "hyperloom-inference_optimizer"
-
-
-@dataclass(frozen=True)
-class CodeVersion:
-    """The installed package version and the source revision :func:`detect_code_revision` reports: the source
-    tree's commit, else the revision baked into the image; empty where there is none."""
-
-    package: str
-    git_sha: str
-
-
-def code_version() -> CodeVersion:
-    """This scheduler's :class:`CodeVersion`. Blocks on git."""
-
-    try:
-        package = importlib.metadata.version(MB_DISTRIBUTION)
-    except importlib.metadata.PackageNotFoundError:
-        package = ""
-    return CodeVersion(package, detect_code_revision(os.environ))
 
 
 @dataclass(frozen=True)

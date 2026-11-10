@@ -29,6 +29,7 @@ from hyperloom.measure.framework.base import FRAMEWORK_BASE_FILE, SNAPSHOT_ENV, 
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, MeasurementJournal, Record
 from hyperloom.measure import live_log
 from hyperloom.measure.live_log import last_output
+from hyperloom.measure.pins import IMAGE_DIGEST_VAR, IMAGE_REF_VAR
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex
 from hyperloom.measure.tests.framework_fixtures import make_framework
 from hyperloom.measure.tests.hosted_fixtures import spec_context
@@ -51,6 +52,7 @@ from hyperloom_multibranch.toolbox.local_hosted import (
     max_parallel_tests,
     runner_plan,
 )
+from hyperloom_multibranch.toolbox.resume_guard import MeasuredOn, check_baseline_reusable
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import (
@@ -635,6 +637,28 @@ async def test_a_runner_that_cannot_start_says_why_and_leaves_no_log_traceback(
         assert "could not be saved" not in caplog.text, "a runner with no out/files has no logs: that is not a warning"
     finally:
         await toolbox.close()
+
+
+async def test_the_local_toolbox_records_what_its_baseline_is_measured_on_as_a_resume_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record names the session's directory, this node, the image of the spec and the whole card pool, and a resume
+    on the same machine and image (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_baseline_reusable`)
+    reuses the baseline it describes."""
+    commit = "0" * 40
+    pin_inferencex_at(commit, monkeypatch)
+    monkeypatch.setenv("NODE_NAME", "node-a")
+    session = tmp_path / "session"
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox_of(blackboard, tmp_path, session, commit)
+    await toolbox.close()
+    image = spec_context(tmp_path).image_digest
+    monkeypatch.setenv(IMAGE_REF_VAR, "registry.example/vllm:session")
+    monkeypatch.setenv(IMAGE_DIGEST_VAR, image)
+
+    assert toolbox.measured_on == MeasuredOn(session, "node-a", image, 8)
+    assert toolbox.measured_on.record()
+    assert check_baseline_reusable(session, range(8)) is None
 
 
 @pytest.mark.agent_isolation

@@ -22,8 +22,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hyperloom_common.shared_storage import open_shared_append
+from hyperloom_common.shared_storage import open_shared_append, open_shared_existing
 
+#: Where a toolbox keeps its submit log, below its session directory.
+SUBMISSIONS_FILE = "toolbox/submissions.jsonl"
 ACCEPTED = "accepted"
 OUTCOME = "outcome"
 SETTLED = "settled"
@@ -80,6 +82,17 @@ def complete_lines(path: Path) -> list[str]:
     return data[:end].decode(_UTF8).splitlines()
 
 
+def logged_entries(path: Path) -> list[LogEntry]:
+    """The entries of the submit log at ``path`` as a restart replays them, in the order they were queued, read without
+    writing anything: a torn last line is skipped and left on the file for the next writer to cut off."""
+
+    with os.fdopen(open_shared_existing(path, os.O_RDONLY), "rb") as handle:  # never through a link at its name
+        data = handle.read()
+    log = SubmissionLog(path, "", _replay=False)
+    log._replay_lines(data[: data.rfind(b"\n") + 1].decode(_UTF8).splitlines())
+    return log.entries()
+
+
 @dataclass
 class SubmissionLog:
     path: Path
@@ -88,10 +101,12 @@ class SubmissionLog:
     scope: str = ""
     _entries: dict[str, LogEntry] = field(default_factory=dict)
     _sequences: dict[str, int] = field(default_factory=dict)
+    #: Off for a reader (:func:`logged_entries`) that replays lines it read itself and writes nothing.
+    _replay: bool = field(default=True, repr=False)
 
     def __post_init__(self) -> None:
-        if self.path.exists():
-            self._replay()
+        if self._replay and self.path.exists():
+            self._replay_lines(complete_lines(self.path))
 
     def request_id(self, branch: str, sequence: int) -> str:
         try:
@@ -145,8 +160,8 @@ class SubmissionLog:
     def _append(self, record: Mapping[str, object]) -> None:
         append_line(self.path, record)
 
-    def _replay(self) -> None:
-        for number, line in enumerate(complete_lines(self.path), start=1):
+    def _replay_lines(self, lines: list[str]) -> None:
+        for number, line in enumerate(lines, start=1):
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
