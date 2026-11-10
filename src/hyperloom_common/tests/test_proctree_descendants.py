@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import proctree
+from hyperloom_common import proctree
 
 
 def _procfs(

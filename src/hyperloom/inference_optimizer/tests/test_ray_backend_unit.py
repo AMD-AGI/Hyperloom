@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 import yaml
 
-from hyperloom.common.proctree import REAP_MARK_ENV
+from hyperloom_common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.actions.executors import _ray_backend as rb
 from hyperloom.orchestrator.actions.executors import _ray_runtime as rr
 from hyperloom.orchestrator.actions.executors import _ray_serving as rs
@@ -131,7 +131,7 @@ def test_specialist_close_forces_actor_kill_after_stop_attempt(monkeypatch, ack)
 @pytest.mark.parametrize("members", [[], [(10, 100, "Z")], [(10, 100, "S")]])
 def test_managed_exited_root_cannot_confirm_detached_descendants(monkeypatch, members):
     from types import SimpleNamespace
-    from hyperloom.common import proctree
+    from hyperloom_common import proctree
 
     proc = SimpleNamespace(pid=123456, poll=lambda: 0)
     mgr = ManagedServerProcess()
@@ -205,7 +205,7 @@ def test_specialist_close_is_idempotent_after_forced_kill(monkeypatch):
 @pytest.mark.parametrize("confirmed", [False, True])
 def test_managed_live_root_uses_enumerated_tree_ack(monkeypatch, confirmed):
     from types import SimpleNamespace
-    from hyperloom.common import proctree
+    from hyperloom_common import proctree
 
     waited = []
     proc = SimpleNamespace(pid=123456, poll=lambda: None, wait=lambda **kw: waited.append(kw))

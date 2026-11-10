@@ -41,7 +41,7 @@ from hyperloom.common import agent_isolation
 from hyperloom_common.bwrap import BwrapProbe
 from hyperloom.common.agent_isolation import AccountIsolation, BwrapIsolation, NoIsolation
 from hyperloom.common.env_safety import RunAs
-from hyperloom.common.proctree import REAP_MARK_ENV
+from hyperloom_common.proctree import REAP_MARK_ENV
 from hyperloom.orchestrator.specialists.launch_env import LaunchPlace, prepare_launch
 from hyperloom.orchestrator.specialists.agent_cli_config import _build_specialist_env
 from hyperloom.orchestrator.specialists.leaf import build_leaf_agents_json
@@ -866,7 +866,7 @@ async def test_reap_loop_keeps_a_cli_waiting_on_a_tool_it_started_after_its_last
 @pytest.mark.asyncio
 async def test_reap_loop_reaps_a_silent_cli_whose_children_predate_its_last_output(tmp_path: Path):
     """A child older than the CLI's last output is not a tool call in flight, so silence still reaps the CLI."""
-    from hyperloom.common.proctree import descendants
+    from hyperloom_common.proctree import descendants
 
     workspace = tmp_path / "ws"
     proc = _cli("import subprocess; subprocess.run(['sleep', '30'])")

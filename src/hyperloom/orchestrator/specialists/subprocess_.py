@@ -61,7 +61,7 @@ from hyperloom_common.fs_utils import (
     write_text_nofollow,
 )
 from hyperloom.common.env_safety import RunAsError
-from hyperloom.common.proctree import collect_tree, kill_tree
+from hyperloom_common.proctree import collect_tree, kill_tree
 
 from .agent_cli_config import (
     SpecialistAgentUnavailableError,
