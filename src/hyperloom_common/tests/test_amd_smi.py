@@ -31,6 +31,12 @@ def test_a_failed_run_names_the_last_line_amd_smi_printed(monkeypatch):
         run_amd_smi(["set"])
 
 
+def test_a_failed_run_that_printed_nothing_says_so(monkeypatch):
+    _answer(monkeypatch, returncode=2, stdout="\n", stderr="  \n")
+    with pytest.raises(AmdSmiError, match=r"^amd-smi set exited 2 and printed nothing$"):
+        run_amd_smi(["set"])
+
+
 def test_an_amd_smi_that_cannot_start_is_an_amd_smi_error(monkeypatch):
     def _missing(cmd, **kw):
         raise FileNotFoundError("amd-smi")

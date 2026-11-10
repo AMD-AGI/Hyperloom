@@ -7,11 +7,13 @@ The campaign spec maps onto the options of ``run`` (:func:`run_argv`), so a host
 of :class:`~hyperloom_multibranch.scheduling.settings.RunSettings` a command-line session is. Besides the common part
 the legacy entry validated, a multi-branch session needs ``multibranch.workload`` (``--workload``),
 ``workload.conc`` and ``workload.precision``; ``multibranch.inferencex_commit`` is ``--inferencex-commit``,
-``multibranch.max_branches`` ``--max-branches``,
+``multibranch.reference_script`` ``--reference-script``, ``multibranch.max_branches`` ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``placement.measurement`` is ``--measurement``, and ``placement.max_parallel_tests`` is
 ``--max-parallel-tests``, at most what runs at once where the session measures. The fields ``run`` has no option for --
-``objective``, ``launch``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read.
+``objective``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read. A spec that
+sets ``launch.server_args`` or ``launch.extra_env`` is refused rather than run without them: a multi-branch session's
+base launch, its flags and its environment, is the shell script ``multibranch.reference_script`` names.
 
 With ``placement.measurement`` ``hosted`` (the default), every test, PRELUDE's included, runs in a measurement sandbox
 of the grant, so the application's container needs no card: ``hosted-cpu`` serves as ``hosted-gpu`` does. Dev
@@ -139,10 +141,12 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
     tests at once; every value is written ``--option=value`` so that one starting with ``-`` is no option.
 
     Raises:
-        HostedRefused: When the spec lacks what a multi-branch session needs, naming each missing field.
+        HostedRefused: When the spec lacks what a multi-branch session needs, naming each missing field, or sets a
+            field the session would not read.
     """
 
     section = _multibranch_section(spec.multibranch)
+    _refuse_launch_fields(spec)
     values: dict[str, Any] = {
         "model": spec.model_path,
         "framework": spec.framework_name,
@@ -161,6 +165,7 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "osl": spec.osl,
         "ep": spec.ep,
         "inferencex-commit": _inferencex_commit(section.get("inferencex_commit")),
+        "reference-script": _reference_script(section.get("reference_script")),
         "max-hours": max_hours,
         "max-gpu-hours": spec.max_gpu_hours,
         "max-llm-usd": spec.max_llm_usd,
@@ -177,6 +182,26 @@ def _inferencex_commit(commit: object) -> str | None:
     if commit is not None and not isinstance(commit, str):
         raise HostedRefused("multibranch.inferencex_commit must be a string")
     return commit
+
+
+def _reference_script(path: object) -> str | None:
+    if path is not None and (not isinstance(path, str) or not path.strip()):
+        raise HostedRefused("multibranch.reference_script must be the path of a launch script")
+    return path
+
+
+def _refuse_launch_fields(spec: CampaignSpec) -> None:
+    given = [
+        field
+        for field, value in (("launch.server_args", spec.server_args), ("launch.extra_env", spec.extra_env))
+        if value is not None
+    ]
+    if given:
+        raise HostedRefused(
+            f"a multibranch run does not read {' or '.join(given)}: give the base launch as"
+            " multibranch.reference_script, a shell launch script whose 'export NAME=value' lines set its environment"
+            " and whose server command carries its flags"
+        )
 
 
 def _agent_sources(sources: object) -> list[str]:

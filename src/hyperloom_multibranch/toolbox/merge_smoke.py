@@ -26,7 +26,8 @@ either here (a framework that needs a GPU to import) is not judged: the test goe
 
 Not checked: native and kernel sources (``.cu``, ``.hip``, Triton's JIT), anything that fails only at run time, and the
 modules a top-level import does not reach. A runtime root (a stack whose native build the test waits for) has its
-``.py`` files compiled but is not imported, since its native outputs are not built yet.
+``.py`` files compiled but is not imported, since its native outputs are not built yet; and since the other components
+may import what its package adds, an import failure of a stack that holds one is not judged either.
 
 ``HYPERLOOM_MERGE_SMOKE=off`` in the toolbox host's environment turns the check off (:func:`merge_smoke_from`).
 """
@@ -218,6 +219,16 @@ class MergeSmoke:
         if not failed:
             return None
         module = str(failed.get("module"))
+        native = [root.import_name for root in environment.roots if root.kind == _RUNTIME]
+        if native:
+            log.warning(
+                "merge smoke: %s does not import without the native stacks %s, whose packages are not laid until their "
+                "builds are ready, so the import is not judged: %s",
+                module,
+                ", ".join(native),
+                _one_line(str(failed.get("error"))),
+            )
+            return None
         if self._child(_IMAGE_IMPORT_STEP, python, [module], work, image_env):
             log.warning(
                 "merge smoke: the image's own %s does not import here either, so the import is not judged: %s",

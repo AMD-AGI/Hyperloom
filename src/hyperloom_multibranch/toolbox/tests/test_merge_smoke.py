@@ -18,6 +18,7 @@ import pytest
 from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore, PackageBase, compile_environment
+from hyperloom.measure.jit.native.needs import EnvEntry, EnvRoot
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.tests._recipes import IMAGE, PREFIX, git_patch, put_patch, recipe_with
 from hyperloom.measure.tests.hosted_fixtures import make_rig, point_yaml
@@ -284,3 +285,24 @@ def test_the_smoke_runs_in_a_directory_of_its_own(tmp_path: Path, framework: Fra
     scratch.mkdir()
     assert _check(tmp_path, framework, MERGE_OWN, scratch=scratch) is None
     assert os.listdir(scratch) == [], "each check removes what it laid"
+
+
+def test_an_import_a_native_stack_s_package_may_answer_is_not_judged(tmp_path: Path) -> None:
+    """A stack that also patches a native component (a ``runtime`` root, whose package is not laid until its build is
+    ready): the patched framework may import what that package adds, which the image's copy lacks, so its import
+    failing says nothing about the candidate."""
+    framework = _framework(tmp_path / "framework", IMAGE_FILES)
+    kernels = Path(framework.package).parent / "kern"
+    kernels.mkdir()
+    (kernels / "__init__.py").write_text("OLD = 1\n")
+    caller = {"__init__.py": (INIT, "from kern import NEW\n" + INIT)}
+    environment = _environment(tmp_path, framework, caller)
+    blob = LocalBlobStore(environment.blob_root).put(b"OLD = 1\nNEW = 2\n")
+    native = EnvEntry("__init__.py", "upsert", blob, "100644")
+    runtime = EnvRoot("kern", "kern", "kern", "0.0.1", (native,), kind="runtime")
+    with_native = replace(environment, roots=(*environment.roots, runtime))
+    point = point_yaml(tmp_path, "smoke-point.yaml")
+    assert MergeSmoke(default_python=framework.python).check(with_native, (point,)) is None
+    # Without the native stack the same import failure is the candidate's.
+    error = MergeSmoke(default_python=framework.python).check(environment, (point,))
+    assert error is not None and error.startswith("import sglang: ImportError: cannot import name 'NEW'"), error
