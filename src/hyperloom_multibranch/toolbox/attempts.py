@@ -278,7 +278,7 @@ class AttemptRunner:
 
     async def run(self, job: TestJob) -> TestResult:
         attempts: list[Attempt] = []
-        infra_retries, waits, reran = 0, 0, False
+        infra_retries, reran = 0, False
         last: TestResult | None = None
         while True:
             avoided = set(job.request.avoid_nodes) | self._avoid() | set(_facts_nodes(attempts))
@@ -327,11 +327,20 @@ class AttemptRunner:
                     job, result, attempts, _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, reason)
                 )
             infra_retries += 1
-            if _reason_name(result.failure_reason) in WAITED_INFRA_REASONS:
-                waits += 1
-                await self._back_off(job.request, waits)
+            await self._back_off(job.request, attempts)
 
-    async def _back_off(self, request: TestRequest, retry: int) -> None:
+    async def _back_off(self, request: TestRequest, attempts: list[Attempt]) -> None:
+        """Wait before the next infrastructure retry when the last attempt failed for a reason that is not its node's
+        (:data:`WAITED_INFRA_REASONS`), the ``n``-th such wait of the request for the ``n``-th such failure; after any
+        other failure the retry goes at once, to a node the avoid set has not yet seen fail."""
+        waited = [
+            a
+            for a in attempts
+            if a.failure_class is FailureClass.INFRA and _reason_name(a.failure_reason) in WAITED_INFRA_REASONS
+        ]
+        if not waited or waited[-1] is not attempts[-1]:
+            return
+        retry = len(waited)
         wait = self._backoff.before(retry, request)
         if wait > 0:
             log.info("test %s: infrastructure retry %d waits %.0f s first", request.request_id, retry, wait)
