@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 from hyperloom.common.perf_metric import is_agentx_mode
 from .speculative_decoding_focus import speculative_decoding_focus
@@ -802,3 +802,23 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "enablement_specialist": _focus_enablement_specialist,
     "custom_specialist": _focus_custom_specialist,
 }
+
+
+def split_evidence(inp: SpecialistPromptInputs) -> tuple[dict[str, Any], list[str]]:
+    """The roofline evidence and its decode table rows, which render ahead of the TraceLens kernels."""
+    evidence = dict(inp.roofline_evidence)
+    return evidence, _decode_table_rows(evidence.get("decode_modules"))
+
+
+def _decode_table_rows(table: Any) -> list[str]:
+    """The decode steps' time by module, ahead of the TraceLens kernels, or nothing without a table."""
+    if not table:
+        return []
+    return [
+        "**Decode step time by module** (summed per step off the raw profile capture's step windows, so it covers "
+        "the graph-replayed VERIFY step TraceLens cannot split; profiling inflates every figure by about a tenth, "
+        "the shares hold):",
+        "",
+        *(str(line) for line in table),
+        "",
+    ]

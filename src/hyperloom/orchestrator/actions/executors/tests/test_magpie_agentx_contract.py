@@ -332,7 +332,7 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     assert torch_profiler["enabled"] is True
     assert torch_profiler["num_profiles"] == 3
     assert torch_profiler["num_steps"] == 5
-    assert torch_profiler["start_seconds"] == 300
+    assert torch_profiler["start_seconds"] == 900
     assert torch_profiler["interval_seconds"] == 900
     assert "PROFILE_EXTRA_BODY" not in bench["envs"]
     assert bench["model"] == "Qwen/Qwen3-0.6B"
@@ -348,6 +348,20 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     assert measured["round_succeeded"] is True
     assert not is_valid_measurement(measured)
     assert constraint_veto_reason(measured, SimpleNamespace()) == "agentx_evidence_invalid"
+
+
+def test_a_profile_with_no_window_of_its_own_captures_the_steady_state(source, tmp_path, monkeypatch):
+    """Magpie's default is the replay's first 20 steps: the opening prefills alone, at bs=1."""
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    config = yaml.safe_load(source.read_text())
+    config["benchmark"]["profiler"] = {"torch_profiler": {"enabled": False}}
+    source.write_text(yaml.safe_dump(config))
+    rendered = materialize_benchmark_config(source, tmp_path / "profile")
+
+    enable_profile(rendered)
+
+    torch_profiler = load_benchmark(rendered)["profiler"]["torch_profiler"]
+    assert (torch_profiler["start_seconds"], torch_profiler["num_steps"]) == (900, 256)
 
 
 @pytest.mark.parametrize("checkout", ["default", "yaml", "environment"])

@@ -85,7 +85,7 @@ def test_native_and_fixed_profiles_share_patches_not_launch_controls(tmp_path, m
         "enabled": True,
         "num_steps": 256,
         "num_profiles": 1,
-        "start_seconds": 300,
+        "start_seconds": 900,
         "interval_seconds": 900,
         "detailed_annotations": True,
     }
@@ -248,7 +248,7 @@ def test_native_shape_setup_preserves_annotations_without_rewriting_client_body(
         **requested,
         "enabled": True,
         "num_profiles": 1,
-        "start_seconds": 300,
+        "start_seconds": 900,
         "interval_seconds": 900,
     }
     assert native["envs"]["PROFILE_EXTRA_BODY"] == client_body

@@ -113,7 +113,7 @@ def test_standard_cli_generates_native_yaml_and_candidate_controls(tmp_path, mon
     assert profiled["enabled"] is True
     assert profiled["num_steps"] == 256
     assert profiled["num_profiles"] == 1
-    assert profiled["start_seconds"] == 300
+    assert profiled["start_seconds"] == 900
     assert profiled["interval_seconds"] == 900
     assert load_benchmark(source)["profiler"]["torch_profiler"] == {"enabled": False}
 

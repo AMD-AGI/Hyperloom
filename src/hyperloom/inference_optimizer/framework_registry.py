@@ -21,6 +21,9 @@ class FrameworkSpec:
     # The image's default checkout of the framework's source; ``None`` when it has none.
     source_root: str | None
     throughput_unit: str
+    # Env names that relocate this framework's on-disk JIT / code-object caches. Empty when the framework's cache
+    # location has not been established: the caches then stay wherever the image puts them, as before.
+    jit_cache_envs: tuple[str, ...] = ()
 
 
 SERVING = "serving"
@@ -37,6 +40,9 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
         python_package="sglang",
         source_root="/sgl-workspace/sglang/",
         throughput_unit="tok/s",
+        # sglang keeps its shape-specialised triton kernels under SGLANG_CACHE_DIR, not TRITON_CACHE_DIR, and the
+        # LLVM code objects under the ROCm comgr cache.
+        jit_cache_envs=("SGLANG_CACHE_DIR", "AMD_COMGR_CACHE_DIR"),
     ),
     "vllm": FrameworkSpec(
         name="vllm",
@@ -108,6 +114,11 @@ def _spec_or_default(framework: str | None) -> FrameworkSpec:
 def is_scriptable(framework: str | None) -> bool:
     """Return whether ``framework`` is a server-less scriptable workload."""
     return _spec_or_default(framework).kind == SCRIPTABLE
+
+
+def jit_cache_envs(framework: str | None) -> tuple[str, ...]:
+    """Return the env names that relocate ``framework``'s JIT caches, empty when none is established."""
+    return _spec_or_default(framework).jit_cache_envs
 
 
 def tracelens_analysis_mode(framework: str | None) -> str:
