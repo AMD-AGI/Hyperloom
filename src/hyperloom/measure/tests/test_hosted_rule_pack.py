@@ -16,9 +16,9 @@ import pytest
 
 from hyperloom.common.outside_facts.rule_pack import DEFAULT_PACK_PATH, PACK_ENV
 from hyperloom.measure.returncodes import HOSTED_RESULT_REJECTED_RC
-from hyperloom.measure.tests.hosted_fixtures import Rig, make_call
+from hyperloom.measure.tests.hosted_fixtures import Rig
 from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack
-from hyperloom.measure.tests.test_hosted_real_runner import REAL_RUNNER, _point, _rigs
+from hyperloom.measure.tests.test_hosted_real_runner import REAL_RUNNER, _call, _point, _rigs
 
 REFERENCE = identity_of(DEFAULT_PACK_PATH)
 
@@ -35,7 +35,7 @@ def _recorded(rig: Rig) -> dict:
 
 
 def _run(rig: Rig, tmp_path: Path):
-    call = make_call(tmp_path, point=_point(tmp_path), timeout_sec=120)
+    call = _call(tmp_path, point=_point(tmp_path), timeout_sec=120)
     return call, rig.backend.run_test(call)
 
 

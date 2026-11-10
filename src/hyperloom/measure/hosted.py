@@ -46,6 +46,7 @@ from hyperloom.measure.failures import (
     SANDBOX_ACQUIRE_TIMEOUT,
     Disposition,
     FailureClassification,
+    FailureEvidence,
     classify_test_failure,
 )
 from hyperloom.measure.hosted_live import LiveOutputs, finite_number
@@ -64,7 +65,7 @@ from hyperloom.measure.hosted_log import (
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
 from hyperloom.measure.jit.publish import publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
-from hyperloom.measure.manifest import ResultManifest
+from hyperloom.measure.manifest import ResultManifest, result_schema_for
 from hyperloom.measure.phases import ACQUIRED, LANDED, RUNNER_DONE, HostTimeline
 from hyperloom.measure.boot_watch import HUNG_BEFORE_READY, PRE_READY_SILENCE_SEC, PreReadySilence
 from hyperloom.measure.runner.rounds import ROUNDS_FILE, WARMUP_DIR
@@ -89,7 +90,8 @@ from hyperloom.measure.sandboxes import (
 )
 from hyperloom.measure.signing import SigningError, verify
 from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, TestCall, TestOutcome
-from hyperloom.measure.spec import MeasurementSpec, blob_input_path, fingerprint, spec_sha256
+from hyperloom.measure.spec import SPEC_SCHEMA, MeasurementSpec, blob_input_path, fingerprint, spec_sha256
+from inference_suite.contracts.layout import REPORT_FILE
 from hyperloom.sandbox.socket import (
     Sandbox,
     SandboxCreateFailed,
@@ -115,6 +117,8 @@ __all__ = [
 STOPPED_RETURNCODE = -917
 STOPPED_REASON = "orchestrator_cancelled"
 RUNNER_LOST = "runner_lost"
+#: An unfinished attempt journalled with a sheet of an older version, which a restart does not resume.
+PRE_SWITCH = "pre_switch_sheet"
 #: The platform made a test's sandbox and it failed before it ran (``SandboxCreateFailed``); the reason carries the
 #: platform's message.
 SANDBOX_CREATE_FAILED = "sandbox_create_failed"
@@ -124,6 +128,8 @@ READY_PATH, SPEC_PATH = "/in/READY", "/in/spec.json"
 STATUS_PATH, PROGRESS_PATH = "/out/status.json", "/out/progress.json"
 MANIFEST_PATH, SIGNATURE_PATH, FILES_ROOT = "/out/manifest.json", "/out/manifest.sig", "/out/files"
 _LOSS_POLLS = 3
+#: The report a measuring round leaves in a landed bundle: an inference_suite run_dir's, or an archived v1 Magpie round's.
+_ROUND_REPORTS = frozenset({REPORT_FILE, "benchmark_report.json"})
 #: The steps of a landing, marked on the attempt's timeline when each ends. The journal line of the attempt's end says how
 #: long each took (``landing_sec``): all of them are file system work below the session directory, and a slow landing
 #: is told apart only by its steps. What ``result_landing`` holds beyond them is that journal line and its event.
@@ -595,6 +601,9 @@ class HostedMeasurementBackend:
                 return _refusal(
                     call, HOSTED_SPEC_REJECTED_RC, "resume_failed", f"the journalled sheet is unusable: {exc}"
                 )
+            if spec.schema != SPEC_SCHEMA:
+                self._drop_pre_switch(previous, spec.schema)
+                return None
             started = float(previous.extra.get("submitted_unix", self._clock()))
             attempt = _Attempt(call, previous.request_id, previous.attempt, spec, raw, runner, started, stop, timeline)
             if not runner.public_key_pem:
@@ -720,6 +729,8 @@ class HostedMeasurementBackend:
         text = f"{error_class}: {reported['message']}"
         if rc == HOSTED_INFRA_FAILURE_RC:  # where it failed matters for the node; a refused sheet is the sheet's
             text = f"{text} ({where(*_place(attempt.runner))})"
+        elif error_class == "spec_rejected":  # a runner of an older version names only the versions it reads
+            text = f"{text} (the sheet is {attempt.spec.schema})"
         outcome = _outcome(call, rc, facts=_facts_of(attempt.runner, None), stderr=text, failure=verdict)
         self._finish_record(attempt, outcome, {"verdict": error_class, "runner_status": reported})
         return outcome
@@ -795,6 +806,7 @@ class HostedMeasurementBackend:
                 spec_fingerprint=self._expected_fingerprint(attempt.spec, listed.runner.hyperloom_version),
                 spec_sha256=spec_sha256(attempt.spec_raw),
                 sandbox_id=runner.sandbox_id,
+                result_schema=result_schema_for(attempt.spec.schema),
                 rule_pack_digest=self._config.rule_pack_digest,
             ),
             max_total_bytes=attempt.spec.outputs.max_total_bytes,
@@ -816,7 +828,9 @@ class HostedMeasurementBackend:
         except ValueError as exc:
             raise ResultRejected(RejectReason.MANIFEST_INVALID, str(exc)) from None
         if manifest.total_size() > spec.outputs.max_total_bytes:
-            raise ResultRejected(RejectReason.TOO_LARGE, f"{manifest.total_size()} > {spec.outputs.max_total_bytes}")
+            # The sum is not shown: sizes thousands of digits long can add up to more digits than str() converts.
+            limit = spec.outputs.max_total_bytes
+            raise ResultRejected(RejectReason.TOO_LARGE, f"the listed files hold more than {limit} bytes")
         return manifest
 
     def _expected_fingerprint(self, spec: MeasurementSpec, claimed_version: str) -> str:
@@ -928,7 +942,16 @@ class HostedMeasurementBackend:
         if not isinstance(fingerprint, str) or not fingerprint or not record.sandbox_id:
             raise ResultRejected(RejectReason.RECORD_MISMATCH, "the acceptance kept no sheet fingerprint or sandbox")
         sheet = self.journal.load_spec(record.request_id, record.attempt)
-        return BundleExpectation(key, record.request_id, fingerprint, spec_sha256(sheet), record.sandbox_id)
+        schema = result_schema_for(MeasurementSpec.from_bytes(sheet).schema)
+        return BundleExpectation(key, record.request_id, fingerprint, spec_sha256(sheet), record.sandbox_id, schema)
+
+    def _drop_pre_switch(self, previous: Record, schema: str) -> None:
+        """End an attempt journalled with a sheet of an older version: its sandbox measures what the session no longer
+        asks for, so the test starts a fresh attempt instead."""
+        self._pool.discard(str(previous.sandbox_id))
+        self._mark_finished(
+            previous, {"verdict": PRE_SWITCH, "reason": f"the journalled sheet is {schema}, not {SPEC_SCHEMA}"}
+        )
 
     # -- journal and events -------------------------------------------------------------------------------------
 
@@ -1116,13 +1139,16 @@ def _failure_of(out: Any) -> FailureClassification:
         return FailureClassification(Disposition.FAILED, FailureClass(out.failure_class), out.failure_reason)
     if out.timed_out:
         return classify_test_failure(returncode=out.returncode, timed_out=True)
-    return classify_test_failure(returncode=out.returncode, logs=[out.stderr_tail, out.stdout_tail])
+    return classify_test_failure(
+        returncode=out.returncode, evidence=FailureEvidence(logs=(out.stderr_tail, out.stdout_tail))
+    )
 
 
 def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ...]:
     """The rounds of a landed result: from ``rounds.json`` when the runner listed it, else from the report layout.
 
-    The layout alone only says which reports there are; a report in the warm-up directory is not a measuring round.
+    The layout alone only says which reports there are, an inference_suite run_dir's or an archived v1 Magpie round's; a report in the
+    warm-up directory is not a measuring round.
     """
     listed = {entry.path for entry in verified.result.files}
     returncode = verified.result.outcome.returncode
@@ -1144,7 +1170,7 @@ def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ..
             raise ResultRejected(RejectReason.MANIFEST_INVALID, "a round failed under an outcome that says success")
         return rounds
     reports = sorted(
-        path for path in listed if path.endswith("benchmark_report.json") and WARMUP_DIR not in Path(path).parts
+        path for path in listed if Path(path).name in _ROUND_REPORTS and WARMUP_DIR not in Path(path).parts
     )
     return tuple(RoundOutcome(0, "measure", output / Path(path).parent, returncode) for path in reports)
 

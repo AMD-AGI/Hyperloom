@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
+from hyperloom.common.benchmark_config import BenchmarkPoint
 import functools
 import logging
 import os
@@ -53,14 +54,10 @@ from ...state.shared_state import (
     resolve_graded_comparison,
     stack_base_params,
 )
-from ..stop_attribution import (
-    StoppedByTheRun,
-    stopped_by_the_run_class,
-    variant_budget_stop,
-)
-from ._accuracy_gate import parse_eval_results
+from ..stop_attribution import StoppedByTheRun, stopped_by_the_run_class, variant_budget_stop
+from ._accuracy_gate import AccuracyReference, parse_eval_results
 from . import _framework_switch_manifest as _switch_manifest
-from .bypass_scriptable import declared_lever_payload
+from .explore_prefilter.declared_levers import declared_lever_payload
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import (
     BaseControls,
@@ -71,10 +68,12 @@ from ._proposal_identity import (
 )
 from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
+from ._grid_base import importable_overlay_dir, variant_config_of
 from ._grid_base import apply_base_env
 from ._agentx_checkpoint import round_checkpoint
 from ._subprocess_kill import AGENTX_EARLY_STOP_ERROR_CLASS
 from .benchmark_result import double_run_requested
+from .benchmark_run.accuracy import accuracy_round_due, record_accuracy_round, run_candidate_accuracy_round
 from .explore_prefilter._prefilter import prefilter_round, record_decision_round
 from .explore_prefilter._remeasure import STACK_REVALIDATE_SOURCE, _is_config_replay_variant, is_stack_revalidation
 from ._grid_runner import (
@@ -84,12 +83,13 @@ from ._grid_runner import (
     GridVariant,
     SessionDirField,
     _build_variant_yaml,
-    _num_gpus_for_config,
+    lease_cards,
     _safe,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
     session_grid_bounds,
+    teardown_variant_server,
 )
 from ._grid_variant_filter import (
     ServingStack,
@@ -100,19 +100,14 @@ from ._grid_variant_filter import (
     reorder_grid_for_multi_node,
     resolve_skip_spec,
 )
-from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-from hyperloom.inference_optimizer.grid_server_args import (
-    compose_server_args,
-)
+from hyperloom.inference_optimizer.framework_registry import is_scriptable, server_args_env_name
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 from ._ray_serving import maybe_serving_lease
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 
 from ._launch_restatement import Launch, config_envs, launch_change, observed_launch_after, read_launch
-from ._server_argv import ConfigUnreadable, config_server_argv
-from ._server_lifecycle import (
-    resolve_lifecycle_params,
-    teardown_lifecycle_server,
-)
+from ._server_argv import ConfigUnreadable, config_point, config_server_argv
+from ._server_lifecycle import resolve_lifecycle_params
 from ._workload_envs import (
     BenchmarkTarget,
     FrameworkScriptMismatchError,
@@ -355,14 +350,14 @@ def filter_context_copy_drafts(
         tmp_root = Path(tmp_dir)
         try:
             base = _materialized_launch(recipe, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base")
-        except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
+        except _UNREADABLE_LAUNCH as exc:
             log.warning("explore: could not materialize the base to read its speculative decoding (%s)", exc)
             base = ("", {})
         for idx, gv in enumerate(grid):
             against = base
             try:
                 launch = _materialized_launch(recipe, gv, tmp_root / f"v{idx}")
-            except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
+            except _UNREADABLE_LAUNCH as exc:
                 log.warning("explore: could not materialize %s to read its speculative decoding (%s)", gv.name, exc)
                 launch = (str(gv.extra_server_args or ""), {str(k): str(v) for k, v in (gv.extra_envs or {}).items()})
                 against = ("", {})
@@ -498,14 +493,11 @@ def _materialized_round_config(
         raise _RoundRefused("framework_script_mismatch", str(exc)) from exc
 
 
-def _framework_of(config_path: Path) -> tuple[str, dict[str, Any]]:
+def _round_point(config_path: Path) -> BenchmarkPoint:
     try:
-        with config_path.open(encoding="utf-8") as handle:
-            bench = (yaml.safe_load(handle) or {}).get("benchmark") or {}
-    except (OSError, yaml.YAMLError) as exc:
-        log.warning("explore: could not resolve framework from %s: %s", config_path, exc)
-        return "", {}
-    return str(bench.get("framework") or "").lower(), bench
+        return config_point(config_path)
+    except ConfigUnreadable as exc:
+        raise _RoundRefused("unreadable_config", str(exc)) from exc
 
 
 def _anchor_the_params(params: dict[str, Any], ss: Any) -> None:
@@ -654,6 +646,7 @@ def _outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str
         "error_class": str(te.get("error_class") or ""),
         "failure_attribution": classify_failure_attribution(
             error_class=te.get("error_class"),
+            framework_changed=bool(te.get("framework_changed")),
             error_excerpt=te.get("error_excerpt"),
             reason=reason,
         )
@@ -704,9 +697,9 @@ class _ExploreRound:
         grading = getattr(self.ss, "grading", None)
         self.config_path = _materialized_round_config(params, output_root, self.target, grading)
         _anchor_the_params(params, self.ss)
-        self.framework, bench = _framework_of(self.config_path)
-        self.bench = bench
-        self.yaml_envs = bench.get("envs") or {}
+        self.point = _round_point(self.config_path)
+        self.framework = self.point.framework.lower()
+        self.yaml_envs = dict(self.point.envs)
         self.base_args = str(params.get("base_extra_args") or "").strip()
         self.base_envs = dict(params.get("base_extra_envs") or {})
         self.base_remove_args = to_str_list(params.get("base_remove_args"))
@@ -723,12 +716,7 @@ class _ExploreRound:
         self.running_tput = self.base_tput
         self.running_perf: Any = None
         self.keep_threshold_pct = float(params["keep_threshold_pct"])
-        # The measured baseline outranks a proposed one.
-        self.baseline_accuracy = to_float(getattr(self.ss, "baseline_accuracy", 0.0), 0.0) or 0.0
-        if self.baseline_accuracy <= 0:
-            self.baseline_accuracy = (
-                to_float(params.get("accuracy_baseline"), 0.0) or to_float(params.get("baseline_accuracy"), 0.0) or 0.0
-            )
+        self.accuracy_reference = AccuracyReference.of_session(self.ss, params)
         # A context-copying draft is refused on the synthetic benchmark, whose repetition loops it would copy.
         self.refuse_context_copy = not agentx_active(
             benchmark_mode=getattr(self.ss, "benchmark_mode", "")
@@ -771,7 +759,7 @@ class _ExploreRound:
         self._open_schedule()
         round_ctx = await prefilter_round(self, session_dir)
         # One Ray serving lease (actor) spans the WHOLE round; every variant reuses it.
-        self.lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(self.config_path)) if self.runnable else None
+        self.lease = maybe_serving_lease(num_gpus=lease_cards(self.config_path, session_dir)) if self.runnable else None
         try:
             for idx, gv in enumerate(self.runnable):
                 if self._refused(gv, idx):
@@ -786,21 +774,21 @@ class _ExploreRound:
                     if self.run_stop is not None:
                         break
                     if measurement is not None:
-                        row = self._settle(gv, run_gv, measurement, slot)
+                        row = await self._settle(gv, run_gv, measurement, slot)
                         await record_decision_round(round_ctx, gv, measurement, row)
                 finally:
-                    # Reap THIS variant's persistent server on every exit path (idempotent + no-op when reuse was
-                    # ineligible).
+                    # The warmup and decision rounds share this slot's server; reap it on every exit path.
                     if self.lifecycle_eligible:
-                        teardown_lifecycle_server(
-                            pid_dir=slot, framework=self.lifecycle_framework, port=self.lifecycle_port
-                        )
+                        self._reap_variant_server(slot)
         finally:
-            # Release the round's Ray serving lease/actor exactly once (this was a per-variant ``ray.kill`` before
-            # -- the raylet worker churn that destabilised the single-node cluster).
+            # One lease spans the round; a per-variant ``ray.kill`` churns raylet workers on a single-node cluster.
             if self.lease is not None:
                 self.lease.close()
         return self._result()
+
+    def _reap_variant_server(self, slot: Path) -> None:
+        if survivors := teardown_variant_server(slot):
+            log.error("explore: pids %s outlived SIGKILL; %s keeps their record", survivors, slot)
 
     # ----- the stack the round accumulates ---------------------------------
 
@@ -816,7 +804,7 @@ class _ExploreRound:
         """
         return {
             "throughput": self.running_tput,
-            "accuracy": self.baseline_accuracy or None,
+            "accuracy": self.accuracy_reference.score or None,
             "extra_server_args": self.args,
             "extra_envs": dict(self.envs),
             "remove_args": list(self.remove_args),
@@ -967,9 +955,8 @@ class _ExploreRound:
         # cold decision round instead of one that re-attaches to the warmup's server).
         lifecycle = resolve_lifecycle_params(self.config_path)
         self.lifecycle_eligible = bool(lifecycle.get("eligible"))
-        self.lifecycle_framework = str(lifecycle.get("framework") or "")
         self.lifecycle_port = to_int(lifecycle.get("port"), 0) or 0
-        self.use_warm_decision = self.lifecycle_eligible and double_run_requested(self.params)
+        self.use_warm_decision = self.lifecycle_eligible and double_run_requested(self.params, self.config_path)
         # Stop testing further variants once the session wall-clock budget runs out; untested variants stay out of
         # the ledger so a resume can retry them.
         self.session_deadline_sec, session_expected_sec = session_grid_bounds(self.ss)
@@ -1252,7 +1239,7 @@ class _ExploreRound:
 
     # ----- the verdict -----------------------------------------------------
 
-    def _settle(self, gv: GridVariant, run_gv: GridVariant, r: Any, slot: Path) -> dict[str, Any]:
+    async def _settle(self, gv: GridVariant, run_gv: GridVariant, r: Any, slot: Path) -> dict[str, Any]:
         # Rule on this variant's measurement and fold a KEEP onto the round's stack.
         #
         # A variant KEEPs when it clears the graded verdict and the accuracy gate. The axes and the threshold floor
@@ -1293,6 +1280,8 @@ class _ExploreRound:
             "validation_basis": "",
         }
         if row["outcome"] == TS_FAILED and not row["reason"]:
+            if accuracy_round_due(self.ss):
+                await self._run_accuracy_round(row, slot, r.workspace)
             self._apply_accuracy_gate(row, slot)
         self._record(gv, row)
         if row["outcome"] == "KEEP":
@@ -1307,6 +1296,7 @@ class _ExploreRound:
             "extra_envs": dict(gv.extra_envs),
             **controls_of(vars(gv)),
             **_decision_fields(gv),
+            "framework_changed": bool(importable_overlay_dir(gv)),
         }
 
     def _graded_verdict(self, gv: GridVariant, r: Any, variant_meas: dict[str, Any]) -> dict[str, Any]:
@@ -1365,25 +1355,31 @@ class _ExploreRound:
             "gates": gates,
         }
 
+    async def _run_accuracy_round(self, row: dict[str, Any], slot: Path, workspace: str) -> None:
+        if self.lifecycle_eligible:  # the round boots a server of its own on the variant's GPUs
+            self._reap_variant_server(slot)
+        launch = variant_config_of(workspace)
+        outcome = await run_candidate_accuracy_round(slot, launch, self.ss, session=self.session_dir, lease=self.lease)
+        record_accuracy_round(row, outcome)
+
     def _apply_accuracy_gate(self, row: dict[str, Any], slot: Path) -> None:
         # Rule on the round's accuracy evidence for a variant no earlier gate refused.
         #
         # A session with no baseline accuracy gates nothing, so its KEEPs rest on throughput alone -- a weaker
         # claim than one an accuracy gate ruled on, and ``validation_basis`` must not read alike for the two.
-        from hyperloom.inference_optimizer import framework_registry
-
-        scriptable = framework_registry.is_scriptable(self.framework)
+        scriptable = is_scriptable(self.framework)
         observed: Any = None
         reference: float | None = None
         passed = True
         # Serving still needs a measured baseline to compare against; scriptable compares against a fixed 1.0.
-        gated = scriptable or self.baseline_accuracy > 0
+        gated = scriptable or self.accuracy_reference.score > 0
         if gated:
-            observed = parse_eval_results(
+            results = parse_eval_results(
                 slot, framework=self.framework, benchmark_mode=str(getattr(self.ss, "benchmark_mode", "") or "")
-            ).get("accuracy")
+            )
+            observed = results.get("accuracy") if scriptable else self.accuracy_reference.comparable(results)
             if isinstance(observed, (int, float)):
-                reference = 1.0 if scriptable else self.baseline_accuracy
+                reference = 1.0 if scriptable else self.accuracy_reference.score
                 passed = accuracy_passed(reference, float(observed))
             else:
                 passed = False
@@ -1466,7 +1462,9 @@ class _ExploreRound:
             effective["remove_args"] = list(run_remove_args)
         if run_gv.unset_envs:
             effective["unset_envs"] = list(run_gv.unset_envs)
-        persist = keeps_effective_args(self.bench, self.args_mode, gv.args_mode, run_remove_args, run_gv.unset_envs)
+        persist = keeps_effective_args(
+            self.point.agentx, self.args_mode, gv.args_mode, run_remove_args, run_gv.unset_envs
+        )
         if persist:
             effective["args_mode"] = "replace"
         # The variant KEEPs on the round that graded it.

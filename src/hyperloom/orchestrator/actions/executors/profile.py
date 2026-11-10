@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Real ``profile`` ActionRunner — Magpie run with torch profiler on."""
+"""Real ``profile`` ActionRunner — a benchmark round with the torch profiler on."""
 
 from __future__ import annotations
 
@@ -12,27 +12,20 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 import yaml
 
+from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.orchestrator.trace_analysis._capture_shapes import is_capture_fragment
-from hyperloom.orchestrator.trace_analysis._trace_rank import (
-    select_primary_trace,
-    trace_rank as _trace_rank,
-)
 from hyperloom_common.io import atomic_write_json, safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from hyperloom.inference_optimizer import framework_registry
-from ._inferencex_patcher import (
-    benchmark_serving_path_in,
-    ensure_benchmark_lib_patched,
-    ensure_benchmark_lib_eval_dest_patched,
-    ensure_benchmark_serving_patched,
-)
 from .benchmark_result import round_succeeded
+from inference_suite.contracts import RunLayout
+from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS
 from .baseline import BenchmarkRunExecutor
 
 
@@ -115,37 +108,24 @@ def _check_row(
     return {"check_id": check_id, "status": status, "skip_reason": skip_reason, "detail": detail}
 
 
-def _instrumentation_preflight_row(bench: Any, patchers: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def _instrumentation_preflight_row(envs: Mapping[str, Any]) -> dict[str, Any]:
     """State, before the run, whether the annotations the trace checks look for can land at all.
 
     When the TraceLens runtime patch is unavailable the env layer turns ``detailed_annotations`` and
     ``shape_discovery`` off, which makes checks 3 and 5 certain to fail. Recording that decision here gives the
     post-hoc failures their cause. This only reports it -- the run proceeds unchanged, because a trace without
     annotations is still a trace.
-
-    ``patchers`` carries each patcher's own outcome. The env block records what the patch results *caused*, which
-    is not the same as which patcher ran and what it returned: a successful patch records its outcome too, so
-    "instrumentation was fine" and "nobody looked" are different records.
     """
-    envs = (bench or {}).get("envs") if isinstance(bench, dict) else None
-    if not isinstance(envs, dict):
-        return _check_row(
-            CHECK_INSTRUMENTATION_PREFLIGHT,
-            status="skipped",
-            skip_reason="materialized config carries no benchmark.envs block",
-        )
     degraded = str(envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") or "")
-    patchers = dict(patchers or {})
     try:
         extra_body = json.loads(str(envs.get("PROFILE_EXTRA_BODY") or "{}"))
     except (TypeError, ValueError):
         extra_body = {}
     if not isinstance(extra_body, dict):
         extra_body = {}
-    failed_patchers = sorted(name for name, ok in patchers.items() if ok is False)
     return _check_row(
         CHECK_INSTRUMENTATION_PREFLIGHT,
-        status="failed" if (degraded or failed_patchers) else "passed",
+        status="failed" if degraded else "passed",
         degraded_reason=degraded,
         tracelens_patch_status=str(envs.get("HYPERLOOM_TRACELENS_PATCH_STATUS") or ""),
         detailed_annotations=extra_body.get("detailed_annotations"),
@@ -154,8 +134,6 @@ def _instrumentation_preflight_row(bench: Any, patchers: Mapping[str, Any] | Non
         shape_discovery_flag_present=(
             "shape-discovery-for-cuda-graph-profile" in str(envs.get("EXTRA_SGLANG_ARGS") or "")
         ),
-        patchers=patchers,
-        failed_patchers=failed_patchers,
         # Named so a reader knows which post-hoc checks this predicts rather than having to rediscover the link.
         predicts_failure_of=[CHECK_STEP_ANNOTATIONS, CHECK_SGLANG_SHAPE_PROFILER] if degraded else [],
     )
@@ -302,12 +280,9 @@ def _certify_trace_dir(trace_dir: Path, trace_input: Path, framework: str) -> di
     )
 
 
+# A run_dir keeps the capture sidecars beside its ``torch_trace``.
 def _capture_trace_files(trace_dir: Path) -> tuple[Path | None, list[Path]]:
-    capture_dirs = (
-        trace_dir / "capture_traces",
-        trace_dir / "graph_capture_profile",
-        trace_dir / "graph_capture",
-    )
+    capture_dirs = [base / name for base in (trace_dir, trace_dir.parent) for name in CAPTURE_TRACE_DIRS]
     capture = next((path for path in capture_dirs if path.is_dir()), None)
     if capture is None:
         return None, []
@@ -500,9 +475,8 @@ def _check_steady_state_naming(split_files: list[Path]) -> tuple[dict, str]:
         "[6] trace_split/ has _extend_* / _decode_* files but NO "
         "_steady_state_* — profile_by_stage=True leaked through, "
         "PROFILE_EXTRA_BODY env was not consumed by the framework. "
-        "Confirm _inferencex_patcher patched Magpie's bundled "
-        "InferenceX (#210; check $MAGPIE_PATH/InferenceX/utils/"
-        "bench_serving/benchmark_serving.py)."
+        "Check that the round's profile start request carried "
+        "PROFILE_EXTRA_BODY with profile_by_stage disabled."
     )
 
 
@@ -744,7 +718,7 @@ def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_
         result["trace_dir"] = None
         result["trace_files"] = []
         log.warning(
-            "profile_executor: round trace dir %s does not exist after magpie completed; check sglang server logs for torch profiler errors",
+            "profile_executor: round trace dir %s does not exist after the round completed; check sglang server logs for torch profiler errors",
             round_trace_root,
         )
         return
@@ -901,12 +875,8 @@ def _preferred_main_trace_path(trace_dir: Path, trace_files: list[Path]) -> Path
 
 
 def _candidate_trace_dirs(workspace: Path) -> list[Path]:
-    """Trace directories to probe for a Magpie profile workspace."""
-    return [
-        workspace / "torch_trace",
-        workspace / "capture_traces",
-        workspace.parent / "capture_traces",
-    ]
+    """Trace directories to probe in a run_dir."""
+    return list(RunLayout(workspace).profile_trace_dirs())
 
 
 def _default_profile_config() -> Path:
@@ -924,22 +894,20 @@ class ProfileExecutor(BenchmarkRunExecutor):
     def __init__(
         self,
         *,
-        magpie_python: str | None = None,
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
     ):
         """Initialize the profile executor with profile-specific defaults."""
         super().__init__(
-            magpie_python=magpie_python,
             default_config_path=default_config_path,
             session_dir=session_dir,
         )
-        # Set by ``_after_materialize_config`` once the probe is armed; read after the run to merge per-rank reports.
+        # Set by ``_prepare_point`` once the probe is armed; read after the run to merge per-rank reports.
         self._host_probe_dir: str = ""
         # Non-empty only when arming failed, and then says why (an empty probe dir cannot tell never-asked from failed).
         self._host_probe_status: str = ""
-        # Set by ``_after_materialize_config`` from the config the run will actually execute, so the post-hoc trace
-        # checks ship alongside the pre-run statement of whether their subject could have been produced.
+        # Set by ``_prepare_point`` from the config the run will actually execute, so the post-hoc trace checks ship
+        # alongside the pre-run statement of whether their subject could have been produced.
         self._instrumentation_preflight: dict[str, Any] | None = None
 
     def _resolve_default_config(self) -> Path:
@@ -1015,17 +983,13 @@ class ProfileExecutor(BenchmarkRunExecutor):
             deep=_evidence.deep_probe_enabled(),
         )
 
-    def _after_materialize_config(
-        self,
-        config_path: Path,
-        output_dir: Path,
-    ) -> dict[str, Any] | None:
-        """Arm the host probe, then patch the InferenceX checkout Magpie will execute."""
-        from .magpie_agentx import enable_profile, native_config
+    def _prepare_point(self, config_path: Path, output_dir: Path) -> None:
+        """Turn the AgentX profile on, or arm the host probe, in the point either backend then runs."""
+        from .agentx_point import enable_profile, native_config
 
         if native_config(config_path):
             enable_profile(config_path)
-            return None
+            return
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
             self._host_probe_status = ""
@@ -1033,108 +997,8 @@ class ProfileExecutor(BenchmarkRunExecutor):
             log.warning("profile_executor: host-probe injection failed: %s", exc, exc_info=True)
             self._host_probe_dir = ""
             self._host_probe_status = f"probe_injection_failed: {exc}"
-        try:
-            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        except (OSError, ValueError, yaml.YAMLError) as exc:
-            return {
-                "status": "failed",
-                "error_class": "profile_config_unreadable",
-                "error": f"cannot read materialized profile config {config_path}: {exc}",
-            }
-        bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
-        patchers: dict[str, Any] = {}
-
-        def _note_instrumentation() -> None:
-            """Re-state the instrumentation report. Called before every exit below, so no path leaves it unset."""
-            self._instrumentation_preflight = _instrumentation_preflight_row(bench, patchers)
-            detail = self._instrumentation_preflight["detail"]
-            if self._instrumentation_preflight["status"] != "failed":
-                return
-            log.warning(
-                "profile_executor: instrumentation preflight — degraded_reason=%r failed_patchers=%s; "
-                "annotation-dependent trace checks (%s, %s) cannot pass for this run",
-                detail.get("degraded_reason"),
-                detail.get("failed_patchers"),
-                CHECK_STEP_ANNOTATIONS,
-                CHECK_SGLANG_SHAPE_PROFILER,
-            )
-
-        _note_instrumentation()
-        framework = ""
-        if isinstance(bench, dict):
-            framework = str(bench.get("framework") or "").strip().lower()
-        from hyperloom.inference_optimizer import framework_registry
-
-        if framework_registry.is_scriptable(framework):
-            return None
-        inferencex_path = ""
-        if isinstance(bench, dict):
-            inferencex_path = str(bench.get("inferencex_path") or "").strip()
-        if not inferencex_path:
-            inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
-        if not inferencex_path:
-            log.warning(
-                "profile_executor: no benchmark.inferencex_path / "
-                "INFERENCEX_PATH configured; skipping InferenceX profile "
-                "patch validation"
-            )
-            patchers["inferencex"] = None
-            _note_instrumentation()
-            return None
-
-        ix_root = Path(inferencex_path)
-        lib_ok = ensure_benchmark_lib_patched(ix_root)
-        patchers["benchmark_lib"] = lib_ok
-        patchers["benchmark_lib_eval_dest"] = ensure_benchmark_lib_eval_dest_patched(ix_root)
-        serving_ok = ensure_benchmark_serving_patched(ix_root)
-        patchers["benchmark_serving"] = serving_ok
-        return self._verify_inferencex_patches(ix_root, patchers, _note_instrumentation)
-
-    def _verify_inferencex_patches(
-        self,
-        ix_root: Path,
-        patchers: dict[str, Any],
-        note_instrumentation: Callable[[], None],
-    ) -> dict[str, Any] | None:
-        """Read the patched InferenceX sentinels back; a failed result when the checkout is not patched."""
-        lib_ok = patchers["benchmark_lib"]
-        serving_ok = patchers["benchmark_serving"]
-        lib_path = ix_root / "benchmarks" / "benchmark_lib.sh"
-        # path as a forwarding shim, which never carries the sentinel however well the patch landed.
-        # Scoped to ``ix_root`` like ``lib_path`` above: this gate speaks for the tree Magpie runs.
-        serving_path = benchmark_serving_path_in(ix_root)
-
-        def _contains(path: Path, needle: str) -> bool:
-            """Check whether ``needle`` appears in ``path``'s text."""
-            try:
-                return needle in path.read_text(encoding="utf-8")
-            except OSError:
-                return False
-
-        lib_valid = _contains(lib_path, "${NUM_PROMPTS:-$max_concurrency}")
-        serving_valid = _contains(serving_path, "PROFILE_EXTRA_BODY")
-        # The sentinels are a separate fact from the patcher's return: a patcher can report success against a
-        # checkout whose anchors have since moved, and only reading the file back tells them apart.
-        patchers["benchmark_lib_sentinel"] = lib_valid
-        patchers["benchmark_serving_sentinel"] = serving_valid
-        patchers["inferencex_path"] = str(ix_root)
-        note_instrumentation()
-        if not (lib_ok and serving_ok and lib_valid and serving_valid):
-            return {
-                "status": "failed",
-                "error_class": "profile_inferencex_patch_failed",
-                "error": (
-                    "profile requires InferenceX to honour NUM_PROMPTS and "
-                    "PROFILE_EXTRA_BODY, but the checkout Magpie will use is "
-                    f"not patched: inferencex_path={ix_root}, "
-                    f"benchmark_lib_ok={lib_ok}/{lib_valid}, "
-                    f"benchmark_serving_ok={serving_ok}/{serving_valid}"
-                ),
-                "inferencex_path": str(ix_root),
-                "benchmark_lib": str(lib_path),
-                "benchmark_serving": str(serving_path),
-            }
-        return None
+        with contextlib.suppress(OSError, ValueError, yaml.YAMLError):
+            self._instrumentation_preflight = _instrumentation_preflight_row(read_benchmark_point(config_path).envs)
 
     def drain_instrumentation_report(self) -> dict[str, Any] | None:
         """Take the instrumentation report this executor produced, clearing it.
@@ -1191,9 +1055,9 @@ class ProfileExecutor(BenchmarkRunExecutor):
         params = ctx.task.params or {}
         _merge_profile_params(params)
         extra = getattr(ctx, "extra", None) or {}
-        from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
+        from hyperloom.common.benchmark_config import configured_benchmark, is_agentx
 
-        if is_magpie_agentx(configured_benchmark()):
+        if is_agentx(configured_benchmark()):
             return await self._run_native_profile(ctx)
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
@@ -1231,33 +1095,14 @@ class ProfileExecutor(BenchmarkRunExecutor):
     _measurement_succeeded = staticmethod(round_succeeded)
 
     async def _run_native_profile(self, ctx) -> dict[str, Any]:
-        """Collect Magpie-owned captures and certify each time window separately."""
-        import asyncio
+        """Certify an AgentX profile round's traces as a fixed round's."""
 
         result = await super().__call__(ctx)
         if result.get("status") != "succeeded":
             return result
-        capture = result.get("agentx_metrics", {}).get("profile_capture", {})
-        if capture.get("status") != "complete":
-            return {
-                **result,
-                "status": "failed",
-                "error_class": "profile_capture_failed",
-                "trace_capture": capture,
-                "trace_input_ready": False,
-            }
-        result["trace_capture"] = capture
-        result["trace_capture_status"] = capture["status"]
-        result["trace_input_ready"] = False
-        result["profile_captures"] = []
-        for window in capture.get("profiles", [capture]):
-            mapped = await asyncio.to_thread(_map_native_capture, window, result)
-            result["profile_captures"].append(mapped)
-        primary = next((window for window in result["profile_captures"] if window.get("trace_input_ready")), None)
-        if primary is None:
-            result.update(status="failed", error_class="primary_rank_trace_missing")
-        else:
-            result.update(primary)
+        framework = str(result.get("framework") or "")
+        _record_workspace_traces(result, result["workspace"], framework, self._instrumentation_preflight)
+        result["trace_input_ready"] = bool(result.get("main_trace_path"))
         return result
 
 
@@ -1269,24 +1114,3 @@ __all__ = [
     "ProfileExecutor",
     "profile_executor",
 ]
-
-
-def _map_native_capture(capture: dict[str, Any], measurement: dict[str, Any]) -> dict[str, Any]:
-    """Select and check one capture, without combining ranks from different windows."""
-    files = [Path(name) for name in capture.get("trace_files", [])]
-    result: dict[str, Any] = {"capture_id": capture["capture_id"], "trace_input_ready": False}
-    if not files or not all(path.is_file() for path in files):
-        return result
-    trace_dir = files[0].parent
-    main = select_primary_trace(files, file_size=_trace_size_bytes, tensor_parallel_size=measurement.get("tp"))
-    result.update(trace_dir=str(trace_dir), trace_files=[str(path) for path in files])
-    if main is None:
-        return result
-    result.update(main_trace_path=str(main), primary_rank=_trace_rank(main), trace_input_ready=True)
-    framework = measurement["framework"]
-    health = _validate_trace_structure(trace_dir, framework)
-    certificate = _certify_trace_dir(trace_dir, main, framework)
-    result["trace_health"] = health
-    result["trace_validate"] = _build_trace_validate(health, _TraceProbe(trace_dir, framework, certificate=certificate))
-    result["trace_validate_path"] = _write_trace_certificate(trace_dir, result["trace_validate"])
-    return result

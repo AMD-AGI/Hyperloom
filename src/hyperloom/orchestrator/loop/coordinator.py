@@ -115,12 +115,12 @@ if TYPE_CHECKING:
 
 
 def reap_orphaned_servers_best_effort(session_dir: Path, *, phase: str) -> None:
-    """Reap leftover single-node serving processes via this session's pidfiles.
+    """Stop the single-node servers this session's ``server.pid`` files still record.
 
-    Runs at boot, at shutdown and on resume. Every other teardown is in-band (a wrapper's signal trap, a ``killpg`` on
-    a handle still held), so none of it runs when the owner dies without getting to; this is the backstop, and with no
-    cgroup or pid namespace the only one: the pidfile outlives its writer. Scoped to this session's own pidfiles and
-    gated on a cmdline match, so a co-located session's server and a recycled pid are never touched.
+    Runs at boot, at shutdown and on resume. Every other teardown is in-band, so none of it runs when the owner dies
+    without getting to; this is the backstop, and with no cgroup or pid namespace the only one: the pidfile outlives
+    its writer. Scoped to this session's own pidfiles, and to the incarnation and run mark each one records, so a
+    co-located session's server and a recycled pid are never touched.
     """
     try:
         from ..actions.executors._multi_node_env import is_multi_node

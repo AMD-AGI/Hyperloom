@@ -68,7 +68,7 @@ def test_extract_launch_log_empty_on_none_or_blank():
         ({"error": "bad --flag"}, "fast_exit_arg_error"),
         ({"error": "pinned dependency missing"}, AGENTX_PREFLIGHT_ERROR_CLASS),
         ({"error": f"{RAY_INFEASIBLE_MARKER}: cluster has 0 GPU(s), 8 requested"}, "subprocess_nonzero"),
-        ({"error": "gpu_selection.auto: needed 8 idle GPU(s) but only found 7"}, HOST_GPUS_UNAVAILABLE),
+        ({"error": "GPU 0: held by pid 4242 (python3)"}, HOST_GPUS_UNAVAILABLE),
         ({"error": "budget reached"}, SESSION_TIME_EXHAUSTED_CLASS),
     ],
 )
@@ -158,14 +158,13 @@ def test_build_params_threads_eval_origin_carriers(monkeypatch, tmp_path):
     fake.shared_state.enablement.origin = "eval"
     fake.shared_state.enablement.accuracy_floor = 0.3
     fake.shared_state.enablement.probe_config_path = "/runs/baseline/materialized.yaml"
-    fake.shared_state.enablement.eval_contract_fingerprint = "abc123"
+    fake.shared_state.enablement.eval_definition_digest = "sha256:abc123"
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
     assert params["enablement_origin"] == "eval"
     assert params["enablement_accuracy_floor"] == 0.3
     assert params["enablement_probe_config_path"] == "/runs/baseline/materialized.yaml"
-    # The eval-contract fingerprint is no longer carried: nothing downstream reads it.
-    assert "enablement_eval_contract_fingerprint" not in params
+    assert "enablement_eval_definition_digest" not in params
 
 
 _TRANSFORMERS_UNRECOGNIZED_LOG = (
@@ -292,7 +291,7 @@ def _enqueue_self(tmp_path, **state_kw):
             accepted_config_path=state_kw.get("enablement_accepted_config_path", ""),
             accepted_config=state_kw.get("enablement_accepted_config", {}),
             accuracy_floor=state_kw.get("enablement_accuracy_floor", 0.0),
-            eval_contract_fingerprint=state_kw.get("enablement_eval_contract_fingerprint", ""),
+            eval_definition_digest=state_kw.get("enablement_eval_definition_digest", ""),
             active_runtime=state_kw.get("enablement_active_runtime", {}),
             revalidation_task_id=state_kw.get("enablement_revalidation_task_id", ""),
             revalidation_generation=state_kw.get("enablement_revalidation_generation", 0),
@@ -821,7 +820,6 @@ async def test_rearm_kept_points_accepted_config_at_the_archived_copy(tmp_path):
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-1")
     # Read by the setting-script write that shares the rearm's archive block.
-    fake.shared_state.reference_model = ""
     fake.shared_state.tp = 8
     fake.shared_state.max_model_len = 0
     await fake.enablement_lane.maybe_rearm_enablement(

@@ -33,7 +33,6 @@ import pytest
 from hyperloom.common import env_safety
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.cli import preflight_env
-from hyperloom.orchestrator.actions.executors import benchmark_backend
 
 from ._kernel_tools_harness import RUNTIME_ENV_SH
 from .test_dotenv_credentials_private import (
@@ -116,10 +115,9 @@ def test_the_shell_copy_of_what_a_shared_dotenv_lends_equals_preflights():
         *_FETCH_AND_ENDPOINT_VALUES.keys() - {"FRAMEWORK"},
         *(name.upper() for name in _ROUTING_AND_PROGRAM_KEYS),
     }
-    # The values a shipped choice can take, so a framework or backend added later is lent too.
+    # The values a shipped choice can take, so a framework added later is lent too.
     lent = env_safety.DOTENV_NOT_PRIVATE_LENT_VALUES
     assert lent["FRAMEWORK"] == frozenset(framework_registry.FRAMEWORKS)
-    assert lent["HYPERLOOM_BENCHMARK_BACKEND"] == benchmark_backend.KNOWN_BENCHMARK_BACKENDS
     assert not [value for values in lent.values() for value in values if not re.fullmatch(r"[a-z0-9-]+", value)]
 
 
@@ -681,13 +679,13 @@ _SHAPES = (
     "HYPERLOOM_FRAMEWORK_ENV = shared\n",
     "FRAMEWORK=vllm # a comment\n",
     "FRAMEWORK=../planted\n",
-    'HYPERLOOM_BENCHMARK_BACKEND="magpie\nbypass"\n',
+    'HF_HUB_OFFLINE="1\n0"\n',
     "HF_HOME=/models/hf\n",
     "# FRAMEWORK=sglang\n",
     "\n",
     "   \n",
     "stray words\n",
-    "HYPERLOOM_BENCHMARK_BACKEND=bypass",
+    "HF_DATASETS_OFFLINE=1",
 )
 
 
@@ -716,7 +714,7 @@ def test_the_rewrite_keeps_exactly_what_the_loader_lends_from_a_shared_dotenv(tm
     assert after.stdout.splitlines()[-1] == "[]"
     assert dotenv.read_bytes() == (
         b"FRAMEWORK=vllm\nHYPERLOOM_RUN_MODE=docker\nHF_HUB_OFFLINE=1\nHF_DATASETS_OFFLINE=0\n"
-        b"HYPERLOOM_LLM_MODE=openai\nHYPERLOOM_FRAMEWORK_ENV=shared\nHYPERLOOM_BENCHMARK_BACKEND=bypass\n"
+        b"HYPERLOOM_LLM_MODE=openai\nHYPERLOOM_FRAMEWORK_ENV=shared\nHF_DATASETS_OFFLINE=1\n"
     )
     assert dotenv.stat().st_mode & 0o777 == 0o600
 

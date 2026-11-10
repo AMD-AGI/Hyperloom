@@ -28,6 +28,7 @@ from hyperloom.measure.runner.rounds import rounds_document
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.tests import eval_refusal_logs, test_log_causes
 from hyperloom.measure.tests._inferencex import CLIENT, CLIENT_PATH, LIBRARY, LIBRARY_PATH, stock_checkout
+from hyperloom.measure.tests.run_dirs import write_run_dir
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -35,6 +36,7 @@ from hyperloom.orchestrator.actions.executors import (
     VariantResult,
 )
 from hyperloom.orchestrator.actions.executors._server_lifecycle import REUSE_PORT_DEFAULT
+from inference_suite.contracts import FailedStep, RunLayout
 
 
 def _point(directory: Path, name: str, *, conc: int = 4, run_eval: object = "false", **counts: object) -> Path:
@@ -52,7 +54,6 @@ def _call(tmp_path: Path, *points: Path, **kwargs: Any) -> TestCall:
         "output_dir": tmp_path / "out",
         "timeout_sec": 900,
         "cwd": str(tmp_path),
-        "magpie_python": "",
         "task_id": "t-1",
     }
     return TestCall(**{**defaults, **kwargs})
@@ -101,12 +102,6 @@ class _Grid:
         return [self.answers.get(name) or self.result(name)]
 
 
-@pytest.fixture(autouse=True)
-def magpie_backend(monkeypatch) -> None:
-    """The benchmark backend is read from the process environment; a test that does not pick one runs on Magpie."""
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
-
-
 @pytest.fixture
 def grid(monkeypatch, tmp_path) -> _Grid:
     fake = _Grid(tmp_path)
@@ -117,19 +112,30 @@ def grid(monkeypatch, tmp_path) -> _Grid:
 class _Server:
     """Stands in for the lifecycle helpers: a server that is eligible and records its teardowns."""
 
-    def __init__(self, monkeypatch, *, eligible: bool = True) -> None:
+    def __init__(self, monkeypatch, *, eligible: bool = True, survivors: tuple[int, ...] = ()) -> None:
         self.teardowns: list[dict[str, Any]] = []
         monkeypatch.setattr(
             local,
             "resolve_lifecycle_params",
             lambda path: {"eligible": eligible, "port": 8123, "framework": "sglang", "reason": "not eligible"},
         )
-        monkeypatch.setattr(local, "teardown_lifecycle_server", lambda **kw: self.teardowns.append(kw))
+
+        def teardown(slot: Path) -> list[int]:
+            self.teardowns.append({"pid_dir": slot})
+            return list(survivors)
+
+        monkeypatch.setattr(local, "teardown_variant_server", teardown)
 
 
 @pytest.fixture
 def server(monkeypatch) -> _Server:
     return _Server(monkeypatch)
+
+
+@pytest.fixture
+def unheld(monkeypatch) -> _Server:
+    """A point whose server the lifecycle cannot hold: the test is one ``run_grid`` call."""
+    return _Server(monkeypatch, eligible=False)
 
 
 def _run(call: TestCall):
@@ -146,7 +152,7 @@ def _own_port(config: dict[str, Any]) -> int:
 # --- single-point test --------------------------------------------------------------------------------------------
 
 
-def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, tmp_path):
+def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, unheld, tmp_path):
     call = _call(tmp_path, result_dir="/res", session_deadline_sec=123.0, serving_lease="lease")
 
     outcome = _run(call)
@@ -159,7 +165,6 @@ def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, tmp_pat
         123.0,
         "lease",
     )
-    assert kwargs["launch"].magpie_python is None
     assert kwargs["launch"].server_lifecycle is None
     (config,) = grid.configs
     _own_port(config)
@@ -170,7 +175,7 @@ def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, tmp_pat
 
 
 @pytest.mark.parametrize(("plan", "expected"), [(None, None), (0, False), (1, True)])
-def test_the_warmup_plan_reaches_run_grid_as_it_was_stated(grid, tmp_path, plan, expected):
+def test_the_warmup_plan_reaches_run_grid_as_it_was_stated(grid, unheld, tmp_path, plan, expected):
     _run(_call(tmp_path, rounds=RoundPlan(warmup_rounds=plan)))
 
     assert grid.calls[0]["launch"].warmup_before_measure is expected
@@ -200,9 +205,9 @@ def test_a_point_that_run_grid_did_not_warn_about_carries_none(grid, tmp_path):
     assert [r.nonfatal_warnings for r in outcome.rounds] == [()]
 
 
-def test_an_accuracy_test_reports_the_accuracy_round_with_the_eval_exit_code(grid, tmp_path):
+def test_an_accuracy_test_reports_the_accuracy_round_with_the_eval_exit_code(grid, unheld, tmp_path):
     result = grid.result("test", returncode=0)
-    (Path(result.workspace) / "eval_returncode").write_text("3\n", encoding="utf-8")
+    write_run_dir(Path(result.workspace), eval_code=3)
     grid.answers["test"] = result
     point = _point(tmp_path, "acc", run_eval="true")
 
@@ -212,46 +217,45 @@ def test_an_accuracy_test_reports_the_accuracy_round_with_the_eval_exit_code(gri
     assert outcome.returncode == 3
 
 
-def _lm_eval_results(directory: Path, score: float) -> None:
-    directory.mkdir(parents=True, exist_ok=True)
-    document = {"results": {"gsm8k": {"exact_match,flexible-extract": score}}}
-    (directory / "results_2000-01-01T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
+#: The version every run_dir report of these tests states for its evaluation.
+LM_EVAL_VERSION = "lm_eval=0.4.9;gsm8k=3"
 
 
-def test_the_accuracy_round_carries_the_measured_rounds_scores_not_the_warmups(grid, tmp_path):
+def _evaluated(run_dir: Path, score: float) -> None:
+    """The round in ``run_dir`` evaluated ``score``, as its report says."""
+    write_run_dir(run_dir, scores={"exact_match,flexible-extract": score}, eval_code=0)
+
+
+def test_the_accuracy_round_carries_the_measured_rounds_scores_not_the_warmups(grid, unheld, tmp_path):
     result = grid.result("test", nonfatal_warnings=["run_grid_warmup_discarded_first"])
     workspace = Path(result.workspace)
-    _lm_eval_results(workspace / "eval_output", 0.64)
-    _lm_eval_results(workspace.parent / "warmup_round" / "bench" / "eval_output", 0.10)
+    _evaluated(workspace, 0.64)
+    _evaluated(workspace.parent / "warmup_round", 0.10)
     grid.answers["test"] = result
     point = _point(tmp_path, "acc", run_eval="true")
 
     outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy"))
 
     by_phase = {r.phase: r.accuracy for r in outcome.rounds}
-    assert by_phase["accuracy"] == (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64),)
+    assert by_phase["accuracy"] == (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64, LM_EVAL_VERSION),)
     assert by_phase["warmup"] == by_phase["measure"] == ()
 
 
-def test_the_accuracy_round_carries_the_version_lm_eval_reported(grid, tmp_path):
+def test_the_accuracy_round_carries_the_version_lm_eval_reported(grid, unheld, tmp_path):
     result = grid.result("test")
-    workspace = Path(result.workspace)
-    workspace.joinpath("eval_output").mkdir(parents=True, exist_ok=True)
-    document = {"results": {"gsm8k": {"exact_match,flexible-extract": 0.64}}, "versions": {"gsm8k": 3.0}}
-    document["lm_eval_version"] = "0.4.13"
-    (workspace / "eval_output" / "results_2000-01-01T10-00-00.json").write_text(json.dumps(document), encoding="utf-8")
+    _evaluated(Path(result.workspace), 0.64)
     grid.answers["test"] = result
     point = _point(tmp_path, "acc", run_eval="true")
 
     outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy"))
 
     (value,) = [r.accuracy for r in outcome.rounds if r.phase == "accuracy"][0]
-    assert value.version == "lm_eval=0.4.13;gsm8k=3"
+    assert value.version == "lm_eval=0.4.9;gsm8k=3"
 
 
 def test_an_accuracy_round_with_only_a_warmup_evaluation_carries_no_score(grid, tmp_path):
     result = grid.result("test", nonfatal_warnings=["run_grid_warmup_discarded_first"])
-    _lm_eval_results(Path(result.workspace).parent / "warmup_round" / "eval_output", 0.10)
+    _evaluated(Path(result.workspace).parent / "warmup_round", 0.10)
     grid.answers["test"] = result
     point = _point(tmp_path, "acc", run_eval="true")
 
@@ -307,9 +311,9 @@ def _graded_answers(grid: _Grid, score: float = 0.64) -> VariantResult:
         grid.result("test", output_throughput=2222.0),
         grid.result("eval", note="evaluation_only"),
     )
-    _lm_eval_results(Path(warmup.workspace) / "eval_output", 0.10)
-    _lm_eval_results(Path(measured.workspace) / "eval_output", 0.20)
-    _lm_eval_results(Path(evaluation.workspace) / "lm_eval", score)
+    _evaluated(Path(warmup.workspace), 0.10)
+    _evaluated(Path(measured.workspace), 0.20)
+    _evaluated(Path(evaluation.workspace), score)
     grid.answers.update(warmup=warmup, test=measured, eval=evaluation)
     return evaluation
 
@@ -386,7 +390,7 @@ def test_the_accuracy_of_a_graded_test_is_read_from_its_evaluation_round(grid, s
         Path(grid.answers["warmup"].workspace),
         Path(grid.answers["test"].workspace),
     )
-    assert accuracy.accuracy == (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64),)
+    assert accuracy.accuracy == (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64, LM_EVAL_VERSION),)
     assert warmed.accuracy == measured.accuracy == ()
     assert outcome.returncode == 0
 
@@ -405,7 +409,7 @@ def test_the_rounds_file_of_a_graded_test_lists_its_rounds_in_the_order_they_ran
     assert [entry.get("accuracy") for entry in document] == [
         None,
         None,
-        [{"task": "gsm8k", "metric": "exact_match,flexible-extract", "score": 0.64}],
+        [{"task": "gsm8k", "metric": "exact_match,flexible-extract", "score": 0.64, "version": LM_EVAL_VERSION}],
     ]
 
 
@@ -426,7 +430,7 @@ def test_the_warmup_round_of_a_held_test_says_what_run_grid_says_of_a_discarded_
 
 def test_the_eval_exit_code_of_a_graded_test_is_the_one_its_evaluation_round_recorded(grid, server, tmp_path):
     evaluation = _graded_answers(grid)
-    (Path(evaluation.workspace) / "eval_returncode").write_text("3\n", encoding="utf-8")
+    write_run_dir(Path(evaluation.workspace), scores={"exact_match,flexible-extract": 0.64}, eval_code=3)
 
     outcome = _run(_graded_call(tmp_path))
 
@@ -437,13 +441,14 @@ def test_the_eval_exit_code_of_a_graded_test_is_the_one_its_evaluation_round_rec
 def test_a_server_that_dies_in_the_evaluation_fails_the_accuracy_and_keeps_the_measured_reading(grid, server, tmp_path):
     _graded_answers(grid)
     workspace = Path(grid.answers["eval"].workspace)
+    write_run_dir(workspace)  # the evaluation never finished, so the report holds no score and no exit code of it
     (workspace / "server.log").write_text(test_log_causes.ILLEGAL_ADDRESS_LOG, encoding="utf-8")
     grid.answers["eval"] = grid.result(
         "eval",
         status="failed",
         returncode=1,
         error="server died",
-        error_class="magpie_nonzero_invalid_measurement",
+        error_class="round_nonzero_invalid_measurement",
         server_log_path=str(workspace / "server.log"),
     )
 
@@ -484,7 +489,7 @@ def test_a_measured_round_that_fails_ends_a_graded_test_before_its_evaluation(gr
 
 
 def test_a_round_whose_client_could_not_fetch_its_dependencies_is_an_infrastructure_failure(grid, server, tmp_path):
-    """No server started: Magpie's git fetch of the replay client stalled, which says nothing of the candidate."""
+    """No server started: the git fetch of the replay client stalled, which says nothing of the candidate."""
     stall = (
         "subprocess.TimeoutExpired: Command ['git', '-C', '/w/InferenceX', 'submodule', 'update', '--init', "
         "'--recursive', '--', 'inferencex-e2e/utils/aiperf'] timed out after 300 seconds"
@@ -497,6 +502,74 @@ def test_a_round_whose_client_could_not_fetch_its_dependencies_is_an_infrastruct
     assert outcome.failure_reason.startswith("git_fetch_timeout: subprocess.TimeoutExpired")
 
 
+def test_a_round_refused_before_it_ran_names_its_class_and_detail_as_the_reason(grid, server, tmp_path):
+    """No run_dir, no server log: what the round runner recorded is the only account of the failure."""
+    detail = "inferencex is not staged in /tools"
+    grid.answers["warmup"] = grid.result(
+        "warmup", status="failed", returncode=None, workspace=None, error=detail, error_class="staging_missing"
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == ("unclear", f"staging_missing: {detail}")
+
+
+@pytest.mark.parametrize(
+    ("step", "failure_class", "reason"),
+    [
+        (FailedStep.PORT_IN_USE, "infra", "port_in_use"),
+        (FailedStep.GPUS_UNAVAILABLE, "infra", "host_gpus_unavailable"),
+        (FailedStep.SERVER_SILENT_BEFORE_READY, "infra", "hung_before_ready"),
+        (FailedStep.SERVER_STALLED, "unclear", "server_stalled"),
+    ],
+)
+def test_the_step_a_rounds_report_failed_at_classifies_the_test_its_logs_cannot(
+    grid, server, tmp_path, step, failure_class, reason
+):
+    """The suite refuses a taken port itself, so no bind error reaches ``server.log``; a traceback there is no cause."""
+    workspace = write_run_dir(grid.tmp_path / "ws" / "warmup", failed_step=step)
+    (workspace / "server.log").write_text("Traceback (most recent call last):\nRuntimeError: boom\n", encoding="utf-8")
+    grid.answers["warmup"] = grid.result(
+        "warmup", status="failed", returncode=1, error=step.value, server_log_path=str(workspace / "server.log")
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
+
+
+def test_a_flag_the_suite_refused_names_the_refusal_its_report_records(grid, server, tmp_path):
+    """The suite parses the argv before boot: the refusal is in ``report.json``'s ``failure_detail``, in no log."""
+    detail = "the user layer: argument --attention-backend: invalid choice: 'nonexistent'"
+    workspace = write_run_dir(
+        grid.tmp_path / "ws" / "warmup", failed_step=FailedStep.FLAG_UNKNOWN, failure_detail=detail
+    )
+    grid.answers["warmup"] = grid.result("warmup", status="failed", returncode=1, error="flag_unknown")
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == ("candidate", f"serve_flag: {detail}")
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup"]
+
+
+@pytest.mark.parametrize(
+    ("framework_changed", "failure_class", "reason"),
+    [(False, "infra", "framework_unimportable"), (True, "candidate", "import_error")],
+)
+def test_a_framework_the_serving_interpreter_cannot_import_is_the_images_unless_the_test_rebuilt_it(
+    grid, server, tmp_path, framework_changed, failure_class, reason
+):
+    detail = "/opt/venv/bin/python cannot import sglang"
+    workspace = write_run_dir(
+        grid.tmp_path / "ws" / "warmup", failed_step=FailedStep.FRAMEWORK_VERSION_UNKNOWN, failure_detail=detail
+    )
+    grid.answers["warmup"] = grid.result("warmup", status="failed", returncode=1, error="framework_version_unknown")
+
+    outcome = _run(_graded_call(tmp_path, framework_changed=framework_changed))
+
+    assert (outcome.failure_class, outcome.failure_reason) == (failure_class, f"{reason}: {detail}")
+
+
 @pytest.mark.parametrize("round_name", ["warmup", "test", "eval"])
 def test_a_graded_test_the_run_stops_in_a_round_reports_the_stop_and_runs_no_round_after_it(
     grid, server, tmp_path, round_name
@@ -505,6 +578,7 @@ def test_a_graded_test_the_run_stops_in_a_round_reports_the_stop_and_runs_no_rou
     grid.answers[round_name] = grid.result(
         round_name, status="failed", returncode=None, error_class="session_time_exhausted", error="out of time"
     )
+    write_run_dir(Path(grid.answers[round_name].workspace))  # the stopped round evaluated nothing
 
     outcome = _run(_graded_call(tmp_path))
 
@@ -534,10 +608,26 @@ def test_a_graded_test_without_a_warmup_boots_in_its_measured_round_and_evaluate
     assert outcome.rounds[1].output_dir == Path(evaluation.workspace) and outcome.rounds[1].accuracy[0].score == 0.64
 
 
+@pytest.mark.parametrize("held", [True, False], ids=["held", "unheld"])
+@pytest.mark.parametrize("plan", [None, 1])
+def test_an_agentx_test_is_measured_once_with_no_warmup_round_before_it(monkeypatch, grid, tmp_path, held, plan):
+    """An AgentX replay is long and stable and warms its own client inside the round: one round, whatever the plan."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+    _Server(monkeypatch, eligible=held)
+    point = _agentx_point(tmp_path, monkeypatch)
+
+    outcome = _run(_call(tmp_path, point, rounds=RoundPlan(warmup_rounds=plan)))
+
+    (kwargs,) = grid.calls
+    assert kwargs["grid"][0].name == "test"
+    assert kwargs["launch"].warmup_before_measure is False and not kwargs["launch"].server_already_ready
+    assert [r.phase for r in outcome.rounds] == ["measure"]
+
+
 def test_a_graded_test_on_a_framework_that_cannot_hold_a_server_evaluates_in_its_one_round(monkeypatch, grid, tmp_path):
     _Server(monkeypatch, eligible=False)
     result = grid.result("test")
-    _lm_eval_results(Path(result.workspace) / "eval_output", 0.64)
+    _evaluated(Path(result.workspace), 0.64)
     grid.answers["test"] = result
 
     outcome = _run(_graded_call(tmp_path))
@@ -565,6 +655,15 @@ def test_a_point_that_leaves_run_eval_unset_is_refused_because_unset_means_on(gr
     point = _point(tmp_path, "unset", run_eval=None)
 
     with pytest.raises(TestCallRefused, match="does not set RUN_EVAL"):
+        _run(_call(tmp_path, point))
+    assert grid.calls == []
+
+
+def test_a_point_not_shaped_as_one_is_refused_like_any_call_the_backend_cannot_run(grid, tmp_path):
+    point = tmp_path / "shapeless.yaml"
+    point.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": "RUN_EVAL=false"}}), encoding="utf-8")
+
+    with pytest.raises(TestCallRefused, match=str(point)):
         _run(_call(tmp_path, point))
     assert grid.calls == []
 
@@ -629,7 +728,7 @@ def test_the_session_is_a_fresh_empty_directory_and_the_environment_is_put_back(
 
 def test_the_environment_is_put_back_when_the_test_raises(grid, tmp_path, monkeypatch):
     monkeypatch.delenv("HL_TEST_FLAG", raising=False)
-    grid.answers["test"] = grid.result("test", status="failed", error_class="magpie_timeout")
+    grid.answers["test"] = grid.result("test", status="failed", error_class="round_timeout")
 
     with pytest.raises(subprocess.TimeoutExpired):
         _run(_call(tmp_path, env_overrides={"HL_TEST_FLAG": "on"}))
@@ -637,24 +736,51 @@ def test_the_environment_is_put_back_when_the_test_raises(grid, tmp_path, monkey
     assert "HL_TEST_FLAG" not in os.environ
 
 
-def test_the_reference_launch_the_old_flow_keeps_reads_empty_in_the_test_session(tmp_path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors._workload_envs import resolve_reference_launch
+def test_the_session_base_the_old_flow_keeps_reads_empty_in_the_test_session(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.state.base_launch import ServerBase, session_server_base
+    from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 
     real = tmp_path / "real"
-    (real).mkdir()
-    (real / "state.json").write_text('{"reference_server_args": "--from-the-old-flow"}', encoding="utf-8")
+    real.mkdir()
+    freeze_session_base(real, args=("--from-the-old-flow",))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(real))
-    seen: list[tuple] = []
+    seen: list[ServerBase] = []
 
     async def probe(**kwargs):
-        seen.append(resolve_reference_launch())
+        seen.append(session_server_base())
         return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
 
     monkeypatch.setattr(local, "run_grid", probe)
 
     _run(_call(tmp_path))
 
-    assert seen == [("", {}, {})]
+    assert seen == [ServerBase()]
+
+
+def test_the_test_session_holds_the_calls_frozen_base_and_never_the_applications(tmp_path, monkeypatch):
+    """The base a call carries reaches its rounds through the test's own session, frozen as a session freezes it, so
+    the point routes to inference_suite with it; the application's session, with another base, is not read."""
+    from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
+    from hyperloom.orchestrator.state.base_launch import frozen_session_base
+    from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
+
+    real = tmp_path / "real"
+    real.mkdir()
+    freeze_session_base(real, args=("--from-the-application",))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(real))
+    seen = []
+
+    async def probe(**kwargs):
+        seen.append(frozen_session_base())
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", probe)
+
+    _run(_call(tmp_path, session_facts=SessionFacts(staging=STAGING, base_launch=base_launch())))
+
+    (frozen,) = seen
+    assert frozen.launch == base_launch() and frozen.path.parent != real
+    assert not frozen.path.exists(), "the test session is removed with the test"
 
 
 def test_the_per_round_cap_and_the_leak_scope_come_from_the_call(grid, tmp_path, monkeypatch):
@@ -714,13 +840,12 @@ def _lifecycle(call: dict[str, Any]) -> dict[str, Any] | None:
     return call["launch"].server_lifecycle
 
 
-#: What a boot round adds to the point on Magpie: no evaluation, and one request of the client round Magpie runs after
-#: its server phase whatever the phase says. Not the phase itself: Magpie sets that, and a variable it does not know
-#: would make its reuse check refuse every round that measures (``test_local_reuse_identity``).
+#: What a boot round adds to the point: no evaluation, and one request of the client round that runs after its server
+#: phase. Not the phase itself, which no round names (``test_local_sweep_rounds``).
 BOOT_ENVS = {"RUN_EVAL": "false", "NUM_PROMPTS": "1"}
 
 
-def _envs_handed_to_magpie(grid: _Grid, tmp_path: Path, call: dict[str, Any]) -> dict[str, Any]:
+def _envs_handed_to_the_round(grid: _Grid, tmp_path: Path, call: dict[str, Any]) -> dict[str, Any]:
     """The ``benchmark.envs`` ``run_grid`` makes of one recorded call: its own layering of the point and the recipe's
     base variables over the round's shape the process environment held while the call ran."""
     from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
@@ -766,14 +891,13 @@ def _graded_sweep(tmp_path: Path, *levels: int, run_eval: str = "true") -> TestC
 
 
 @pytest.mark.parametrize("ambient_conc", [None, "64"], ids=["clean", "conc_left_in_the_process"])
-def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no_bench_evaluates(
+def test_the_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no_bench_evaluates(
     grid, server, tmp_path, monkeypatch, ambient_conc
 ):
     if ambient_conc is None:
         monkeypatch.delenv("CONC", raising=False)
     else:
         monkeypatch.setenv("CONC", ambient_conc)
-    grid.answers["c8"] = grid.result("c8", status="failed", returncode=1, error_class="no_benchmark_workspace")
     call = _graded_sweep(tmp_path, 8, 4, 2)
     points = [Path(p).read_text() for p in call.points]
 
@@ -781,29 +905,36 @@ def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no
 
     boots = [c for c in grid.calls if c["launch"].lifecycle_boot_only]
     measured = [c for c in grid.calls if not c["launch"].lifecycle_boot_only]
-    assert [c["grid"][0].name for c in boots] == ["c8", "c4"], "the failed boot and the one it stepped down to"
-    assert [c["grid"][0].name for c in measured] == ["c4", "c2", "eval"]
+    assert [c["grid"][0].name for c in boots] == ["c8"]
+    assert [c["grid"][0].name for c in measured] == ["c8", "c4", "c2", "eval"]
     assert all(c["recipe"].base.extra_envs == BOOT_ENVS for c in boots)
     assert [c["recipe"].base.extra_envs for c in measured] == [
+        {"RUN_EVAL": "false"},
         {"RUN_EVAL": "false"},
         {"RUN_EVAL": "false"},
         {"RUN_EVAL": "true", "EVAL_ONLY": "true"},
     ]
     assert [Path(p).read_text() for p in call.points] == points, "the points are the ones the call was accepted on"
-    for index, boot in enumerate(boots):
-        level = (8, 4)[index]
-        envs = _envs_handed_to_magpie(grid, tmp_path, boot)
-        assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"]) == ("false", "1"), f"the boot at {level}"
-        assert "MAGPIE_RUN_PHASE" not in envs and envs["CONC"] == level
-        assert envs["NUM_WARMUPS"] == min(level, 8), "a variable outside the reuse check is the point's own"
-    for level, round_ in zip((4, 2, 4), measured, strict=True):
-        envs = _envs_handed_to_magpie(grid, tmp_path, round_)
+    envs = _envs_handed_to_the_round(grid, tmp_path, boots[0])
+    assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"]) == ("false", "1")
+    assert "HYPERLOOM_RUN_PHASE" not in envs and envs["CONC"] == 8
+    assert envs["NUM_WARMUPS"] == 8, "a variable outside the reuse check is the point's own"
+    for level, round_ in zip((8, 4, 2, 8), measured, strict=True):
+        envs = _envs_handed_to_the_round(grid, tmp_path, round_)
         assert (envs["NUM_PROMPTS"], envs["NUM_WARMUPS"], envs["CONC"]) == (level * 10, min(level, 8), level)
-        assert "MAGPIE_RUN_PHASE" not in envs
-    assert [_envs_handed_to_magpie(grid, tmp_path, c)["RUN_EVAL"] for c in measured] == ["false", "false", "true"], (
-        "no bench evaluates; one evaluation, from the level the server booted on, after the last bench"
-    )
-    assert [(r.point, r.phase) for r in outcome.rounds] == [(1, "measure"), (2, "measure"), (1, "accuracy")]
+        assert "HYPERLOOM_RUN_PHASE" not in envs
+    assert [_envs_handed_to_the_round(grid, tmp_path, c)["RUN_EVAL"] for c in measured] == [
+        "false",
+        "false",
+        "false",
+        "true",
+    ], "no bench evaluates; one evaluation, from the level the server booted on, after the last bench"
+    assert [(r.point, r.phase) for r in outcome.rounds] == [
+        (0, "measure"),
+        (1, "measure"),
+        (2, "measure"),
+        (0, "accuracy"),
+    ]
     assert outcome.returncode == 0
     assert os.environ.get("CONC") == ambient_conc, "the process environment is put back after the test"
 
@@ -813,9 +944,9 @@ def _graded_sweep_answers(grid: _Grid, *levels: int, score: float = 0.64) -> Var
     evaluation's score sits in the evaluation round's directory."""
     for level in levels:
         bench = grid.answers[f"c{level}"] = grid.result(f"c{level}", output_throughput=100.0 * level)
-        _lm_eval_results(Path(bench.workspace) / "eval_output", level / 100.0)
+        _evaluated(Path(bench.workspace), level / 100.0)
     evaluation = grid.answers["eval"] = grid.result("eval", note="evaluation_only")
-    _lm_eval_results(Path(evaluation.workspace) / "lm_eval", score)
+    _evaluated(Path(evaluation.workspace), score)
     return evaluation
 
 
@@ -849,7 +980,7 @@ def test_a_graded_sweep_benches_every_level_and_then_evaluates_once_on_the_serve
         (),
         (),
         (),
-        (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64),),
+        (AccuracyValue("gsm8k", "exact_match,flexible-extract", 0.64, LM_EVAL_VERSION),),
     ]
     assert outcome.rounds[-1].output_dir == Path(evaluation.workspace)
     assert outcome.returncode == 0
@@ -893,6 +1024,7 @@ def test_a_graded_sweep_whose_bench_fails_or_is_stopped_runs_no_evaluation(grid,
 def test_a_graded_sweep_whose_evaluation_fails_keeps_every_bench_and_fails_its_accuracy(grid, server, tmp_path):
     _graded_sweep_answers(grid, 8, 4)
     grid.answers["eval"] = grid.result("eval", status="failed", returncode=1, error="server died", error_class="x")
+    write_run_dir(Path(grid.answers["eval"].workspace))  # the evaluation never finished
 
     outcome = _run(_graded_sweep(tmp_path, 8, 4))
 
@@ -941,19 +1073,34 @@ def test_a_boot_does_not_pin_what_the_point_pins_for_a_graded_round(grid, server
     assert grid.calls[0]["recipe"].base_yaml_path == call.points[0]
 
 
-@pytest.mark.parametrize(
-    ("backend", "boot_envs"), [("magpie", {}), ("bypass", {"MAGPIE_RUN_PHASE": "server"})], ids=["magpie", "bypass"]
-)
-def test_an_agentx_boot_carries_only_what_its_backend_says(grid, server, tmp_path, monkeypatch, backend, boot_envs):
-    """An AgentX point has no evaluation round and no prompt count: its boot round keeps only the backend's phase."""
+def test_an_agentx_boot_pins_nothing(grid, server, tmp_path, monkeypatch):
+    """An AgentX point has no evaluation round and no prompt count, and no backend phase is said for a boot."""
+    _boot_only(grid)
+    _Case(tmp_path, monkeypatch, "exit 0")
     point = _agentx_point(tmp_path, monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", backend)
 
-    _run(_call(tmp_path, point, prep="conc_sweep"))
+    _run(_call(tmp_path, point, kind="repro", attachments=(_CASE,), timeout_sec=30))
 
-    boot, *measured = grid.calls
-    assert boot["recipe"].base.extra_envs == boot_envs
-    assert all(c["recipe"].base.extra_envs is None for c in measured)
+    (boot,) = grid.calls
+    assert boot["launch"].lifecycle_boot_only
+    assert boot["recipe"].base.extra_envs == {}
+
+
+@pytest.mark.parametrize("levels", [(8, 4, 2), (4,)], ids=["levels", "one-level"])
+def test_an_agentx_sweep_boots_a_server_of_its_own_for_each_level(grid, tmp_path, monkeypatch, levels):
+    """Every level replays one trace corpus with one seed: on a server a level before it warmed, it reads its cache."""
+    torn_down: list[Path] = []
+    monkeypatch.setattr(local, "teardown_variant_server", lambda slot: torn_down.append(slot) or [])
+    points = [_agentx_point(tmp_path, monkeypatch, conc=level) for level in levels]
+    assert local.resolve_lifecycle_params(points[0])["eligible"], "the lifecycle could hold an AgentX server"
+
+    outcome = _run(_call(tmp_path, *points, prep="conc_sweep"))
+
+    assert [c["grid"][0].name for c in grid.calls] == [f"c{level}" for level in levels]
+    assert all(_lifecycle(c) is None and not c["launch"].lifecycle_boot_only for c in grid.calls)
+    assert [(r.point, r.phase) for r in outcome.rounds] == [(i, "measure") for i in range(len(levels))]
+    assert "server restarted per level: an AgentX replay is cache-sensitive" in outcome.stderr
+    assert outcome.returncode == 0 and torn_down == []
 
 
 def test_no_call_of_a_sweep_runs_without_the_shared_server(grid, server, tmp_path):
@@ -983,30 +1130,31 @@ def test_a_sweep_that_restarts_per_level_gives_every_level_a_port_of_its_own(mon
     assert all(config == yaml.safe_load(point.read_text()) for config, point in zip(grid.configs, call.points[:2]))
 
 
-def test_a_boot_that_fails_steps_down_one_level_and_that_level_is_measured_on_the_new_server(grid, server, tmp_path):
+@pytest.mark.parametrize("levels", [(8, 4, 2), (8,)], ids=["levels", "one-level"])
+def test_a_boot_that_fails_is_the_sweeps_failed_row_and_the_launch_is_not_booted_again(grid, server, tmp_path, levels):
+    """A level's CONC never reaches the server's launch: a lower level, or a server per level, boots the same one."""
     grid.answers["c8"] = grid.result(
         "c8", status="failed", returncode=1, error_class="no_benchmark_workspace", error="oom"
     )
 
-    outcome = _run(_sweep_call(tmp_path, 8, 4, 2))
+    outcome = _run(_sweep_call(tmp_path, *levels))
 
-    assert [c["grid"][0].name for c in grid.calls] == ["c8", "c4", "c4", "c2"]
-    assert [r.point for r in outcome.rounds] == [1, 2]
-    assert "stepping down" in outcome.stderr
-    assert len(server.teardowns) == 2  # after the failed boot, and at the end
+    (boot,) = grid.calls
+    assert boot["grid"][0].name == "c8" and boot["launch"].lifecycle_boot_only
+    assert [(r.point, r.phase, r.returncode) for r in outcome.rounds] == [(0, "measure", 1)]
+    assert outcome.returncode == 1 and "oom" in outcome.stderr
+    assert len(server.teardowns) == 1
 
 
-def test_when_no_level_boots_the_ladder_falls_back_to_one_server_per_level(grid, server, tmp_path):
-    for level in (8, 4):
-        grid.answers[f"c{level}"] = grid.result(f"c{level}", status="failed", returncode=1, error_class="x")
+def test_a_sweep_takes_its_server_down_through_its_pid_dir_and_names_what_outlived_it(monkeypatch, grid, tmp_path):
+    """The arm's server is reaped as every grid caller's is: by its pid_dir, which a suite round's server.pid is in."""
+    server = _Server(monkeypatch, survivors=(4242,))
+    call = _sweep_call(tmp_path, 8, 4)
 
-    outcome = _run(_sweep_call(tmp_path, 8, 4))
+    outcome = _run(call)
 
-    restart_calls = grid.calls[2:]
-    assert [c["grid"][0].name for c in restart_calls] == ["c8", "c4"]
-    assert all(_lifecycle(c) is None for c in restart_calls)
-    assert "every boot attempt failed" in outcome.stderr
-    assert outcome.returncode == 1
+    assert server.teardowns == [{"pid_dir": Path(call.output_dir) / "server_arm"}]
+    assert "server pids [4242] outlived SIGKILL" in outcome.stderr
 
 
 def test_a_framework_that_cannot_hold_a_server_restarts_per_level_and_says_so(monkeypatch, grid, tmp_path):
@@ -1119,23 +1267,47 @@ def test_a_patched_test_measures_the_rebuilt_framework_that_the_compile_produced
     assert outcome.sandbox.image_digest == IMAGE
 
 
-def _agentx_point(tmp_path, monkeypatch, **launch_envs: str) -> Path:
-    """The point the toolbox renders for an AgentX session whose recipe launches with ``launch_envs``."""
+def test_a_patched_test_tells_the_rounds_verdict_that_it_changed_the_framework(
+    monkeypatch, tmp_path, installed_framework
+):
+    python, _ = installed_framework
+    seen: list[bool] = []
+    ended = local._ended
+
+    def record(run):
+        seen.append(run.call.framework_changed)
+        return ended(run)
+
+    async def look(**kwargs):
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+    monkeypatch.setattr(local, "_ended", record)
+    point = _point_with_python(tmp_path, python)
+
+    _run(_call(tmp_path, point, environment=_compile(tmp_path, installed_framework)))
+    _run(_call(tmp_path, point))
+
+    assert seen[0] is True and seen[-1] is False
+
+
+def _agentx_point(tmp_path, monkeypatch, conc: int = 4, **launch_envs: str) -> Path:
+    """The point the toolbox renders for an AgentX session at ``conc`` whose recipe launches with ``launch_envs``."""
     from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
     from hyperloom.inference_optimizer.cli.benchmark_config import AgentXWorkload, write_agentx_benchmark
     from hyperloom.orchestrator.actions.executors import LaunchLayer, materialize_benchmark_config
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.setenv(BENCHMARK_CONFIG_ENV, "")
-    source = tmp_path / "agentx.yaml"
-    workload = AgentXWorkload(framework="sglang", model="Qwen/Qwen3-8B", precision="fp8", tp=2, ep=1, conc=4)
+    source = tmp_path / f"agentx-c{conc}.yaml"
+    workload = AgentXWorkload(framework="sglang", model="Qwen/Qwen3-8B", precision="fp8", tp=2, ep=1, conc=conc)
     write_agentx_benchmark(source, workload)
     envs = {**launch_envs, "RUN_EVAL": "false"}
-    return materialize_benchmark_config(source, tmp_path / "agentx", launch=LaunchLayer(extra_envs=envs))
+    return materialize_benchmark_config(source, tmp_path / f"agentx-c{conc}", launch=LaunchLayer(extra_envs=envs))
 
 
-def _magpie_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
-    """What ``run_grid`` hands Magpie for the point, and what the server it launches then imports from ``a.f()``."""
+def _agentx_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
+    """What ``run_grid`` hands the round for the point, and what the server it launches then imports from ``a.f()``."""
     import subprocess
 
     from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
@@ -1159,31 +1331,31 @@ def _magpie_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
     return launched
 
 
-def test_a_patched_agentx_test_hands_the_rebuilt_framework_to_the_server_magpie_launches(
+def test_a_patched_agentx_test_hands_the_rebuilt_framework_to_the_server_the_round_launches(
     monkeypatch, tmp_path, installed_framework
 ):
     """``benchmark.envs`` never reaches an AgentX server: its environment and interpreter are the launch's."""
     python, package = installed_framework
-    launched = _magpie_launch(monkeypatch, tmp_path, python)
+    launched = _agentx_launch(monkeypatch, tmp_path, python)
     point = _agentx_point(tmp_path, monkeypatch, HYPERLOOM_FRAMEWORK_PYTHON=str(python))
 
     _run(_call(tmp_path, point, environment=_compile(tmp_path, installed_framework)))
 
     launch = launched["launch"]
-    assert launched["value"] == "10"  # the interpreter Magpie launches imported the patched file, not the image's
+    assert launched["value"] == "10"  # the interpreter the round launches imported the patched file, not the image's
     assert launch["executable"] == str(python) and "HYPERLOOM_FRAMEWORK_PYTHON" not in launch["env"]
     assert launch["env"]["PYTHONPATH"].split(":")[0] in "".join(launch["source_files"]), "rebuilt files are evidence"
     assert (package / "srt" / "a.py").read_text() == OLD_SOURCE
     assert "PYTHONPATH" not in yaml.safe_load(point.read_text())["benchmark"]["envs"]
 
 
-def test_a_patched_agentx_test_that_names_no_interpreter_is_rebuilt_for_the_python3_magpie_launches(
+def test_a_patched_agentx_test_that_names_no_interpreter_is_rebuilt_for_the_python3_the_round_launches(
     monkeypatch, tmp_path, installed_framework
 ):
-    """Magpie starts the server with ``python3`` unless told otherwise; the farm is built and checked against that."""
+    """The round starts the server with ``python3`` unless told otherwise; the farm is built and checked against that."""
     python, _ = installed_framework
     monkeypatch.setenv("PATH", f"{python.parent}{os.pathsep}{os.environ['PATH']}")
-    launched = _magpie_launch(monkeypatch, tmp_path, python)
+    launched = _agentx_launch(monkeypatch, tmp_path, python)
     point = _agentx_point(tmp_path, monkeypatch)
 
     _run(_call(tmp_path, point, environment=_compile(tmp_path, installed_framework)))
@@ -1218,7 +1390,7 @@ def test_a_profile_whose_patch_cannot_be_laid_in_the_rebuilt_framework_runs_and_
     ]
 
 
-def test_a_test_on_the_image_as_it_is_runs_the_point_unchanged(grid, tmp_path, installed_framework):
+def test_a_test_on_the_image_as_it_is_runs_the_point_unchanged(grid, unheld, tmp_path, installed_framework):
     from hyperloom.contracts.recipe import RecipeDelta
     from hyperloom.measure.compile import LocalBlobStore, compile_environment
     from hyperloom.measure.tests._recipes import IMAGE, recipe_with
@@ -1275,7 +1447,7 @@ def _profile_point(directory: Path, *, profile: object = "1", enabled: bool = Tr
 
 def _with_trace(grid: _Grid, name: str = "test", where: str = "torch_trace") -> VariantResult:
     result = grid.result(name)
-    trace = Path(result.workspace) / where / "rank0.pt.trace.json.gz"
+    trace = RunLayout(Path(result.workspace)).profile_dir / where / "rank0.pt.trace.json.gz"
     trace.parent.mkdir(parents=True, exist_ok=True)
     trace.write_bytes(b"trace")
     grid.answers[name] = result
@@ -1304,63 +1476,6 @@ def test_a_profile_test_puts_the_points_start_profile_body_in_the_process_enviro
 
     assert [seen["PROFILE_EXTRA_BODY"] for seen in grid.env_seen] == [body]
     assert "PROFILE_EXTRA_BODY" not in os.environ, "the test's environment is put back afterwards"
-
-
-def _checkout_when_a_round_starts(monkeypatch, root: Path) -> list[dict[str, str]]:
-    """Each round's start, with the two InferenceX files as ``run_grid`` finds them when it is called."""
-    seen: list[dict[str, str]] = []
-    original = local.run_grid
-
-    async def looking(**kwargs: Any):
-        seen.append({str(path): (root / path).read_text() for path in (LIBRARY_PATH, CLIENT_PATH)})
-        return await original(**kwargs)
-
-    monkeypatch.setattr(local, "run_grid", looking)
-    return seen
-
-
-def _point_on(path: Path, checkout: Path | None, **point: Any) -> Path:
-    """A profile point whose ``benchmark.inferencex_path`` names ``checkout``."""
-    config = yaml.safe_load(_profile_point(path, **point).read_text())
-    if checkout is not None:
-        config["benchmark"]["inferencex_path"] = str(checkout)
-    pinned = path / "named.yaml"
-    pinned.write_text(yaml.safe_dump(config), encoding="utf-8")
-    return pinned
-
-
-def test_a_profile_test_runs_on_a_checkout_patched_to_honour_the_points_window(grid, tmp_path, monkeypatch):
-    """The stock client sends one step per stage whatever PROFILE_EXTRA_BODY says; that trace has no graph kernels."""
-    _with_trace(grid)
-    root = stock_checkout(tmp_path / "ix")
-    seen = _checkout_when_a_round_starts(monkeypatch, root)
-
-    _run(_call(tmp_path, _point_on(tmp_path, root, body='{"start_step": 320, "num_steps": 128}'), kind="profile"))
-
-    (files,) = seen
-    assert "PROFILE_EXTRA_BODY" in files[str(CLIENT_PATH)], "the client reads the window"
-    assert "${NUM_PROMPTS:-$max_concurrency}" in files[str(LIBRARY_PATH)], "the run lasts until the window"
-
-
-def test_a_profile_test_takes_the_checkout_of_the_session_when_its_point_names_none(grid, tmp_path, monkeypatch):
-    _with_trace(grid)
-    root = stock_checkout(tmp_path / "ix")
-    seen = _checkout_when_a_round_starts(monkeypatch, root)
-    facts = SessionFacts(reference_unset_envs=(), inferencex_path=str(root))
-
-    _run(_call(tmp_path, _point_on(tmp_path, None), kind="profile", session_facts=facts))
-
-    assert "PROFILE_EXTRA_BODY" in seen[0][str(CLIENT_PATH)]
-
-
-def test_a_profile_test_on_a_checkout_that_cannot_be_patched_is_refused_before_any_round(grid, tmp_path):
-    root = stock_checkout(
-        tmp_path / "ix", client=CLIENT.replace('"profile_by_stage": True', '"profile_by_stage": False')
-    )
-
-    with pytest.raises(TestCallRefused, match=r"cannot honour .*: .*benchmark_serving\.py lack the patch"):
-        _run(_call(tmp_path, _point_on(tmp_path, root), kind="profile"))
-    assert grid.calls == []
 
 
 def _vllm_profile_point(directory: Path) -> Path:
@@ -1448,7 +1563,7 @@ def test_a_test_that_does_not_profile_leaves_the_checkout_as_upstream_ships_it(g
 
 def test_the_traces_of_a_profile_test_move_into_the_output_profile_directory(grid, tmp_path):
     result = _with_trace(grid)
-    sidecar = Path(result.workspace).parent / "capture_traces" / "graph.json"
+    sidecar = RunLayout(Path(result.workspace)).profile_dir / "capture_traces" / "graph.json"
     sidecar.parent.mkdir(parents=True)
     sidecar.write_text("{}")
 
@@ -1457,7 +1572,7 @@ def test_the_traces_of_a_profile_test_move_into_the_output_profile_directory(gri
     profile = tmp_path / "out" / "profile"
     assert (profile / "torch_trace" / "rank0.pt.trace.json.gz").read_bytes() == b"trace"
     assert (profile / "capture_traces" / "graph.json").is_file(), "the capture sidecars keep their directory name"
-    assert not (Path(result.workspace) / "torch_trace").exists(), "the bundle must carry each trace once"
+    assert not RunLayout(Path(result.workspace)).profile_torch_trace.exists(), "the bundle must carry each trace once"
 
 
 def test_a_profile_test_that_left_no_trace_does_not_end_as_a_success(grid, tmp_path):
@@ -1474,7 +1589,7 @@ def test_a_failed_profile_round_moves_no_trace(grid, tmp_path):
     outcome = _run(_call(tmp_path, _profile_point(tmp_path), kind="profile"))
 
     assert outcome.returncode == 1 and "profile_no_trace" not in outcome.stderr
-    assert (Path(result.workspace) / "torch_trace").exists()
+    assert RunLayout(Path(result.workspace)).profile_torch_trace.exists()
 
 
 @pytest.mark.parametrize(
@@ -1503,7 +1618,7 @@ def test_a_profile_call_that_would_not_profile_or_asks_for_more_is_refused(grid,
 def test_an_agentx_profile_test_is_one_profiled_round_that_turns_the_profiler_on_in_the_yaml(
     grid, tmp_path, monkeypatch
 ):
-    from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
+    from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
 
     point = _agentx_point(tmp_path, monkeypatch)
     enable_profile(point)
@@ -1539,9 +1654,9 @@ class _Machine:
     """One machine's ports: ``run_grid`` as it is for a round whose server is up, listening on the port the round's own
     config names in ``benchmark.envs.PORT`` (the default when it names none).
 
-    The InferenceX script reads it from the environment it is run with; Magpie's AgentX recipe reads it into the
-    ``--port`` of the server's argv (``agentx_recipe._port``, at the pinned ref) and refuses ``PORT`` in
-    ``launch_overrides.env`` as a protocol variable, so the AgentX server's port can come from nowhere else.
+    The InferenceX script reads it from the environment it is run with; an AgentX recipe reads it into the ``--port``
+    of the server's argv and ``PORT`` is not one of ``launch_overrides.env``, so the AgentX server's port can come from
+    nowhere else.
 
     The listeners stay open to the end of the test, as the servers of tests running at the same time do; a round whose
     port is taken fails the way the real one did: its server dies.
@@ -1561,9 +1676,9 @@ class _Machine:
         launched = _build_variant_yaml(kwargs["recipe"], variant, output_subdir=slot)
         self.launches.append(benchmark := yaml.safe_load(launched.read_text())["benchmark"])
         self.ports.append(port := int((benchmark.get("envs") or {}).get("PORT", REUSE_PORT_DEFAULT)))
-        workspace = slot / "benchmark_stub"
-        (workspace / "torch_trace").mkdir(parents=True)
-        (workspace / "torch_trace" / "rank0.pt.trace.json.gz").write_bytes(b"trace")
+        workspace = slot / "suite_run_0"
+        RunLayout(workspace).profile_torch_trace.mkdir(parents=True)
+        (RunLayout(workspace).profile_torch_trace / "rank0.pt.trace.json.gz").write_bytes(b"trace")
         listener = socket.socket()
         try:
             listener.bind(("127.0.0.1", port))
@@ -1590,7 +1705,7 @@ def machine(monkeypatch, tmp_path):
 
 
 def _profile_agentx_point(tmp_path: Path, monkeypatch) -> Path:
-    from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
+    from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
 
     point = _agentx_point(tmp_path, monkeypatch)
     enable_profile(point)
@@ -1611,7 +1726,7 @@ def test_two_profile_tests_on_one_machine_launch_their_servers_on_ports_of_their
     assert [first.returncode, second.returncode] == [0, 0], "the second server found its port taken"
     assert len(set(machine.ports)) == 2 and REUSE_PORT_DEFAULT not in machine.ports
     server_envs = [((b.get("agentx") or {}).get("launch_overrides") or {}).get("env") or {} for b in machine.launches]
-    assert all("PORT" not in env for env in server_envs), "Magpie refuses PORT among an AgentX server's variables"
+    assert all("PORT" not in env for env in server_envs), "PORT is never among an AgentX server's variables"
     assert point.read_text() == shared, "the point is shared by every test that runs it: it is not written to"
 
 
@@ -1630,10 +1745,11 @@ class _Case:
         self.ran = tmp_path / "case-ran"
         self.events: list[str] = []
 
-        def teardown(**_: Any) -> None:
+        def teardown(slot: Path) -> list[int]:
             self.events.append("teardown after the case" if self.ran.exists() else "teardown before the case")
+            return []
 
-        monkeypatch.setattr(local, "teardown_lifecycle_server", teardown)
+        monkeypatch.setattr(local, "teardown_variant_server", teardown)
 
 
 def _repro_point(directory: Path) -> Path:
@@ -1766,10 +1882,11 @@ def test_a_failed_round_is_classified_from_the_flag_error_in_its_server_log(grid
 
 
 def test_a_round_whose_replay_client_the_hub_refused_is_an_infrastructure_failure(grid, tmp_path):
-    """Magpie records only the client's exit code; the Hub's 429 is in agentx_client.log beside server.log."""
+    """The round's report names only the client's exit code; the Hub's 429 is in the run_dir's AgentX client log."""
     refusal = "429 Too Many Requests: you have reached your 'api' rate limit."
     result = _failed_round_with_logs(grid, tmp_path, server_log="INFO waiting for the server to be ready\n")
-    client_log = Path(result.server_log_path).parent / "agentx_client.log"
+    client_log = RunLayout(Path(result.workspace)).agentx_client_log
+    client_log.parent.mkdir(parents=True, exist_ok=True)
     client_log.write_text(f"Fetching 9 files\nhuggingface_hub.errors.HfHubHTTPError: \n\n{refusal}\n", encoding="utf-8")
     grid.answers["test"] = result
 
@@ -1884,13 +2001,12 @@ def _failed_evaluation(grid: _Grid, tmp_path: Path, server_log: str, stderr: str
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "server.log").write_text(server_log, encoding="utf-8")
     (workspace / "benchmark_stderr.log").write_text(stderr, encoding="utf-8")
-    (workspace / "eval_returncode").write_text("1", encoding="utf-8")
     return grid.result(
         "eval",
         status="failed",
         returncode=1,
         error=error,
-        error_class="magpie_nonzero_invalid_measurement",
+        error_class="round_nonzero_invalid_measurement",
         server_log_path=str(workspace / "server.log"),
     )
 
@@ -1977,7 +2093,7 @@ def test_a_warmup_that_failed_for_a_cause_no_log_names_keeps_the_measured_round_
 def test_a_warmup_whose_server_log_is_healthy_goes_on_to_the_measured_round(grid, server, tmp_path):
     _warmup_with_logs(grid, tmp_path, test_log_causes.SERVER_LOG_WITH_BAD_REQUEST, returncode=0)
     evaluation = grid.result("eval")
-    _lm_eval_results(Path(evaluation.workspace) / "lm_eval", 0.64)
+    _evaluated(Path(evaluation.workspace), 0.64)
     grid.answers["eval"] = evaluation
 
     outcome = _run(_graded_call(tmp_path))

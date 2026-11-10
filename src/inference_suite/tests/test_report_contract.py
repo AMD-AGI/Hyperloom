@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract of ``report.json``: fixed key tables, the closed ``FailedStep`` list, and the ``gpu_monitor`` blocks."""
+"""Contract of ``report.json``: fixed key tables, the closed ``FailedStep`` list, and ``gpu_monitor`` blocks the host's
+GPU artifact reads whole."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from dataclasses import replace
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors._gpu_metrics import gpu_metrics_from_report
 from inference_suite.contracts import (
     FIXED_METRIC_KEYS,
     GPU_METRIC_KEYS,
@@ -315,15 +317,21 @@ def test_a_report_written_before_the_power_section_and_token_counts_reads_them_a
     assert Report.from_document(document) == report
 
 
-def test_gpu_monitor_block_holds_the_gpu_its_sample_count_and_the_metric_table() -> None:
+def test_gpu_monitor_block_is_read_whole_by_the_host_gpu_artifact() -> None:
     document = _document(_report())
     assert all(tuple(block) == ("gpu", "sample_count", *GPU_METRIC_KEYS) for block in document["gpu_monitor"])
+    metrics = gpu_metrics_from_report(document)
+    assert metrics["samples"] == 200
+    assert metrics["blocks"] == 2
+    assert metrics["avg_power_w"] == 600.5
+    assert metrics["max_power_w"] == 611.0
+    assert {key: value for key, value in metrics.items() if value is None} == {}
 
 
 def test_gpu_monitor_records_an_unread_metric_as_null() -> None:
     report = _report(gpu_monitor=(replace(_block(0), gpu_util_pct=None),))
     assert _document(report)["gpu_monitor"][0]["gpu_util_pct"] is None
-    assert Report.from_document(_document(report)) == report
+    assert gpu_metrics_from_report(_document(report))["avg_gpu_util_pct"] is None
 
 
 def test_metric_stats_accept_a_mean_rounded_outside_the_range() -> None:
