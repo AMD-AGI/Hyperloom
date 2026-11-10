@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import statistics
 import time
+from dataclasses import replace
 
 from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.utils.git import git
@@ -321,7 +322,8 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
             attempts.append(lost_attempt(tree.round.iteration, item.slot, item.reason))
         for plan in plans.plans:
             if plan.slot.index not in measured:
-                attempts.append(lost_attempt(tree.round.iteration, plan.slot, reason or "the slot was not measured"))
+                lost = lost_attempt(tree.round.iteration, plan.slot, reason or "the slot was not measured")
+                attempts.append(replace(lost, plan_path=plan.path))
         tree.close_round(sorted(attempts, key=lambda item: item.slot))
         self._tree_store.save(tree)
 

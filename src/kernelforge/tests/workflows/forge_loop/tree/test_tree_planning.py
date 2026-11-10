@@ -8,13 +8,24 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
-from kernelforge.workflows.forge_loop.roles.contracts import PublishedLane
+from kernelforge.workflows.forge_loop.roles.contracts import EvidenceRef, PublishedLane
+from kernelforge.workflows.forge_loop.roles.orchestration import LINE_HISTORY_EVIDENCE
 from kernelforge.workflows.forge_loop.tree.admission import slot_prompt
-from kernelforge.workflows.forge_loop.tree.model import NodeSource, Slot, SlotType, TreeNode
+from kernelforge.workflows.forge_loop.tree.facts import render_line_history
+from kernelforge.workflows.forge_loop.tree.model import (
+    Attempt,
+    AttemptOutcome,
+    NodeSource,
+    SearchTree,
+    Slot,
+    SlotType,
+    TreeNode,
+)
 from kernelforge.workflows.forge_loop.tree.planning import (
     PlanningUnit,
     SlotPlan,
     TreePlanningMixin,
+    line_evidence,
     planning_units,
     read_direction_record,
 )
@@ -169,6 +180,65 @@ def _start() -> TreeNode:
         plan="",
         source=NodeSource.BASELINE,
     )
+
+
+def _tree_with_attempts(tmp_path) -> SearchTree:
+    """The root and two attempts from it: one whose Implementer left a record, then one whose did not."""
+    tree = SearchTree.create(_start(), root_branch="opt")
+    recorded, unrecorded = tmp_path / "iter_001" / "slot_01", tmp_path / "iter_002" / "slot_01"
+    recorded.mkdir(parents=True)
+    unrecorded.mkdir(parents=True)
+    (recorded / "lesson.md").write_text("tried a wider tile\n")
+    (unrecorded / "lesson_missing.txt").write_text("the session left no record\n")
+    root = tree.root.commit
+    tree.attempts.extend(
+        [
+            Attempt(
+                1,
+                1,
+                SlotType.BRANCH,
+                root,
+                "",
+                AttemptOutcome.INCORRECT,
+                0.8,
+                "",
+                str(recorded),
+                "open a route",
+                plan_path="start_aaaa/slot_01.md",
+            ),
+            Attempt(2, 1, SlotType.BRANCH, root, "", AttemptOutcome.NO_CHANGES, None, "", str(unrecorded), "again"),
+        ]
+    )
+    return tree
+
+
+def test_a_start_reads_the_lessons_of_its_own_line_instead_of_the_campaign_s(tmp_path):
+    tree = _tree_with_attempts(tmp_path)
+    campaign = (
+        EvidenceRef(kind="analysis_summary", path="analysis/summary.md"),
+        EvidenceRef(kind="lesson_directory", path="forge_experiments/lessons"),
+        EvidenceRef(kind="latest_lesson", path="forge_experiments/lessons/iter_007.md"),
+    )
+
+    refs = line_evidence(tree, tree.root.commit, campaign, tmp_path / "line_aaaa.md")
+
+    assert [(ref.kind, ref.path) for ref in refs] == [
+        ("analysis_summary", "analysis/summary.md"),
+        (LINE_HISTORY_EVIDENCE, str(tmp_path / "line_aaaa.md")),
+        # The latest attempt left no record, so the one before it holds the line's latest lesson.
+        ("latest_lesson", str(tmp_path / "iter_001" / "slot_01" / "lesson.md")),
+    ]
+
+
+def test_the_line_history_names_each_attempt_with_its_plan_and_records(tmp_path):
+    tree = _tree_with_attempts(tmp_path)
+
+    history = render_line_history(tree, tree.root.commit)
+
+    assert f"- {tree.root.commit} [-] baseline in iteration 0: 1.000000x over 1 sample(s)" in history
+    assert "- iter 1 slot 1 BRANCH new INCORRECT 0.800000x" in history
+    assert "  plan: start_aaaa/slot_01.md" in history
+    assert f"  records: {tmp_path / 'iter_001' / 'slot_01'}" in history
 
 
 def test_a_slot_is_told_its_lane_s_approach_and_how_to_time_the_cases_it_aims_at():

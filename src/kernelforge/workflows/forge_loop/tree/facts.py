@@ -17,6 +17,8 @@ _RECORD_CHARS = 300
 _COMMIT_CHARS = 12
 # Attempts listed under a node; older ones are counted.
 _ATTEMPTS_PER_NODE = 6
+LESSON_FILENAME = "lesson.md"
+LESSON_MISSING_FILENAME = "lesson_missing.txt"
 
 
 @dataclass(frozen=True)
@@ -69,13 +71,56 @@ def _one_line(text: str, limit: int = _PLAN_CHARS) -> str:
     return " ".join(str(text or "").split())[:limit]
 
 
+def render_line_history(tree: SearchTree, start: str) -> str:
+    """The line ending at ``start`` as its planners read it: the path from the root, then its attempts, oldest first."""
+    line = tree.line(start)
+    attempts = [entry for attempt in line.attempts for entry in _line_attempt(attempt)]
+    return "\n".join(
+        [
+            f"# The line of search-tree node {start}",
+            "",
+            f"A records directory holds the change.diff, measurement.json and {LESSON_FILENAME} (the Implementer's own "
+            f"record of what it tried and found, or {LESSON_MISSING_FILENAME} saying why there is none) of what made "
+            "that node or attempt.",
+            "",
+            "## The path from the root",
+            *(entry for node in line.nodes for entry in _path_node(tree, node)),
+            "",
+            "## Attempts from this path",
+            *(attempts or ["- none yet"]),
+            "",
+        ]
+    )
+
+
+def _path_node(tree: SearchTree, node: TreeNode) -> list[str]:
+    head = (
+        f"- {node.commit} [{node.direction or '-'}] {node.source.value} in iteration {node.iteration}: "
+        f"{node.score:.6f}x over {len(node.samples)} sample(s){_versus_parent(tree, node)}"
+    )
+    records = [f"  records: {node.records}"] if node.records else []
+    return [head, *_what_it_did(node, ""), *records]
+
+
+def _line_attempt(attempt: Attempt) -> list[str]:
+    lines = [
+        f"- {_attempt_summary(attempt, {})}",
+        f"  from {attempt.start}: {_one_line(attempt.reason, _RECORD_CHARS)}",
+    ]
+    if attempt.plan_path:
+        lines.append(f"  plan: {attempt.plan_path}")
+    if attempt.archive_path:
+        lines.append(f"  records: {attempt.archive_path}")
+    return lines
+
+
 def _sources(sources: FactSources) -> list[str]:
     return [
         "## Where the detail lives",
         f"- {sources.archive_dir}/iter_NNN/slot_KK/: one slot's change.diff, measurement.json (per-case timings of "
-        "every run) and lesson.md (its Implementer's own record of what it tried and found); "
-        "start_<commit>/slot_KK.md is the plan it ran (start_<commit>_<profile>/ when the start's slots ran on "
-        "several profiles).",
+        f"every run) and {LESSON_FILENAME} (its Implementer's own record of what it tried and found, or "
+        f"{LESSON_MISSING_FILENAME} saying why there is none); start_<commit>/slot_KK.md is the plan it ran "
+        "(start_<commit>_<profile>/ when the start's slots ran on several profiles).",
         f"- {sources.selections_dir}/iter_NNN.md: what you were shown and answered in an earlier round.",
         "- Every node is a commit: `git show <commit>`, `git diff <parent> <commit>`, `git log --oneline <branch>`.",
         "",
@@ -154,26 +199,35 @@ def _nodes(tree: SearchTree, models: Mapping[str, str]) -> list[str]:
 
 
 def _node(tree: SearchTree, node: TreeNode, published: TreeNode, indent: str, models: Mapping[str, str]) -> list[str]:
-    parent = tree.node(node.parent)
-    versus_parent = f", {_percent(node.score, parent.score)} vs parent" if parent is not None else ""
     marks = [mark for mark, on in (("PUBLISHED", node.commit == published.commit), ("root", node.is_root)) if on]
     head = (
         f"{indent}- {node.commit} [{', '.join([node.direction or '-', *marks])}] "
         f"{node.source.value} in iteration {node.iteration}{_model(node.agent_profile_id, models, 'by')}: "
         f"{node.score:.6f}x over {len(node.samples)} sample(s)"
-        f"{versus_parent}, {_percent(node.score, published.score)} vs published"
+        f"{_versus_parent(tree, node)}, {_percent(node.score, published.score)} vs published"
     )
-    lines = [head]
-    if node.plan:
-        lines.append(f"{indent}  plan: {_one_line(node.plan)}")
-    if node.approach or node.focus_cases:
-        aimed = ", ".join(node.focus_cases) or "every case"
-        lines.append(f"{indent}  approach: {_one_line(node.approach, _RECORD_CHARS) or '-'}; aimed at: {aimed}")
+    lines = [head, *_what_it_did(node, indent)]
     lines.extend(_case_standing(node, published, indent))
     opened = tree.directions_from(node.commit)
     if opened:
         lines.append(f"{indent}  directions opened here: {', '.join(item.direction_id for item in opened)}")
     lines.extend(_attempts(tree.attempts_from(node.commit), indent, models))
+    return lines
+
+
+def _versus_parent(tree: SearchTree, node: TreeNode) -> str:
+    parent = tree.node(node.parent)
+    return f", {_percent(node.score, parent.score)} vs parent" if parent is not None else ""
+
+
+def _what_it_did(node: TreeNode, indent: str) -> list[str]:
+    """The plan a node was made by, and the approach and cases its lane was given."""
+    lines = []
+    if node.plan:
+        lines.append(f"{indent}  plan: {_one_line(node.plan)}")
+    if node.approach or node.focus_cases:
+        aimed = ", ".join(node.focus_cases) or "every case"
+        lines.append(f"{indent}  approach: {_one_line(node.approach, _RECORD_CHARS) or '-'}; aimed at: {aimed}")
     return lines
 
 
@@ -201,15 +255,18 @@ def _attempts(attempts: list[Attempt], indent: str, models: Mapping[str, str]) -
     shown = attempts[-_ATTEMPTS_PER_NODE:]
     if len(shown) < len(attempts):
         lines.append(f"{indent}    ({len(attempts) - len(shown)} older attempt(s) not listed)")
-    for attempt in shown:
-        score = f" {attempt.score:.6f}x" if attempt.score is not None else ""
-        child = f" -> {_short(attempt.node)}" if attempt.node else ""
-        lines.append(
-            f"{indent}    iter {attempt.iteration} slot {attempt.slot} {attempt.slot_type.value} "
-            f"{attempt.direction or 'new'}{_model(attempt.agent_profile_id, models, 'on')} "
-            f"{attempt.outcome.value}{score}{child}{_detail(attempt)}"
-        )
+    lines.extend(f"{indent}    {_attempt_summary(attempt, models)}" for attempt in shown)
     return lines
+
+
+def _attempt_summary(attempt: Attempt, models: Mapping[str, str]) -> str:
+    score = f" {attempt.score:.6f}x" if attempt.score is not None else ""
+    child = f" -> {_short(attempt.node)}" if attempt.node else ""
+    return (
+        f"iter {attempt.iteration} slot {attempt.slot} {attempt.slot_type.value} "
+        f"{attempt.direction or 'new'}{_model(attempt.agent_profile_id, models, 'on')} "
+        f"{attempt.outcome.value}{score}{child}{_detail(attempt)}"
+    )
 
 
 def _detail(attempt: Attempt) -> str:
@@ -250,4 +307,11 @@ def _percent(value: float, reference: float) -> str:
     return f"{(value / reference - 1.0) * 100:+.2f}%"
 
 
-__all__ = ["FactSources", "RoundOutlook", "render_facts"]
+__all__ = [
+    "LESSON_FILENAME",
+    "LESSON_MISSING_FILENAME",
+    "FactSources",
+    "RoundOutlook",
+    "render_facts",
+    "render_line_history",
+]

@@ -14,13 +14,18 @@ from pathlib import Path
 
 from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.utils.git import git
-from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationInfrastructureError
+from kernelforge.workflows.forge_loop.roles.contracts import EvidenceRef
+from kernelforge.workflows.forge_loop.roles.orchestration import (
+    LINE_HISTORY_EVIDENCE,
+    OrchestrationInfrastructureError,
+)
 from kernelforge.workflows.forge_loop.search.search_policy import (
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
     OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
     SEARCH_MODE_DIVERSIFY,
     SEARCH_MODE_EXPLOIT,
 )
+from kernelforge.workflows.forge_loop.tree.facts import LESSON_FILENAME, render_line_history
 from kernelforge.workflows.forge_loop.tree.model import DirectionProposal, Round, SearchTree, Slot, SlotType, TreeNode
 from kernelforge.workflows.forge_loop.tree.profiles import SlotActors
 
@@ -34,6 +39,8 @@ _DIRECTION_KEYS = {
     "fails if": "failure_criterion",
     "hint": "hint",
 }
+# The campaign's own lesson evidence, which a start's line replaces.
+_CAMPAIGN_LESSON_EVIDENCE = frozenset({"lesson_directory", "latest_lesson"})
 
 
 @dataclass(frozen=True)
@@ -127,6 +134,34 @@ def read_direction_record(plan: str) -> tuple[DirectionProposal | None, str]:
     return proposal, fields.get("hint", "")
 
 
+def _line_history_name(start: str) -> str:
+    return f"line_{start[:12]}.md"
+
+
+def line_evidence(tree: SearchTree, start: str, refs: Sequence[EvidenceRef], history: Path) -> tuple[EvidenceRef, ...]:
+    """A start's planning evidence: the campaign's, with its lesson evidence taken from the start's own line."""
+    kept = [ref for ref in refs if ref.kind not in _CAMPAIGN_LESSON_EVIDENCE]
+    kept.append(
+        EvidenceRef(
+            kind=LINE_HISTORY_EVIDENCE,
+            path=str(history),
+            summary="This start's line: the path from the root to it and the attempts made from that path, with "
+            "each one's plan and records.",
+        )
+    )
+    lessons = [Path(item.archive_path) / LESSON_FILENAME for item in tree.line(start).attempts if item.archive_path]
+    latest = next((path for path in reversed(lessons) if path.is_file()), None)
+    if latest is not None:
+        kept.append(
+            EvidenceRef(
+                kind="latest_lesson",
+                path=str(latest),
+                summary="The latest free-form Implementer session record on this start's line.",
+            )
+        )
+    return tuple(kept)
+
+
 def start_brief(tree: SearchTree, start: TreeNode, slots: Sequence[Slot]) -> str:
     """What the planners at one start are asked to produce, lane by lane."""
     lines = [
@@ -199,11 +234,13 @@ class TreePlanningMixin:
     async def _plan_round_slots(self, tree: SearchTree, round_: Round, actors: SlotActors) -> RoundPlans:
         """Plan every slot of ``round_`` on its own profile; a unit whose planning failed leaves its slots unplanned."""
         started_at = time.time()
+        round_dir = self._experiments.tree_round(round_.iteration)
         try:
-            units = planning_units(round_.slots, self._experiments.tree_round(round_.iteration))
+            units = planning_units(round_.slots, round_dir)
             # One after another: concurrent ``git worktree add`` calls contend for the repository's own locks.
             for start in dict.fromkeys(unit.start for unit in units):
                 self._start_worktrees.ensure(start)
+                _write_record(round_dir, _line_history_name(start), render_line_history(tree, start))
             outcomes = await asyncio.gather(
                 *(
                     self._plan_unit(tree, round_.iteration, unit, actors.of(unit.slots[0]).orchestration_factory)
@@ -228,7 +265,8 @@ class TreePlanningMixin:
             return RoundPlans(
                 port_plans, tuple(UnplannedSlot(slot, "no planning service is configured") for slot in planned)
             )
-        context = self._start_context(tree, tree.require_node(unit.start), planned)
+        history = self._experiments.tree_round(iteration) / _line_history_name(unit.start)
+        context = self._start_context(tree, tree.require_node(unit.start), planned, history)
         try:
             result = await orchestration_factory().run(context, usage=self._usage, lanes=len(planned))
         except OrchestrationInfrastructureError as error:
@@ -242,8 +280,8 @@ class TreePlanningMixin:
         mapped = self._map_plans(unit, planned, result)
         return RoundPlans((*port_plans, *mapped.plans), mapped.unplanned)
 
-    def _start_context(self, tree: SearchTree, start: TreeNode, slots: Sequence[Slot]):
-        """The campaign's planning context, re-seated on one start node's checkout and measurements."""
+    def _start_context(self, tree: SearchTree, start: TreeNode, slots: Sequence[Slot], history: Path):
+        """The campaign's planning context, re-seated on one start node's checkout, measurements and line."""
         base = self._with_ceiling_standing(
             self._with_case_config_coverage(self._active_analysis_context or self._build_orchestration_context())
         )
@@ -265,6 +303,7 @@ class TreePlanningMixin:
             ),
             current_mean_case_speedup=start.score,
             evidence_stale=bool(base.evidence_commit and base.evidence_commit != start.commit),
+            evidence_refs=line_evidence(tree, start.commit, base.evidence_refs, history),
             cumulative_diff_path=diff.path,
             cumulative_diff_error=diff.error,
             program_context=f"{base.program_context}\n\n{start_brief(tree, start, slots)}",
@@ -334,6 +373,7 @@ __all__ = [
     "SlotPlan",
     "TreePlanningMixin",
     "UnplannedSlot",
+    "line_evidence",
     "planning_units",
     "port_plan",
     "read_direction_record",

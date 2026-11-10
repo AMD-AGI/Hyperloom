@@ -141,6 +141,7 @@ def _published_lanes(synthesized: Sequence[SynthesizedPlan], lane_ids: Sequence[
     )
 
 
+LINE_HISTORY_EVIDENCE = "tree_line_history"
 _GLOBAL_EVIDENCE_KINDS = {
     "analysis_artifact_catalog",
     "analysis_bundle",
@@ -149,6 +150,7 @@ _GLOBAL_EVIDENCE_KINDS = {
     "analysis_source_map",
     "analysis_workflow",
     "latest_lesson",
+    LINE_HISTORY_EVIDENCE,
     "supervisor_guidance",
 }
 _PROFILED_CASE_FLAGS = {
