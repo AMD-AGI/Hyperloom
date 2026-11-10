@@ -103,7 +103,7 @@ from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION, PLAYBOOK_JUDGE_PROMPT_VERSION
-from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
+from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, LaunchIsolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.llm import recorded
@@ -118,6 +118,7 @@ from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.prelude import (
     Prelude,
+    baseline_decision,
     PreludeFailed,
     PreludeResult,
     PreludeServices,
@@ -1154,12 +1155,20 @@ def persisted_run(root: Path) -> PersistedRun:
 
 
 def resumable_run(root: Path) -> PersistedRun:
-    """:func:`persisted_run` for :meth:`Session.resume`; raises ValueError too when PRELUDE recorded no baseline, or
-    the session was to stop once its map was made."""
+    """:func:`persisted_run` for :meth:`Session.resume`; raises ValueError too when PRELUDE recorded no baseline or not
+    the decision that names it, the session was measured in a grant's sandboxes, which a resume does not lease again,
+    or it was to stop once its map was made. Writes nothing."""
 
     persisted = persisted_run(root)
-    if not prelude_landed(root):
+    layout = SessionLayout(root)
+    if not prelude_landed(root) or baseline_decision(read_jsonl(layout.decisions)) is None:
         raise ValueError(f"the session in {root} recorded no baseline to resume from; start a new session")
+    isolation = read_manifest(layout.manifest).agent_isolation
+    if isolation is not None and isolation.tests == HOSTED:
+        raise ValueError(
+            f"the session in {root} was measured in a grant's sandboxes and a resume measures on this machine's cards;"
+            " start a new session"
+        )
     if persisted.settings.stop_after_map:
         raise ValueError(f"the session in {root} was to stop once its map was made, so it has no EXPLORE to resume")
     return persisted

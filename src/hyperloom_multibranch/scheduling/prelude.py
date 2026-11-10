@@ -199,7 +199,8 @@ class Prelude:
         profile = await self._blackboard.session_profile()
         start = await self._repo.head(INTEGRATION_BRANCH)
         rows = read_jsonl(self._layout.decisions)
-        baseline = next(row for row in rows if row["reason"] == BASELINE_ESTABLISHED)
+        baseline = baseline_decision(rows)
+        assert baseline is not None, "resumable_run admits a session only once PRELUDE recorded its baseline decision"
         profiled = next((row for row in rows if row["kind"] == DecisionKind.PROFILE.value), None)
         job = "" if profiled is None else str(profiled["detail"].get("job_id") or "")
         return PreludeResult(root, start, profile, (), float(baseline["detail"]["longest_test_seconds"]), job)
@@ -389,7 +390,15 @@ def _session_profile(
     )
 
 
+def baseline_decision(rows: Iterable[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """The decision PRELUDE recorded its baseline with among the decision log's ``rows``; ``None`` when there is none,
+    as for a session stopped between the rule gate's baseline and that decision."""
+
+    return next((row for row in rows if row["reason"] == BASELINE_ESTABLISHED), None)
+
+
 __all__ = [
+    "baseline_decision",
     "PreludeFailed",
     "Prelude",
     "PreludeResult",
