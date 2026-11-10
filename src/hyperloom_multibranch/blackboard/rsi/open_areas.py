@@ -7,12 +7,13 @@
 profiled, with the largest Amdahl ceilings, leaving out the ops a running branch works on (its focus, an op a direction
 of Arbor's map it holds names, or an op of the family of a claim it holds or of its last explore test, which is all a
 branch opened without a focus shows) and the spent ones: those the playbook's ``failed_op_limit`` branches opened on
-the integration head as it stands were focused on and stopped without a commit, and those a stopped branch focused on
-them exhausted on that head, its latest EXHAUSTED record finding no ceiling above the bar or every idea tested or
-claimed there. The other reasons of a record wait on a tool or a capability, not on the op, and spend none. A spent op
-opens again once the integration head moves, and an op of a direction of the map once its Arbor branch stops. With too little of EXPLORE
-left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a new branch took to
-it, it says that no branch should open. Shares taken from a commit the head builds on are named as that commit's, beside
+the integration head as it stands were focused on and stopped without a commit, and those a branch focused on them
+gave up on at that head, its give-up quoting an EXHAUSTED record that finds no ceiling above the bar or every idea
+tested or claimed there. A record alone is about one of the session's directions, not the op, and spends nothing; nor
+does a branch the judge or the session's end stopped, nor a record that waits on a tool or a capability. A spent op
+opens again once the integration head moves, and an op of a direction of the map once its Arbor branch stops. With too
+little of EXPLORE left for a new branch's first commit, the playbook's ``last_open_minutes`` or else the median time a
+new branch took to it, it says that no branch should open. Shares taken from a commit the head builds on are named as that commit's, beside
 the head's. The direction families' odds are the specialists' menu (:mod:`rsi.menu`), not the judge's: a family has
 too few tests to rank ops by.
 """
@@ -38,7 +39,7 @@ from hyperloom_multibranch.blackboard.rsi.playbook import H0, Playbook
 #: How many ops the open areas list at most.
 OPEN_OPS = 5
 _MINUTE = 60.0
-#: The reasons of an EXHAUSTED record that say the op itself is done on the record's head.
+#: The reasons of an EXHAUSTED record that, quoted by a focused branch's give-up, say its op is done on the record's head.
 _DONE = frozenset({ExhaustedWhy.NO_CEILING_ABOVE_BAR, ExhaustedWhy.ALL_TESTED_OR_CLAIMED})
 
 
@@ -59,7 +60,7 @@ class OpenOp:
 class FocusHistory:
     """The branches this session opened on one op as their focus: how many, how many of them stopped without a
     commit, the commits they made and the best gain among those; ``exhausted`` is the record that spent the op when
-    one of them exhausted it on the integration head."""
+    one of them gave up on it on the integration head quoting it."""
 
     opened: int
     ended_without_commit: int
@@ -201,6 +202,14 @@ class StoppedOnFocus:
     node: BranchNode
     exhausted: Exhausted | None
 
+    @property
+    def gave_up_on(self) -> Exhausted | None:
+        """The record the branch's give-up quotes as its last words, ``None`` when it stopped any other way: by the
+        judge, at the session's end, after crashes, or giving up without a record."""
+
+        record = self.exhausted
+        return record if record is not None and (self.node.stop_reason or "").endswith(record.summary()) else None
+
 
 def stopped_on_focus(snapshot: BlackboardSnapshot, focus: str) -> tuple[StoppedOnFocus, ...]:
     """The stopped branches whose ``OPEN`` named ``focus``, newest first, each with its latest EXHAUSTED record."""
@@ -216,14 +225,14 @@ def stopped_on_focus(snapshot: BlackboardSnapshot, focus: str) -> tuple[StoppedO
 def _spent(
     snapshot: BlackboardSnapshot, op: str, focused: Sequence[BranchNode], head: str, limit: int
 ) -> FocusHistory | None:
-    """The history of the ``focused`` branches of ``op`` when a stopped one exhausted it on ``head``, or ``limit`` of
-    those opened on ``head`` stopped without a commit, else ``None``."""
+    """The history of the ``focused`` branches of ``op`` when one gave up on it on ``head``, or ``limit`` of those
+    opened on ``head`` stopped without a commit, else ``None``."""
 
     record = next(
         (
-            item.exhausted
+            quoted
             for item in stopped_on_focus(snapshot, op)
-            if item.exhausted is not None and item.exhausted.why in _DONE and item.exhausted.head == head
+            if (quoted := item.gave_up_on) is not None and quoted.why in _DONE and quoted.head == head
         ),
         None,
     )

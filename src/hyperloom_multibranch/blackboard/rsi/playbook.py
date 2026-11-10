@@ -95,8 +95,9 @@ class PlaybookNumbers:
     ``grace_tests`` of its explore tests succeeded and were judged. ``max_open`` caps the branches running at once,
     ``None`` for the run's cap; no branch the judge refills opens in the last ``last_open_minutes`` of EXPLORE,
     ``None`` for the median time a new branch took to its first commit; an op that ``failed_op_limit`` branches opened
-    on the integration head as it stands were focused on and stopped without a commit leaves the open areas until the
-    head moves.
+    on the integration head as it stands were focused on and stopped without a commit, or that one branch focused on it
+    gave up on at that head quoting an EXHAUSTED record that finds no ceiling above the bar or every idea tested or
+    claimed, leaves the open areas until the head moves.
     """
 
     stall_tests: int | None = None
@@ -170,7 +171,8 @@ class Playbook:
             f"- open: at most {opened} at once; after the opening batch, none once less of EXPLORE is left than {late}. "
             "The scheduler cuts an open past either.",
             f"- spent: an op {n.failed_op_limit} branches opened on the integration head were focused on and ended "
-            "without a commit leaves the open areas until the head moves.",
+            "without a commit, or that a branch focused on it gave up on at that head quoting an exhausted record of "
+            "no ceiling above the bar or every idea tested or claimed, leaves the open areas until the head moves.",
             *(f"- rule ({rule.governs.value}): {rule.text}" for rule in self.rules),
             "Safety envelope, whatever the playbook says:",
             *(f"- {line}" for line in SAFETY_ENVELOPE),
