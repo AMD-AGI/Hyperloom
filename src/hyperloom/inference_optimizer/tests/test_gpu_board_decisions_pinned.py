@@ -19,6 +19,7 @@ _BOARDS = [
     ("mi350x", "mi355x", True, "vendor"),
     ("mi355x", "mi355x", True, "vendor"),
     ("r9700", "gfx12", False, "vendor"),
+    ("r9600d", "gfx12", False, "vendor"),
 ]
 
 
@@ -62,8 +63,9 @@ def test_the_gfx12_runner_is_validated_for_vllm_only(framework):
     )
 
 
-def test_only_r9700_pins_its_geak_identity():
+def test_only_the_gfx1201_radeon_boards_pin_their_geak_identity():
     assert gpu_types.geak_identity_pin("r9700") == {"expected_target": "r9700", "expected_gfx": "gfx1201"}
+    assert gpu_types.geak_identity_pin("r9600d") == {"expected_target": "r9600d", "expected_gfx": "gfx1201"}
     for product in ("mi300x", "mi308x", "mi325x", "mi350x", "mi355x", "radeon8060s", "unknown_gpu", ""):
         assert gpu_types.geak_identity_pin(product) == {}, product
 
@@ -80,6 +82,7 @@ def test_only_r9700_pins_its_geak_identity():
         ("AMD_INSTINCT_MI300X", "mi300x"),
         ("Card Series: AMD Radeon AI PRO R9700", "r9700"),
         ("card series: amd radeon ai pro r9700", "r9700"),
+        ("Card Series: AMD Radeon AI PRO R9600D", "r9600d"),
         ("Card Series: AMD Instinct MI300XL", None),
         ("Card Series: AMD Radeon AI PRO R9700S", None),
         ("Card Series: AMD Radeon AI PRO XR9700", None),
