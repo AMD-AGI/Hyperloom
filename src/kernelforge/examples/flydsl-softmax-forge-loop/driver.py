@@ -89,7 +89,7 @@ def _run_correctness(case: _Case, device: str) -> int:
 
     ref = _reference(x)
     print(f"SNR: {_snr_db(ref, out):.2f} dB")
-    print(f"allclose: {torch.allclose(out, ref, atol=1e-2, rtol=1e-2)}")
+    print(f"allclose_diagnostic: {torch.allclose(out, ref, atol=1e-2, rtol=1e-2)}")
     return 0
 
 
