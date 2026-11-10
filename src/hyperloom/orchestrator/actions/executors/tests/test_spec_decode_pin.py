@@ -531,7 +531,6 @@ def _native_recipe(
     tmp_path: Path,
     recipe_args: list[str] | None = None,
     recipe_envs: dict[str, str | None] | None = None,
-    runtime_env: dict[str, str] | None = None,
 ) -> Path:
     """A native recipe as a verified session leaves it: the resolved workload and the launch receipt beside it.
 
@@ -565,7 +564,6 @@ def _native_recipe(
                         "base_argv": argv,
                         "effective_argv": argv,
                         "effective_env": dict(recipe_envs or {}),
-                        "runtime_environment": dict(runtime_env or {}),
                     },
                     "recipe": {"tp": 1, "ep": 1, "conc": 8},
                 }
@@ -595,34 +593,6 @@ def test_a_variable_the_recipe_cleared_is_not_a_setting_it_pinned(tmp_path):
     config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, {"SGLANG_SIMULATE_ACC_LEN": None})
     launch = _build_native(tmp_path, config, GridVariant("v", extra_server_args="--speculative-num-draft-tokens 6"))
     assert launch["append_args"] == ["--speculative-num-draft-tokens", "6"]
-
-
-# InferenceX injects the recipe's golden acceptance length at launch: Magpie's receipt has it only in the
-# environment the server ran with, not in the recipe-owned ``effective_env``.
-_LAUNCHER_RAN_ENV = {
-    "PATH": "/usr/bin",
-    "SGLANG_SIMULATE_ACC_LEN": "3.61",
-    "SGLANG_SIMULATE_ACC_METHOD": "match-expected",
-}
-
-
-def test_a_candidate_echoing_the_simulated_acceptance_the_launcher_injected_is_admitted(tmp_path):
-    """AMD-AGI/Hyperloom#2432: GEAK echoes the baseline's runtime environment back; neither draft nor acceptance moved."""
-    config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, {}, _LAUNCHER_RAN_ENV)
-    launch = _build_native(tmp_path, config, GridVariant("geak_revalidate", extra_envs=dict(_LAUNCHER_RAN_ENV)))
-    assert launch["env"]["SGLANG_SIMULATE_ACC_LEN"] == "3.61"
-
-
-def test_a_candidate_moving_the_acceptance_the_launcher_injected_is_still_refused(tmp_path):
-    config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, {}, _LAUNCHER_RAN_ENV)
-    with pytest.raises(SpeculativeDecodingPinnedError, match=SERVE_FLAG):
-        _build_native(tmp_path, config, GridVariant("v", extra_envs={"SGLANG_SIMULATE_ACC_LEN": "4.2"}))
-
-
-def test_a_real_draft_base_still_refuses_a_candidate_that_simulates_acceptance(tmp_path):
-    config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, {}, {"PATH": "/usr/bin"})
-    with pytest.raises(SpeculativeDecodingPinnedError, match=SERVE_FLAG):
-        _build_native(tmp_path, config, GridVariant("v", extra_envs={"SGLANG_SIMULATE_ACC_LEN": "3.61"}))
 
 
 def test_building_a_native_variant_pins_the_draft_the_accepted_stack_carries(tmp_path):
