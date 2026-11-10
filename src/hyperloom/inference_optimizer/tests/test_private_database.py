@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
 import textwrap
 import threading
@@ -213,6 +214,74 @@ def test_a_ledger_directory_that_is_not_absolute_is_refused_by_name(tmp_path, ow
     for call in (private_db_path_for, db_path_for):
         with pytest.raises(ValueError, match="HYPERLOOM_LEDGER_DIR must be an absolute path"):
             call(session)
+
+
+def _with_a_session_id(session: Path, ident: str, *, files: tuple[str, ...] = ("manifest.json",)) -> Path:
+    session.mkdir(parents=True, exist_ok=True)
+    for name in files:
+        (session / name).write_text(json.dumps({"session_id": ident}))
+    return session
+
+
+def test_the_ledger_is_keyed_by_the_session_id_so_a_session_seen_at_another_path_has_the_same_one(tmp_path, own_tmp):
+    """The same session reached through a link, and through a copy of what a mount at another path shows (its manifest
+    says the same id), is one session, with one ledger; another session is another."""
+    session = _with_a_session_id(tmp_path / "shared-nfs" / "20261109-ab12cd34", "m_20261109T080000Z_ab12cd34")
+    linked = tmp_path / "linked"
+    linked.symlink_to(session)
+    elsewhere = _with_a_session_id(tmp_path / "other-mount" / "sessions" / "x", "m_20261109T080000Z_ab12cd34")
+    other = _with_a_session_id(tmp_path / "shared-nfs" / "20261109-ef56ab78", "m_20261109T090000Z_ef56ab78")
+    where = private_db_path_for(session)
+    assert private_db_path_for(linked) == private_db_path_for(elsewhere) == where
+    assert private_db_path_for(other) != where
+    SqliteConnection(where, file_mode=_PRIVATE).raw.close()
+    for path in (linked, elsewhere):
+        assert private_db_exists(path) and db_path_for(path) == where, path
+
+
+def test_the_ledger_of_a_session_mounted_at_another_path_by_a_bind_mount_is_the_same(tmp_path, own_tmp):
+    session = _with_a_session_id(tmp_path / "shared" / "s", "m_20261109T080000Z_ab12cd34")
+    mounted = tmp_path / "mounted"
+    mounted.mkdir()
+    bound = subprocess.run(["mount", "--bind", str(session), str(mounted)], capture_output=True, text=True, check=False)
+    if bound.returncode != 0:
+        pytest.skip(f"cannot bind-mount here: {bound.stderr.strip()}")
+    try:
+        assert os.path.realpath(mounted) != os.path.realpath(session), "a mount shows another real path"
+        assert private_db_path_for(mounted) == private_db_path_for(session)
+    finally:
+        subprocess.run(["umount", str(mounted)], capture_output=True, check=False)
+
+
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        pytest.param(("state.json",), "from-state", id="state-json-when-there-is-no-manifest"),
+        pytest.param((), "named-dir", id="the-name-of-the-directory-when-neither-says"),
+    ],
+)
+def test_without_a_manifest_the_ledger_key_falls_back_to_the_state_id_then_to_the_directory_name(
+    tmp_path, own_tmp, files, expected
+):
+    ident = "from-state" if files else "named-dir"
+    first = _with_a_session_id(tmp_path / "one" / ident, ident, files=files)
+    second = _with_a_session_id(tmp_path / "two" / ident, ident, files=files)
+    assert private_db_path_for(first) == private_db_path_for(second)
+    assert private_db_path_for(first).parent.name.startswith(expected)
+
+
+def test_a_manifest_this_account_cannot_read_leaves_the_key_to_the_state_id(tmp_path, own_tmp, monkeypatch):
+    session = _with_a_session_id(tmp_path / "s", "the-id", files=("manifest.json", "state.json"))
+    keyed = private_db_path_for(session)
+    real_read_text = Path.read_text
+
+    def another_accounts(self, *args, **kwargs):
+        if self == session / "manifest.json":
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", another_accounts)
+    assert private_db_path_for(session) == keyed, "state.json says the same"
 
 
 # -- a place that is not safe is refused before anything is made --------------------------------------------------------

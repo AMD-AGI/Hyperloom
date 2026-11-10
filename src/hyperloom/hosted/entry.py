@@ -60,6 +60,7 @@ from hyperloom.inference_optimizer.session.paths import (
     SESSION_FILES,
     ensure_archive_root,
     hosted_session_dir,
+    named_ledger_dir,
     stop_request_path,
 )
 from hyperloom.inference_optimizer.session.resume_guard import (
@@ -129,6 +130,10 @@ def _run() -> int:
     user_data = Path(os.environ.get(ENV_USER_DATA_PATH, ""))
     if not user_data.is_absolute():
         raise Refused(f"{ENV_USER_DATA_PATH} must be set to an absolute path")
+    try:
+        named_ledger_dir()
+    except ValueError as exc:
+        raise Refused(str(exc)) from None
     _check_shared_storage(info.state_dir, user_data)
     _default_runtime_dir()
     if spec.flow == FLOW_MULTIBRANCH:

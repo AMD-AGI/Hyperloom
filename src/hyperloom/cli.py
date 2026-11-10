@@ -48,6 +48,20 @@ def _run(module: str, argv: list[str]) -> int:
     return importlib.import_module(module).main(argv)
 
 
+def _ledger_dir_error(command: str, rest: list[str]) -> str | None:
+    """The one-line error for a ``HYPERLOOM_LEDGER_DIR`` that is not an absolute path, for the commands that open a
+    session's coordinator database (``optimize``, ``recover`` and ``session events``); ``None`` otherwise."""
+    if command not in ("optimize", "recover") and not (command == "session" and rest[:1] == ["events"]):
+        return None
+    from hyperloom.inference_optimizer.session.paths import named_ledger_dir
+
+    try:
+        named_ledger_dir()
+    except ValueError as exc:
+        return f"ERROR: {exc}"
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] in ("-h", "--help"):
@@ -57,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
         print(_usage(), file=sys.stderr)
         return 2
     command, rest = args[0], args[1:]
+    if (error := _ledger_dir_error(command, rest)) is not None:
+        print(error, file=sys.stderr)
+        return 2
     if command != "session":
         module, prefix, _ = _COMMANDS[command]
         return _run(module, [*prefix, *rest])

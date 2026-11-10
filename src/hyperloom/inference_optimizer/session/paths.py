@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import logging
 import os
 import hashlib
@@ -64,7 +65,7 @@ ARCHIVE_MODE = 0o2770
 PRIVATE_SESSION_SUBDIRS: tuple[str, ...] = (ARCHIVE_DIRNAME,)
 
 #: Where an account keeps the coordinator database of a session that holds a credential, below ``${TMPDIR:-/tmp}``:
-#: ``hyperloom-ledger-<uid>/<session name>-<hash of the session directory>/``. Not in the session directory, which the
+#: ``hyperloom-ledger-<uid>/<session id>-<hash of the id>/``, keyed by the session's id, not by the path it is mounted at. Not in the session directory, which the
 #: group can write: SQLite reaches a database, and makes its journal files, by path, so any directory on that path that
 #: another account can rename entries in lets it put a database of its own there while one is opened.
 PRIVATE_DB_DIR_PREFIX = "hyperloom-ledger-"
@@ -259,24 +260,48 @@ def shared_db_path_for(session_dir: Path) -> Path:
     return Path(session_dir) / "storage" / "coordinator.db"
 
 
-def private_db_path_for(session_dir: Path) -> Path:
-    """Return the path of this account's own coordinator database for a session, outside the session directory (see
-    :data:`PRIVATE_DB_DIR_PREFIX` and :data:`ENV_LEDGER_DIR`); nothing is made there.
+def named_ledger_dir() -> Path | None:
+    """The directory ``HYPERLOOM_LEDGER_DIR`` names for this account's ledgers, or ``None`` when it is not set.
 
     Raises:
-        ValueError: When ``HYPERLOOM_LEDGER_DIR`` is not an absolute path: a relative one names a different ledger from
-            each working directory.
+        ValueError: When it is not an absolute path: a relative one names a different ledger from each working directory.
     """
-    resolved = Path(os.path.realpath(session_dir))
-    name = re.sub(r"[^A-Za-z0-9_.-]", "_", resolved.name)[:40] or "session"
-    key = hashlib.sha256(os.fsencode(resolved)).hexdigest()[:16]
     named = os.environ.get(ENV_LEDGER_DIR, "").strip()
     if named and not os.path.isabs(named):
         raise ValueError(f"{ENV_LEDGER_DIR} must be an absolute path, not {named!r}")
-    ledgers = (
-        Path(named) if named else Path(os.environ.get("TMPDIR") or "/tmp") / f"{PRIVATE_DB_DIR_PREFIX}{os.geteuid()}"
-    )
-    return ledgers / f"{name}-{key}" / "coordinator.db"
+    return Path(named) if named else None
+
+
+def _recorded_session_id(session_dir: Path) -> str:
+    """The id ``manifest.json`` records for the session, else the one ``state.json`` does; ``""`` when neither is
+    readable (a session not yet started, or one another account's pins keep owner-only)."""
+    for name in SESSION_FILES:
+        try:
+            recorded = json.loads((Path(session_dir) / name).read_text(encoding="utf-8")).get("session_id")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(recorded, str) and recorded.strip():
+            return recorded.strip()
+    return ""
+
+
+def session_ledger_key(session_dir: Path) -> str:
+    """The name of the session's directory among an account's ledgers: its recorded session id (the id ``manifest.json``
+    gives it when it starts, so the same for every leg and for every path the session directory is mounted at), else the
+    name of the session directory, which a mount of it at another path keeps too. Neither is the path."""
+    ident = _recorded_session_id(session_dir) or Path(os.path.realpath(session_dir)).name or "session"
+    return f"{re.sub(r'[^A-Za-z0-9_.-]', '_', ident)[:40]}-{hashlib.sha256(ident.encode()).hexdigest()[:16]}"
+
+
+def private_db_path_for(session_dir: Path) -> Path:
+    """Return the path of this account's own coordinator database for a session, outside the session directory (see
+    :data:`PRIVATE_DB_DIR_PREFIX`, :data:`ENV_LEDGER_DIR` and :func:`session_ledger_key`); nothing is made there.
+
+    Raises:
+        ValueError: When ``HYPERLOOM_LEDGER_DIR`` is not an absolute path.
+    """
+    ledgers = named_ledger_dir() or Path(os.environ.get("TMPDIR") or "/tmp") / f"{PRIVATE_DB_DIR_PREFIX}{os.geteuid()}"
+    return ledgers / session_ledger_key(session_dir) / "coordinator.db"
 
 
 def private_db_exists(session_dir: Path) -> bool:
@@ -419,11 +444,13 @@ __all__ = [
     "make_session_dir",
     "mn_profile_trace_root",
     "deps_cache_root",
+    "named_ledger_dir",
     "private_db_exists",
     "private_db_path_for",
     "resolve_dep_dir",
     "runtime_dir",
     "session_dir",
+    "session_ledger_key",
     "shared_db_path_for",
     "workspace_root",
 ]

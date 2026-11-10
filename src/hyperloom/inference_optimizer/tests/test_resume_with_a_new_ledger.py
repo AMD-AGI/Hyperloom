@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.session.resume_guard import ResumeBlocked, ensure_resume_safe
 from hyperloom.inference_optimizer.session.paths import (
     ENV_LEDGER_DIR,
     db_path_for,
@@ -249,3 +250,33 @@ async def test_a_session_without_a_credential_resumed_in_a_new_container_keeps_i
     assert resumed.db.db_path == shared_db_path_for(session_dir)
     resumed.db.raw.close()
     assert _said_about_the_ledger(caplog) == []
+
+
+async def _a_leg_whose_worker_exit_was_never_proven(session: Path) -> None:
+    """A leg with a credential whose ledger holds a GPU lease: what the resume guard refuses to resume past."""
+    coord = await _stopped_leg(session)
+    coord.db.raw.execute("INSERT INTO gpu_leases (gpu_id, holder_id, task_id) VALUES (0, 'worker', 'ti-live')")
+    coord.db.raw.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("named", [True, False], ids=["ledger-directory-named", "default-ledger"])
+async def test_the_resume_guard_reads_the_leases_of_a_kept_ledger_and_has_none_to_read_in_a_new_default_one(
+    session_dir, tmp_path, monkeypatch, named
+):
+    """Where main's guard read the leases in the shared database and refused while work was live, the guard reads the
+    ledger this account has: kept across containers by ``HYPERLOOM_LEDGER_DIR``, it still refuses; the default one is gone
+    with the container, and the guard has nothing to inspect (the warning of ``database_target`` says so)."""
+    monkeypatch.delenv(ENV_LEDGER_DIR, raising=False)
+    if named:
+        ledgers = tmp_path / "ledgers"
+        ledgers.mkdir(mode=0o700)
+        monkeypatch.setenv(ENV_LEDGER_DIR, str(ledgers))
+    _container(tmp_path, monkeypatch, "container-1")
+    await _a_leg_whose_worker_exit_was_never_proven(session_dir)
+    _container(tmp_path, monkeypatch, "container-2")
+    if named:
+        with pytest.raises(ResumeBlocked, match="worker exit is unproven"):
+            ensure_resume_safe(session_dir, owner_scope="host:2")
+    else:
+        ensure_resume_safe(session_dir, owner_scope="host:2")  # nothing to inspect: admitted
