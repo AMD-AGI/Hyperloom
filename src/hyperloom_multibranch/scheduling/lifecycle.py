@@ -335,6 +335,7 @@ class Session:
             REVIEW_HOST if settings.review_gate else REVIEW_OFF,
             maps,
             settings.agent_share_minutes,
+            make_before_break=settings.make_before_break,
         )
 
     def _map_calls(self) -> MapCalls:
