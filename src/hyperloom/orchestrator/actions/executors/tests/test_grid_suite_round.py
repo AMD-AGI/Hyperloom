@@ -20,17 +20,19 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from hyperloom.common.deadline import Deadline
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from hyperloom.orchestrator.actions.executors import _grid_base, _grid_runner
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
-from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch, GridRecipe, GridVariant, run_grid
+from hyperloom.orchestrator.actions.executors._grid_runner import GridLaunch, GridRecipe, GridStop, GridVariant
+from hyperloom.orchestrator.actions.executors._grid_runner import run_grid
 from hyperloom.orchestrator.actions.executors._suite.config import MEASURED_SEED
 from hyperloom.orchestrator.actions.executors._suite.rounds import RUN_DIR_PREFIX, TOOL_CACHE_ENV
 from hyperloom.orchestrator.actions.executors._suite.config import WARMUP_SEED
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _MODEL, _base
 from hyperloom.orchestrator.rehearsal import READY, STAGE_FAILED, LaunchAttempt, LaunchScenario, ScriptedRounds
-from hyperloom.orchestrator.rehearsal import VirtualClock
+from hyperloom.orchestrator.rehearsal import VirtualClock, installed_clock
 from hyperloom.orchestrator.rehearsal.scenario import ScenarioError
 from hyperloom.orchestrator.state.failure_evidence import ARGV_INVALID
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
@@ -112,6 +114,35 @@ def test_the_warmup_boots_the_server_the_measured_round_reuses_and_the_variant_r
     assert row.workspace == str(slot / f"{RUN_DIR_PREFIX}0")
     assert RunLayout(slot / "warmup_round" / f"{RUN_DIR_PREFIX}0").report.is_file()
     assert set(suite.stopped) == {slot}
+
+
+@pytest.mark.parametrize("phase_sec", [None, 60.0], ids=["session-only", "phase-ends-first"])
+def test_a_phase_deadline_that_ends_first_bounds_only_the_discarded_warmup(monkeypatch, suite, phase_sec):
+    """The measured round keeps the session's deadline: a phase change waits for its booking."""
+    attempts = (LaunchAttempt(outcome=READY, metrics=_COLD), LaunchAttempt(outcome=READY, metrics=_HOT))
+    rounds = ScriptedRounds(scenario=LaunchScenario(attempts=attempts), clock=VirtualClock(), launch=_launch())
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
+    clock = rounds.clock
+    session_sec, started = 600.0, clock.wall()
+    phase = None if phase_sec is None else Deadline.after(phase_sec, now=clock.monotonic())
+    stop = GridStop(session_deadline_sec=clock.monotonic() + session_sec, phase_deadline=phase)
+    launch = GridLaunch(warmup_before_measure=True)
+
+    with installed_clock(clock):
+        [row] = asyncio.run(
+            run_grid(
+                grid=[GridVariant("vA")],
+                output_root=suite.out,
+                recipe=GridRecipe(suite.point),
+                launch=launch,
+                stop=stop,
+            )
+        )
+
+    assert row.status == "succeeded", row
+    warmup, measured = (call.config.deadlines.deadline_unix for call in rounds.calls)
+    assert measured == int(started + session_sec)
+    assert warmup == int(started + (session_sec if phase_sec is None else phase_sec))
 
 
 def test_a_lone_round_owns_its_server_and_its_run_dir_is_the_variant_workspace(monkeypatch, suite):
