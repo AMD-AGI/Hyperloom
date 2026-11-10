@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reading what a planner wrote: the direction record of a BRANCH plan, and a plan's title."""
+"""Reading what a planner wrote into slot plans: a BRANCH plan's direction record, a plan's title, its lane's focus."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
-from kernelforge.workflows.forge_loop.tree.model import Slot, SlotType
+from kernelforge.workflows.forge_loop.roles.contracts import PublishedLane
+from kernelforge.workflows.forge_loop.tree.admission import slot_prompt
+from kernelforge.workflows.forge_loop.tree.model import NodeSource, Slot, SlotType, TreeNode
 from kernelforge.workflows.forge_loop.tree.planning import SlotPlan, TreePlanningMixin, read_direction_record
 
 # The shape a real planner wrote: an opening sentence, then a record whose keys are bold.
@@ -62,15 +64,15 @@ def _slots(count: int) -> list[Slot]:
     return [Slot(index, SlotType.BRANCH, "a" * 40, "r") for index in range(1, count + 1)]
 
 
-def _planning_result(plans: tuple[str, ...], **diagnostics) -> SimpleNamespace:
-    return SimpleNamespace(optimization_plans=plans, structured_output_diagnostics=diagnostics)
+def _planning_result(plans: tuple[str, ...], lanes: tuple[PublishedLane, ...], **diagnostics) -> SimpleNamespace:
+    return SimpleNamespace(optimization_plans=plans, published_lanes=lanes, structured_output_diagnostics=diagnostics)
 
 
 def test_a_lane_lost_mid_round_costs_only_its_own_slot(tmp_path):
     slots = _slots(3)
     result = _planning_result(
         ("plan for lane 1", "plan for lane 3"),
-        lanes={"planned": 2, "published_lane_ids": [1, 3]},
+        (PublishedLane(1), PublishedLane(3)),
         lane_losses={"2": "no analysis read the epilogue"},
     )
 
@@ -83,7 +85,7 @@ def test_a_lane_lost_mid_round_costs_only_its_own_slot(tmp_path):
 def test_a_slot_whose_lane_the_critic_dropped_says_so(tmp_path):
     result = _planning_result(
         ("plan for lane 2",),
-        lanes={"planned": 2, "published_lane_ids": [2]},
+        (PublishedLane(2),),
         lane_narrowing={"dropped_lanes": {"1": "lane 2 already covers it"}},
     )
 
@@ -96,7 +98,7 @@ def test_a_slot_whose_lane_the_critic_dropped_says_so(tmp_path):
 def test_a_round_whose_synthesis_failed_runs_no_slot_on_the_framework_plan(tmp_path):
     result = _planning_result(
         ("framework plan",),
-        lanes={"planned": 1, "published_lane_ids": []},
+        (),
         synthesis={"status": "unavailable", "message": "OrchestrationOutputError: no lane plan"},
     )
 
@@ -104,3 +106,49 @@ def test_a_round_whose_synthesis_failed_runs_no_slot_on_the_framework_plan(tmp_p
 
     assert mapped.plans == ()
     assert {item.reason for item in mapped.unplanned} == {"OrchestrationOutputError: no lane plan"}
+
+
+def test_a_slot_is_planned_with_the_approach_and_cases_its_lane_was_given(tmp_path):
+    result = _planning_result(
+        ("plan for lane 1", "plan for lane 2"),
+        (PublishedLane(1, approach="retime the MFMA issue", focus_cases=("m_64",)), PublishedLane(2)),
+    )
+
+    mapped = _Host(tmp_path)._map_plans(1, _slots(2), result)
+
+    assert [(plan.approach, plan.focus_cases) for plan in mapped.plans] == [
+        ("retime the MFMA issue", ("m_64",)),
+        ("", ()),
+    ]
+
+
+def _start() -> TreeNode:
+    return TreeNode(
+        commit="a" * 40,
+        parent="",
+        direction="",
+        slot_type=None,
+        iteration=0,
+        slot=0,
+        samples=(1.0,),
+        wall_ms=1.0,
+        case_times={"m_64": 1.0, "m_128": 2.0},
+        case_spreads={"m_64": 0.01, "m_128": 0.01},
+        snr_db=None,
+        plan="",
+        source=NodeSource.BASELINE,
+    )
+
+
+def test_a_slot_is_told_its_lane_s_approach_and_how_to_time_the_cases_it_aims_at():
+    slot = _slots(1)[0]
+    plan = SlotPlan(slot, "## Plan\nretime", "p", approach="retime the MFMA issue", focus_cases=("m_64", "m_128"))
+
+    prompt = slot_prompt(plan, _start(), lambda text: text)
+
+    assert "retime the MFMA issue" in prompt
+    assert "aimed at these cases: m_64, m_128" in prompt and "--bench-case <case_id>" in prompt
+    assert prompt.endswith("## Plan\nretime")
+    # A lane aimed at the plan alone is told nothing more than its plan.
+    plain = slot_prompt(SlotPlan(slot, "## Plan\nretime", "p"), _start(), lambda text: text)
+    assert "approach" not in plain and "--bench-case" not in plain

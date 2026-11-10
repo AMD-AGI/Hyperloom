@@ -121,8 +121,12 @@ def _optional_float(value: object) -> float | None:
     return None if value is None else float(value)
 
 
+# Node fields a tree written before they existed lacks, and the value such a node carries.
+_NODE_FIELDS_OLDER_TREES_LACK = {"approach": "", "focus_cases": []}
+
+
 def _node(payload: object) -> TreeNode:
-    data = _exact(payload, TreeNode, "search tree node")
+    data = _exact(_with_older_defaults(payload, _NODE_FIELDS_OLDER_TREES_LACK), TreeNode, "search tree node")
     return TreeNode(
         commit=str(data["commit"]),
         parent=str(data["parent"]),
@@ -138,7 +142,13 @@ def _node(payload: object) -> TreeNode:
         plan=str(data["plan"]),
         source=NodeSource(data["source"]),
         provenance=tuple(str(item) for item in data["provenance"]),
+        approach=str(data["approach"]),
+        focus_cases=tuple(str(item) for item in data["focus_cases"]),
     )
+
+
+def _with_older_defaults(payload: object, defaults: dict[str, Any]) -> object:
+    return {**defaults, **payload} if isinstance(payload, dict) else payload
 
 
 def _direction(payload: object) -> Direction:

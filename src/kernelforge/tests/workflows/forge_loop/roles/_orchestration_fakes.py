@@ -228,9 +228,18 @@ def _lane(ground: str, **extra) -> dict:
     return {"ground": ground, "reason": "one session's worth", "joint": False, "fallback": "", **extra}
 
 
-def _assigned_lane(ground: str, *, unplannable: str = "") -> dict:
-    """One lane of an assigned round's partition, which also says when the evidence cannot serve the lane."""
-    return _lane(ground, unplannable=unplannable)
+def _assigned_lane(
+    ground: str, *, approach: str = "", focus_cases: tuple[str, ...] = (), unplannable: str = ""
+) -> dict:
+    """One lane of an assigned round's partition: its ground, what sets it apart, and whether evidence can serve it."""
+    return {
+        "ground": ground,
+        "approach": approach,
+        "focus_cases": list(focus_cases),
+        "reason": "one session's worth",
+        "fallback": "",
+        "unplannable": unplannable,
+    }
 
 
 def _assigned_partition(*grounds: str) -> str:

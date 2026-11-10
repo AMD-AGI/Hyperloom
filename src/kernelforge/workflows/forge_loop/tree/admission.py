@@ -63,13 +63,28 @@ def _summary(text: str) -> str:
 
 
 def slot_prompt(plan: SlotPlan, start: TreeNode, lane_prompt) -> str:
-    """One slot's Implementer prompt: where it starts, what counts, then its plan."""
+    """One slot's Implementer prompt: where it starts, what counts, its lane's approach and focus, then its plan."""
     preamble = (
         f"This session starts from search-tree node {start.commit} at {start.score:.6f}x (equal-weight mean "
         "pristine-relative case speedup). Aim to exceed it. The candidate must be correct; a correct but slower first "
         "step of the planned route is acceptable, is measured, and is kept in the search tree.\n\n"
     )
-    return lane_prompt(preamble + plan.text)
+    return lane_prompt(preamble + _lane_focus(plan) + plan.text)
+
+
+def _lane_focus(plan: SlotPlan) -> str:
+    """What the round planner set this slot's lane apart by: its approach and the cases it aims at."""
+    notes = []
+    if plan.approach:
+        notes.append(f"This lane's approach, which the other lanes at this node do not share: {plan.approach}")
+    if plan.focus_cases:
+        notes.append(
+            f"This lane is aimed at these cases: {', '.join(plan.focus_cases)}. Make them faster; every case must "
+            "stay correct, and the other cases may get slower. While you iterate, pass `--bench-case <case_id>` to the "
+            "driver command above to time one of them alone (a driver that does not take the flag times every case), "
+            "and run the whole driver once before you finish."
+        )
+    return "".join(f"{note}\n\n" for note in notes)
 
 
 class TreeAdmissionMixin:
@@ -188,7 +203,14 @@ class TreeAdmissionMixin:
         commit = self._start_worktrees.commit(worktree, _commit_message(iteration, slot, direction_id, plan, result))
         pin_node(self.ic.workspace_dir, commit)
         provenance = (slot.source,) if slot.slot_type is SlotType.PORT else ()
-        node = _node_of(result, _Placement(commit, slot.start, direction_id, provenance), slot=slot, plan=plan.title)
+        node = _node_of(
+            result,
+            _Placement(commit, slot.start, direction_id, provenance),
+            slot=slot,
+            plan=plan.title,
+            approach=plan.approach,
+            focus_cases=plan.focus_cases,
+        )
         self._add_node(tree, node)
         return node
 
@@ -328,7 +350,15 @@ class _Placement:
     provenance: tuple[str, ...] = ()
 
 
-def _node_of(result: IterationResult, placement: _Placement, *, slot: Slot | None, plan: str) -> TreeNode:
+def _node_of(
+    result: IterationResult,
+    placement: _Placement,
+    *,
+    slot: Slot | None,
+    plan: str,
+    approach: str = "",
+    focus_cases: tuple[str, ...] = (),
+) -> TreeNode:
     detail = result.bench_detail or {}
     return TreeNode(
         commit=placement.commit,
@@ -345,6 +375,8 @@ def _node_of(result: IterationResult, placement: _Placement, *, slot: Slot | Non
         plan=_summary(plan),
         source=_source_of(slot),
         provenance=placement.provenance,
+        approach=approach,
+        focus_cases=focus_cases,
     )
 
 

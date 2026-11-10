@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 
 import pytest
 
@@ -155,12 +156,25 @@ def test_the_tree_round_trips_through_its_store(tmp_path):
     tree.set_direction_status("d002", DirectionStatus.CLOSED, "converged")
     tree.open_round(Round(iteration=3, slots=(Slot(1, SlotType.PORT, "3" * 40, "r", source="2" * 40),)))
     tree.mark_slot(1, SlotStatus.DISPATCHED)
+    focused = replace(_node("4" * 40, "3" * 40, "d002", iteration=3), approach="stage via LDS", focus_cases=("m_1",))
+    tree.add_node(focused)
     store = SearchTreeStore(tmp_path / "search_tree.json")
 
     store.save(tree)
 
     assert tree_to_dict(store.load()) == tree_to_dict(tree)
     assert store.load().round.slots[0].status is SlotStatus.DISPATCHED
+    assert store.load().node(focused.commit) == focused
+
+
+def test_a_tree_saved_before_nodes_carried_their_lane_s_focus_still_loads():
+    payload = json.loads(json.dumps(tree_to_dict(_grown_tree())))
+    for node in payload["nodes"]:
+        del node["approach"], node["focus_cases"]
+
+    tree = tree_from_dict(payload)
+
+    assert [(node.approach, node.focus_cases) for node in tree.nodes] == [("", ())] * len(tree.nodes)
 
 
 def test_the_store_refuses_a_field_set_it_did_not_write(tmp_path):

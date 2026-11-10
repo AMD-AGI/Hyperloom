@@ -12,9 +12,16 @@ import pytest
 
 from kernelforge.workflows.forge_loop.roles import orchestration as orchestration_module
 from kernelforge.agent_backends import AgentProviderUnavailableError, AgentRunResult
+from kernelforge.agent_backends.structured_output import output_json_schema
 from kernelforge.workflows.forge_loop.roles.contracts import DispatchPlan, SpecialistRound
 from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent
-from kernelforge.workflows.forge_loop.roles.plan_requests import AssignedPartitionAnswer, PartitionAnswer
+from kernelforge.workflows.forge_loop.roles.plan_prompts import (
+    ASSIGNED_LANE_SYNTHESIS_SYSTEM_PROMPT,
+    ASSIGNED_PARTITION_SYSTEM_PROMPT,
+    LANE_SYNTHESIS_SYSTEM_PROMPT,
+    PARTITION_SYSTEM_PROMPT,
+)
+from kernelforge.workflows.forge_loop.roles.plan_requests import PartitionAnswer
 from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
     ASSIGNMENTS,
     GROUND_A,
@@ -157,11 +164,75 @@ async def test_an_assigned_round_plans_every_assignment_however_few_analyses_it_
 
     assert _planned_lanes(results) == [(1, "# Lane 1"), (2, "# Lane 2"), (3, "# Lane 3")]
     partition = backend.specs[0]
-    assert "lane k serves assignment k" in partition.system_prompt
-    assert partition.output_schema is AssignedPartitionAnswer
+    assert partition.system_prompt == ASSIGNED_PARTITION_SYSTEM_PROMPT
     assert json.loads(partition.user_prompt)["context"]["lane_assignments"] == list(ASSIGNMENTS)
     assert _lane_assignments(backend.specs[1:]) == list(ASSIGNMENTS)
+    assert all(spec.system_prompt == ASSIGNED_LANE_SYNTHESIS_SYSTEM_PROMPT for spec in backend.specs[1:])
     assert "lane_losses" not in agent.structured_output_diagnostics
+
+
+@pytest.mark.asyncio
+async def test_lanes_at_one_node_are_distinct_attempts_that_may_change_the_same_code() -> None:
+    """Each lane plans its own approach and cases, knowing what its siblings attempt; sharing code costs it nothing."""
+    backend = _PerCallBackend(
+        [
+            _partition_lanes(
+                [
+                    _assigned_lane(GROUND_A, approach="retime the MFMA issue", focus_cases=("case-b", "case-b")),
+                    _assigned_lane(GROUND_A, approach="stage the operand through LDS"),
+                ]
+            ),
+            "# Lane 1",
+            "# Lane 2",
+        ]
+    )
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    results = await agent.synthesize_lane_plan_results(_assigned(2), specialists, lanes=2)
+
+    assert [(result.lane_id, result.approach, result.focus_cases) for result in results] == [
+        (1, "retime the MFMA issue", ("case-b",)),
+        (2, "stage the operand through LDS", ()),
+    ]
+    first, second = (json.loads(spec.user_prompt)["lane"] for spec in backend.specs[1:])
+    assert (first["ground"], first["approach"], first["focus_cases"]) == (GROUND_A, "retime the MFMA issue", ["case-b"])
+    assert first["other_lanes"] == [
+        {
+            "assignment": ASSIGNMENTS[1],
+            "approach": "stage the operand through LDS",
+            "focus_cases": [],
+            "ground": GROUND_A,
+        }
+    ]
+    assert [other["approach"] for other in second["other_lanes"]] == ["retime the MFMA issue"]
+    grounds = agent.structured_output_diagnostics["partition"]["grounds"]
+    assert [(lane.get("approach"), lane.get("focus_cases")) for lane in grounds] == [
+        ("retime the MFMA issue", ["case-b"]),
+        ("stage the operand through LDS", []),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_lane_can_aim_only_at_cases_the_round_measures() -> None:
+    """A focus case is one of the round's own, so no lane is told to time a case its driver does not run."""
+    backend = _PerCallBackend(
+        [
+            _partition_lanes([_assigned_lane(GROUND_A, focus_cases=("case-z",)), _assigned_lane(GROUND_B)]),
+            "# Lane 1",
+            "# Lane 2",
+        ]
+    )
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    results = await agent.synthesize_lane_plan_results(_assigned(2), specialists, lanes=2)
+
+    lane_schema = output_json_schema(backend.specs[0].output_schema)["$defs"]["AssignedLaneAnswer"]
+    assert lane_schema["properties"]["focus_cases"]["items"]["enum"] == ["case-a", "case-b"]
+    # An answer naming another case is no partition: each lane plans its assignment alone.
+    assert agent.structured_output_diagnostics["partition"]["status"] == "fallback"
+    assert [(result.lane_id, result.focus_cases) for result in results] == [(1, ()), (2, ())]
 
 
 @pytest.mark.asyncio
@@ -173,10 +244,16 @@ async def test_an_unassigned_round_is_not_told_about_assignments() -> None:
 
     await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
 
-    assert "lane_assignments" not in backend.specs[0].system_prompt
+    assert backend.specs[0].system_prompt == PARTITION_SYSTEM_PROMPT
     assert backend.specs[0].output_schema is PartitionAnswer
     assert "lane_assignments" not in json.loads(backend.specs[0].user_prompt)["context"]
-    assert all("assignment" not in json.loads(spec.user_prompt)["lane"] for spec in backend.specs[1:])
+    assert all(spec.system_prompt == LANE_SYNTHESIS_SYSTEM_PROMPT for spec in backend.specs[1:])
+    assert all(
+        set(json.loads(spec.user_prompt)["lane"]) == {"ground", "joint", "fallback", "ground_owned_by_other_lanes"}
+        for spec in backend.specs[1:]
+    )
+    grounds = agent.structured_output_diagnostics["partition"]["grounds"]
+    assert all(set(lane) == {"lane_id", "ground", "reason", "joint", "fallback"} for lane in grounds)
 
 
 @pytest.mark.asyncio
@@ -201,7 +278,7 @@ async def test_an_assigned_lane_the_evidence_cannot_serve_costs_only_itself() ->
     # No synthesis is bought for the lane that cannot be planned.
     assert len(backend.specs) == 3
     assert _lane_assignments(backend.specs[1:]) == [ASSIGNMENTS[0], ASSIGNMENTS[2]]
-    assert json.loads(backend.specs[1].user_prompt)["lane"]["ground_owned_by_other_lanes"] == [GROUND_C]
+    assert [other["ground"] for other in json.loads(backend.specs[1].user_prompt)["lane"]["other_lanes"]] == [GROUND_C]
     assert agent.structured_output_diagnostics["lane_losses"] == {"2": unplannable}
 
 

@@ -12,7 +12,7 @@ from dataclasses import replace
 import pytest
 
 from kernelforge.agent_backends import AgentRunResult
-from kernelforge.workflows.forge_loop.roles.contracts import LaneDrop, PlanCriticOutcome, SynthesizedPlan
+from kernelforge.workflows.forge_loop.roles.contracts import LaneDrop, PlanCriticOutcome, PublishedLane, SynthesizedPlan
 from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationAgent, OrchestrationService
 from kernelforge.workflows.forge_loop.roles.specialists import SpecialistAgent, SpecialistPool
 from kernelforge.workflows.forge_loop.roles.plan_critic import PlanCriticAgent
@@ -551,7 +551,7 @@ async def test_an_assigned_round_reports_every_lane_by_its_assignment() -> None:
             _dispatch_payload(both_roles=True),
             _partition_lanes(
                 [
-                    _assigned_lane(GROUND_A),
+                    _assigned_lane(GROUND_A, approach="retime the MFMA issue", focus_cases=("case-b",)),
                     _assigned_lane("", unplannable="nothing to stand on"),
                     _assigned_lane(GROUND_C),
                 ]
@@ -574,6 +574,7 @@ async def test_an_assigned_round_reports_every_lane_by_its_assignment() -> None:
     result = await service.run(_assigned(3), lanes=3)
 
     assert result.optimization_plans == ("# Lane 1 draft",)
+    assert result.published_lanes == (PublishedLane(1, approach="retime the MFMA issue", focus_cases=("case-b",)),)
     diagnostics = result.structured_output_diagnostics
     assert diagnostics["lanes"]["published_lane_ids"] == [1]
     assert diagnostics["lane_losses"] == {"2": "nothing to stand on"}

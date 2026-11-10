@@ -148,6 +148,9 @@ def _node(tree: SearchTree, node: TreeNode, published: TreeNode, indent: str) ->
     lines = [head]
     if node.plan:
         lines.append(f"{indent}  plan: {_one_line(node.plan)}")
+    if node.approach or node.focus_cases:
+        aimed = ", ".join(node.focus_cases) or "every case"
+        lines.append(f"{indent}  approach: {_one_line(node.approach, _RECORD_CHARS) or '-'}; aimed at: {aimed}")
     lines.extend(_case_standing(node, published, indent))
     opened = tree.directions_from(node.commit)
     if opened:

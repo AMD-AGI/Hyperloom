@@ -44,6 +44,9 @@ class SlotPlan:
     path: str
     proposal: DirectionProposal | None = None
     hint_answer: str = ""
+    # How the round planner had this slot's lane differ from the start's other lanes, and the cases it aims at.
+    approach: str = ""
+    focus_cases: tuple[str, ...] = ()
 
     @property
     def title(self) -> str:
@@ -109,9 +112,9 @@ def start_brief(tree: SearchTree, start: TreeNode, slots: Sequence[Slot]) -> str
         lines.append(f"{position}. {assignment}")
     if any(slot.slot_type is SlotType.BRANCH for slot in slots):
         lines.append(
-            'Every BRANCH lane begins its plan with a "## Direction" section of lines "- name:", "- hypothesis:", '
-            '"- expected ceiling:" (with its evidence), "- fails if:" and, when the slot carries a hint, "- hint:" '
-            "saying whether it was adopted or, if refuted, the evidence that refutes it."
+            'Right after its Summary line, every BRANCH lane\'s plan carries a "## Direction" section of lines '
+            '"- name:", "- hypothesis:", "- expected ceiling:" (with its evidence), "- fails if:" and, when the slot '
+            'carries a hint, "- hint:" saying whether it was adopted or, if refuted, the evidence that refutes it.'
         )
     return "\n".join(lines)
 
@@ -249,8 +252,9 @@ class TreePlanningMixin:
         in planning costs exactly its own slot.
         """
         diagnostics = dict(getattr(result, "structured_output_diagnostics", None) or {})
-        lane_ids = (diagnostics.get("lanes") or {}).get("published_lane_ids") or ()
-        published = dict(zip(lane_ids, result.optimization_plans))
+        published = {
+            lane.lane_id: (lane, text) for lane, text in zip(result.published_lanes, result.optimization_plans)
+        }
         dropped = (diagnostics.get("lane_narrowing") or {}).get("dropped_lanes") or {}
         losses = {
             **(diagnostics.get("lane_losses") or {}),
@@ -259,19 +263,23 @@ class TreePlanningMixin:
         unavailable = (diagnostics.get("synthesis") or {}).get("message") or "planning published no plan for its lane"
         plans: list[SlotPlan] = []
         unplanned: list[UnplannedSlot] = []
-        for lane, slot in enumerate(slots, start=1):
-            text = str(published.get(lane) or "").strip()
-            if text:
-                plans.append(self._slot_plan(iteration, slot, text))
+        for lane_id, slot in enumerate(slots, start=1):
+            lane, text = published.get(lane_id, (None, ""))
+            if lane is not None and text.strip():
+                plans.append(
+                    self._slot_plan(iteration, slot, text.strip(), approach=lane.approach, focus_cases=lane.focus_cases)
+                )
             else:
-                unplanned.append(UnplannedSlot(slot, losses.get(str(lane)) or unavailable))
+                unplanned.append(UnplannedSlot(slot, losses.get(str(lane_id)) or unavailable))
         self._write_round_record(iteration, slots[0].start, "orchestration.json", diagnostics)
         return RoundPlans(tuple(plans), tuple(unplanned))
 
-    def _slot_plan(self, iteration: int, slot: Slot, text: str) -> SlotPlan:
+    def _slot_plan(
+        self, iteration: int, slot: Slot, text: str, *, approach: str = "", focus_cases: tuple[str, ...] = ()
+    ) -> SlotPlan:
         proposal, hint_answer = read_direction_record(text) if slot.slot_type is SlotType.BRANCH else (None, "")
         path = self._write_round_record(iteration, slot.start, f"slot_{slot.index:02d}.md", text)
-        return SlotPlan(slot, text, str(path), proposal, hint_answer)
+        return SlotPlan(slot, text, str(path), proposal, hint_answer, approach=approach, focus_cases=focus_cases)
 
     def _write_port_plan(self, tree: SearchTree, iteration: int, slot: Slot) -> SlotPlan:
         ancestor = git("merge-base", slot.start, slot.source, cwd=self.ic.workspace_dir).stdout.strip()

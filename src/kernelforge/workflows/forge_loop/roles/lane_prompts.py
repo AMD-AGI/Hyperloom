@@ -26,10 +26,9 @@ _LANE_TASK = (
     "implementation sequence."
 )
 _ASSIGNED_LANE_TASK = (
-    "Produce the optimization plan this lane's Implementer "
-    "should execute on the ground this lane owns, serving the "
-    "lane's assignment. Judge the analyses rather than copying "
-    "them, and choose a clear implementation sequence."
+    "Produce the optimization plan this lane's Implementer should execute for the lane's assignment, with the "
+    "approach and focus cases the round planner gave it. Judge the analyses rather than copying them, and choose a "
+    "clear implementation sequence."
 )
 
 
@@ -40,7 +39,7 @@ def lane_prompts(
 ) -> list[tuple[str, str]]:
     """Each lane's prompt and the leading part of it that every lane of the round shares.
 
-    A lane of a round whose lanes are assigned also carries its own assignment, inside the block only it reads.
+    A lane of a round whose lanes are assigned reads its assignment, approach and focus cases, and the other lanes'.
     """
     evidence = {
         "task": _ASSIGNED_LANE_TASK if context.lane_assignments else _LANE_TASK,
@@ -52,20 +51,38 @@ def lane_prompts(
             for outcome in specialists.analyses
         ],
     }
-    prompts = []
-    for index, own in enumerate(grounds):
-        lane = {
-            "ground": own.ground,
-            "joint": own.joint,
-            "fallback": own.fallback,
-            "ground_owned_by_other_lanes": [
-                other.ground for position, other in enumerate(grounds) if position != index
-            ],
-        }
-        if context.lane_assignments:
-            lane["assignment"] = context.lane_assignments[own.lane_id - 1]
-        prompts.append(lane_last_prompt({**evidence, LANE_KEY: lane}))
-    return prompts
+    block = _assigned_lane_block if context.lane_assignments else _owned_ground_block
+    return [lane_last_prompt({**evidence, LANE_KEY: block(context, grounds, index)}) for index in range(len(grounds))]
+
+
+def _owned_ground_block(_context: OrchestrationContext, grounds: Sequence[LaneGround], index: int) -> dict:
+    own = grounds[index]
+    return {
+        "ground": own.ground,
+        "joint": own.joint,
+        "fallback": own.fallback,
+        "ground_owned_by_other_lanes": [other.ground for position, other in enumerate(grounds) if position != index],
+    }
+
+
+def _assigned_lane_block(context: OrchestrationContext, grounds: Sequence[LaneGround], index: int) -> dict:
+    own = grounds[index]
+    return {
+        **_assigned_lane_summary(context, own),
+        "fallback": own.fallback,
+        "other_lanes": [
+            _assigned_lane_summary(context, other) for position, other in enumerate(grounds) if position != index
+        ],
+    }
+
+
+def _assigned_lane_summary(context: OrchestrationContext, lane: LaneGround) -> dict:
+    return {
+        "assignment": context.lane_assignments[lane.lane_id - 1],
+        "approach": lane.approach,
+        "focus_cases": list(lane.focus_cases),
+        "ground": lane.ground,
+    }
 
 
 def lane_last_prompt(payload: Mapping[str, object]) -> tuple[str, str]:

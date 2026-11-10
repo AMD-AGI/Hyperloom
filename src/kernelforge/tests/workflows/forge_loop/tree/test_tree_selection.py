@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from kernelforge.workflows.forge_loop.tree.facts import FactSources, RoundOutlook, render_facts
 from kernelforge.workflows.forge_loop.tree.model import (
     Attempt,
@@ -180,6 +182,20 @@ def test_the_facts_carry_directions_nodes_case_standing_and_earlier_rounds():
     assert "iteration 3: DEEPEN at 333333333333 (keep going) -> INCORRECT" in facts
     assert "333333333333 onto 222222222222" in facts
     assert "about 2 round(s)" in facts
+
+
+def test_the_facts_say_what_a_node_s_lane_attempted_and_the_cases_it_aimed_at():
+    tree = _tree()
+    node = _node("4" * 40, N3, "d002", 1.0, case_times={"small": 1.2, "big": 2.9}, iteration=3)
+    tree.add_node(replace(node, approach="stage the operand through LDS", focus_cases=("big",)))
+
+    facts = render_facts(
+        tree, outlook=RoundOutlook(lanes=3, remaining_sec=3600, rounds_left=2), sources=FactSources("/a", "/s")
+    )
+
+    assert "approach: stage the operand through LDS; aimed at: big" in facts
+    # A node no partition lane produced carries no such line.
+    assert facts.count("approach:") == 1
 
 
 def test_the_selector_reads_why_a_slot_came_to_nothing():

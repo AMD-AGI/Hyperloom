@@ -619,9 +619,15 @@ class PlanCriticOutcome:
         return f"VERDICT: {self.verdict}\n\n{self.review.strip()}"
 
 
+def _focus_cases(values: tuple[str, ...], label: str) -> None:
+    _texts(values, label)
+    if len(set(values)) != len(values):
+        raise ValueError(f"{label} must not contain duplicates")
+
+
 @dataclass(frozen=True)
 class LaneGround:
-    """The ground one lane of a round owns, in the terms an edit lands in."""
+    """One lane of a round: the code it works on, and on an assigned round its approach and the cases it aims at."""
 
     lane_id: int
     ground: str
@@ -630,6 +636,10 @@ class LaneGround:
     fallback: str = ""
     # Why the evidence cannot serve an assigned lane; such a lane owns no ground and is not planned.
     unplannable: str = ""
+    # Set on an assigned round only: how the lane differs from the round's other lanes, and the scored cases it aims at
+    # (none: every case).
+    approach: str = ""
+    focus_cases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.lane_id, int) or isinstance(self.lane_id, bool):
@@ -642,16 +652,24 @@ class LaneGround:
         if not isinstance(self.joint, bool):
             raise ValueError("lane ground.joint must be a boolean")
         _text(self.fallback, "lane ground.fallback", allow_empty=True)
+        _text(self.approach, "lane ground.approach", allow_empty=True)
+        _focus_cases(self.focus_cases, "lane ground.focus_cases")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "lane_id": self.lane_id,
             "ground": self.ground,
             "reason": self.reason,
             "joint": self.joint,
             "fallback": self.fallback,
-            "unplannable": self.unplannable,
         }
+        # The assigned-round fields are omitted rather than empty, so an unassigned round's record keeps its shape.
+        if self.unplannable:
+            payload["unplannable"] = self.unplannable
+        if self.approach or self.focus_cases:
+            payload["approach"] = self.approach
+            payload["focus_cases"] = list(self.focus_cases)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -667,11 +685,13 @@ class SynthesizedPlan:
     fallback: str = ""
     # The 1-based lane of the round's partition this plan was made for, kept through narrowing and revision.
     lane_id: int = 1
+    # The lane's approach and the cases it aims at, set on an assigned round only.
+    approach: str = ""
+    focus_cases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.text, "synthesized plan")
-        if isinstance(self.lane_id, bool) or not isinstance(self.lane_id, int) or self.lane_id < 1:
-            raise ValueError("synthesized plan lane_id must be a positive integer")
+        _positive_lane_id(self.lane_id, "synthesized plan lane_id")
         _text(
             self.session_id,
             "synthesized plan session_id",
@@ -684,6 +704,27 @@ class SynthesizedPlan:
         if not isinstance(self.joint, bool):
             raise ValueError("synthesized plan joint must be a boolean")
         _text(self.fallback, "synthesized plan fallback", allow_empty=True)
+        _text(self.approach, "synthesized plan approach", allow_empty=True)
+        _focus_cases(self.focus_cases, "synthesized plan focus_cases")
+
+
+def _positive_lane_id(value: Any, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{label} must be a positive integer")
+
+
+@dataclass(frozen=True)
+class PublishedLane:
+    """The partition lane one published plan was made for, with the approach and the cases it aims at."""
+
+    lane_id: int
+    approach: str = ""
+    focus_cases: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _positive_lane_id(self.lane_id, "published lane lane_id")
+        _text(self.approach, "published lane approach", allow_empty=True)
+        _focus_cases(self.focus_cases, "published lane focus_cases")
 
 
 @dataclass(frozen=True)
@@ -699,10 +740,15 @@ class OrchestrationRunResult:
     optimization_plan_draft: str = ""
     plan_critic: PlanCriticOutcome | None = None
     plan_revised: bool = False
+    # One entry per optimization plan, in the same order, when the plans came from a synthesis; empty when the
+    # framework rendered the plan.
+    published_lanes: tuple[PublishedLane, ...] = ()
 
     def __post_init__(self) -> None:
         for plan in self.optimization_plans or ("",):
             _text(plan, "orchestration optimization_plan")
+        if self.published_lanes and len(self.published_lanes) != len(self.optimization_plans):
+            raise ValueError("orchestration published_lanes must name one lane per optimization plan")
         _text(
             self.optimization_plan_draft,
             "orchestration optimization_plan_draft",

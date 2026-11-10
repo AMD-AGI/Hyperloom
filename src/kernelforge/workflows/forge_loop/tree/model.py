@@ -73,6 +73,10 @@ class TreeNode:
     plan: str
     source: NodeSource
     provenance: tuple[str, ...] = ()
+    # How the round planner had the slot's lane differ from the start's other lanes, and the cases it aimed at; empty
+    # for a node no partition lane produced.
+    approach: str = ""
+    focus_cases: tuple[str, ...] = ()
 
     @property
     def score(self) -> float:

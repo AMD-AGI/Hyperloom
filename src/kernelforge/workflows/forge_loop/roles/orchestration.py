@@ -39,6 +39,7 @@ from kernelforge.workflows.forge_loop.roles.contracts import (
     OrchestrationContext,
     OrchestrationRunResult,
     PlanCriticOutcome,
+    PublishedLane,
     SynthesizedPlan,
     SpecialistAssignment,
     SpecialistDefinition,
@@ -54,6 +55,7 @@ from kernelforge.workflows.forge_loop.roles.round_partition import (
     partition_answer_model,
     partition_payload,
     partition_system_prompt,
+    read_assigned_partition,
     read_partition,
 )
 from kernelforge.workflows.forge_loop.roles.specialists import (
@@ -62,6 +64,7 @@ from kernelforge.workflows.forge_loop.roles.specialists import (
     SpecialistProbeConfig,
 )
 from kernelforge.workflows.forge_loop.roles.plan_prompts import (
+    ASSIGNED_LANE_SYNTHESIS_SYSTEM_PROMPT,
     LANE_SYNTHESIS_SYSTEM_PROMPT,
     REVISION_SYSTEM_PROMPT,
     SYNTHESIS_SYSTEM_PROMPT,
@@ -127,6 +130,15 @@ def _log_partition(reading: PartitionReading, grounds: Sequence[LaneGround], lan
             "joint lane(s) %s carry no fallback; a joint step that is abandoned leaves them with nothing to measure",
             ", ".join(str(lane_id) for lane_id in unbacked),
         )
+
+
+def _published_lanes(synthesized: Sequence[SynthesizedPlan], lane_ids: Sequence[int]) -> tuple[PublishedLane, ...]:
+    """The lane, approach and focus cases of each published plan, in publication order."""
+    by_lane = {plan.lane_id: plan for plan in synthesized}
+    return tuple(
+        PublishedLane(lane_id, approach=by_lane[lane_id].approach, focus_cases=by_lane[lane_id].focus_cases)
+        for lane_id in lane_ids
+    )
 
 
 _GLOBAL_EVIDENCE_KINDS = {
@@ -426,13 +438,14 @@ class OrchestrationAgent:
             return [await self._single_lane_plan(context, specialists, usage=usage)]
         plannable = [ground for ground in grounds if not ground.unplannable]
         prompts = lane_prompts(context, specialists, plannable)
+        system_prompt = ASSIGNED_LANE_SYNTHESIS_SYSTEM_PROMPT if assigned else LANE_SYNTHESIS_SYSTEM_PROMPT
 
         async def _lane(index: int, on_response_started: Callable[[], None] | None = None) -> SynthesizedPlan | None:
             ground = plannable[index]
             role = f"orchestration lane {ground.lane_id} synthesis"
             prompt, shared = prompts[index]
             turn = _Turn(
-                LANE_SYNTHESIS_SYSTEM_PROMPT,
+                system_prompt,
                 prompt,
                 role=role,
                 shared_prompt_prefix=shared,
@@ -450,6 +463,8 @@ class OrchestrationAgent:
                 joint=ground.joint,
                 fallback=ground.fallback,
                 lane_id=ground.lane_id,
+                approach=ground.approach,
+                focus_cases=ground.focus_cases,
             )
 
         # Each lane is an independent call, so one that fails is one lane lost and not the round.
@@ -501,7 +516,8 @@ class OrchestrationAgent:
             try:
                 result = await self._run_result(context, turn, usage=usage)
                 answer = self._validated_answer(result, partition_answer_model(context), role=turn.role)
-                reading = read_partition(answer, lanes=lanes)
+                read = read_assigned_partition if context.lane_assignments else read_partition
+                reading = read(answer, lanes=lanes)
             except (OrchestrationInfrastructureError, OrchestrationOutputError) as error:
                 reading = PartitionReading.unavailable(f"{type(error).__name__}: {error}")
         grounds = list(reading.grounds) or fallback_grounds(context, specialists.analyses)
@@ -787,6 +803,7 @@ class OrchestrationService:
             optimization_plan_draft=draft_plan,
             plan_critic=critic_outcome,
             plan_revised=plan_revised,
+            published_lanes=_published_lanes(synthesized_plans, lane_ids),
         )
 
     async def _specialist_round(
