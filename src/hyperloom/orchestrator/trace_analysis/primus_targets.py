@@ -24,7 +24,8 @@ This module closes the training loop for Hyperloom:
 * ``feedback`` turns what the lanes measured into ``primus.kernel_speedups``;
   ``project`` re-projects the iteration with them: the end-to-end gain.
 * ``tune`` runs the Primus tuning agent's systematic seed search (no LLM) with
-  the calibration, then analyzes its best configuration.
+  the calibration, then analyzes its top configurations, merged
+  (:mod:`primus_search`).
 * ``validate`` compares projections with measured runs: iteration time, and how
   far the projected kernel-class mix is from each trace's.
 """
@@ -52,7 +53,7 @@ from ._targets_common import Run as _Run
 from ._targets_common import Subject, speedups_from_gemm_tune
 from ._targets_common import write_json as _write_json
 from ._targets_common import write_sidecars
-from . import primus_forge
+from . import primus_forge, primus_search
 
 log = logging.getLogger(__name__)
 
@@ -379,6 +380,11 @@ def _markdown(report: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
         f"(TP{dep.get('tp')} PP{dep.get('pp')} EP{dep.get('ep')} CP{dep.get('cp')} DP{dep.get('dp')}, "
         f"{dep.get('microbatches')} microbatches of {dep.get('micro_batch_size')}).",
         "",
+    ]
+    merged = (report.get("provenance") or {}).get("merged_configs") or []
+    if merged:
+        lines += [f"Targets merged over {len(merged)} configurations, each weighted equally: {'; '.join(merged)}.", ""]
+    lines += [
         "| term | stage | calls | est ms | share % |",
         "|---|---|---|---|---|",
     ]
@@ -553,7 +559,13 @@ def tune(primus: Primus, workload: str, out: Path, spec: TuneSpec = TuneSpec()) 
     best = json.loads(summary_path.read_text(encoding=_UTF8)).get("best") or {}
     cmd_run = (best.get("result") or {}).get("cmd") or []
     winner = cmd_run[cmd_run.index(_CONFIG) + 1] if _CONFIG in cmd_run else ""
-    return {"best": best, "winner_config": winner, "tuning_log": str(log_path), "summary": str(summary_path)}
+    return {
+        "best": best,
+        "winner_config": winner,
+        "tuning_log": str(log_path),
+        "summary": str(summary_path),
+        "trials": str(summary_path.with_name("trials.jsonl")),
+    }
 
 
 # ── validation ──────────────────────────────────────────────────────────────
@@ -678,6 +690,12 @@ def _add_project_tune_validate(sub: Any) -> None:
     t.add_argument("--target-cluster", default="", help="tuning-agent target cluster YAML (default: from --nodes)")
     t.add_argument("--seed-budget", type=int, default=12)
     t.add_argument("--hbm-gb", type=float, default=288.0)
+    t.add_argument(
+        "--top-k",
+        type=int,
+        default=primus_search.top_k_setting(),
+        help=f"kernel targets from this many of the best configurations (default 5, or {primus_search.TOP_K_ENV})",
+    )
     t.add_argument("--workspace-path", required=True)
     t.add_argument("--session-id", default="")
     _add_primus_args(t)
@@ -824,21 +842,27 @@ def _tune(args: argparse.Namespace) -> dict[str, Any]:
     )
     if not found["winner_config"]:
         return {"tool": TOOL, "status": "failed", "error": "the tuning agent found no legal configuration", **found}
-    report = project(
-        primus,
-        found["winner_config"],
-        out / "winner_report.json",
-        calibration=args.kernel_calibration,
-        speedups=args.kernel_speedups,
-    )
+    trials_path = Path(found["trials"])
+    ranked = primus_search.ranked_trials(trials_path) if trials_path.is_file() else []
+    picked = primus_search.chosen(ranked, found["winner_config"], args.top_k)
+
+    def one(trial: primus_search.Trial, i: int) -> dict[str, Any]:
+        name = "winner_report.json" if i == 0 else f"top{i + 1}_report.json"
+        return project(
+            primus, trial.config, out / name, calibration=args.kernel_calibration, speedups=args.kernel_speedups
+        )
+
+    projected = primus_search.project_top(picked, one)
+    report_path = out / "winner_report.json"
+    report = projected.reports[0]
+    if len(projected.reports) > 1:
+        report = primus_search.merge_reports(projected.reports, projected.labels)
+        report_path = Path(_write_json(out / "targets_report.json", report))
+    search_path = _write_json(out / "config_search.json", {"top_k": args.top_k, "configs": projected.configs})
     subject = Subject(workspace_path=args.workspace_path, session_id=args.session_id, framework="megatron")
-    result = write_run(
-        report,
-        subject,
-        report_path=str(out / "winner_report.json"),
-        extra={"winner_config": found["winner_config"], "tuning_summary": found["summary"]},
-    )
-    result["tuning"] = {"best": found["best"], "winner_config": found["winner_config"]}
+    extra = {"winner_config": found["winner_config"], "tuning_summary": found["summary"], "config_search": search_path}
+    result = write_run(report, subject, report_path=str(report_path), extra=extra)
+    result["tuning"] = {"best": found["best"], "winner_config": found["winner_config"], "configs": projected.configs}
     return result
 
 
