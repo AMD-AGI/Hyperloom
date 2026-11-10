@@ -1,0 +1,246 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Which part of a serving trace a kernel ranking is about.
+
+Prefill steps run far longer than decode steps, so one ranking over a whole agentic trace ranks prefill. sglang
+annotates every step with its kind and batch size (``step[VERIFY bs=3]``) on the device timeline, so kernels are
+grouped by the step they start in and ranked within each group.
+"""
+
+from __future__ import annotations
+
+import re
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from kernelforge.evaluation.profiling.trace_events import (
+    GPU_ANNOTATION_CAT,
+    KERNEL_CAT,
+    is_collective_kernel,
+    load_trace_events,
+)
+
+#: ``step[KIND bs=N ...]``. The tail carries per-step quantities (``toks=``, ``c_sq=``) that make every prefill
+#: step's name unique, which is why the class is built from the two leading fields rather than from the name.
+_STEP_RE = re.compile(r"^step\[(?P<kind>[A-Z_]+)\s+bs=(?P<bs>\d+)")
+
+#: Step kinds that run one decode cycle. Prefill (``EXTEND``) is kept as its own class, never merged into these:
+#: it is where the indexer and prefill-MoE wins live, and it would otherwise drown them.
+DECODE_KINDS: frozenset[str] = frozenset({"VERIFY", "DRAFT", "DECODE", "IDLE"})
+
+#: Microseconds per millisecond; the traces are in us and the report is in ms.
+_US_PER_MS: float = 1000.0
+#: Decimal places every millisecond figure in this module is reported to.
+_REPORTED_PLACES: int = 3
+#: Kernels named per window class.
+TOP_N: int = 15
+#: What separates a window class's step kind from its batch width.
+_WIDTH_SEPARATOR: str = " bs="
+
+
+@dataclass(frozen=True)
+class StepWindow:
+    """One annotated step on the device timeline."""
+
+    kind: str
+    batch_size: int
+    start_us: float
+    end_us: float
+
+    @property
+    def window_class(self) -> str:
+        """The group this step is ranked within: what it does and how wide it is."""
+        return f"{self.kind}{_WIDTH_SEPARATOR}{self.batch_size}"
+
+    @property
+    def is_decode(self) -> bool:
+        return self.kind in DECODE_KINDS
+
+
+def step_kind(window_class: str) -> str:
+    """The step kind a window class names, whatever its batch width."""
+    return window_class.split(_WIDTH_SEPARATOR, 1)[0]
+
+
+def step_windows(events: list[dict[str, Any]]) -> list[StepWindow]:
+    """Annotated steps on the device timeline, in time order.
+
+    Device-side only: a host annotation's duration is submission time, and only the device timeline shares a clock
+    with the kernels.
+    """
+    out: list[StepWindow] = []
+    for event in events:
+        if event.get("cat") != GPU_ANNOTATION_CAT:
+            continue
+        match = _STEP_RE.match(str(event.get("name") or ""))
+        if not match:
+            continue
+        start, duration = _number(event.get("ts")), _number(event.get("dur"))
+        if start is None or duration is None or duration <= 0:
+            continue
+        out.append(
+            StepWindow(
+                kind=match.group("kind"),
+                batch_size=int(match.group("bs")),
+                start_us=start,
+                end_us=start + duration,
+            )
+        )
+    out.sort(key=lambda w: w.start_us)
+    return out
+
+
+def _number(value: Any) -> float | None:
+    """Coerce a trace timestamp or duration to float, or ``None`` when it is not one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def kernels_in(events: list[dict[str, Any]], windows: list[StepWindow]) -> list[dict[str, Any]]:
+    """Timed kernel events that start inside *windows*, in trace order."""
+    spans = sorted((w.start_us, w.end_us) for w in windows)
+    out: list[dict[str, Any]] = []
+    for event in events:
+        start, duration = _number(event.get("ts")), _number(event.get("dur"))
+        if event.get("cat") != KERNEL_CAT or start is None or duration is None or duration <= 0:
+            continue
+        # A kernel belongs to the step it starts in; one that outlives its step is still that step's work.
+        if any(lo <= start < hi for lo, hi in spans):
+            out.append(event)
+    return out
+
+
+def _kernels_in(events: list[dict[str, Any]], windows: list[StepWindow]) -> dict[str, float]:
+    """Total kernel microseconds per name, counting only kernels inside *windows*."""
+    totals: dict[str, float] = defaultdict(float)
+    for event in kernels_in(events, windows):
+        if name := str(event.get("name") or ""):
+            totals[name] += float(event["dur"])
+    return totals
+
+
+def hot_kernels_by_class(trace_path: str | Path) -> dict[str, dict[str, Any]]:
+    """Per window class, the kernels that spent the most device time in it, worst first.
+
+    Empty when the trace carries no step annotations, which is what a capture taken outside a serving loop looks
+    like: the caller is told nothing rather than handed a ranking of everything.
+    """
+    events = load_trace_events(trace_path)
+    windows = step_windows(events)
+    if not windows:
+        return {}
+    by_class: dict[str, list[StepWindow]] = defaultdict(list)
+    for window in windows:
+        by_class[window.window_class].append(window)
+    out: dict[str, dict[str, Any]] = {}
+    for window_class, members in by_class.items():
+        totals = _kernels_in(events, members)
+        if not totals:
+            continue
+        total_us = sum(totals.values())
+        ranked = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:TOP_N]
+        out[window_class] = {
+            "steps": len(members),
+            "is_decode": members[0].is_decode,
+            "kernel_ms_total": round(total_us / _US_PER_MS, _REPORTED_PLACES),
+            "kernels": [
+                {"name": name, "ms": round(us / _US_PER_MS, _REPORTED_PLACES), "pct": round(us / total_us * 100.0, 2)}
+                for name, us in ranked
+            ],
+        }
+    return dict(sorted(out.items(), key=lambda kv: kv[1]["kernel_ms_total"], reverse=True))
+
+
+#: A rendered kernel name is cut here. A templated CK symbol runs past 400 characters of template arguments, and
+#: this document is read by an agent on a context budget; what identifies the kernel is at the front.
+_NAME_CHARS: int = 110
+
+
+def _short(name: str) -> str:
+    """A kernel name cut to what identifies it."""
+    return name if len(name) <= _NAME_CHARS else name[: _NAME_CHARS - 1] + "…"
+
+
+#: Said beneath a ranking that holds a collective: one rank's collective time is also its wait for the others.
+COLLECTIVE_NOTE = (
+    "A row marked (collective) is one rank's time in a collective, which includes the time it waited for the "
+    "other ranks: do not rank it against compute kernels on this figure."
+)
+
+
+def _row(kernel: dict[str, Any]) -> str:
+    """One ranking row, marking a collective."""
+    marker = " (collective)" if is_collective_kernel(kernel["name"]) else ""
+    return f"| {kernel['pct']:.1f}% | {kernel['ms']:.2f} | `{_short(kernel['name'])}`{marker} |"
+
+
+def render_hot_kernels_by_class(by_class: dict[str, dict[str, Any]], *, top_n: int = 8) -> list[str]:
+    """Render one ranking per window class, with what each class is, as report lines."""
+    lines: list[str] = []
+    for window_class, data in by_class.items():
+        phase = "decode" if data["is_decode"] else "prefill"
+        lines.extend(
+            [
+                f"### {window_class} ({phase})",
+                "",
+                f"{data['steps']} step(s), {data['kernel_ms_total']} ms of kernel time in class",
+                "",
+                "| share | ms | kernel |",
+                "|---:|---:|---|",
+            ]
+        )
+        lines.extend(_row(k) for k in data["kernels"][:top_n])
+        lines.append("")
+    if any(" (collective) |" in line for line in lines):
+        lines.extend([COLLECTIVE_NOTE, ""])
+    return lines
+
+
+#: Heading of the decode-class list in a handoff; the task validator reads the batch sizes back from under it.
+OBSERVED_DECODE_HEADING = "## Observed Decode Classes"
+_OBSERVED_ROW_RE = re.compile(r"^- `[A-Z_]+ bs=(?P<bs>\d+)`:", re.MULTILINE)
+
+
+def render_observed_decode_classes(by_class: dict[str, dict[str, Any]]) -> list[str]:
+    """One row per decode class, most steps first, with its share of all decode steps."""
+    # IDLE is a DP-attention rank's empty forward (bs=0): it bounds no decode case.
+    decode = sorted(
+        (
+            (window_class, data["steps"])
+            for window_class, data in by_class.items()
+            if data["is_decode"] and step_kind(window_class) != "IDLE"
+        ),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+    total = sum(steps for _class, steps in decode)
+    return [
+        f"- `{window_class}`: {steps} step(s), {steps / total * 100.0:.1f}% of decode steps"
+        for window_class, steps in decode
+    ]
+
+
+def observed_decode_batch_sizes(document: str) -> frozenset[int]:
+    """The batch sizes listed under ``OBSERVED_DECODE_HEADING`` in *document*; empty when it lists none."""
+    _before, heading, rest = document.partition(f"{OBSERVED_DECODE_HEADING}\n")
+    section = rest.split("\n## ", 1)[0] if heading else ""
+    return frozenset(int(match.group("bs")) for match in _OBSERVED_ROW_RE.finditer(section))
+
+
+__all__ = [
+    "COLLECTIVE_NOTE",
+    "DECODE_KINDS",
+    "OBSERVED_DECODE_HEADING",
+    "TOP_N",
+    "StepWindow",
+    "hot_kernels_by_class",
+    "kernels_in",
+    "observed_decode_batch_sizes",
+    "render_hot_kernels_by_class",
+    "render_observed_decode_classes",
+    "step_kind",
+    "step_windows",
+]

@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -45,6 +47,7 @@ from kernelforge.workflows.rewrite_controller.task_publisher import (
     pending_rejections,
     publish_complete_staged_tasks,
 )
+from kernelforge.evaluation.profiling.serving_windows import observed_decode_batch_sizes
 from kernelforge.utils.git import git
 from kernelforge.agent_backends.usage import UsageAccumulator
 
@@ -221,13 +224,12 @@ class _AnalysisToolGuard:
 
 @dataclass
 class _AnalysisSession:
-    """One running analysis session: its provider, spec, Stop guard, staging layout, refusals, deadline and usage."""
+    """One running analysis session: its provider, spec, Stop guard, staging publisher, deadline and usage."""
 
     backend: AgentBackend
     spec: AgentRunSpec
     guard: _AnalysisToolGuard
-    layout: ControllerLayout
-    refused: dict[str, float]
+    publish: Callable[..., _ResumePublications]
     deadline_monotonic: float
     usage: UsageAccumulator
 
@@ -242,9 +244,7 @@ class _AnalysisSession:
         if not hasattr(self.backend, "resume"):
             return run_result, ()
         while True:
-            resume_publications.extend(
-                publish_complete_staged_tasks(self.layout, quiescent_sec=0.0, refused=self.refused)
-            )
+            resume_publications.extend(self.publish(quiescent_sec=0.0))
             decision = await self.guard._on_stop({}, None, None)
             if decision.get("decision") != "block":
                 break
@@ -275,6 +275,20 @@ class _AnalysisSession:
         return run_result, tuple(resume_publications)
 
 
+def _staged_publisher(layout: ControllerLayout, handoff: HandoffBundle) -> Callable[..., _ResumePublications]:
+    """Publication of this session's staged drafts, checked against the decode batch sizes the handoff observed.
+
+    Its refusals are carried across calls so a draft this host already refused is not re-validated on every
+    half-second tick for the rest of the session.
+    """
+    return functools.partial(
+        publish_complete_staged_tasks,
+        layout,
+        refused={},
+        decode_batch_sizes=observed_decode_batch_sizes(handoff.trace_evidence),
+    )
+
+
 def _ensure_agent_workspace(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     if (path / ".git").exists():
@@ -303,6 +317,30 @@ def _additional_directories(handoff: HandoffBundle) -> list[str]:
                 directories.add(path if path.is_dir() else path.parent)
     return [str(path.resolve()) for path in sorted(directories, key=str)]
 
+
+#: Opportunity rule 3. A whole-trace share ranks prefill and out-of-step kernels as if they were decode work.
+DECODE_SHARE_RULE = """\
+Rank on the decode step. Use each operator's share in the decode classes
+   (VERIFY, DECODE) of the "Hot Kernels by Step Class" section of
+   trace-evidence.md, and prefer the largest; assign lower numeric priority
+   values to higher-share operators. Do not publish an operator that is
+   below 1% of the kernel time in every decode class. A row marked
+   (collective) includes the time that rank waited for the others, so rank a
+   collective on its communication total (rule 9), not on that row. When no
+   decode ranking is available, rank only from clearly labeled corroborated
+   evidence and never fabricate a percentage."""
+
+#: Opportunity rule 4. The host refuses a decode case at a batch size the trace never ran.
+DECODE_CASES_RULE = """\
+Derive driver cases from the current workload and serving state, including
+   its prefill/decode phases, TP/EP partitioning, concurrency, sequence lengths,
+   active backend, tensor shapes, dtypes, layouts, and dispatch boundaries.
+   Give each decode case the batch size of the step class it stands for as
+   "batch_size" (the step's bs, not its token count M), using only the batch
+   sizes listed in the Observed Decode Classes section of
+   trace-evidence.md, and cover the classes with the most steps first. The host
+   refuses a decode case at any other batch size. When that section lists none,
+   derive decode batch sizes from the serving state."""
 
 _SYSTEM_PROMPT_TEMPLATE = """\
 You are the KernelForge kernel rewrite opportunity analyst.
@@ -345,13 +383,8 @@ Apply these non-negotiable opportunity rules:
    here -- which algorithm is chosen, the size thresholds that choose it, buffer
    and IPC registration, the quantized path, how it is captured into a graph --
    and rewriting that layer is a real optimization, not a workaround.
-3. Prefer the largest measured end-to-end GPU-time share. Assign lower numeric
-   priority values to higher-share operators. When exact percentages are
-   unavailable, rank only from clearly labeled corroborated evidence and never
-   fabricate a percentage.
-4. Derive driver cases from the current workload and serving state, including
-   its prefill/decode phases, TP/EP partitioning, concurrency, sequence lengths,
-   active backend, tensor shapes, dtypes, layouts, and dispatch boundaries.
+3. {decode_share_rule}
+4. {decode_cases_rule}
 5. For every case, correctness and performance must invoke the same operator
    with the same shapes, dtypes, layouts, and semantic inputs. Performance must
    time CUDA/HIP graph replays over preallocated inputs; do not use eager timing
@@ -425,6 +458,7 @@ task.json must use this exact top-level structure:
   "shape_cases": [{
     "name": "<workload-derived case>",
     "phase": "<prefill|decode>",
+    "batch_size": 1,
     "shape": {"<dimension>": 1},
     "dtype": "<runtime dtype>"
   }],
@@ -495,8 +529,10 @@ refused draft is neither fixed nor withdrawn.
 
 
 def _system_prompt() -> str:
-    return _SYSTEM_PROMPT_TEMPLATE.replace(
-        "{kernel_backends}", ", ".join(f"`{backend}`" for backend in KERNEL_BACKENDS)
+    return (
+        _SYSTEM_PROMPT_TEMPLATE.replace("{kernel_backends}", ", ".join(f"`{backend}`" for backend in KERNEL_BACKENDS))
+        .replace("{decode_share_rule}", DECODE_SHARE_RULE)
+        .replace("{decode_cases_rule}", DECODE_CASES_RULE)
     )
 
 
@@ -577,9 +613,7 @@ class OpportunityAnalysisAgent:
             )
         )
         publications: dict[str, TaskPublicationResult] = {}
-        # Carried across polls so a draft this host already refused is not re-validated on every half-second tick for
-        # the rest of the session.
-        refused: dict[str, float] = {}
+        publish = _staged_publisher(layout, handoff)
         status = ANALYSIS_STATUS_COMPLETED
         reason = ""
         deadline = time.monotonic() + self.timeout_sec
@@ -592,11 +626,11 @@ class OpportunityAnalysisAgent:
                     backend_task.cancel()
                     break
                 await asyncio.wait({backend_task}, timeout=min(_PUBLISH_POLL_SEC, remaining))
-                publications.update(_by_draft(publish_complete_staged_tasks(layout, refused=refused)))
+                publications.update(_by_draft(publish()))
             if not backend_task.cancelled():
                 try:
                     agent_result = await backend_task
-                    session = _AnalysisSession(self.backend, spec, tool_guard, layout, refused, deadline, usage)
+                    session = _AnalysisSession(self.backend, spec, tool_guard, publish, deadline, usage)
                     agent_result, resume_publications = await session.resume_for_refused_staging_drafts(agent_result)
                     publications.update(_by_draft(resume_publications))
                     unfinished = self._unfinished_session(agent_result)
@@ -616,7 +650,7 @@ class OpportunityAnalysisAgent:
                     await backend_task
             # No quiescence window here: the session has stopped, so nothing is still writing, and waiting would
             # strand a task finished moments before the deadline -- the case incremental publication exists for.
-            publications.update(_by_draft(publish_complete_staged_tasks(layout, quiescent_sec=0.0, refused=refused)))
+            publications.update(_by_draft(publish(quiescent_sec=0.0)))
             if spec.progress_log:
                 atomic_write_text(
                     layout.agent_root / "progress.log", "\n".join(spec.progress_log) + "\n", options=DURABLE
