@@ -50,7 +50,7 @@ from typing import Any, NamedTuple
 
 import yaml
 
-from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_WHEEL_DIR
+from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_WHEEL_DIR, ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.measure.compile import BlobError, CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.farm import FarmError, build_farm, named_python, prepend_pythonpath, server_environment
 from hyperloom.measure.spec import EnvRoot as SheetRoot
@@ -78,7 +78,7 @@ MERGE_SMOKE_ENV = "HYPERLOOM_MERGE_SMOKE"
 SMOKE_TIMEOUT_SEC = 120.0
 #: The variables that hide every GPU from the smoke's children, each set empty. ``ROCR_VISIBLE_DEVICES`` is ROCm's
 #: runtime-level mask, applied beneath HIP's, so leaving the host's value would keep its cards visible to the runtime.
-SMOKE_HIDDEN_DEVICES = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+SMOKE_HIDDEN_DEVICES = (ROCR_VISIBLE_DEVICES_ENV, "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 _UPSERT = "upsert"
 _RUNTIME = "runtime"
 _DETAIL_CHARS = 400
