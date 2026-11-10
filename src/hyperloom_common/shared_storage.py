@@ -50,6 +50,7 @@ _WAY = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 #: How a link on the way is opened to check whose it is and read it (:meth:`_Walk.follow`).
 _LINK = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
 _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+_APPEND = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
 _PROBE_PREFIX = ".hl-writable-"
 #: What a new file is made with, before ``fchmod`` gives it its mode: the umask never decides it.
 _OWNER_ONLY = 0o600
@@ -367,6 +368,30 @@ def _new_temporary(directory: int, name: str, mode: int, flags: int = 0) -> tupl
     raise FileExistsError(errno.EEXIST, "no free name for a new file beside it", name)
 
 
+def open_shared(path: Path, access: int, mode: int = SHARED_FILE_MODE) -> int:
+    """Open ``path`` for ``access`` (``os.O_RDWR``, ``os.O_WRONLY | os.O_APPEND``) and return the descriptor, creating it
+    when it is not there: with ``mode`` below shared storage (:func:`parent_is_shared`), else as the umask leaves it
+    (a narrower ``mode`` is kept as asked, shared or not).
+
+    It is reached through its parent as :func:`open_directory` reaches it, and never through a link. A file that exists
+    is opened as it is, never truncated, chmodded or replaced by rename: a lock or a log that another process holds open
+    would be left on an unlinked inode. Another account's ``0600`` file therefore raises ``PermissionError``.
+    """
+    with shared_parent(path) as (directory, name, widen):
+        try:
+            descriptor = os.open(
+                name, access | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, _OWNER_ONLY, dir_fd=directory
+            )  # the umask never decides it: fchmod below
+        except FileExistsError:
+            return os.open(name, access | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+        try:
+            os.fchmod(descriptor, _final_mode(mode, widen))
+        except BaseException:
+            os.close(descriptor)
+            raise
+    return descriptor
+
+
 @dataclass(frozen=True)
 class Flush:
     """What :func:`write_shared_bytes` flushes to disk: the new ``file`` before the rename, its ``directory`` after."""
@@ -443,25 +468,63 @@ def create_new_shared_file(path: Path, *, mode: int = SHARED_FILE_MODE) -> int:
         FileExistsError: When anything, a link included, has that name already; it is left as it is.
     """
     with shared_parent(path) as (directory, name, widen):
-        mode = _final_mode(mode, widen)
-        descriptor, temporary = _new_temporary(directory, name, mode, os.O_APPEND)
-        try:
-            os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
-        except OSError as exc:
-            os.close(descriptor)
-            with suppress(OSError):
-                os.unlink(temporary, dir_fd=directory)
-            if exc.errno not in _NO_LINKS:
-                raise
-            return _create_in_place(directory, name, mode)
-        except BaseException:
-            os.close(descriptor)
-            with suppress(OSError):
-                os.unlink(temporary, dir_fd=directory)
-            raise
+        return _create_new(directory, name, _final_mode(mode, widen))
+
+
+def _create_new(directory: int, name: str, mode: int) -> int:
+    """:func:`create_new_shared_file` of ``name`` in ``directory`` with ``mode``, final already."""
+    descriptor, temporary = _new_temporary(directory, name, mode, os.O_APPEND)
+    try:
+        os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+    except OSError as exc:
+        os.close(descriptor)
         with suppress(OSError):
             os.unlink(temporary, dir_fd=directory)
+        if exc.errno not in _NO_LINKS:
+            raise
+        return _create_in_place(directory, name, mode)
+    except BaseException:
+        os.close(descriptor)
+        with suppress(OSError):
+            os.unlink(temporary, dir_fd=directory)
+        raise
+    with suppress(OSError):
+        os.unlink(temporary, dir_fd=directory)
     return descriptor
+
+
+def shared_mode(path: Path, mode: int) -> int:
+    """``mode`` for what is made at ``path``, judged now, before a missing parent is made: as asked below shared storage
+    (:func:`parent_is_shared`), else as the umask leaves it. A writer that makes the parents first asks this first: a
+    parent made under a umask that leaves group write in a setgid directory would look shared itself."""
+    return mode if parent_is_shared(path) else mode & ~current_umask()
+
+
+def open_shared_append(path: Path, *, mode: int = SHARED_FILE_MODE, make_parents: bool = False) -> int:
+    """``path`` opened for appending (the caller closes the descriptor), its directory reached as
+    :func:`open_directory` reaches it and never through a link at its own name.
+
+    When missing it is made new as :func:`create_new_shared_file` makes it, with ``mode`` below shared storage
+    (:func:`parent_is_shared`), so the next account of the group appends to it too, and as the umask leaves ``mode``
+    anywhere else; one another process made meanwhile, or one there already, is opened as it is. One another account
+    made without group write fails ``EACCES``: a file that is appended to cannot be replaced by rename. With
+    ``make_parents`` the missing directories are made first (:func:`make_shared_dirs`), the mode judged before them
+    (:func:`shared_mode`).
+    """
+    if make_parents:
+        mode = shared_mode(path, mode)
+        make_shared_dirs(Path(path).parent)
+    with shared_parent(path) as (directory, name, widen):
+        for _ in range(_TEMPORARY_TRIES):
+            try:
+                return os.open(name, _APPEND, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+            try:
+                return _create_new(directory, name, _final_mode(mode, widen))
+            except FileExistsError:
+                continue  # made meanwhile by another process: opened as it is
+    raise FileExistsError(errno.EEXIST, "made and removed again by another process each time", str(path))
 
 
 def _create_in_place(directory: int, name: str, mode: int) -> int:
@@ -574,11 +637,14 @@ __all__ = [
     "current_umask",
     "make_shared_dirs",
     "open_directory",
+    "open_shared",
+    "open_shared_append",
     "read_directory",
     "replace_shared_file",
     "open_shared_replacement",
     "ownership",
     "parent_is_shared",
+    "shared_mode",
     "shared_parent",
     "setgid_warnings",
     "writable_problems",

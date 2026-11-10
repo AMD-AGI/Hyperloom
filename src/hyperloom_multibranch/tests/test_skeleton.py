@@ -1022,6 +1022,16 @@ async def test_the_dev_leases_of_the_run_reach_the_peers(tmp_path: Path) -> None
     assert stage.setup.dev_leases == 2
 
 
+@pytest.mark.parametrize("keep", [True, False])
+async def test_the_make_before_break_of_the_run_reaches_the_peers(tmp_path: Path, keep: bool) -> None:
+    stage = _stage(tmp_path)
+    stage.settings = replace(stage.settings, make_before_break=keep)
+
+    stage._session()
+
+    assert stage.setup.make_before_break is keep
+
+
 async def test_the_agent_port_of_the_run_reaches_the_peers(tmp_path: Path) -> None:
     stage = _stage(tmp_path)
     stage.settings = replace(stage.settings, agent_port=32100)

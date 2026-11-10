@@ -93,8 +93,8 @@ known""",
     free_slot="""\
 When the open areas list no op, leave a free slot free: give its tests to the running branches by raising their K
 where the caps allow, or to the pending forks and repairs; the scheduler then opens only the branches you name a focus
-for. Reopen an op a stopped branch was opened on only for an angle its history has not tried, and say in your
-reasoning which.""",
+for. Reopen an op a stopped branch was opened on only for an angle its history has not tried, or, for one spent by a
+give-up, when its 'worth again if' holds, and say in your reasoning which.""",
     out_of_ideas="""\
 a branch out of ideas is one to stop, its slot refilled while an open area is left, rather than stop
 the session""",
@@ -115,7 +115,8 @@ branch is briefed on {{default_focus}}. The opening batch is given no focus. A s
 was opened on, empty for none; a stopped branch keeps it, so its stopped line says how a branch on that op ended.
 free_branch_slots counts the branches you may open at this call having stopped nothing; a stop frees one more for the
 same answer, and branches beyond the slots left are not opened. {{free_slot}}
-pending lists the forks and repairs the rule gate asked for that wait for a slot, oldest first, with how long each has
+pending lists the shares a mapping branch asked for and the forks and repairs the rule gate asked for, that wait for a
+slot: shares first, then forks and repairs oldest first, with how long each has
 waited: a slot your stops free goes to them first and only the slots left open your branches. You do not admit them; stop a branch that is worth less than a pending one to let it
 start.
 {{spend}}

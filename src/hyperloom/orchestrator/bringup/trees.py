@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.git_safety import repo_root, safe_directory_args
-from hyperloom_common.io import JsonFormat, atomic_write_json
+from hyperloom_common.io import SHARED, JsonFormat, atomic_write_json
 from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.inference_optimizer.session import session_paths as session_layout
 from hyperloom.inference_optimizer.session.session_paths import BRINGUP_SEGMENT
@@ -179,7 +179,9 @@ def write_trees(trees: Sequence[TreeIdentity], *, session_dir: Path | None = Non
         session_dir: Session root; defaults to the current session.
     """
     target = trees_path(session_dir)
-    atomic_write_json(target, {"trees": [t.to_dict() for t in trees]}, fmt=JsonFormat(trailing_newline=True))
+    atomic_write_json(
+        target, {"trees": [t.to_dict() for t in trees]}, fmt=JsonFormat(trailing_newline=True), options=SHARED
+    )
     return target
 
 

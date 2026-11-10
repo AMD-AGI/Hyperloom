@@ -48,15 +48,37 @@ def _run(module: str, argv: list[str]) -> int:
     return importlib.import_module(module).main(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    if args and args[0] in ("-h", "--help"):
-        print(_usage())
-        return 0
-    if not args or (args[0] not in _COMMANDS and args[0] != "session"):
-        print(_usage(), file=sys.stderr)
-        return 2
-    command, rest = args[0], args[1:]
+def _opens_a_ledger(command: str, rest: list[str]) -> bool:
+    """Whether the command opens a session's coordinator database: ``optimize``, ``recover`` and ``session events``."""
+    return command in ("optimize", "recover") or (command == "session" and rest[:1] == ["events"])
+
+
+def _ledger_dir_error(command: str, rest: list[str]) -> str | None:
+    """The one-line error for a ``HYPERLOOM_LEDGER_DIR`` that is not an absolute path, for the commands that open a
+    session's coordinator database; ``None`` otherwise."""
+    if not _opens_a_ledger(command, rest):
+        return None
+    from hyperloom.inference_optimizer.session.paths import named_ledger_dir
+
+    try:
+        named_ledger_dir()
+    except ValueError as exc:
+        return f"ERROR: {exc}"
+    return None
+
+
+def _ledger_refusals(command: str, rest: list[str]) -> tuple[type[Exception], ...]:
+    """What a command that opens a session's coordinator database may refuse with from deep inside a run: a resume
+    that has no ledger to inspect (``ResumeBlocked``), ended with one line and exit code 2, as the guard does at the
+    start of a resume; nothing for the other commands."""
+    if not _opens_a_ledger(command, rest):
+        return ()
+    from hyperloom.inference_optimizer.session.resume_guard import ResumeBlocked
+
+    return (ResumeBlocked,)
+
+
+def _dispatch(command: str, rest: list[str]) -> int:
     if command != "session":
         module, prefix, _ = _COMMANDS[command]
         return _run(module, [*prefix, *rest])
@@ -67,3 +89,22 @@ def main(argv: list[str] | None = None) -> int:
         print(_usage(), file=sys.stderr)
         return 2
     return _run(_SESSION_COMMANDS[rest[0]][0], rest[1:])
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] in ("-h", "--help"):
+        print(_usage())
+        return 0
+    if not args or (args[0] not in _COMMANDS and args[0] != "session"):
+        print(_usage(), file=sys.stderr)
+        return 2
+    command, rest = args[0], args[1:]
+    if (error := _ledger_dir_error(command, rest)) is not None:
+        print(error, file=sys.stderr)
+        return 2
+    try:
+        return _dispatch(command, rest)
+    except _ledger_refusals(command, rest) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2

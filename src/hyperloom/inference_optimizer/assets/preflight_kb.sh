@@ -16,9 +16,28 @@
 # records recipe-KB enablement from --degraded-kb directly.
 #
 # Writes a marker JSON to $USER_DATA_PATH/runtime/recipe_kb/.kb_preflight.json
-# capturing reachability + skip + failure_reason per branch.
+# capturing reachability + skip + failure_reason per branch. recipe_kb/ may be shared with other accounts of one group
+# (setgid, 2775): the marker is written 664 to a new file and renamed over the old one, so a marker another account
+# left there never blocks this one. runtime/ above it holds what the installer writes and later steps source, so it is
+# 2755: the group can enter it, only its owner can change what is in it. Modes are asked for only where the storage is
+# set up to be shared (a setgid directory the group can write and others cannot): anywhere else the umask decides.
 
 set -u
+
+# Whether the nearest existing directory of $1 is set up to be shared: setgid, group-writable, not writable by others.
+shared_storage() {
+  local dir="$1" mode
+  while [ ! -d "${dir}" ] && [ "${dir}" != / ]; do dir="$(dirname "${dir}")"; done
+  mode="$(stat -c '%a' -- "${dir}" 2>/dev/null)" || return 1
+  [ "${#mode}" -eq 4 ] && [ $(( ${mode:0:1} & 2 )) -ne 0 ] && [ $(( ${mode:2:1} & 2 )) -ne 0 ] \
+    && [ $(( ${mode:3:1} & 2 )) -eq 0 ]
+}
+
+# Make $1 with mode $2 where the storage is shared, else as the umask leaves it.
+make_dir() {
+  if [ -d "$1" ]; then return 0; fi
+  if shared_storage "$1"; then mkdir -p -m "$2" -- "$1"; else mkdir -p -- "$1"; fi
+}
 
 # Legacy marker fields: kb_* are always skipped (no remote recipe-KB probe).
 kb_reachable="false"
@@ -43,8 +62,12 @@ fi
 : "${SKIP_PR_PROBE:=}"
 
 marker_dir="${USER_DATA_PATH}/runtime/recipe_kb"
-mkdir -p "${marker_dir}"
+make_dir "${USER_DATA_PATH}/runtime" 2755
+make_dir "${marker_dir}" 2775
+if shared_storage "${marker_dir}/.kb_preflight.json"; then umask 002; fi # the marker is 664 where it is shared
 marker="${marker_dir}/.kb_preflight.json"
+marker_tmp=""
+trap '[ -z "${marker_tmp}" ] || rm -f -- "${marker_tmp}"' EXIT
 
 pr_reachable="false"
 pr_skipped="false"
@@ -84,7 +107,7 @@ else
     probe_curl "${KB_STORE_URL%/}/pr-monitor/v1/healthz" 5 3 || true
 fi
 
-{
+write_marker() {
     printf '{'
     printf '"kb_reachable":%s,' "${kb_reachable}"
     printf '"pr_reachable":%s,' "${pr_reachable}"
@@ -94,7 +117,17 @@ fi
         printf ',"pr_failure_reason":"%s"' "${pr_failure_reason}"
     fi
     printf '}\n'
-} > "${marker}"
+}
+
+# Written to a file this process creates (noclobber is O_EXCL: nothing is written through a link another account left at
+# that name), 664 by the umask above, then renamed over the marker, whoever made that one.
+marker_tmp="${marker_dir}/.kb_preflight.$$.${RANDOM}"
+if (set -C; write_marker > "${marker_tmp}") 2>/dev/null; then
+  mv -f -- "${marker_tmp}" "${marker}" && marker_tmp=""
+else
+  marker_tmp=""
+  echo "[preflight WARN] cannot write a marker in ${marker_dir}; the reachability result is not recorded." >&2
+fi
 
 if [ "${pr_skipped}" = "false" ] && [ "${pr_reachable}" = "false" ]; then
     exit 1
