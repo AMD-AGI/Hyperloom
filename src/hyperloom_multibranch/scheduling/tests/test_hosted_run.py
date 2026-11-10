@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, read_host_info
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
 from hyperloom_multibranch.scheduling.hosted_run import (
@@ -26,6 +27,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     grant_deadline,
     record_session,
     recorded_session,
+    run_argv,
     write_final_exit,
 )
 
@@ -93,3 +95,40 @@ def test_the_host_reads_a_final_ending_and_the_session_a_restart_finishes(tmp_pa
     write_final_exit(tmp_path, HostedExit(2, error="multibranch.workload is missing"))
     exit_document = json.loads((tmp_path / "exit.json").read_text(encoding="utf-8"))
     assert exit_document == {"final": True, "returncode": 2, "error": "multibranch.workload is missing"}
+
+
+def _spec(**multibranch: object) -> CampaignSpec:
+    return parse_campaign(
+        {
+            "schema": "hyperloom.campaign-spec/v1",
+            "flow": "multibranch",
+            "model": {"path": "/models/Llama-3-8B"},
+            "framework": {"name": "vllm", "image": "registry.example/vllm@sha256:" + "2" * 64},
+            "hardware": {"gpu_type": "mi355x", "tp": 1},
+            "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
+            "budget": {"max_hours": 1},
+            "placement": {"profile": "hosted-gpu", "measurement": "hosted"},
+            "multibranch": {"workload": "inferencex", **multibranch},
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("given", "switches"),
+    [
+        ({}, []),  # run's default: on
+        ({"make_before_break": True}, ["--make-before-break"]),
+        ({"make_before_break": False}, ["--no-make-before-break"]),
+    ],
+)
+def test_the_operator_turns_make_before_break_on_or_off_in_the_spec(
+    given: dict[str, bool], switches: list[str]
+) -> None:
+    argv = run_argv(_spec(**given), 1.0, 8)
+    assert [arg for arg in argv if arg.endswith("make-before-break")] == switches
+
+
+@pytest.mark.parametrize("given", ["false", 0, 1])
+def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object) -> None:
+    with pytest.raises(HostedRefused, match="multibranch.make_before_break must be true or false"):
+        run_argv(_spec(make_before_break=given), 1.0, 8)

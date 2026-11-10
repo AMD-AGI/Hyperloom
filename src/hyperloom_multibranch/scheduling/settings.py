@@ -149,7 +149,10 @@ class RunSettings:
     ``references`` are the
     directories of reference material the run copies in before its first phase, each with the commit it was taken at.
     ``dev_leases`` is how many dev sandboxes the session lends its specialists at once; 0 lends none. ``playbook`` says
-    which scheduling playbook the session plays."""
+    which scheduling playbook the session plays. ``make_before_break`` has a hosted session keep a finished test's
+    sandbox until the next test's runs, so that the cluster does not give its node to another job between two tests,
+    where the grant fits at least three tests at once; it runs one test fewer at once there. Off, every test the grant
+    fits runs at once and each sandbox is closed when its test ends. A session measured on this machine ignores it."""
 
     workload: Workload
     max_hours: float
@@ -171,6 +174,7 @@ class RunSettings:
     stop_after_map: bool = False
     agent_dossier: str = ""
     review_gate: bool = True
+    make_before_break: bool = True
 
 
 __all__ = [

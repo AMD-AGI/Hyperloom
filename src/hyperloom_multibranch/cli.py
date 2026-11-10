@@ -144,6 +144,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     refuse_unhosted_branches,
     reported_stop_reason,
     run_argv,
+    spec_make_before_break,
     toolbox_grant,
     write_final_exit,
 )
@@ -329,6 +330,12 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         default=0,
         metavar="N",
         help="Dev sandboxes lent to the specialists at once, from the cards tests are measured on; 0 = none.",
+    )
+    run.add_argument(
+        "--make-before-break",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Hosted: keep a finished test's sandbox until the next one runs, where 3+ tests fit (one fewer runs).",
     )
     run.add_argument(
         "--measurement",
@@ -736,6 +743,7 @@ def settings_from(
         references=_references(args.references or []),
         dev_leases=args.dev_leases,
         playbook=PlaybookMode(args.playbook),
+        make_before_break=args.make_before_break,
         agent_directions=_agent_directions(args.agent_directions, agents),
         agent_pack=_agent_pack(args.agent_pack, agents),
         agent_launch=_agent_launch(args.agent_launch, agents),
@@ -976,14 +984,19 @@ def hosted_runner_cache(env: Mapping[str, str]) -> Path:
     return Path(value)
 
 
-def grant_tests_that_fit(host: HostInfo) -> Callable[[int], int]:
-    """How many tests of a TP the grant ``host`` holds runs at once; raises ValueError when one does not fit, and
-    ImportError when the ``hosted`` extra is not installed."""
+def grant_tests_that_fit(host: HostInfo, make_before_break: bool = True) -> Callable[[int], int]:
+    """How many tests of a TP the grant ``host`` holds runs at once, as the hosted toolbox runs them (``handover_for``
+    with ``make_before_break``); raises ValueError when one does not fit, ImportError without the ``hosted`` extra."""
 
     # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
-    from hyperloom_multibranch.toolbox.hosted_toolbox import parallel_tests_for
+    from hyperloom_multibranch.toolbox.hosted_toolbox import handover_for, parallel_tests_for
 
-    return partial(parallel_tests_for, toolbox_grant(host.grant_limits))
+    grant = toolbox_grant(host.grant_limits)
+
+    def tests_that_fit(tp: int) -> int:
+        return parallel_tests_for(grant, tp, handover_for(grant, tp) if make_before_break else None)
+
+    return tests_that_fit
 
 
 def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory]) -> ReadySession:
@@ -1058,7 +1071,7 @@ def _stop_before_grant_ends(deadline: GrantDeadline) -> None:
 
 def _hosted_settings(host: HostInfo, session_hours: Callable[[float], float]) -> RunSettings:
     spec = campaign_spec(host)
-    tests_that_fit = grant_tests_that_fit(host)
+    tests_that_fit = grant_tests_that_fit(host, spec_make_before_break(spec))
     argv = run_argv(spec, session_hours(spec.max_hours), tests_that_fit(spec.tp))
     settings = settings_from(_parsed_run(argv), tests_that_fit)
     refuse_unhosted_branches(settings, host, os.environ)
@@ -1112,7 +1125,8 @@ def _handed_grant(args: argparse.Namespace) -> HandedGrant:
 def _run_settings(args: argparse.Namespace, grant: HandedGrant | None) -> RunSettings:
     if grant is None:
         return settings_from(args)
-    settings = replace(settings_from(args, grant_tests_that_fit(grant.host)), max_hours=grant.max_hours)
+    fits = grant_tests_that_fit(grant.host, args.make_before_break)
+    settings = replace(settings_from(args, fits), max_hours=grant.max_hours)
     refuse_unhosted_branches(settings, grant.host, os.environ)
     return settings
 
