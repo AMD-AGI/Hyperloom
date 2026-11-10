@@ -24,11 +24,12 @@ from typing import Any, NoReturn
 from hyperloom.common.agent_runtime_requirements import agent_runtime_requirements
 from hyperloom.common.agent_cli import resolve_claude_executable, resolve_codex_executable
 from hyperloom_common.llm.llm_config import (
+    AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
     CLAUDE_OAUTH_TOKEN_ENV,
     DEFAULT_CLAUDE_MODEL,
     anthropic_synthesizable_key,
-    preferred_agent_backend,
+    resolve_agent_backend,
     with_synthesized_anthropic_keys,
 )
 from hyperloom_common.env import forge_explicitly_enabled
@@ -860,11 +861,12 @@ def _check_kernel_tuning_clis() -> dict[str, Any]:
 
 def _check_agent_cli() -> None:
     """Check the agent CLI: warn when it cannot be resolved, and stop when Codex cannot create its sandbox."""
-    backend = preferred_agent_backend()
-    resolve = resolve_codex_executable if backend == AGENT_BACKEND_CODEX else resolve_claude_executable
-    if not resolve():
-        print(f"Preflight: WARNING — no {backend} CLI; specialists cannot start without it (assets/install.sh).")
-    _check_codex_sandbox()
+    backend = resolve_agent_backend()
+    if backend in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
+        resolve = resolve_codex_executable if backend == AGENT_BACKEND_CODEX else resolve_claude_executable
+        if not resolve():
+            print(f"Preflight: WARNING — no {backend} CLI; specialists cannot start without it (assets/install.sh).")
+    _check_codex_sandbox(backend)
 
 
 def _emit_preflight_diagnostics(
