@@ -6,7 +6,7 @@
 The user names one directions map with ``--agent-directions``: the open directions of an Arbor dossier map, or a list
 written by hand, in the form Arbor's ``component.plan`` reads. Two Arbor agents given the whole map would work the
 same directions. Split, each works its own. Before the agent branches open, each agent source is fetched once, and the
-map is split by Arbor's own command line (:func:`~hyperloom_multibranch.specialist.arbor_adapter.split_directions`)
+map is split by Arbor's own command line (:func:`~hyperloom_multibranch.specialist.arbor_map.split_directions`)
 into as many disjoint shares as there are Arbor agents, one each, in the order the user named them. Any other agent
 gets none: only Arbor reads a plan.
 
@@ -15,7 +15,7 @@ Without a map, two or more Arbor agents split the map of the dossier pass
 (:mod:`~hyperloom_multibranch.specialist.map_session`), which the session passes here as the map once the pass ends and
 opens a share branch for each share. The dossier pass is the default, and it runs on a branch, so no other branch waits
 for it. When the pass gives none, they split one Arbor generates from the root's shares, PRELUDE's profile, with no GPU
-time (:func:`~hyperloom_multibranch.specialist.arbor_adapter.generate_directions`): one direction per op family, ranked
+time (:func:`~hyperloom_multibranch.specialist.arbor_map.generate_directions`): one direction per op family, ranked
 by its share. Those shares are the root's op shares (:mod:`~hyperloom_multibranch.scheduling.root_shares`), kernel
 names where the toolbox ranked kernels, and ``shares_source`` says where they came from. A single Arbor gets none and
 maps its own directions, which its dossier measures better.
@@ -28,7 +28,7 @@ The session keeps the map it split (:class:`MapDealer`) for Arbor's master to de
 share back (it exits ``reported``, its report's ``ended`` saying why) gives the scheduler its worker report as its run
 ends; the master folds every report so far into the map and deals the slot the worker frees its next order, at most
 :data:`DEAL_SIZE` open directions that no report settled and no running worker holds, a direction reported back open
-by two workers never again (:func:`~hyperloom_multibranch.specialist.arbor_adapter.deal_order`). The scheduler asks the fork desk for a share
+by two workers never again (:func:`~hyperloom_multibranch.specialist.arbor_map.deal_order`). The scheduler asks the fork desk for a share
 branch on that order, which takes the slot once the worker's branch has stopped and its cards are back. An empty order
 asks for none, and the slot goes to the judge's refill. A worker's order stays held until it reports, or until the
 fork desk rejects the branch asked on it.
@@ -54,12 +54,12 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     fetch_source,
     root_profile,
 )
-from hyperloom_multibranch.specialist.arbor_adapter import (
+from hyperloom_multibranch.specialist.arbor_adapter import is_arbor
+from hyperloom_multibranch.specialist.arbor_map import (
     DealRequest,
     SplitFailed,
     deal_order,
     generate_directions,
-    is_arbor,
     split_directions,
 )
 
@@ -159,7 +159,7 @@ async def _split(arbor: Path, map_file: Path, shares: int, work_dir: Path) -> tu
 
 async def generated_map(arbor: Path, root_shares: OpShares | None, source: str, work_dir: Path) -> Path:
     """The map the Arbor checkout ``arbor`` generates in ``work_dir`` from ``root_shares``, which came from
-    ``source``; raise :class:`~hyperloom_multibranch.specialist.arbor_adapter.SplitFailed` when there are none to
+    ``source``; raise :class:`~hyperloom_multibranch.specialist.arbor_map.SplitFailed` when there are none to
     generate it from or Arbor cannot."""
 
     profile = root_profile(root_shares, work_dir, source)
@@ -195,7 +195,7 @@ class MapDealer:
     async def deal(self, arbor: Path) -> Path | None:
         """Have the master of the Arbor checkout ``arbor`` fold every report handed back into the map and deal the next
         order, held from then on; its path, or ``None`` when no open direction is left to deal. Raise
-        :class:`~hyperloom_multibranch.specialist.arbor_adapter.SplitFailed` when Arbor cannot deal."""
+        :class:`~hyperloom_multibranch.specialist.arbor_map.SplitFailed` when Arbor cannot deal."""
 
         async with self._dealing:
             self._out.mkdir(parents=True, exist_ok=True)

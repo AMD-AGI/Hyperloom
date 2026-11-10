@@ -18,7 +18,7 @@ import pytest
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.scheduling.agent_plans import GENERATED_MAP, agent_plans, arbor_agents, map_dealer
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, ROOT_PROFILE_SOURCE
-from hyperloom_multibranch.specialist.arbor_adapter import SplitFailed
+from hyperloom_multibranch.specialist.arbor_map import SplitFailed
 from hyperloom_multibranch.tests.agent_rig import CHECKOUT_FILES, MAP, _committed, _write, worker_report
 from hyperloom_multibranch.tests.test_specialist_arbor_keys import VENDORED_ARBOR
 
