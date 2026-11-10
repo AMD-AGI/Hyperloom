@@ -28,7 +28,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.jsonio import read_json_strict, read_jsonl
+from hyperloom_common.jsonio import read_jsonl
 from hyperloom.common.outside_facts.image_check import ImageCheckReport
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom.measure.compile import BlobError, BlobStore
@@ -52,7 +52,7 @@ from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import SKIPPED,
 from hyperloom_multibranch.blackboard.knowledge.warm_start import WarmLead
 from hyperloom_multibranch.blackboard.rsi.authoring import author_playbook
 from hyperloom_multibranch.blackboard.rsi.lesson_curation import curate_lessons
-from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVED
+from hyperloom_multibranch.blackboard.rsi.archive import TreeArchive
 from hyperloom_multibranch.blackboard.rsi.archive import SKIPPED as STEP_SKIPPED
 from hyperloom_multibranch.blackboard.rsi.session import CloseStep, KnowledgeClose
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
@@ -100,17 +100,13 @@ def step_lines(steps: Mapping[str, CloseStep]) -> list[str]:
     ]
 
 
-def archived_before(report: Path) -> bool:
-    """Whether the CLOSE report at ``report``, which an earlier CLOSE of the session wrote, says that CLOSE or one
-    before it archived the session's search tree; ``False`` with no report."""
+def archived_before(snapshot: BlackboardSnapshot) -> bool:
+    """Whether the archive :data:`~hyperloom_multibranch.blackboard.rsi.archive.ARCHIVE_ENV` names already holds the
+    search tree of the session ``snapshot`` is of: an earlier CLOSE of the session archived it, whatever became of the
+    rest of that CLOSE's exports."""
 
-    if not report.is_file():
-        return False
-    exports = read_json_strict(report, require_dict=True)["exports"]
-    if exports is None:
-        return False
-    archive = exports["knowledge"]["archive"]
-    return archive["status"] == ARCHIVED or archive["reason"] == ARCHIVED_BEFORE
+    archive = TreeArchive.from_env()
+    return archive is not None and snapshot.profile is not None and archive.holds(snapshot.profile.session_id)
 
 
 def _recovered_by(row: Mapping[str, Any]) -> tuple[str, ...]:
@@ -249,7 +245,7 @@ class SessionExports:
         snapshot = await self._blackboard.snapshot()
         chosen = await self._final_recipe(final)
         kb_write_back = await self._publish(snapshot, chosen)
-        if await asyncio.to_thread(archived_before, self._layout.report):
+        if await asyncio.to_thread(archived_before, snapshot):
             skipped = CloseStep(STEP_SKIPPED, ARCHIVED_BEFORE)
             knowledge = KnowledgeClose(**{step.name: skipped for step in fields(KnowledgeClose)})
             playbook = curation = skipped
