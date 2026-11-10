@@ -20,6 +20,16 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A GEAK or Forge reproduction of the measured launch keeps settings whose
+  names contain `TOKEN`.** The GEAK handoff's `baseline_env_spec`, the Forge
+  handoff's serving context and the reference launch script now carry launch
+  settings such as `SGLANG_SIMULATE_ACC_TOKEN_MODE`,
+  `SGLANG_USE_AITER_FP8_PER_TOKEN` and `MAX_NUM_BATCHED_TOKENS`, and GEAK or a
+  reference script may unset one. Before, any name containing `TOKEN` was taken
+  for a credential: the reproduction ran without the setting the original
+  launch had, so its baseline was not the measured configuration, and a GEAK
+  result unsetting one was rejected. Credentials (`HF_TOKEN`,
+  `AWS_SECRET_ACCESS_KEY`) are still never written into these artifacts.
 - **An Arbor agent on an AgentX session keeps by MB's rule and no longer
   reads the round's numbers itself.** MB writes `component.bench_read`, so
   Arbor's harness reads the session's objective and its guards (P50 or P90
