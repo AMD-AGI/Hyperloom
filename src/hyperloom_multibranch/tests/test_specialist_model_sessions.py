@@ -3,6 +3,7 @@
 
 import asyncio
 import shlex
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -121,6 +122,9 @@ def test_a_branch_whose_task_names_an_agent_runs_it_on_ports_of_its_own_in_the_s
     lease = BranchLease("lease-1", "a1", (6,), tmp_path / "lease-1", {"SGLANG_USE_AITER": "1"}, 1)
     sandbox = first._setup.sandbox(lease)
     assert (sandbox.cards, sandbox.root) == ((6,), lease.root)
+    host_tmp = tmp_path / "host-tmp"  # the sandbox's own temporary directory is made below the host's
+    host_tmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(host_tmp))
     assert sandbox.env({})["SGLANG_USE_AITER"] == "1"
     assert isinstance(built.factory(SessionStart("s1", "c0", 1, BranchTask("leads"))), AgentSession)
     with pytest.raises(ValueError, match="no specialist stands for"):

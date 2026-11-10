@@ -320,9 +320,9 @@ def test_a_branch_row_shows_what_is_known_of_its_specialist_and_a_gave_up_one_is
         "crashes": 4,
         "lost": 1,
         "gave_up": True,
+        "exhausted": "",
         "judge_failed": False,
         "unready": "",
-        "exhausted": "",
     }
     assert (rows["b02"]["specialist"]["lost"], rows["b02"]["specialist"]["judge_failed"]) == (6, True)
     assert "specialist" not in rows[INTEGRATION_BRANCH] and "specialist" not in rows["b03"]
@@ -333,6 +333,12 @@ def test_a_branch_row_shows_what_is_known_of_its_specialist_and_a_gave_up_one_is
     assert "A branch whose judging failed makes no more progress" in prompt
     assert "gave up or whose judging failed" not in prompt
     assert "weigh a specialist's lost count against its progress" in prompt
+
+
+def test_the_prompt_says_unfocused_branches_spread_over_the_largest_ops_in_turn() -> None:
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+
+    assert "briefed on the largest ops of the integration head's latest profile in turn" in prose
 
 
 def test_the_prompt_says_a_free_slot_may_be_opened_without_a_stop() -> None:

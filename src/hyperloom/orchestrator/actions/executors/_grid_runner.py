@@ -79,10 +79,12 @@ from ._grid_base import (
     VARIANT_CONFIG_FILE,
     GridRound,
     GridVariant,
+    RoundError,
     failed_step_class,
     run_grid_suite_round,
     VariantResult,
     apply_variant_env,
+    argv_refusal,
     importable_overlay_dir,
     pin_xdit_tool_path,
     runnable_moe_backend_args,
@@ -456,13 +458,6 @@ class _RoundProcess(NamedTuple):
     stderr: str
 
 
-class _RoundError(NamedTuple):
-    """Why a grid round measured nothing, and under which class it is recorded."""
-
-    summary: str
-    error_class: str
-
-
 def _invalid_measurement_error(
     proc: _RoundProcess,
     *,
@@ -470,17 +465,17 @@ def _invalid_measurement_error(
     death_excerpt: str,
     workspace: Any,
     slot: Any,
-) -> _RoundError:
+) -> RoundError:
     if proc.returncode != 0:
         error = death_excerpt or redact_secret_values((proc.stderr or proc.stdout)[-2000:])
         if not error.strip():
             error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
         if not error.strip():
             error = redact_secret_values(_report_errors_summary(report))
-        return _RoundError(error, failure_evidence.ROUND_NONZERO_INVALID_MEASUREMENT)
+        return RoundError(error, failure_evidence.ROUND_NONZERO_INVALID_MEASUREMENT)
     if not report:
-        return _RoundError(death_excerpt or "benchmark_report missing", failure_evidence.BENCHMARK_REPORT_MISSING)
-    return _RoundError(
+        return RoundError(death_excerpt or "benchmark_report missing", failure_evidence.BENCHMARK_REPORT_MISSING)
+    return RoundError(
         death_excerpt or "benchmark_report missing valid throughput/completed requests",
         "benchmark_report_invalid_metric",
     )
@@ -955,20 +950,22 @@ async def _warmup_throughput(
     teardown_variant_server(at.path)
     warmup_server_log = warmup_slot / "server.log"
     report_path = round_report_path(workspace)
-    warmup_error = (
+    found = argv_refusal(_measurement_server_log_path(warmup_server_log, workspace)) or RoundError(
         death_excerpt(str(warmup_server_log)) or redact_secret_values((pass_.proc.stderr or pass_.proc.stdout)[-2000:])
         if returncode != 0
-        else "warmup benchmark_report missing valid throughput/completed requests"
+        else "warmup benchmark_report missing valid throughput/completed requests",
+        "warmup_round_failed",
     )
     log.warning(
-        "grid_runner: variant %s aborted: warmup_round_failed (rc=%s): %s",
+        "grid_runner: variant %s aborted: %s (rc=%s): %s",
         _variant_tag(run, at),
+        found.error_class,
         returncode,
-        warmup_error[:200],
+        found.summary[:200],
     )
     _abort_variant(
         at,
-        _VariantFailure("warmup_round_failed", warmup_error),
+        _VariantFailure(found.error_class, found.summary),
         workspace=str(workspace) if run_ws is not None else None,
         report_path=str(report_path) if report_path.exists() else None,
         raw_result_path=measurement.get("raw_result_path"),
@@ -1142,7 +1139,7 @@ def _abort_without_workspace(
     proc = round_.proc
     returncode = proc.returncode
     server_log = at.path / "server.log"
-    found = _RoundError(
+    found = RoundError(
         death_excerpt(str(server_log))
         or (
             redact_secret_values((proc.stderr or proc.stdout)[-2000:])
@@ -1181,7 +1178,7 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
     workspace = outcome.measured.workspace
     report_path = round_report_path(workspace)
     server_log = at.path / "server.log"
-    found = _invalid_measurement_error(
+    found = argv_refusal(_measurement_server_log_path(server_log, workspace)) or _invalid_measurement_error(
         outcome.measured.round.proc,
         report=outcome.report,
         death_excerpt=death_excerpt(str(server_log)),

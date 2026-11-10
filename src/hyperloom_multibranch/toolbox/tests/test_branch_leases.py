@@ -88,6 +88,7 @@ async def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             spec_context(session, blob_root=str(session / "hosted" / "blobs")),
             options=LocalOptions(
                 poll_interval_sec=0.05,
+                infra_backoff_seconds=(),
                 runner_envs=runner_envs,
                 card_holders=card_holders,
                 card_guard=card_guard,

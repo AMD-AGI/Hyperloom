@@ -673,8 +673,9 @@ a resumed run.
 
 Every Orchestration turn is stateless: the Coordinator composes one
 unconditional full state projection (mission, `SharedState`, gaps,
-warm-start, scores, and the inbox events since the last turn), so the
-turn never depends on what an earlier turn happened to remember.
+warm-start, scores, the tasks in flight with each explore round's grid,
+and the inbox events since the last turn), so the turn never depends on
+what an earlier turn happened to remember.
 
 - **Cycle directive**: While SWEEP is open and another macro-cycle is
   still feasible, the Coordinator appends one handoff request to an ordinary
@@ -684,7 +685,7 @@ turn never depends on what an earlier turn happened to remember.
   entered; a turn that produced nothing usable leaves the directive empty.
 - **Context tools**: A read-only MCP surface lets the agent pull what the
   projection leaves out — finished outcomes (`get_recent_outcomes`),
-  in-flight work (`get_running_tasks`), failure packets (`get_failure` /
+  a mid-turn re-read of in-flight work (`get_running_tasks`), failure packets (`get_failure` /
   `get_variant_failures`), reference docs (`read_reference`), the raw
   `analysis.md` (`show_analysis_md`), denial history (`why_denied`) — plus
   Transports without MCP tools get the projection only.

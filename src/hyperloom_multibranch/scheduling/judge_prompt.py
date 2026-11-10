@@ -55,8 +55,8 @@ behind is no reason to stop it, as the commits it goes on making are what the in
     grace=f"{SETTLED_TESTS} of its explore tests",
     envelope="",
     default_focus="""\
-the largest op of the integration head's latest profile, or on none when that head was never
-profiled""",
+the largest ops of the integration head's latest profile in turn, the largest first, wrapping when more branches open
+than it has ops, or on none when that head was never profiled""",
     free_slot="Leaving a free slot unopened needs a reason; opening into it does not.",
     out_of_ideas="a branch out of ideas is one to stop and replace, so refill the free slots rather than stop the session",
 )

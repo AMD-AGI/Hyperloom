@@ -1314,7 +1314,7 @@ def test_a_session_final_cannot_run_over_exits_two_and_changes_nothing(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+    layout = _ended_before_final(tmp_path / "MB-20300102T030405Z-0123abcd")
     damage(layout)
     before = _tree(layout.root)
 
@@ -1331,7 +1331,7 @@ def test_a_session_final_cannot_run_over_exits_two_and_changes_nothing(
 def test_final_only_finishes_a_session_that_was_killed_before_it_could_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+    layout = _ended_before_final(tmp_path / "MB-20300102T030405Z-0123abcd")
     _killed(layout, ANOTHER_POD)
     finished: list[PersistedRun] = []
 
@@ -1364,7 +1364,7 @@ def test_final_only_over_a_path_that_is_no_directory_exits_two(
 def test_a_final_only_holds_the_session_against_a_second_one_and_releases_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+    layout = _ended_before_final(tmp_path / "MB-20300102T030405Z-0123abcd")
     persisted = persisted_run(layout.root)
 
     async def while_it_runs(run: PersistedRun, peer_factory: object, services: object) -> int:
@@ -1387,7 +1387,7 @@ def test_final_only_finishes_the_session_on_the_settings_its_manifest_holds(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setenv("USER_DATA_PATH", str(workspace))
-    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+    layout = _ended_before_final(tmp_path / "MB-20300102T030405Z-0123abcd")
 
     assert cli.main(["final-only", str(layout.root)]) == 0
 
@@ -1780,7 +1780,7 @@ def test_a_hosted_session_that_crashes_leaves_the_host_to_start_the_run_again(
 def test_a_restart_finishes_the_session_an_earlier_start_began_and_ends_the_run_for_good(
     host: Host, agent_cli: list[RunSettings], tmp_path: Path
 ) -> None:
-    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+    layout = _ended_before_final(tmp_path / "MB-20300102T030405Z-0123abcd")
     (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
     host.spec(multibranch=None)
 
@@ -1971,7 +1971,7 @@ def test_a_final_only_takes_its_log_off_when_it_ends(tmp_path: Path, monkeypatch
 def test_a_restart_over_a_session_that_already_chose_ends_the_run_for_good(
     host: Host, agent_cli: list[RunSettings], tmp_path: Path
 ) -> None:
-    layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
+    layout = _ended_before_final(tmp_path / "MB-20300102T030405Z-0123abcd")
     _report(layout, final={"chosen": {"commit": "c9"}})
     (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
 

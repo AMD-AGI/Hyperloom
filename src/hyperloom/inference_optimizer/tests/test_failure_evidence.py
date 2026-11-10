@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 from hyperloom.orchestrator.state.failure_evidence import (
     FAILURE_ATTRIBUTION_CANDIDATE,
     FAILURE_ATTRIBUTION_ENVIRONMENT,
@@ -34,6 +35,9 @@ class TestClassifyFailureAttribution:
             classify_failure_attribution(framework_changed=False, error_class="capability_unsupported")
             == FAILURE_ATTRIBUTION_CANDIDATE
         )
+
+    def test_an_argv_the_server_refused_is_the_candidates(self):
+        assert classify_failure_attribution(error_class=ARGV_INVALID) == FAILURE_ATTRIBUTION_CANDIDATE
 
     def test_candidate_specific_cli_error_is_publishable(self):
         assert (

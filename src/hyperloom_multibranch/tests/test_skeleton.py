@@ -409,6 +409,21 @@ class SilentModel(ScriptedCompletion):
 
 
 @dataclass
+class SlowModel(ScriptedCompletion):
+    """A judge model that answers ``seconds`` of virtual time after it is asked; ``asked`` holds when each call
+    started. A test double, not a placeholder."""
+
+    clock: VirtualClock = field(default_factory=lambda: VirtualClock(START))
+    seconds: float = 0.0
+    asked: list[float] = field(default_factory=list)
+
+    async def __call__(self, system: str, user: str) -> CompletionReply:
+        self.asked.append(self.clock.now())
+        await self.clock.sleep(self.seconds)
+        return await super().__call__(system, user)
+
+
+@dataclass
 class Stage:
     """One session on the specialist runtime: ``scripts`` and ``steps`` are what each branch's specialist does,
     ``explored`` what its tests and retests measure and ``measured`` what every other test does, the runtime refuses
@@ -1325,6 +1340,23 @@ async def test_a_judge_that_never_answers_gives_up_at_the_explore_deadline_and_o
     assert [row["reason"] for row in decisions if row["kind"] == "judge_failed"] == [
         "no answer by the EXPLORE deadline"
     ]
+
+
+async def test_no_judge_round_starts_when_too_little_of_explore_is_left_to_start_a_branch(tmp_path: Path) -> None:
+    interval = 500.0
+    stage = _stage(tmp_path)
+    stage.settings = replace(SETTINGS, judge_interval_seconds=interval)
+    stage.judge = SlowModel([OPENING, STEER], clock=stage.time, seconds=100.0)
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    [explore] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "explore"]
+    explore_end = float(str(explore["detail"]["explore_end"]))
+    steered = stage.judge.asked[1:]
+    assert steered and all(explore_end - at >= branches.SPECIALIST_START_SECONDS for at in steered)
+    assert explore_end - branches.SPECIALIST_START_SECONDS < steered[-1] + interval < explore_end
+    assert [row for row in _decisions(stage) if row["kind"] == "judge_failed"] == []
 
 
 def _decisions(stage: Stage) -> list[dict[str, object]]:
@@ -2423,6 +2455,7 @@ async def test_a_run_that_stops_after_its_map_keeps_a_map_generated_from_the_roo
 async def test_a_run_that_stops_after_its_map_and_gets_none_fails_with_why_and_keeps_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+
     async def mapping(_start: DossierStart) -> DossierOutcome:
         return DossierOutcome(None, None, "it refused its config: the pack has no dossier skill")
 
@@ -2494,7 +2527,6 @@ def _review_steps(stage: Stage) -> list[str]:
 def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: list[str]) -> tuple[Stage, Path, Path]:
     """A session of two Arbors with the review on, whose dossier pass writes a map and a dossier; the split records
     the map's text as it reads it."""
-
     map_file, dossier = _pass_wrote(tmp_path)
 
     async def split(
