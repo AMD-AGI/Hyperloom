@@ -24,7 +24,7 @@ and taken up again by :meth:`Session.finish`, which runs FINAL and CLOSE alone o
 carrying the stop reason that session ended with: the roster and the branches are the ones that session persisted,
 and only its report, dashboard and breakdown are written again. One that ended before PRELUDE recorded its baseline
 (:func:`prelude_landed`) has no candidate: the finish withdraws its unfinished tests and CLOSE reports why nothing was
-chosen.
+chosen. One that recorded it can be continued instead, without PRELUDE, by :meth:`Session.resume` (:func:`resumable_run`).
 """
 
 from __future__ import annotations
@@ -38,16 +38,18 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from hyperloom_common.jsonio import read_jsonl
 from hyperloom.common.outside_facts.image_check import ImageCheckReport, run_image_check
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
-from hyperloom_multibranch.contracts.fork import ShareRequest
+from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ShareRequest
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import NotRecorded, UsageSink
-from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, ManifestFingerprint, SessionProfile
-from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, LineageEvent, ManifestFingerprint
+from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
+from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -70,20 +72,24 @@ from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.agent_map import SharedMap
 from hyperloom_multibranch.scheduling.agent_plans import (
     AGENT_SOURCES_UNREAD,
+    DEALT,
     DOSSIER_ENDED,
     DOSSIER_SKIPPED,
     DOSSIER_STARTED,
     GENERATED_FOR,
-    GENERATED_MAP,
     MADE_BY_PASS,
     MADE_BY_SHARES,
     MAP_KEPT,
+    NO_DEAL,
+    NOTHING_TO_DEAL,
     ROOT_SHARES_READ,
     SHARES_TOO_LATE,
+    MapDealer,
     agent_plans,
     arbor_agents,
     generated_map,
     keep_map,
+    map_dealer,
 )
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
@@ -101,7 +107,7 @@ from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION, PLAYBOOK_JUDGE_PROMPT_VERSION
-from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
+from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, LaunchIsolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.llm import recorded
@@ -116,6 +122,7 @@ from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.prelude import (
     Prelude,
+    baseline_decision,
     PreludeFailed,
     PreludeResult,
     PreludeServices,
@@ -151,7 +158,8 @@ from hyperloom_multibranch.scheduling.stops import (
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.widening import Widening
 from hyperloom_multibranch.specialist.agent_onboarding import ROOT_PROFILE_SOURCE, AttemptFailed
-from hyperloom_multibranch.specialist.arbor_adapter import REVIEW_HOST, REVIEW_OFF, SplitFailed
+from hyperloom_multibranch.specialist.arbor_adapter import REVIEW_HOST, REVIEW_OFF
+from hyperloom_multibranch.specialist.arbor_map import SplitFailed
 from hyperloom_multibranch.specialist.map_session import MapCalls
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 
@@ -273,6 +281,7 @@ class Session:
         self._desk = desk
         self._prelude: PreludeResult | None = None
         self._map_shares: tuple[RootShares | None] | None = None
+        self._dealer: MapDealer | None = None
         self._explore_end = math.inf
         peers = peer_factory(self._peer_setup(desk, services))
         context = SchedulerContext(
@@ -345,7 +354,7 @@ class Session:
             settings.agent_dossier,
             # The session's review stands in for each Arbor's own; without one, nobody's does.
             REVIEW_HOST if settings.review_gate else REVIEW_OFF,
-            MapCalls(self._map_start, self._map_split) if settings.agents else None,
+            MapCalls(self._map_start, self._map_split, self._deal) if settings.agents else None,
             settings.agent_share_minutes,
             settings.inferencex_commit,
             settings.agentx_early_stop,
@@ -452,6 +461,30 @@ class Session:
         work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended)
         return await self._run_and_close(work, ending, budget, hard_stop)
 
+    async def resume(self, ended: SessionStopReason) -> SessionOutcome:
+        """Continue the session an earlier run left here, which ended for ``ended`` before FINAL, with EXPLORE, FINAL
+        and CLOSE and no PRELUDE (:meth:`Prelude.landed`). The deadline moves by the time since the last decision that
+        run recorded, kept in the manifest. That run's tests are withdrawn and its open branches stopped, the roster
+        and the integration branch open again, and EXPLORE opens new branches on the integration head."""
+
+        budget = self._resumed_budget(ended)
+        self._processes.record_scheduler()
+        self._image_check = await asyncio.to_thread(run_image_check)
+        hard_stop = HardStop(budget, self._clock)
+        aborted = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
+        return await self._run_and_close(self._resumed_phases(budget, ended), aborted, budget, hard_stop)
+
+    def _resumed_budget(self, ended: SessionStopReason) -> SessionBudget:
+        """The session's budget moved by its downtime, written to the manifest and recorded as a ``resume`` phase."""
+
+        manifest = read_manifest(self._layout.manifest)
+        stopped_at = float(read_jsonl(self._layout.decisions)[-1]["at"])
+        downtime = max(self._clock.now() - stopped_at, 0.0)
+        deadline = manifest.deadline + downtime
+        replace(manifest, deadline=deadline).write(self._layout.manifest)
+        self._phase("resume", ended=ended.value, downtime_seconds=downtime, deadline=deadline)
+        return SessionBudget(manifest.started_at, deadline - manifest.started_at)
+
     async def _run_and_close(
         self, work: Awaitable[SessionOutcome], ending: SessionOutcome, budget: SessionBudget, hard_stop: HardStop
     ) -> SessionOutcome:
@@ -555,6 +588,22 @@ class Session:
         if self._settings.stop_after_map:
             # Its stop is the review point: the map is kept and reviewed offline, so the session does not pause.
             return await self._stop_after_map(prelude)
+        return await self._explore_and_final(prelude, budget)
+
+    async def _resumed_phases(self, budget: SessionBudget, ended: SessionStopReason) -> SessionOutcome:
+        await self._take_up(ended)
+        await self._stopper.end_exploration(ended)
+        if self._roster.reopen():
+            reopen = LineageEvent(LineageKind.REOPEN, INTEGRATION_BRANCH, reason=f"resumed after {ended.value}")
+            await self._blackboard.record_lineage(reopen)
+        await self._branches.push_quota()
+        prelude = await self._prelude.landed()
+        self._briefs.references = await asyncio.to_thread(self._reference_leads, prelude.profile)
+        await self._adopt_playbook()
+        await self._record_versions()
+        return await self._explore_and_final(prelude, budget)
+
+    async def _explore_and_final(self, prelude: PreludeResult, budget: SessionBudget) -> SessionOutcome:
         self._prelude = prelude
         try:
             opening = await self._agent_branches(prelude)
@@ -618,9 +667,7 @@ class Session:
             if settings.agent_directions and settings.review_gate and await self._arbors():
                 dossier = Path(settings.agent_dossier) if settings.agent_dossier else None
                 await self._review(Path(settings.agent_directions), dossier, MADE_BY_USER)
-            plans = await agent_plans(settings.agents, settings.agent_directions, work)
-            await self._hand_map(settings.agent_directions, plans)
-            return AgentBranches(settings.agents, plans)
+            return AgentBranches(settings.agents, await self._split(settings.agents, settings.agent_directions))
         arbors = await self._arbors()
         if not arbors or (len(arbors) < GENERATED_FOR and not settings.review_gate):
             return AgentBranches(settings.agents, await agent_plans(settings.agents, "", work))
@@ -680,25 +727,79 @@ class Session:
                 return f"the map was rejected at its review ({exc}); no share branch opens"
             if late := await self._too_late(branch, map_for, "after the review"):
                 return late
-        work = self._layout.agent_plans
-        given = () if shares is None else (shares.shares, shares.source)
-        plans = await agent_plans(map_for, map_file, work, *given)
-        await self._hand_map(map_file, plans)
+        plans = await self._split(map_for, map_file, shares)
         answers = []
         for agent, plan in zip(map_for, plans):
-            admission = await self._desk.admit_share(ShareRequest(branch, start_commit, agent, plan))
+            admission = await self._admit_share(ShareRequest(branch, start_commit, agent, plan))
             answers.append(f"{admission.branch or admission.reason} ({admission.status.value})")
         split = "split" if any(plans) else "not split, each Arbor maps its own"
         return f"{len(map_for)} share branches asked, the map {split}: {', '.join(answers)}"
 
-    async def _hand_map(self, map_file: str, plans: tuple[str, ...]) -> None:
-        """Keep the map ``plans`` were split from on the blackboard (:mod:`agent_map`), for the open areas, the briefs,
-        the menu and the judge to read: ``map_file``, or the one generated from the root's shares when it is ``""``;
-        none when nothing was split."""
+    async def _split(self, agents: tuple[str, ...], map_file: str, shares: RootShares | None = None) -> tuple[str, ...]:
+        """Each of ``agents``' share of ``map_file``, as :func:`agent_plans` splits it, or a map it generates from the
+        root's ``shares``; the map it split is kept to deal from, and on the blackboard (:mod:`agent_map`) for the open
+        areas, the briefs, the menu and the judge to read."""
 
-        if any(plans):
-            given = Path(map_file) if map_file else self._layout.agent_plans / GENERATED_MAP
-            await self._branches.record_map(SharedMap.read(given, plans))
+        work = self._layout.agent_plans
+        given = () if shares is None else (shares.shares, shares.source)
+        plans = await agent_plans(agents, map_file, work, *given)
+        self._dealer = map_dealer(map_file, plans, work)
+        if self._dealer is not None:
+            await self._branches.record_map(SharedMap.read(self._dealer.map_file, plans), self._dealer)
+        return plans
+
+    async def _deal(self, branch: str, agent: str, plan: str, report: Path) -> str:
+        """Fold the ``report`` of the Arbor ``agent`` whose branch ``branch`` handed its share ``plan`` back into the
+        session's map, and ask the fork desk for a share branch, cut at the integration head, on the next order its
+        master deals; the branch takes the slot ``branch`` frees once it stops. None when no map was split, too little
+        time is left for an Arbor iteration, Arbor cannot deal or nothing is left to deal: the slot then goes to the
+        judge's refill. The report is folded in whether or not an order is dealt. Each deal is a ``SHARE`` decision of
+        ``branch``; what was done, for its notice."""
+
+        detail: dict[str, object] = {"agent": agent, "plan": plan, "report": str(report)}
+        dealer = self._dealer
+        if dealer is None:
+            return self._no_deal(branch, detail, "no map was split for this session's Arbors")
+        dealer.hand_back(plan, report)
+        order = None
+        why = await self._too_late(branch, (agent,), "at the deal")
+        arbors = {} if why else await self._arbors()
+        if arbors:
+            try:
+                order = await dealer.deal(arbors[min(arbors)])
+            except SplitFailed as exc:
+                why = f"Arbor cannot deal: {exc}"
+        await self._branches.record_deal(report, order)
+        why = why or ("" if arbors else "no Arbor source to deal with")
+        if why:
+            return self._no_deal(branch, detail, why)
+        return await self._deal_to(branch, agent, order, detail)
+
+    def _no_deal(self, branch: str, detail: dict[str, object], why: str) -> str:
+        self._decisions.record(Decision(DecisionKind.SHARE, NO_DEAL, branch, {**detail, "why": why}))
+        return f"no order is dealt: {why}"
+
+    async def _deal_to(self, branch: str, agent: str, order: Path | None, detail: dict[str, object]) -> str:
+        """Ask the fork desk for a share branch of the Arbor ``agent`` on ``order``, cut at the integration head, in
+        the slot ``branch`` frees; none for no order. An order whose branch the desk rejects is no longer held."""
+
+        if order is None:
+            self._decisions.record(Decision(DecisionKind.SHARE, NOTHING_TO_DEAL, branch, detail))
+            return "nothing is left to deal; the slot goes to the judge's refill"
+        head = await self._repo.head(INTEGRATION_BRANCH)
+        admission = await self._admit_share(ShareRequest(branch, head, agent, str(order)))
+        dealt = {**detail, "order": str(order), "branch": admission.branch, "status": admission.status.value}
+        self._decisions.record(Decision(DecisionKind.SHARE, DEALT, branch, dealt))
+        return f"the next order {order.name} is dealt to {admission.branch or admission.reason}"
+
+    async def _admit_share(self, request: ShareRequest) -> ForkAdmission:
+        """Ask the fork desk for the share branch ``request`` names; a share or an order whose branch it rejects is no
+        longer held, so the master deals its directions again."""
+
+        admission = await self._desk.admit_share(request)
+        if admission.status is AdmissionStatus.REJECTED and self._dealer is not None:
+            self._dealer.release(request.plan)
+        return admission
 
     async def _too_late(self, branch: str, map_for: tuple[str, ...], step: str) -> str:
         """Why the shares of ``map_for`` do not open when each would now run less than ``--agent-share-minutes``
@@ -846,8 +947,7 @@ class Session:
         belong to branches that are over: they are withdrawn, and the quota then admits FINAL's validation alone.
         """
 
-        await self._toolbox.start()
-        await self._toolbox.withdraw_all(ended.value)
+        await self._take_up(ended)
         await self._toolbox.set_policy(final_quota(self._settings.caps))
         return await self._final(candidates, ended)
 
@@ -856,10 +956,15 @@ class Session:
         again from its submit log, which re-attaches a measurement still running, and withdraws them, so CLOSE ends
         their sandboxes instead of leaving them to hold the grant's slots until they time out."""
 
-        await self._toolbox.start()
-        await self._toolbox.withdraw_all(ended.value)
+        await self._take_up(ended)
         self._decisions.record(Decision(DecisionKind.FINAL, NO_BASELINE, detail={"chosen": None}))
         return SessionOutcome(ended, None, None, NO_BASELINE)
+
+    async def _take_up(self, ended: SessionStopReason) -> None:
+        """Start the toolbox, which takes up an earlier run's unfinished tests from its log, and withdraw them."""
+
+        await self._toolbox.start()
+        await self._toolbox.withdraw_all(ended.value)
 
     async def _final(self, candidates: FinalCandidates, reason: SessionStopReason) -> SessionOutcome:
         self._in_final = True
@@ -1106,6 +1211,26 @@ def persisted_run(root: Path) -> PersistedRun:
     return persisted
 
 
+def resumable_run(root: Path) -> PersistedRun:
+    """:func:`persisted_run` for :meth:`Session.resume`; raises ValueError too when PRELUDE recorded no baseline or not
+    the decision that names it, the session was measured in a grant's sandboxes, which a resume does not lease again,
+    or it was to stop once its map was made. Writes nothing."""
+
+    persisted = persisted_run(root)
+    layout = SessionLayout(root)
+    if not prelude_landed(root) or baseline_decision(read_jsonl(layout.decisions)) is None:
+        raise ValueError(f"the session in {root} recorded no baseline to resume from; start a new session")
+    isolation = read_manifest(layout.manifest).agent_isolation
+    if isolation is not None and isolation.tests == HOSTED:
+        raise ValueError(
+            f"the session in {root} was measured in a grant's sandboxes and a resume measures on this machine's cards;"
+            " start a new session"
+        )
+    if persisted.settings.stop_after_map:
+        raise ValueError(f"the session in {root} was to stop once its map was made, so it has no EXPLORE to resume")
+    return persisted
+
+
 def persisted_session(root: Path) -> PersistedRun:
     """:func:`persisted_run` on any build: for a session that recorded no baseline, which a restart only closes, so
     nothing it measured is read back."""
@@ -1137,4 +1262,5 @@ __all__ = [
     "persisted_session",
     "prelude_landed",
     "recorded_baseline",
+    "resumable_run",
 ]
