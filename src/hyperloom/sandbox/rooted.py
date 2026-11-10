@@ -43,12 +43,15 @@ class _Walk:
     """One walk from ``root``: the descriptors of the directories it is in, the root's first, and the links followed."""
 
     def __init__(self, root: Path, virtual: str) -> None:
+        self.root = root
         self.virtual = virtual
         self.roots = [_parts(os.path.abspath(root)), _parts(os.path.realpath(root))]
-        self.stack = [os.open(root, _DIRECTORY)]
+        self.stack: list[int] = []
         self.links = 0
 
     def __enter__(self) -> _Walk:
+        """The walk from the root, whose descriptor is opened here and closed on exit with every other."""
+        self.stack.append(os.open(self.root, _DIRECTORY))
         return self
 
     def __exit__(self, *_exc: object) -> None:
