@@ -19,6 +19,7 @@ from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTrack
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
 from kernelforge.workflows.forge_loop.iteration import attempt_verdict, campaign_runtime, scoring_runtime
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig, LoopAgents
+from kernelforge.workflows.forge_loop.roles.contracts import PublishedLane
 from kernelforge.workflows.forge_loop.roles.slot_selector import SelectorAnswer
 from kernelforge.workflows.forge_loop.search.agent_relay import (
     AgentAvailabilitySnapshot,
@@ -101,6 +102,7 @@ class _Planning:
         assert workspace.is_dir() and _git(workspace, "rev-parse", "HEAD") == context.analysis_commit
         assert Path(context.source_map_path).is_relative_to(workspace)
         brief = context.program_context
+        approaches: tuple[PublishedLane, ...] = ()
         if "BRANCH" in brief:
             plans = (
                 "## Direction\n- name: fast table\n- hypothesis: smaller value\n- expected ceiling: 2x\n"
@@ -108,19 +110,23 @@ class _Planning:
                 "## Direction\n- name: structural route\n- hypothesis: pays later\n- expected ceiling: 3x\n"
                 "- fails if: never faster\n\nset VALUE = 12",
             )
+            approaches = (
+                PublishedLane(1, approach="shrink the table", focus_cases=("case",)),
+                PublishedLane(2, approach="restructure the loop"),
+            )
         elif "DEEPEN direction d002" in brief:
             plans = ("set VALUE = 11",)
         else:
             plans = ("set VALUE = 4",)
         # The tree decides the lanes: one assignment per slot planned here.
         assert len(context.lane_assignments) == lanes
-        return _planned(plans[:lanes])
+        return _planned(plans[:lanes], approaches[:lanes])
 
 
-def _planned(plans: tuple[str, ...]) -> SimpleNamespace:
+def _planned(plans: tuple[str, ...], lanes: tuple[PublishedLane, ...] = ()) -> SimpleNamespace:
     """A planning result whose plans are for lanes 1, 2, ... in order."""
-    lanes = {"planned": len(plans), "published_lane_ids": list(range(1, len(plans) + 1))}
-    return SimpleNamespace(optimization_plans=plans, structured_output_diagnostics={"lanes": lanes})
+    published = lanes or tuple(PublishedLane(lane_id) for lane_id in range(1, len(plans) + 1))
+    return SimpleNamespace(optimization_plans=plans, published_lanes=published, structured_output_diagnostics={})
 
 
 def _lane_factory(_lane_dir, _serialized_driver):
@@ -256,6 +262,8 @@ def test_a_round_keeps_a_slower_route_and_publishes_the_faster_one(tmp_path, mon
     assert [round(node.score, 3) for node in tree.nodes] == [1.0, 2.0, 0.833]
     assert [item.name for item in tree.directions] == ["fast table", "structural route"]
     fast, slow = tree.nodes[1], tree.nodes[2]
+    # Each node keeps what set its lane apart, for the selector to read in later rounds.
+    assert (fast.approach, fast.focus_cases, slow.approach) == ("shrink the table", ("case",), "restructure the loop")
     assert tree.published_best == fast.commit
     assert (workspace / "kernel.py").read_text() == "VALUE = 5\n"
     assert _git(workspace, "rev-parse", "HEAD^{tree}") == _git(workspace, "rev-parse", f"{fast.commit}^{{tree}}")
