@@ -43,7 +43,7 @@ from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
-from hyperloom_multibranch.contracts.fork import ShareRequest
+from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ShareRequest
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import NotRecorded, UsageSink
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, ManifestFingerprint, SessionProfile
@@ -687,7 +687,7 @@ class Session:
         plans = await self._split(map_for, map_file, shares)
         answers = []
         for agent, plan in zip(map_for, plans):
-            admission = await self._desk.admit_share(ShareRequest(branch, start_commit, agent, plan))
+            admission = await self._admit_share(ShareRequest(branch, start_commit, agent, plan))
             answers.append(f"{admission.branch or admission.reason} ({admission.status.value})")
         split = "split" if any(plans) else "not split, each Arbor maps its own"
         return f"{len(map_for)} share branches asked, the map {split}: {', '.join(answers)}"
@@ -710,37 +710,53 @@ class Session:
         session's map, and ask the fork desk for a share branch, cut at the integration head, on the next order its
         master deals; the branch takes the slot ``branch`` frees once it stops. None when no map was split, too little
         time is left for an Arbor iteration, Arbor cannot deal or nothing is left to deal: the slot then goes to the
-        judge's refill. Each deal is a ``SHARE`` decision of ``branch``; what was done, for its notice."""
+        judge's refill. The report is folded in whether or not an order is dealt. Each deal is a ``SHARE`` decision of
+        ``branch``; what was done, for its notice."""
 
         detail: dict[str, object] = {"agent": agent, "plan": plan, "report": str(report)}
         dealer = self._dealer
-        why = "no map was split for this session's Arbors" if dealer is None else ""
-        why = why or await self._too_late(branch, (agent,), "at the deal")
+        if dealer is None:
+            return self._no_deal(branch, detail, "no map was split for this session's Arbors")
+        dealer.hand_back(plan, report)
+        order = None
+        why = await self._too_late(branch, (agent,), "at the deal")
         arbors = {} if why else await self._arbors()
-        if dealer is not None and arbors:
+        if arbors:
             try:
-                order = await dealer.deal(arbors[min(arbors)], plan, report)
+                order = await dealer.deal(arbors[min(arbors)])
             except SplitFailed as exc:
                 why = f"Arbor cannot deal: {exc}"
-            else:
-                await self._branches.record_deal(report, order)
-                return await self._deal_to(branch, agent, order, detail)
-        why = why or "no Arbor source to deal with"
+        await self._branches.record_deal(report, order)
+        why = why or ("" if arbors else "no Arbor source to deal with")
+        if why:
+            return self._no_deal(branch, detail, why)
+        return await self._deal_to(branch, agent, order, detail)
+
+    def _no_deal(self, branch: str, detail: dict[str, object], why: str) -> str:
         self._decisions.record(Decision(DecisionKind.SHARE, NO_DEAL, branch, {**detail, "why": why}))
         return f"no order is dealt: {why}"
 
     async def _deal_to(self, branch: str, agent: str, order: Path | None, detail: dict[str, object]) -> str:
         """Ask the fork desk for a share branch of the Arbor ``agent`` on ``order``, cut at the integration head, in
-        the slot ``branch`` frees; none for no order."""
+        the slot ``branch`` frees; none for no order. An order whose branch the desk rejects is no longer held."""
 
         if order is None:
             self._decisions.record(Decision(DecisionKind.SHARE, NOTHING_TO_DEAL, branch, detail))
             return "nothing is left to deal; the slot goes to the judge's refill"
         head = await self._repo.head(INTEGRATION_BRANCH)
-        admission = await self._desk.admit_share(ShareRequest(branch, head, agent, str(order)))
+        admission = await self._admit_share(ShareRequest(branch, head, agent, str(order)))
         dealt = {**detail, "order": str(order), "branch": admission.branch, "status": admission.status.value}
         self._decisions.record(Decision(DecisionKind.SHARE, DEALT, branch, dealt))
         return f"the next order {order.name} is dealt to {admission.branch or admission.reason}"
+
+    async def _admit_share(self, request: ShareRequest) -> ForkAdmission:
+        """Ask the fork desk for the share branch ``request`` names; a share or an order whose branch it rejects is no
+        longer held, so the master deals its directions again."""
+
+        admission = await self._desk.admit_share(request)
+        if admission.status is AdmissionStatus.REJECTED and self._dealer is not None:
+            self._dealer.release(request.plan)
+        return admission
 
     async def _too_late(self, branch: str, map_for: tuple[str, ...], step: str) -> str:
         """Why the shares of ``map_for`` do not open when each would now run less than ``--agent-share-minutes``

@@ -66,6 +66,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     LeaseStart,
     LlmUsage,
     BlackboardSnapshot,
+    MapDirection,
     OpShares,
     PendingCandidate,
     QuarantineEvent,
@@ -122,6 +123,7 @@ from hyperloom_multibranch.scheduling.budget import (
 )
 from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling import events
+from hyperloom_multibranch.scheduling import forks as fork_desk
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE, PROFILED
 from hyperloom_multibranch.scheduling.explore import (
     EXPLORE_TICK_SECONDS,
@@ -214,6 +216,7 @@ from hyperloom_multibranch.scheduling.agent_plans import (
     MADE_BY_PASS,
     MADE_BY_SHARES,
     MAP_KEPT,
+    NO_DEAL,
     NOTHING_TO_DEAL,
     ROOT_SHARES_READ,
     SHARES_TOO_LATE,
@@ -2232,13 +2235,26 @@ def _directions_file(path: Path, *entries: dict[str, str]) -> str:
     return str(path)
 
 
+def _hands_back(stage: Stage, report: Path, seconds: float) -> Callable[[str], Awaitable[None]]:
+    """A branch's step that hands its share back ``seconds`` after its branch started, as the adapter does: it gives
+    the scheduler its worker ``report``, then finishes ``reported``."""
+
+    async def step(branch: str) -> None:
+        await stage.time.sleep(seconds)
+        maps = stage.setup.agent_maps
+        assert maps is not None
+        said = await maps.deal(branch, stage.sessions.agents[branch], stage.sessions.plans[branch], report)
+        raise SessionFinished(f"the agent finished its run: reported; {said}")
+
+    return step
+
+
 def _one_reports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, order: list[dict[str, str]]
 ) -> tuple[Stage, list[DealRequest], Path]:
     """A session of two Arbors on their shares of a given map, ``b01`` on ``m-attn`` and ``b02`` on ``m-moe``, in which
-    ``b01`` hands its share back after :data:`REPORT_SECONDS` as the adapter does: it gives the scheduler its worker
-    report, which closes ``m-attn``, then finishes ``reported``. Arbor's master deals ``order``; every deal asked is
-    kept, with the report ``b01`` gave."""
+    ``b01`` hands its share back after :data:`REPORT_SECONDS` with a worker report that closes ``m-attn``. Arbor's
+    master deals ``order``; every deal asked is kept, with the report ``b01`` gave."""
 
     asked: list[DealRequest] = []
     titles = {"m-attn": "attention decode path", "m-moe": "MoE GEMM tables", "m-allreduce": "custom all-reduce"}
@@ -2259,13 +2275,6 @@ def _one_reports(
         request.out.write_text(json.dumps({"directions": order}))
         return request.out
 
-    async def reports(branch: str) -> None:
-        await stage.time.sleep(REPORT_SECONDS)
-        maps = stage.setup.agent_maps
-        assert maps is not None
-        said = await maps.deal(branch, stage.sessions.agents[branch], stage.sessions.plans[branch], report)
-        raise SessionFinished(f"the agent finished its run: reported; {said}")
-
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
     monkeypatch.setattr(agent_plans_module, "deal_order", deal)
@@ -2273,9 +2282,13 @@ def _one_reports(
     stage.settings = replace(
         SETTINGS, agents=("/agents/arbor", "/agents/arbor"), agent_directions=str(tmp_path / "d.json")
     )
-    stage.steps = {"b01": reports}
+    stage.steps = {"b01": _hands_back(stage, report, REPORT_SECONDS)}
     stage.judge = ScriptedCompletion([])
     return stage, asked, report
+
+
+async def _map_record(stage: Stage) -> dict[str, MapDirection]:
+    return {item.id: item for item in (await stage.handle(Role.OBSERVER).snapshot()).agent_map}
 
 
 async def test_a_reported_arbor_is_stopped_as_finished_and_its_slot_dealt_the_next_order_once_its_cards_are_back(
@@ -2307,7 +2320,7 @@ async def test_a_reported_arbor_is_stopped_as_finished_and_its_slot_dealt_the_ne
     ]
     assert stop < entered
     # The map record follows the deal: the report's verdict, and the new branch holding the order it opened on.
-    recorded = {item.id: item for item in (await stage.handle(Role.OBSERVER).snapshot()).agent_map}
+    recorded = await _map_record(stage)
     assert (recorded["m-attn"].status, recorded["m-attn"].why) == ("done", "KEEP 1")
     assert {key: recorded[key].holder for key in ("m-moe", "m-allreduce")} == {"m-moe": "b02", "m-allreduce": share}
 
@@ -2323,6 +2336,45 @@ async def test_a_reported_arbor_with_nothing_left_to_deal_frees_its_slot_for_the
     assert len(asked) == 1 and _shares(stage) == {}
     assert [row["branch"] for row in _decisions(stage) if row["reason"] == NOTHING_TO_DEAL] == ["b01"]
     assert not [row for row in _decisions(stage) if row["kind"] == "share" and row["detail"].get("status")]
+
+
+async def test_a_report_arbor_cannot_deal_on_is_still_folded_into_the_map_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage, _asked, _report = _one_reports(tmp_path, monkeypatch, [{"id": "m-allreduce"}])
+
+    async def fails(_checkout: Path, request: DealRequest) -> Path:
+        raise SplitFailed("`python3 -m arbor.roles deal` exited 1")
+
+    monkeypatch.setattr(agent_plans_module, "deal_order", fails)
+
+    await stage.run()
+
+    [none] = [row for row in _decisions(stage) if row["reason"] == NO_DEAL]
+    assert none["branch"] == "b01" and none["detail"]["why"].startswith("Arbor cannot deal")
+    recorded = await _map_record(stage)
+    assert (recorded["m-attn"].status, recorded["m-attn"].why) == ("done", "KEEP 1")
+    assert {key: recorded[key].holder for key in ("m-moe", "m-allreduce")} == {"m-moe": "b02", "m-allreduce": ""}
+
+
+async def test_an_order_whose_branch_the_fork_desk_rejects_is_no_longer_held_at_the_next_deal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage, asked, first = _one_reports(tmp_path, monkeypatch, [{"id": "m-allreduce"}])
+    second = worker_report(tmp_path / "worker_report-2.json", {"id": "m-moe", "status": "killed", "why": "no gain"})
+    stage.steps["b02"] = _hands_back(stage, second, REPORT_SECONDS + 60.0)
+    monkeypatch.setattr(
+        fork_desk, "_share_refusal", lambda _roster, request: "full" if "order-" in request.plan else ""
+    )
+
+    await stage.run()
+
+    assert [row["detail"]["status"] for row in _decisions(stage) if row["reason"] == DEALT] == ["rejected"] * 2
+    # Neither the rejected order nor the share of b02, which reported, is held at the second deal.
+    assert [(request.reports, request.held) for request in asked] == [
+        ((first,), (tmp_path / "share-2.json",)),
+        ((first, second), ()),
+    ]
 
 
 #: Two agents' keeps, each a gain alone and more together: ``a1`` and ``a2`` both land on the integration branch.

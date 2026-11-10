@@ -9,6 +9,7 @@ directions no report settled, two reports did not give back open and no held ord
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -149,21 +150,24 @@ async def test_a_reporting_worker_s_slot_is_dealt_open_directions_no_report_sett
     dealer = map_dealer(_map(tmp_path, DEAL_MAP), (first, "", second), tmp_path / "work")
     assert dealer is not None
 
-    order = await dealer.deal(Path(arbor), first, _report(tmp_path, "r1", {"id": "m-attn", "status": "done"}))
+    dealer.hand_back(first, _report(tmp_path, "r1", {"id": "m-attn", "status": "done"}))
+    order = await dealer.deal(Path(arbor))
 
     # m-moe is held by the running worker, m-rope was closed in the map; at most two by rank.
     assert order is not None and _ids(str(order)) == ["m-allreduce", "m-sampler"]
 
-    back = _report(tmp_path, "r2", {"id": "m-sampler", "status": "done"}, left_open=("m-allreduce",))
-    again = await dealer.deal(Path(arbor), str(order), back)
+    dealer.hand_back(
+        str(order), _report(tmp_path, "r2", {"id": "m-sampler", "status": "done"}, left_open=("m-allreduce",))
+    )
+    again = await dealer.deal(Path(arbor))
 
     # Given back open once, m-allreduce is dealt again; the closed m-attn and m-sampler stay closed.
     assert again is not None and _ids(str(again)) == ["m-allreduce"]
 
-    spent = _report(tmp_path, "r3", left_open=("m-allreduce",))
+    dealer.hand_back(str(again), _report(tmp_path, "r3", left_open=("m-allreduce",)))
 
     # Given back open by a second worker, m-allreduce is exhausted: every report is passed, so it is not reopened.
-    assert await dealer.deal(Path(arbor), str(again), spent) is None
+    assert await dealer.deal(Path(arbor)) is None
 
 
 async def test_arbor_s_own_master_settles_what_a_worker_report_closed(tmp_path: Path) -> None:
@@ -172,10 +176,42 @@ async def test_arbor_s_own_master_settles_what_a_worker_report_closed(tmp_path: 
     assert dealer is not None
 
     closed = ({"id": "m-allreduce", "status": "killed", "why": "no gain"}, {"id": "m-sampler", "status": "done"})
-    order = await dealer.deal(VENDORED_ARBOR, share, _report(tmp_path, "r1", *closed, left_open=("m-attn",)))
+    dealer.hand_back(share, _report(tmp_path, "r1", *closed, left_open=("m-attn",)))
+    order = await dealer.deal(VENDORED_ARBOR)
 
     # The vendored Arbor reads the report as the fake master does: m-attn back open, the two it closed settled.
     assert order is not None and _ids(str(order)) == ["m-attn", "m-moe"]
+
+
+async def test_two_workers_reporting_at_once_are_never_dealt_the_same_direction(tmp_path: Path) -> None:
+    arbor, _ = _agents(tmp_path)
+    first, second = _share(tmp_path, "share-1", "m-attn"), _share(tmp_path, "share-2", "m-moe")
+    dealer = map_dealer(_map(tmp_path, DEAL_MAP), (first, second), tmp_path / "work")
+    assert dealer is not None
+
+    dealer.hand_back(first, _report(tmp_path, "r1", {"id": "m-attn", "status": "done"}))
+    dealer.hand_back(second, _report(tmp_path, "r2", {"id": "m-moe", "status": "done"}))
+    orders = await asyncio.gather(dealer.deal(Path(arbor)), dealer.deal(Path(arbor)))
+
+    # The second deal holds the order the first dealt: what is left is all in one order.
+    assert [None if order is None else _ids(str(order)) for order in orders] == [["m-allreduce", "m-sampler"], None]
+
+
+async def test_an_order_no_branch_runs_is_dealt_again(tmp_path: Path) -> None:
+    arbor, _ = _agents(tmp_path)
+    first, second = _share(tmp_path, "share-1", "m-attn"), _share(tmp_path, "share-2", "m-moe")
+    dealer = map_dealer(_map(tmp_path, DEAL_MAP), (first, second), tmp_path / "work")
+    assert dealer is not None
+
+    dealer.hand_back(first, _report(tmp_path, "r1", {"id": "m-attn", "status": "done"}))
+    order = await dealer.deal(Path(arbor))
+    assert order is not None
+    dealer.release(str(order))
+    dealer.release(second)
+
+    again = await dealer.deal(Path(arbor))
+
+    assert again is not None and _ids(str(again)) == ["m-moe", "m-allreduce"]
 
 
 async def test_with_every_open_direction_settled_or_held_the_deal_leaves_the_slot_without_an_order(
@@ -186,15 +222,10 @@ async def test_with_every_open_direction_settled_or_held_the_deal_leaves_the_slo
     dealer = map_dealer(_map(tmp_path, DEAL_MAP), (first, second), tmp_path / "work")
     assert dealer is not None
 
-    report = _report(
-        tmp_path,
-        "r1",
-        {"id": "m-attn", "status": "done"},
-        {"id": "m-allreduce", "status": "dropped"},
-        {"id": "m-sampler", "status": "done"},
-    )
+    closed = ({"id": "m-attn", "status": "done"}, {"id": "m-allreduce", "status": "dropped"})
+    dealer.hand_back(first, _report(tmp_path, "r1", *closed, {"id": "m-sampler", "status": "done"}))
 
-    assert await dealer.deal(Path(arbor), first, report) is None
+    assert await dealer.deal(Path(arbor)) is None
 
 
 async def test_an_arbor_with_no_master_cannot_deal_and_a_split_that_dealt_no_share_keeps_no_map(
@@ -205,6 +236,7 @@ async def test_an_arbor_with_no_master_cannot_deal_and_a_split_that_dealt_no_sha
     dealer = map_dealer(_map(tmp_path, DEAL_MAP), (share,), tmp_path / "work")
     assert dealer is not None
 
+    dealer.hand_back(share, _report(tmp_path, "r1", {"id": "m-attn", "status": "done"}))
     with pytest.raises(SplitFailed, match="arbor.roles"):
-        await dealer.deal(old, share, _report(tmp_path, "r1", {"id": "m-attn", "status": "done"}))
+        await dealer.deal(old)
     assert map_dealer(_map(tmp_path), ("", ""), tmp_path / "none") is None

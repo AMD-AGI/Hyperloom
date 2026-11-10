@@ -30,7 +30,8 @@ ends; the master folds every report so far into the map and deals the slot the w
 :data:`DEAL_SIZE` open directions that no report settled and no running worker holds, a direction reported back open
 by two workers never again (:func:`~hyperloom_multibranch.specialist.arbor_adapter.deal_order`). The scheduler asks the fork desk for a share
 branch on that order, which takes the slot once the worker's branch has stopped and its cards are back. An empty order
-asks for none, and the slot goes to the judge's refill. A worker's order stays held until it reports.
+asks for none, and the slot goes to the judge's refill. A worker's order stays held until it reports, or until the
+fork desk rejects the branch asked on it.
 
 A session that stops after its map (``--stop-after-map``) maps for one Arbor too, splits nothing, and keeps the map and
 the dossier beside it for a person to review (:func:`keep_map`); the run after the review is given them back.
@@ -38,6 +39,7 @@ the dossier beside it for a person to review (:func:`keep_map`); the run after t
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shutil
@@ -168,29 +170,43 @@ async def generated_map(arbor: Path, root_shares: OpShares | None, source: str, 
 
 class MapDealer:
     """The session's split map, which Arbor's master deals from: the orders dealt and not yet reported on, and the
-    reports the workers handed back, every one of them passed to every later deal so that the map stays folded."""
+    reports the workers handed back, every one of them passed to every later deal so that the map stays folded. Deals
+    run one at a time, so that each holds every order dealt before it."""
 
     def __init__(self, map_file: Path, dealt: tuple[str, ...], work_dir: Path) -> None:
         self.map_file = map_file
         self._held = [Path(plan) for plan in dealt]
         self._reports: list[Path] = []
+        self._orders = 0
         self._out = work_dir / ORDERS_DIR
+        self._dealing = asyncio.Lock()
 
-    async def deal(self, arbor: Path, plan: str, report: Path) -> Path | None:
-        """Fold the ``report`` of the worker that held ``plan`` into the map and have the master of the Arbor checkout
-        ``arbor`` deal the next order; its path, or ``None`` when no open direction is left to deal. Raise
-        :class:`~hyperloom_multibranch.specialist.arbor_adapter.SplitFailed` when Arbor cannot deal."""
+    def hand_back(self, plan: str, report: Path) -> None:
+        """Take the ``report`` of the worker that held ``plan``, which no longer holds it."""
+
+        self.release(plan)
+        self._reports.append(report)
+
+    def release(self, plan: str) -> None:
+        """Hold ``plan``, a share or an order, no longer: no branch runs it."""
 
         self._held = [order for order in self._held if order != Path(plan)]
-        self._reports.append(report)
-        self._out.mkdir(parents=True, exist_ok=True)
-        order = self._out / f"order-{len(self._reports)}.json"
-        request = DealRequest(self.map_file, tuple(self._reports), tuple(self._held), order, DEAL_SIZE)
-        await deal_order(arbor, request)
-        if not _directions_in(order):
-            return None
-        self._held.append(order)
-        return order
+
+    async def deal(self, arbor: Path) -> Path | None:
+        """Have the master of the Arbor checkout ``arbor`` fold every report handed back into the map and deal the next
+        order, held from then on; its path, or ``None`` when no open direction is left to deal. Raise
+        :class:`~hyperloom_multibranch.specialist.arbor_adapter.SplitFailed` when Arbor cannot deal."""
+
+        async with self._dealing:
+            self._out.mkdir(parents=True, exist_ok=True)
+            self._orders += 1
+            order = self._out / f"order-{self._orders}.json"
+            request = DealRequest(self.map_file, tuple(self._reports), tuple(self._held), order, DEAL_SIZE)
+            await deal_order(arbor, request)
+            if not _directions_in(order):
+                return None
+            self._held.append(order)
+            return order
 
 
 def map_dealer(map_file: str, plans: tuple[str, ...], work_dir: Path) -> MapDealer | None:
