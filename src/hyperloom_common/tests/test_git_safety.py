@@ -17,6 +17,7 @@ import os
 import pty
 import shlex
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -611,6 +612,71 @@ def test_a_worktree_of_another_repository_than_the_caller_names_runs_nothing(tmp
         == 0
     )
     assert app_git(other.worktree, "status", "--porcelain").returncode == 0
+
+
+def _chown_tree(root: Path, uid: int, gid: int) -> None:
+    for path in (root, *root.rglob("*")):
+        os.lchown(path, uid, gid)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="an admin directory of another owner needs root to chown")
+def test_an_admin_directory_another_account_made_is_trusted_only_in_a_shared_repository_of_its_group(tmp_path):
+    """Another account's admin directory is the app's only when ``common`` is a shared (setgid) git directory and the
+    entry is in that directory's group: the run's legs, accounts of one group, make the repository in turn."""
+    tree = _tree(tmp_path / "t")
+    common = tree.base / ".git"
+    admin = common / "worktrees" / "worktree"
+    another, group, stranger = 65534, 65533, 65532
+    _chown_tree(common, another, group)
+
+    with pytest.raises(OSError, match="not a directory owned by the app"):
+        app_git(
+            tree.worktree, "status", "--porcelain", admin=git_safety.trusted_admin_dir(tree.worktree, common)
+        )  # not setgid: not shared
+    for path in (common, *common.rglob("*")):
+        if path.is_dir() and not path.is_symlink():
+            path.chmod(path.stat().st_mode | stat.S_ISGID)
+    assert (
+        app_git(
+            tree.worktree, "status", "--porcelain", admin=git_safety.trusted_admin_dir(tree.worktree, common)
+        ).returncode
+        == 0
+    )
+    with pytest.raises(OSError, match="not a directory owned by the app"):
+        app_git(tree.worktree, "status", "--porcelain")  # no common: the uid alone
+    os.lchown(admin, another, stranger)
+    with pytest.raises(OSError, match="not a directory owned by the app"):
+        app_git(tree.worktree, "status", "--porcelain", admin=git_safety.trusted_admin_dir(tree.worktree, common))
+    os.lchown(admin, another, group)
+    os.lchown(admin / "gitdir", another, stranger)
+    with pytest.raises(OSError, match="not an admin dir of a linked worktree"):
+        app_git(tree.worktree, "status", "--porcelain", admin=git_safety.trusted_admin_dir(tree.worktree, common))
+
+
+@pytest.mark.parametrize(("common_mode", "shared"), [(0o2775, True), (0o2755, False), (0o755, False)], ids=oct)
+def test_git_writes_what_the_group_can_write_only_in_a_repository_on_shared_storage(tmp_path, common_mode, shared):
+    """In a repository whose git directory is set up to be shared (setgid, group-writable, closed to others) the next
+    leg, another account of the group, writes the index and the objects after this one: git runs under the shared
+    child umask there, and under this process's anywhere else."""
+    with open("/proc/self/status", encoding="ascii") as status:
+        umask = next(int(line.split()[1], 8) for line in status if line.startswith("Umask:"))
+    assert umask & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    tree = _tree(tmp_path / "t")
+    common = tree.base / ".git"
+    common.chmod(common_mode)
+    if common_mode & stat.S_ISGID and not common.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    (tree.worktree / "new.py").write_text("new = 1\n", encoding="utf-8")
+    before = {path for path in (common / "objects").iterdir() if path.is_dir()}
+
+    done = app_git(tree.worktree, "add", "-A", admin=git_safety.trusted_admin_dir(tree.worktree, common))
+
+    assert done.returncode == 0, done.stderr
+    made = [path for path in (common / "objects").iterdir() if path.is_dir() and path not in before]
+    index = common / "worktrees" / tree.worktree.name / "index"
+    expected = (0o775, 0o664) if shared else (0o777 & ~umask, 0o666 & ~umask)
+    assert made and {stat.S_IMODE(path.stat().st_mode) for path in made} == {expected[0]}
+    assert stat.S_IMODE(index.stat().st_mode) == expected[1]
 
 
 def test_the_caller_s_environment_never_outranks_what_keeps_the_config_out(tmp_path):
