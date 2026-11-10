@@ -172,7 +172,7 @@ def test_project_failure_says_what_ran(fake_primus, tmp_path):
 def test_tune_hands_the_calibration_to_the_agent_and_returns_its_winner(fake_primus, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     Path("cal.json").write_text("{}")
-    found = pt.tune(fake_primus, "workload.yaml", Path("tune"), calibration="cal.json", seed_budget=2)
+    found = pt.tune(fake_primus, "workload.yaml", Path("tune"), pt.TuneSpec(calibration="cal.json", seed_budget=2))
     assert found["winner_config"] == str(tmp_path / "tune" / "tuning" / "trials" / "best.yaml")
     assert found["best"]["calibration"] == str(tmp_path / "cal.json")
     assert "num_nodes: 1" in (tmp_path / "tune" / "target_cluster.yaml").read_text()

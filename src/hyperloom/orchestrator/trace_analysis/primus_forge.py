@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """KernelForge tasks for a Primus training step's kernels, and their measured speedups back into the projection.
 
 ``primus_targets analyze`` ranks a training step's kernels from Primus' projection, calibrated by a profile.
@@ -23,6 +26,11 @@ ASSETS = Path(__file__).resolve().parent / "primus_forge_assets"
 SPEEDUPS_SCHEMA = "primus.kernel_speedups"
 TASK_SCHEMA = "primus.forge_task"
 _UTF8 = "utf-8"
+_DRIVER = "driver.py"
+_MS_DIGITS = 3
+#: The cross-entropy's HBM passes over the logits at the speed of light: read forward, read and write backward.
+_LOGITS_PASSES = 3
+_DEFAULT_GPU = "mi355x"
 # the scripts run in the stack's image, whose interpreter is not this one
 _PYTHON = "python"
 
@@ -65,9 +73,11 @@ def task_spec(
     tokens: list[int] | None = None,
     check_tokens: list[int] | None = None,
     config: str = "",
-    gpu: str = "mi355x",
 ) -> dict[str, Any]:
-    """The task's facts from a kernel report: its cases, its share of the iteration, phase by phase."""
+    """The task's facts from a kernel report: its cases, its share of the iteration, phase by phase.
+
+    The GPU is the one the report was projected for.
+    """
     if op not in TASKS:
         raise ValueError(f"no forge task for {op}; known: {', '.join(sorted(TASKS))}")
     vocab = _vocab(report)
@@ -85,19 +95,19 @@ def task_spec(
         "op": op,
         "scope": TASKS[op]["scope"],
         "config": config,
-        "gpu": gpu,
+        "gpu": str((report.get("provenance") or {}).get("gpu_arch") or _DEFAULT_GPU),
         "deployment": report.get("deployment") or {},
         "iteration_ms": iteration_ms,
-        "phases_ms": {k: round(v, 3) for k, v in sorted(phases.items())},
-        "est_ms": round(est_ms, 3),
-        "share_pct": round(100.0 * est_ms / iteration_ms, 3) if iteration_ms else 0.0,
+        "phases_ms": {k: round(v, _MS_DIGITS) for k, v in sorted(phases.items())},
+        "est_ms": round(est_ms, _MS_DIGITS),
+        "share_pct": round(100.0 * est_ms / iteration_ms, _MS_DIGITS) if iteration_ms else 0.0,
         "cases": [{"tokens": t, "vocab": vocab} for t in cases],
         "check_cases": [{"tokens": t, "vocab": vocab} for t in sorted(set(check_tokens or [4096, cases[0]]))],
     }
 
 
 def _program(spec: dict[str, Any]) -> str:
-    gpu = _GPUS.get(spec["gpu"], _GPUS["mi355x"])
+    gpu = _GPUS.get(spec["gpu"], _GPUS[_DEFAULT_GPU])
     tokens = spec["cases"][0]["tokens"]
     vocab = spec["cases"][0]["vocab"]
     logits_gb = tokens * vocab * 2 / 1e9
@@ -119,7 +129,7 @@ def _program(spec: dict[str, Any]) -> str:
         vocab=vocab,
         tokens_max=tokens,
         logits_gb=logits_gb,
-        sol_ms=3 * logits_gb / gpu["hbm_tbps"],
+        sol_ms=_LOGITS_PASSES * logits_gb / gpu["hbm_tbps"],
         cases=", ".join(f"{c['tokens']} tokens" for c in spec["cases"]),
         check_cases=", ".join(f"{c['tokens']} tokens" for c in spec["check_cases"]),
     )
@@ -137,7 +147,7 @@ def write_task(spec: dict[str, Any], run_dir: Path) -> dict[str, str]:
     ws.mkdir(parents=True, exist_ok=True)
     assets = TASKS[spec["op"]]
     (ws / "kernel.py").write_text((ASSETS / assets["kernel"]).read_text(encoding=_UTF8), encoding=_UTF8)
-    (ws / "driver.py").write_text((ASSETS / assets["driver"]).read_text(encoding=_UTF8), encoding=_UTF8)
+    (ws / _DRIVER).write_text((ASSETS / assets["driver"]).read_text(encoding=_UTF8), encoding=_UTF8)
     (ws / "program.md").write_text(_program(spec), encoding=_UTF8)
     (ws / "task.json").write_text(json.dumps(spec, indent=2) + "\n", encoding=_UTF8)
     (ws / ".gitignore").write_text(_GITIGNORE, encoding=_UTF8)
@@ -147,7 +157,7 @@ def write_task(spec: dict[str, Any], run_dir: Path) -> dict[str, str]:
     identity = ["-c", "user.name=primus_forge", "-c", "user.email=primus_forge@local"]
     subprocess.run([*git, *identity, "commit", "-q", "-m", "primus_forge: the task"], check=True)
 
-    gpu = _GPUS.get(spec["gpu"], _GPUS["mi355x"])
+    gpu = _GPUS.get(spec["gpu"], _GPUS[_DEFAULT_GPU])
     baseline = run_dir / "baseline.json"
     loop = [_PYTHON, "-m", "kernelforge.cli", "forge-loop"]
     options = ["--workspace", str(ws), "--gpu-target", gpu["arch"], "--paired-keep", "--early-stop"]
@@ -158,7 +168,7 @@ def write_task(spec: dict[str, Any], run_dir: Path) -> dict[str, str]:
         "--kernel",
         str(ws / "kernel.py"),
         "--driver",
-        str(ws / "driver.py"),
+        str(ws / _DRIVER),
         "--program-md-file",
         str(ws / "program.md"),
         "--kernel-backend",
@@ -167,7 +177,7 @@ def write_task(spec: dict[str, Any], run_dir: Path) -> dict[str, str]:
         "forge-optimize",
         *options,
     ]
-    prepare = [_PYTHON, str(ws / "driver.py")]
+    prepare = [_PYTHON, str(ws / _DRIVER)]
     scripts = {
         "prepare.sh": (
             f"#!/bin/sh\nset -e\n{shlex.join(prepare)}\n"

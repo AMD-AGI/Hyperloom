@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
 """Cross-entropy over the LM head's logits, forward and backward, as Megatron's native fused path runs it.
 
 This is the starting kernel: Megatron-LM's ``fused_vocab_parallel_cross_entropy`` at tensor-parallel size 1
