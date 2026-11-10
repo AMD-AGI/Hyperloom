@@ -57,6 +57,7 @@ from hyperloom_multibranch.blackboard.rsi.open_areas import OpenAreas
 from hyperloom_multibranch.blackboard.rsi.playbook import PlaybookPlay
 from hyperloom_multibranch.blackboard.rsi.session import judge_history, judge_open_areas
 from hyperloom_multibranch.blackboard.rsi.stranded import stranded_leads
+from hyperloom_multibranch.scheduling.agent_map import render_map
 from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BatchStart, BranchControl, BranchFocus
 from hyperloom_multibranch.scheduling.build_waits import waiting_builds
@@ -387,6 +388,7 @@ class Explorer:
             focus={node.branch: node.focus for node in snapshot.lineage.branches if node.focus},
         )
         view = self._with_playbook(view, snapshot)
+        view = replace(view, agent_map=render_map(snapshot))
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)
         except asyncio.TimeoutError:
