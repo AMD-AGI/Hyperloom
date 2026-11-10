@@ -44,12 +44,25 @@ _MODULE = "hyperloom.measure.tests.gpu_free_host"
 #: The interpreter a test starts a runner module with, ``(*IDLE_CARDS_PYTHON, "-m", module, *args)``, so that the runner
 #: reads an idle machine of its own instead of the host's cards.
 IDLE_CARDS_PYTHON = (sys.executable, "-m", _MODULE)
+#: A directory of the test's own, below pytest's base temporary directory, where the test's helpers that are not
+#: fixtures (the idle machine of a runner it starts, a fake toolbox's scratch) make their temporary directories instead
+#: of the host's: a runner the test kills, or a test run that is killed, never removes them.
+TEST_SCRATCH_ENV = "HYPERLOOM_TEST_SCRATCH"
+
+
+def scratch_root() -> str | None:
+    """The directory :data:`TEST_SCRATCH_ENV` names, ``None`` (the host's temporary directory) when it names none."""
+    return os.environ.get(TEST_SCRATCH_ENV) or None
 
 
 @pytest.fixture(autouse=True)
 def machine_without_readable_gpus(
-    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv(TEST_SCRATCH_ENV, str(tmp_path_factory.mktemp("scratch")))
     if getattr(request.module, USES_REAL_GPUS_FLAG, False):
         return
     shadow = tmp_path / "gpu-tools-shadow"
@@ -77,7 +90,7 @@ def _run_on_idle_cards(argv: list[str]) -> None:
     if len(argv) < 2 or argv[0] != "-m":
         raise SystemExit(f"usage: python -m {_MODULE} -m <module> [args...]")
     module, args = argv[1], argv[2:]
-    with tempfile.TemporaryDirectory(prefix="hl-idle-machine-") as root:
+    with tempfile.TemporaryDirectory(prefix="hl-idle-machine-", dir=scratch_root()) as root:
         machine = KernelTree(Path(root))
         card_occupancy.KFD_PATH, card_occupancy.PROC_PATH = machine.kfd, machine.procfs
         sys.argv = [module, *args]

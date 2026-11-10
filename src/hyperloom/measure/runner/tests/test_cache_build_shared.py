@@ -239,6 +239,14 @@ def _build_command(rig: Rig, cache: Path, code: str | None = None) -> list[str]:
     return [sys.executable, "-I", "-c", code, _SRC, *arguments]
 
 
+def _own_tmp(tmp_path: Path) -> dict[str, str]:
+    """The environment of a builder the test kills: a killed builder never removes its temporary directory, so it gets
+    one below ``tmp_path`` instead of the host's."""
+    temporary = tmp_path / "tmp"
+    temporary.mkdir(exist_ok=True)
+    return {**os.environ, "TMPDIR": str(temporary)}
+
+
 @pytest.mark.parametrize("umask", [0o022, 0o077])
 def test_a_builder_killed_with_the_copy_whole_but_not_yet_in_place_leaves_what_the_next_build_sweeps(
     rig: Rig, tmp_path: Path, umask: int
@@ -252,6 +260,7 @@ def test_a_builder_killed_with_the_copy_whole_but_not_yet_in_place_leaves_what_t
         timeout=300,
         umask=umask,
         check=False,
+        env=_own_tmp(tmp_path),
     )
     assert killed.returncode == -signal.SIGKILL, killed.stderr
     (leftover,) = cache.glob(f".{sha}.tmp-*")
@@ -315,6 +324,7 @@ def test_a_builder_killed_between_the_rename_and_its_fchmod_leaves_an_entry_the_
         timeout=300,
         umask=umask,
         check=False,
+        env=_own_tmp(tmp_path),
     )
     assert killed.returncode == -signal.SIGKILL, killed.stderr
     assert stat.S_IMODE((cache / sha).stat().st_mode) & 0o777 == 0o700, "in place, but no other account can read it"
