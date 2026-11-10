@@ -553,6 +553,15 @@ re-authored on the kept stack, within the authored-lane retry cap. A tree that
 is not a git checkout has no merge step: a patch that does not apply ends the
 round `apply_failed`.
 
+`--no-source-changes` keeps the second lever to launch configuration: every
+route that can change a source tree or the installed environment lands through
+`integrate_patch`, which skips such a round (`skipped_reason=no_source_changes`)
+before anything is applied. Specialists still run and their configuration
+proposals are still benched. The kernel phase and the PRELUDE warm replay never
+reach that gate, so the flag turns both off as well, as `--no-kernel` and
+`--no-warm-replay` do: the one flag gives a result that holds only server
+arguments and environment variables.
+
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An
 operator can add one domain of their own, `custom_specialist`, whose focus is
