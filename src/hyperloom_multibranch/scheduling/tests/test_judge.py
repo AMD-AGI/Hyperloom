@@ -51,6 +51,7 @@ from hyperloom_multibranch.scheduling.judge import (
     QueuedIntent,
     StopOrder,
     cap_decision,
+    dev_wait_holds,
     envelope_holds,
     held_branches,
     hold_decision,
@@ -212,8 +213,20 @@ def test_the_safety_envelope_holds_a_branch_on_probation_or_with_a_stranded_lead
     }
 
 
-@pytest.mark.parametrize("hold", sorted(ENVELOPE_HOLDS))
-def test_a_branch_the_envelope_holds_keeps_its_stop_refused_while_its_k_is_the_judges_to_lower(
+def test_a_running_branch_in_line_for_a_dev_sandbox_is_held_unless_its_specialist_gave_up_or_failed_judging() -> None:
+    running = SpecialistStatus(running=True, crashes=0, lost=0, gave_up=False, judge_failed=False)
+    specialists = {
+        "b01": running,
+        "b02": replace(running, gave_up=True),
+        "b03": replace(running, judge_failed=True),
+        "b04": running,
+    }
+
+    assert dev_wait_holds({"b01", "b02", "b03", "b05"}, specialists) == {"b01": HoldReason.DEV_WAIT}
+
+
+@pytest.mark.parametrize("hold", [*sorted(ENVELOPE_HOLDS), HoldReason.DEV_WAIT])
+def test_a_branch_the_envelope_or_its_dev_wait_holds_keeps_its_stop_refused_while_its_k_is_the_judges_to_lower(
     hold: HoldReason,
 ) -> None:
     roster = (_entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION), _entry("b01", k=2), _entry("b02", k=2))

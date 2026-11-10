@@ -401,6 +401,10 @@ class DevLeases:
         held = self._held.get(branch)
         return held is not None and held.busy()
 
+    def waiting(self) -> frozenset[str]:
+        """The branches in line for a lease, whether or not one is held for them now."""
+        return frozenset(self._line)
+
     async def reclaim(self, branch: str, reason: str) -> None:
         """Take back ``branch``'s lease, if it holds one or one is starting."""
         await self._cancel_start(branch)
