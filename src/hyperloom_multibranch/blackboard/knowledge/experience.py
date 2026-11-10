@@ -5,7 +5,8 @@
 
 Every specialist test of kind ``test`` that the rule gate judged, or that failed by the candidate's own fault, becomes
 one Experience through the packaged ``multibranch-notebook-v1`` mapping; the other kinds (profile, accuracy, repro,
-sweep) examine a state rather than try a change, so they are not published:
+sweep) examine a state rather than try a change, so they are not published, nor is a landed retraction, which undoes
+a change its agent found invalid:
 
 * conditions: the session profile under the names the ``inference-recipe-v1`` declaration gives them, plus the
   intent's target (as ``bottleneck``), mechanism and layer;
@@ -17,7 +18,8 @@ sweep) examine a state rather than try a change, so they are not published:
 
 The reasoning is the hypothesis or attempt the specialist logged citing the request; the reflection is its latest
 learning citing the request, else the result it logged, else the hypothesis it settled. A test whose measurement failed taught nothing and is not published. The measured-against state is the parent commit,
-the experiment repository commit that pins the exact recipe.
+the experiment repository commit that pins the exact recipe. A test that brought in a change a landed retraction later
+undid is still published, its reflection naming the retraction.
 
 A judged record changes only while its split is pending, so pending splits wait; everything else is published once and
 reads ``unchanged`` afterwards. Merges stack commits already published, so they are not.
@@ -47,7 +49,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     TestRecord,
 )
 from hyperloom_multibranch.contracts.blackboard.vocab import COMMITTING, Conclusion
-from hyperloom_multibranch.blackboard.knowledge.lessons import direction
+from hyperloom_multibranch.blackboard.knowledge.lessons import direction, later_retractions
 
 MAPPING_PATH = Path(__file__).with_name("mappings") / "multibranch-notebook-v1.yaml"
 MULTIBRANCH_MAPPING_PATH = Path(__file__).with_name("mappings") / "multibranch-recipe-v1.yaml"
@@ -148,6 +150,15 @@ def cited_learning(learnings: Sequence[LearningRecord], branch: str, request_id:
     return citing[-1] if citing else ""
 
 
+def _learn(learnt: str, logged: str, undone: Sequence[str]) -> tuple[str, str]:
+    """What a test taught and where that came from: the specialist's learning, else the result it logged, then each
+    landed retraction that later undid a change the test brought in."""
+
+    said = "; ".join(part for part in (learnt or logged, *undone) if part)
+    source = "specialist_learning" if learnt else "specialist_branch_log" if logged else "retraction" if undone else ""
+    return said, source
+
+
 def _decision(record: TestRecord) -> str:
     if record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED:
         return "failed"
@@ -197,8 +208,9 @@ def _state(snapshot: BlackboardSnapshot, commit_id: str) -> str:
 def candidate_row(
     record: TestRecord, snapshot: BlackboardSnapshot, profile: SessionProfile, metric: str
 ) -> dict[str, object] | None:
-    """One export row; ``None`` for a merge, another kind than ``test``, a test in flight or not measured, or a
-    judgement waiting on its split."""
+    """One export row; ``None`` for a merge, another kind than ``test``, a test in flight or not measured, a
+    judgement waiting on its split, or a landed retraction, which tried no optimisation and has no decision the
+    declarations' ``keep``, ``revert`` and ``failed`` name."""
 
     result = record.result
     if (
@@ -206,6 +218,7 @@ def candidate_row(
         or record.request.kind is not TestKind.TEST
         or result is None
         or not record.measured
+        or record.landed_retraction
     ):
         return None
     failed = result.validity is Validity.CANDIDATE_FAILED
@@ -214,6 +227,7 @@ def candidate_row(
     request = record.request
     reasoning, logged = branch_notes(snapshot.branch_logs.get(request.branch, ()), record.request_id)
     learnt = cited_learning(snapshot.learnings, request.branch, record.request_id)
+    learn, learn_source = _learn(learnt, logged, later_retractions(record, snapshot))
     return {
         "request_id": record.request_id,
         "branch": request.branch,
@@ -229,8 +243,8 @@ def candidate_row(
         "direction": direction(record, snapshot),
         "change": change_document(request.delta),
         "reasoning": reasoning,
-        "learn": learnt or logged,
-        "learn_source": "specialist_learning" if learnt else "specialist_branch_log" if logged else "",
+        "learn": learn,
+        "learn_source": learn_source,
         "decision": _decision(record),
         "conclusion": record.conclusion.value if record.conclusion is not None else "",
         "baseline_value": snapshot.value_of(request.parent_commit).get(metric),

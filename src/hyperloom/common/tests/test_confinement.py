@@ -1,0 +1,920 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""``common/confinement``: the masks derived from configuration, the toolchain a child reads, and the bubblewrap
+policy a confinement becomes (no sandbox is made here: ``test_confined_launch.py`` launches one)."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from hyperloom_common.bwrap import SYSTEM_ROOTS, BwrapPolicyError, BwrapProbe, Scratch, interpreter_roots
+
+from hyperloom.common import confinement
+from hyperloom.common.confinement import (
+    PRIVATE_PATHS,
+    Confinement,
+    PrivatePaths,
+    credential_paths,
+    interpreter_search_path,
+    toolchain_paths,
+)
+
+PROBE = BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ())
+
+
+@pytest.fixture
+def home(tmp_path: Path) -> Path:
+    """An app home with tool logins, a venv and a scratch tree holding a worktree four levels down."""
+    root = tmp_path / "home"
+    for path in (".aws/credentials", ".claude/.credentials.json", ".ssh/id_ed25519", ".venv/bin/python"):
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("x", encoding="ascii")
+    (root / "scratch" / "a" / "b" / "wt").mkdir(parents=True)
+    (root / "scratch" / "a" / "notes.txt").write_text("x", encoding="ascii")
+    (root / "scratch" / "other").mkdir()
+    return root
+
+
+@pytest.fixture(autouse=True)
+def no_passwd_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This process has no passwd entry, as the module under test sees it (pytest's own lookups are left alone), so
+    the masks below come only from what each test configures."""
+
+    def unknown(uid: int):
+        raise KeyError(uid)
+
+    monkeypatch.setattr(confinement, "pwd", SimpleNamespace(getpwuid=unknown))
+
+
+@pytest.fixture(autouse=True)
+def app_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This process's environment holds only ``PATH``, as the module under test sees it (it is read from one place, the
+    process environment, for both the masks and the toolchain); a test sets what else it needs with ``setenv``."""
+    for name in list(os.environ):
+        if name != "PATH":
+            monkeypatch.delenv(name)
+
+
+@pytest.fixture
+def no_child_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The child's interpreter adds nothing to the toolchain (it is asked for real in the tests below that need it)."""
+    monkeypatch.setattr(confinement, "interpreter_search_path", lambda _environ, **_kwargs: ())
+
+
+def _masks(environ: dict[str, str], **kwargs) -> set[Path]:
+    return set(credential_paths(environ, **kwargs))
+
+
+def _write(path: Path, text: str = "x") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="ascii")
+    return path
+
+
+def _absent_inside(path: Path, policy) -> bool:
+    """Whether ``path`` does not exist inside ``policy``'s sandbox, or is masked there."""
+    real = os.path.realpath(path)
+    binds = (*policy.read_only, *policy.writable)
+    shown = [bind for bind in binds if real == bind or real.startswith(bind.rstrip("/") + "/")]
+    masked = [mask for mask in policy.masked if real == mask or real.startswith(mask + "/")]
+    return not shown or bool(masked)
+
+
+# ---- credential locations ----
+
+
+def test_the_apps_home_is_masked_whole_when_nothing_allowed_is_in_it(home):
+    assert _masks({"HOME": str(home)}) == {home}
+
+
+@pytest.mark.parametrize("written", [False, True], ids=["read", "written"])
+def test_an_allowed_path_below_the_home_opens_up_only_its_ancestors(home, written):
+    """Also when the worktree is the tree the agent writes: a tree is not reached through itself, so it still counts."""
+    worktree = home / "scratch" / "a" / "b" / "wt"
+    writable = [worktree] if written else []
+    found = _masks({"HOME": str(home)}, allowed=[worktree, home / ".venv"], writable=writable)
+    assert found == {
+        home / ".aws",
+        home / ".claude",
+        home / ".ssh",
+        home / "scratch" / "other",
+        home / "scratch/a/notes.txt",
+        home / ".cache",  # where Hugging Face would make its login, not made yet
+    }
+    assert not any(worktree == mask or mask in worktree.parents for mask in found)
+
+
+def test_past_the_depth_limit_a_directory_that_leads_to_an_allowed_path_is_left_unmasked(home):
+    deep = home / "scratch" / "a" / "b" / "c" / "d" / "e"
+    deep.mkdir(parents=True)
+    (home / "scratch" / "a" / "b" / "c" / "d" / "sibling").mkdir()
+    found = _masks({"HOME": str(home)}, allowed=[deep])
+    assert home / "scratch" / "a" / "b" / "wt" in found, "depth 4 is still opened up"
+    assert home / "scratch" / "a" / "b" / "c" / "d" / "sibling" not in found, "depth 5 is not"
+    assert not any(mask == deep or mask in deep.parents for mask in found)
+
+
+def test_the_passwd_home_is_used_without_HOME_and_masked_beside_another(monkeypatch, home, tmp_path):
+    monkeypatch.setattr(confinement.pwd, "getpwuid", lambda _uid: type("E", (), {"pw_dir": str(home)})())
+    assert _masks({}) == {home}
+    other, child = tmp_path / "other-home", tmp_path / "child-home"
+    other.mkdir()
+    child.mkdir()
+    monkeypatch.setenv("HOME", str(other))
+    found = _masks({"HOME": str(child)})
+    assert found == {child, other, home}, "logins stay in the passwd home, whatever either HOME says"
+
+
+def test_every_variable_that_names_a_credential_location_is_masked(tmp_path):
+    key, kube, token, secret_dir = (tmp_path / name for name in ("signing.pem", "kubeconfig", "tok", "secrets"))
+    for path in (key, kube, token):
+        path.write_text("x", encoding="ascii")
+    secret_dir.mkdir()
+    environ = {
+        "HYPERLOOM_BUILD_SIGNING_KEY_FILE": str(key),
+        "KUBECONFIG": f"{kube}:{tmp_path / 'missing'}:relative/path",
+        "MY_SERVICE_TOKEN_PATH": str(token),
+        "SOME_SECRET_DIR": str(secret_dir),
+        "ANTHROPIC_API_KEY": "sk-not-a-path",
+        "TOKENIZERS_PARALLELISM": "false",
+        "UNRELATED_DIR": str(tmp_path),
+    }
+    assert _masks(environ) == {key, kube, token, secret_dir}
+
+
+def test_hugging_faces_login_files_are_masked_and_its_cache_is_not(tmp_path):
+    hf = tmp_path / "hf"
+    (hf / "hub").mkdir(parents=True)
+    (hf / "token").write_text("hf_x", encoding="ascii")
+    (hf / "stored_tokens").write_text("hf_y", encoding="ascii")
+    found = _masks({"HOME": "/nonexistent-home", "HF_HOME": str(hf)}, allowed=[hf])
+    assert found == {hf / "token", hf / "stored_tokens"}
+
+
+#: Where Hugging Face writes a login made after the launch, as ``huggingface_hub`` resolves it, below a bound data
+#: tree that holds none of it yet: each setting, and what is hidden for it (the first path missing below ``data``).
+HF_LATER = {
+    "token_path": ({"HF_TOKEN_PATH": "{data}/secrets/hf_token"}, ["secrets"]),
+    "token_path_dir": ({"HF_TOKEN_PATH": "{data}/kept/hf_token"}, ["kept/hf_token", "kept/stored_tokens"]),
+    "hf_home": ({"HF_HOME": "{data}/.hf"}, [".hf"]),
+    "xdg_cache": ({"XDG_CACHE_HOME": "{data}/.cache"}, [".cache"]),
+    "home": ({"HOME": "{data}/home"}, ["home"]),
+    "hf_home_tilde": ({"HOME": "{data}", "HF_HOME": "~/.hf"}, [".hf"]),
+    "hf_home_variable": ({"HF_HOME": "${{MODEL_PATH}}/.hf"}, [".hf"]),
+}
+
+
+@pytest.mark.parametrize("whose", ["app", "child"])
+@pytest.mark.parametrize("location", list(HF_LATER))
+def test_a_hugging_face_login_not_made_yet_is_hidden_where_it_would_be_written(tmp_path, monkeypatch, location, whose):
+    """``hf auth login`` writes ``HF_TOKEN_PATH`` (default ``$HF_HOME/token``, ``HF_HOME`` default
+    ``$XDG_CACHE_HOME/huggingface``, that default ``~/.cache``) and ``stored_tokens`` beside it, making the directories
+    on the way: so the first path missing on the way is hidden, and the data tree that holds it is bound entry by
+    entry, whichever environment, this process's or the child's, names the location."""
+    data = tmp_path / "data"
+    model = _write(data / "model" / "weights")
+    (data / "kept").mkdir()
+    settings, hidden = HF_LATER[location]
+    child = {"MODEL_PATH": str(data)}
+    named = {name: value.format(data=data) for name, value in settings.items()}
+    if whose == "app":
+        monkeypatch.setenv("MODEL_PATH", str(data))
+        for name, value in named.items():
+            monkeypatch.setenv(name, value)
+    else:
+        child.update(named)
+
+    found = credential_paths(child, allowed=[data])
+
+    assert {data / path for path in hidden} <= set(found)
+    policy = Confinement(readable=(data,), masked=found).policy()
+    assert str(data) not in policy.read_only, "a name made in the tree later is not shown"
+    assert str(model.parent) in policy.read_only
+    assert policy.masked == ()
+
+
+def test_xdg_directories_outside_the_home_and_registered_files_are_masked(tmp_path, monkeypatch):
+    config, state, private = tmp_path / "config", tmp_path / "state", tmp_path / "state-dir"
+    for path in (config, state, private):
+        path.mkdir()
+    registry = PrivatePaths()
+    registry.add(private, "hosted state dir")
+    registry.add(private, "registered twice")
+    environ = {"XDG_CONFIG_HOME": str(config), "XDG_STATE_HOME": str(state)}
+    assert registry.paths() == (private,)
+    assert _masks(environ) == {config, state}, "the process registry is empty"
+    monkeypatch.setattr(confinement, "PRIVATE_PATHS", registry)
+    assert _masks(environ) == {config, state, private}
+
+
+def test_a_given_path_stays_readable_even_inside_the_masked_home(home):
+    given = home / ".aws" / "credentials"
+    found = _masks({"HOME": str(home), "AWS_SHARED_CREDENTIALS_FILE": str(given)}, given=[given])
+    assert given not in found and home not in found
+    assert {home / ".claude", home / ".ssh", home / ".venv", home / "scratch"} <= found
+
+
+def test_the_root_directory_is_never_a_mask_nor_opened_up(home, monkeypatch):
+    """Opened up around ``/usr``, a home of ``/`` would mask ``/etc``, ``/opt``, ``/root`` and the rest; only where
+    Hugging Face would make its login there, not made yet, is hidden."""
+    cache = Path("/.cache")
+    found = _masks({"HOME": "/", "SOME_TOKEN_DIR": "/"}, allowed=[Path("/usr")])
+    assert found and all(mask == cache or cache in mask.parents for mask in found), found
+    monkeypatch.setenv("HOME", "/")
+    assert set(credential_paths({}, allowed=[Path("/usr")])) == found
+
+
+def test_this_processs_own_credential_locations_are_masked_whatever_the_child_is_given(tmp_path, monkeypatch):
+    """The child's home is re-pointed into its work tree and its environment carries no credential variable; the
+    app's home and ``KUBECONFIG`` inside a readable tree are still masked, and the child's own home is not."""
+    home, tools, work = tmp_path / "home", tmp_path / "tools", tmp_path / "work"
+    kube = _write(tools / "kube" / "config")
+    _write(home / ".ssh" / "id_ed25519")
+    (work / ".home").mkdir(parents=True)
+    _write(tools / "bin" / "tool")
+    child = {"HOME": str(work / ".home"), "PATH": str(tools / "bin")}
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("KUBECONFIG", str(kube))
+
+    found = credential_paths(child, allowed=[tools, work], writable=[work])
+
+    assert {kube, home} <= set(found)
+    assert work / ".home" not in found, "the child's own home, in the tree it writes"
+    policy = Confinement(writable=(work,), readable=(tools,), masked=found).policy()
+    assert policy.masked == ()
+    assert str(tools / "bin") in policy.read_only, "what is beside the login is bound entry by entry"
+    assert not any(kube.is_relative_to(path) for path in map(Path, policy.read_only)), "the login is not bound"
+
+
+def test_the_process_registry_starts_empty():
+    assert isinstance(PRIVATE_PATHS, PrivatePaths)
+
+
+# ---- the toolchain ----
+
+
+def test_the_toolchain_is_the_system_roots_this_interpreter_the_search_paths_and_the_program(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "layer" / "bin"
+    claude = _write(bin_dir / "claude", "#!/bin/sh\n")
+    claude.chmod(0o755)
+    ca = _write(tmp_path / "ca.pem")
+    model = tmp_path / "models" / "m"
+    model.mkdir(parents=True)
+    monkeypatch.setattr(confinement, "interpreter_search_path", lambda _environ, **_kwargs: (Path("/from/sys/path"),))
+    environ = {
+        "PATH": f"{bin_dir}:/usr/bin:relative",
+        "LD_LIBRARY_PATH": "/opt/accel/lib",
+        "SSL_CERT_FILE": str(ca),
+        "HF_HUB_CACHE": str(tmp_path),
+        "MODEL_PATH": str(model),
+    }
+
+    found = toolchain_paths(environ, "claude", writable=())
+
+    assert {Path(root) for root in SYSTEM_ROOTS} <= set(found)
+    assert {Path(root) for root in interpreter_roots()} <= set(found)
+    assert {Path("/from/sys/path"), bin_dir, bin_dir.parent, Path("/usr/bin"), ca, tmp_path, model} <= set(found)
+    assert Path("relative") not in found and Path("/") not in found
+    assert Path("/proc") not in found, "the sandbox mounts its own /proc; a bind of it is refused"
+    assert Path("/sys") not in found, "/sys is the policy's sys_paths, which a compile narrows"
+
+
+def test_a_native_installer_binds_only_the_programs_directories_never_all_of_local(tmp_path, no_child_python):
+    """``~/.local/bin/claude -> ~/.local/share/claude/versions/V``: the directory and parent of both would make all of
+    ``~/.local`` readable, where other tools keep their logins, and mask nothing under it."""
+    home = tmp_path / "home"
+    version = _write(home / ".local/share/claude/versions/2.1.319", "#!/bin/sh\n")
+    version.chmod(0o755)
+    (home / ".local/bin").mkdir(parents=True)
+    (home / ".local/bin/claude").symlink_to(version)
+    logins = [
+        _write(home / ".local/share/opencode/auth.json"),
+        _write(home / ".local/share/uv/credentials"),
+        _write(home / ".local/state/gh/hosts.yml"),
+        _write(home / ".aws/credentials"),
+    ]
+    environ = {"HOME": str(home), "PATH": f"{home / '.local/bin'}:/usr/bin"}
+
+    found = toolchain_paths(environ, "claude", writable=())
+
+    assert {home / ".local/bin", home / ".local/share/claude/versions"} <= set(found)
+    assert not {home, home / ".local", home / ".local/share", home / ".local/share/claude"} & set(found)
+    policy = Confinement(readable=found, masked=credential_paths(environ, allowed=found)).policy()
+    assert [login for login in logins if not _absent_inside(login, policy)] == []
+
+
+def test_nothing_in_a_writable_tree_is_made_read_only(tmp_path, monkeypatch):
+    """The writable trees already show what lies in them; a read-only bind there would take the child's own files
+    from it, and on bubblewrap before 0.12 refuse the launch."""
+    work = tmp_path / "work"
+    for path in (work / "bin", work / "src", work / "py"):
+        path.mkdir(parents=True)
+    monkeypatch.setattr(
+        confinement, "interpreter_search_path", lambda _environ, **_kwargs: (work / "src", Path("/from/sys/path"))
+    )
+    environ = {"PATH": f"{work / 'bin'}:/usr/bin", "PYTHONPATH": str(work / "py"), "HOME": str(tmp_path / "home")}
+
+    found = toolchain_paths(environ, "sh", writable=(work,))
+
+    assert {Path("/usr/bin"), Path("/from/sys/path")} <= set(found)
+    assert [path for path in found if path == work or work in path.parents] == []
+    assert Confinement(writable=(work,), readable=found).policy().problems((0, 9, 0)) == []
+
+
+def test_a_program_directly_in_a_credential_location_binds_only_itself(tmp_path, no_child_python):
+    home = tmp_path / "home"
+    tool = _write(home / "tool", "#!/bin/sh\n")
+    tool.chmod(0o755)
+    found = toolchain_paths({"HOME": str(home), "PATH": "/usr/bin"}, str(tool), writable=())
+    assert tool in found and home not in found and home.parent not in found
+
+
+@pytest.mark.parametrize("variable", ["PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "MODEL_PATH"])
+def test_a_variables_entry_that_is_a_credential_location_is_not_bound_and_one_below_it_is(
+    tmp_path, monkeypatch, no_child_python, variable
+):
+    """Bound whole, the home would show every login in it, and no mask: a mask is only ever below a bound path. So
+    would a tool's login directory a variable names, and a link to either."""
+    home, tools, gh = tmp_path / "home", tmp_path / "tools", tmp_path / "gh"
+    login = _write(home / ".ssh/id_ed25519")
+    _write(gh / "hosts.yml")
+    (home / "bin").mkdir()
+    tools.mkdir()
+    (tmp_path / "link").symlink_to(home)
+    monkeypatch.setenv("HOME", str(home))
+    entries = (home, tmp_path / "link", gh, home / "bin", tools)
+    environ = {"PATH": "/usr/bin", "GH_CONFIG_DIR": str(gh), variable: os.pathsep.join(map(str, entries))}
+
+    found = toolchain_paths(environ, "sh", writable=())
+
+    assert not {home, tmp_path / "link", gh} & set(found)
+    assert {home / "bin", tools} <= set(found)
+    masked = credential_paths(environ, allowed=found)
+    assert _absent_inside(login, Confinement(readable=found, masked=masked).policy())
+
+
+@pytest.mark.parametrize("variable", ["PATH", "PYTHONPATH", "MODEL_PATH"])
+def test_an_entry_that_holds_a_credential_location_is_bound_entry_by_entry_around_it(
+    tmp_path, monkeypatch, no_child_python, variable
+):
+    """An ancestor of the home (or of a tool's login directory) on a search path is never bound whole: its other
+    entries are, down to the login, which is not bound at all, so neither a login in it nor one made later shows."""
+    top = tmp_path / "top"
+    home, gh = top / "users" / "u", top / "etc-gh"
+    _write(home / ".netrc")
+    _write(gh / "hosts.yml")
+    (top / "users" / "u2").mkdir()
+    (top / "users" / "to-home").symlink_to(home)
+    tool = _write(top / "bin" / "tool", "#!/bin/sh\n")
+    monkeypatch.setenv("HOME", str(home))
+    environ = {"PATH": "/usr/bin", "GH_CONFIG_DIR": str(gh), variable: str(top)}
+
+    found = set(toolchain_paths(environ, "sh", writable=()))
+
+    assert {top / "bin", top / "users" / "u2"} <= found
+    assert not {top, top / "users", home, top / "users" / "to-home", gh} & found
+    assert tool.parent in found
+
+
+@pytest.mark.parametrize("variable", ["PATH", "PYTHONPATH", "MODEL_PATH", "SSL_CERT_FILE"])
+@pytest.mark.parametrize(
+    "entry", [".ssh", ".config", "config-link", ".claude", ".netrc", ".config/gh", "xdg/gh", "xdg", "users"]
+)
+def test_a_well_known_login_location_in_the_home_is_not_bound_whole_though_no_variable_names_it(
+    tmp_path, monkeypatch, no_child_python, variable, entry
+):
+    """``~/.ssh``, ``~/.config`` (``XDG_CONFIG_HOME`` unset), a tool's directory in it (or in ``XDG_CONFIG_HOME``),
+    ``~/.claude`` and ``~/.netrc`` hold logins though no variable names them: one on a search path is not bound, nor
+    is a link to it, and what holds one only entry by entry around it; a program directory below one still is."""
+    home, xdg = tmp_path / "users" / "u", tmp_path / "xdg"
+    logins = [
+        _write(home / ".ssh/id_rsa"),
+        _write(home / ".config/gh/hosts.yml"),
+        _write(home / ".claude/.credentials.json"),
+        _write(home / ".netrc"),
+        _write(xdg / "gh/hosts.yml"),
+    ]
+    tools = [_write(home / ".config/tool/bin/tool"), _write(home / ".claude/local/claude")]
+    (tmp_path / "config-link").symlink_to(home / ".config")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    named = {"config-link": tmp_path / "config-link", "xdg/gh": xdg / "gh", "xdg": xdg, "users": tmp_path / "users"}
+    shown = named.get(entry, home / entry)
+    entries = (shown, *(tool.parent for tool in tools))
+    environ = {"HOME": str(home), "PATH": "/usr/bin", "XDG_CONFIG_HOME": str(xdg)}
+    environ[variable] = os.pathsep.join(map(str, entries))
+
+    found = toolchain_paths(environ, "sh", writable=())
+
+    assert shown not in found
+    assert {tool.parent for tool in tools} <= set(found)
+    masked = credential_paths(environ, allowed=found)
+    policy = Confinement(readable=found, masked=masked).policy()
+    assert [login for login in logins if not _absent_inside(login, policy)] == []
+
+
+@pytest.mark.parametrize("variable", ["MODEL_PATH", "SSL_CERT_FILE", "PYTHONPATH", "PATH"])
+@pytest.mark.parametrize(
+    "named", [".ssh/id_rsa", ".config/gh/hosts.yml", ".aws/credentials", ".claude/x.json", "xdg/gh/hosts.yml", "link"]
+)
+def test_a_file_a_variable_names_below_a_login_location_is_not_bound(
+    tmp_path, monkeypatch, caplog, no_child_python, variable, named
+):
+    """``MODEL_PATH=~/.ssh/id_rsa``, ``SSL_CERT_FILE=~/.config/gh/hosts.yml``, a file in ``~/.aws``, ``~/.claude``
+    or ``$XDG_CONFIG_HOME/gh``, or a link elsewhere to one: a file below a login location is a login, so it is not
+    bound, and one warning names it; a file in the home outside every login location, and the program folders
+    below one (``~/.config/tool/bin``, ``~/.claude/local``), still are."""
+    monkeypatch.setattr(confinement, "_SAID", set())
+    home, xdg = tmp_path / "users" / "u", tmp_path / "xdg"
+    secret = _write({"xdg/gh/hosts.yml": xdg / "gh/hosts.yml", "link": home / ".ssh/id_rsa"}.get(named, home / named))
+    shown = tmp_path / "ca.pem" if named == "link" else secret
+    if named == "link":
+        shown.symlink_to(secret)
+    model = _write(home / "models/m.bin")
+    tools = [_write(home / ".config/tool/bin/tool"), _write(home / ".claude/local/claude")]
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    environ = {"HOME": str(home), "PATH": "/usr/bin", "XDG_CONFIG_HOME": str(xdg), "HF_HOME": str(tmp_path / "hf")}
+    environ[variable] = os.pathsep.join(map(str, (shown, model, *(tool.parent for tool in tools))))
+
+    with caplog.at_level("WARNING", logger=confinement.__name__):
+        found = toolchain_paths(environ, "sh", writable=())
+        toolchain_paths(environ, "sh", writable=())
+
+    assert shown not in found
+    assert secret not in found
+    assert {model, *(tool.parent for tool in tools)} <= set(found)
+    said = [record.getMessage() for record in caplog.records if str(shown) in record.getMessage()]
+    assert len(said) == 1, said
+    assert "a file in a tool's login location" in said[0]
+    policy = Confinement(readable=found, masked=credential_paths(environ, allowed=found)).policy()
+    assert _absent_inside(secret, policy)
+
+
+def test_the_program_the_child_runs_from_a_login_location_is_still_bound(tmp_path, monkeypatch, no_child_python):
+    """The program the launch runs is its choice, not a variable's: a program file kept right in ``~/.config`` is
+    still bound, though another file there a variable names is not."""
+    home = tmp_path / "users" / "u"
+    program, other = _write(home / ".config/tool"), _write(home / ".config/token.json")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    environ = {"HOME": str(home), "PATH": "/usr/bin", "MODEL_PATH": str(other)}
+
+    found = toolchain_paths(environ, str(program), writable=())
+
+    assert program in found
+    assert other not in found
+
+
+def test_the_system_roots_stay_whole_whatever_credential_location_lies_below_them(tmp_path, monkeypatch):
+    """A home or login under ``/etc`` or ``/opt`` (baked into an image) leaves the system roots as they are: the
+    masks hide it there."""
+    monkeypatch.setenv("HOME", "/opt")
+    found = toolchain_paths({"PATH": "/usr/bin:/opt", "HOME": "/opt"}, "sh", writable=())
+    assert {Path(root) for root in SYSTEM_ROOTS} <= set(found)
+
+
+def test_the_resolvers_target_is_readable_when_it_lies_outside_etc(tmp_path, monkeypatch, no_child_python):
+    stub = _write(tmp_path / "run" / "stub-resolv.conf")
+    link = tmp_path / "etc" / "resolv.conf"
+    link.parent.mkdir()
+    link.symlink_to(stub)
+    monkeypatch.setattr(confinement, "RESOLV_CONF", link)
+    assert stub in toolchain_paths({"PATH": "/usr/bin"}, "sh", writable=())
+    monkeypatch.setattr(confinement, "RESOLV_CONF", stub)
+    assert stub not in toolchain_paths({"PATH": "/usr/bin"}, "sh", writable=()), (
+        "a plain file in /etc is under the /etc bind"
+    )
+
+
+def _venv(root: Path) -> Path:
+    """A virtual environment at ``root`` on this interpreter's base installation; returns its site directory."""
+    base = Path(os.path.realpath(sys.executable))
+    (root / "bin").mkdir(parents=True)
+    (root / "pyvenv.cfg").write_text(f"home = {base.parent}\ninclude-system-site-packages = false\n", encoding="ascii")
+    (root / "bin" / "python3").symlink_to(base)
+    site = root / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "site-packages"
+    site.mkdir(parents=True)
+    return site
+
+
+def _fake_python(directory: Path, answer: str, seen: Path) -> Path:
+    """A ``python3`` in ``directory`` that records its arguments and environment in ``seen`` and prints ``answer``."""
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "python3"
+    record = f"\"import json, os, sys; json.dump([sys.argv[1:], dict(os.environ)], open({str(seen)!r}, 'w'))\""
+    script.write_text(f"#!/bin/sh\n{sys.executable} -I -S -c {record} \"$@\"\necho '{answer}'\n", encoding="ascii")
+    script.chmod(0o755)
+    return script
+
+
+def test_the_childs_interpreter_reports_its_venvs_site_the_pth_directories_and_editable_trees_running_none(tmp_path):
+    """A setuptools editable install names its source tree only in its finder's MAPPING, which no import path entry
+    has; its .pth file imports that finder. Both are read as data: nothing in them, nor a sitecustomize, runs."""
+    ran = tmp_path / "ran"
+    site = _venv(tmp_path / "venv")
+    extra, other = tmp_path / "extra", tmp_path / "other"
+    extra.mkdir()
+    other.mkdir()
+    (site / "__editable__.demo-1.0.pth").write_text("import __editable___demo_1_0_finder\n", encoding="ascii")
+    (site / "__editable___demo_1_0_finder.py").write_text(
+        f"open({str(ran)!r}, 'a').write('finder ')\nMAPPING: dict[str, str] = {{'demo': '/src/demo/demo'}}\n",
+        encoding="ascii",
+    )
+    (site / "paths.pth").write_text(
+        f"# a comment\n{extra}\n../../../../other\n{tmp_path / 'missing'}\n", encoding="ascii"
+    )
+    pythonpath = tmp_path / "py"
+    pythonpath.mkdir()
+    (pythonpath / "sitecustomize.py").write_text(f"open({str(ran)!r}, 'a').write('site ')\n", encoding="ascii")
+    environ = {"PATH": str(tmp_path / "venv" / "bin"), "PYTHONPATH": str(pythonpath)}
+
+    found = interpreter_search_path(environ, writable=())
+
+    assert {site, extra, other, Path("/src/demo/demo")} <= set(found)
+    assert tmp_path / "missing" not in found and pythonpath not in found
+    assert not ran.exists(), ran.read_text(encoding="ascii")
+    assert interpreter_search_path({"PATH": str(tmp_path / "nowhere")}, writable=()) == ()
+
+
+def test_an_interpreter_in_a_writable_tree_is_never_run_and_its_answer_never_bound(tmp_path):
+    """A ``python3`` the agent could have written runs as the app and names what the agent may read."""
+    work, secret = tmp_path / "work", tmp_path / "home" / ".ssh"
+    secret.mkdir(parents=True)
+    planted = _fake_python(work / "bin", json.dumps({"path": [str(secret)], "site": []}), tmp_path / "planted-ran")
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / "python3").symlink_to(planted)
+    honest = _fake_python(tmp_path / "usr" / "bin", json.dumps({"path": ["/honest"], "site": []}), tmp_path / "seen")
+
+    found = interpreter_search_path({"PATH": f"{work / 'bin'}:{linked}:{honest.parent}"}, writable=(work,))
+
+    assert found == (Path("/honest"),)
+    assert not (tmp_path / "planted-ran").exists()
+    assert interpreter_search_path({"PATH": f"{work / 'bin'}:{linked}"}, writable=(work,)) == ()
+    assert not (tmp_path / "planted-ran").exists()
+
+
+def test_an_interpreter_reached_through_a_writable_tree_is_never_run_even_where_it_points_outside(tmp_path):
+    """``work/bin/python3 -> /usr/bin/python3`` beside a ``work/pyvenv.cfg`` whose ``home`` holds a planted standard
+    library: run by that path, a distribution's interpreter imports the agent's ``encodings`` as the app."""
+    work, seen = tmp_path / "work", tmp_path / "seen"
+    honest = _fake_python(tmp_path / "usr" / "bin", json.dumps({"path": ["/honest"], "site": []}), seen)
+    (work / "bin").mkdir(parents=True)
+    (work / "bin" / "python3").symlink_to(honest)
+    (work / "linked-bin").symlink_to(honest.parent)
+
+    assert interpreter_search_path({"PATH": f"{work / 'bin'}:{work / 'linked-bin'}"}, writable=(work,)) == ()
+    assert not seen.exists()
+    found = interpreter_search_path({"PATH": f"{work / 'bin'}:{honest.parent}"}, writable=(work,))
+    assert found == (Path("/honest"),)
+
+
+def test_the_interpreter_runs_isolated_with_only_the_library_path_outside_the_writable_trees(tmp_path):
+    work, lib, elsewhere = tmp_path / "work", tmp_path / "lib", tmp_path / "elsewhere"
+    (work / "lib").mkdir(parents=True)
+    lib.mkdir()
+    elsewhere.mkdir()
+    (work / "linked-lib").symlink_to(elsewhere)
+    seen = tmp_path / "seen"
+    python = _fake_python(tmp_path / "bin", json.dumps({"path": [], "site": []}), seen)
+    environ = {
+        "PATH": str(python.parent),
+        "LD_LIBRARY_PATH": f"{work / 'lib'}:{work / 'linked-lib'}:{lib}",
+        "LD_PRELOAD": str(work / "lib" / "x.so"),
+        "PYTHONPATH": str(work),
+        "HOME": str(work),
+        "ANTHROPIC_API_KEY": "sk-not-for-the-probe",
+    }
+
+    interpreter_search_path(environ, writable=(work,))
+
+    argv, env = json.loads(seen.read_text(encoding="ascii"))
+    assert argv[:3] == ["-I", "-S", "-c"]
+    assert {name: value for name, value in env.items() if name not in ("PWD", "SHLVL", "_", "LC_CTYPE")} == {
+        "LD_LIBRARY_PATH": str(lib)
+    }
+
+
+def test_a_site_directory_in_a_writable_tree_is_not_read(tmp_path):
+    work, secret, shown = tmp_path / "work", tmp_path / "secret", tmp_path / "shown"
+    for path in (work / "site", tmp_path / "site", tmp_path / "planted-site", secret, shown):
+        path.mkdir(parents=True)
+    (work / "site" / "planted.pth").write_text(f"{secret}\n", encoding="ascii")
+    (tmp_path / "planted-site" / "planted.pth").write_text(f"{secret}\n", encoding="ascii")
+    (work / "linked-site").symlink_to(tmp_path / "planted-site")
+    (tmp_path / "site" / "image.pth").write_text(f"{shown}\n", encoding="ascii")
+    sites = [str(work / "site"), str(work / "linked-site"), str(tmp_path / "site")]
+    answer = json.dumps({"path": [], "site": sites})
+    python = _fake_python(tmp_path / "bin", answer, tmp_path / "seen")
+
+    found = interpreter_search_path({"PATH": str(python.parent)}, writable=(work,))
+
+    assert shown in found and secret not in found
+
+
+@pytest.mark.parametrize("answer", ["not json", "[]", '{"path": "/x", "site": []}', '{"path": []}'])
+def test_an_interpreter_that_does_not_answer_gives_no_path(tmp_path, answer):
+    python = _fake_python(tmp_path / f"bin-{len(answer)}", answer, tmp_path / "seen")
+    assert interpreter_search_path({"PATH": str(python.parent)}, writable=()) == ()
+
+
+# ---- the policy ----
+
+
+def test_a_policy_drops_the_missing_binds_once_and_passes_the_rest_through(tmp_path):
+    work, ca, kfd = tmp_path / "wt", _write(tmp_path / "ca.pem"), Path("/dev/kfd")
+    work.mkdir()
+    scratch = Scratch(str(tmp_path / "tmp"), str(tmp_path / "shm"))
+    policy = Confinement(
+        writable=(work, tmp_path / "missing"),
+        readable=(work, ca, tmp_path / "gone"),
+        masked=(tmp_path / "gone",),
+        devices=(kfd,),
+        app_only=(tmp_path / "state",),
+        sys_paths=(Path("/sys/devices/system/cpu"),),
+        own_network=True,
+    ).policy(scratch=scratch, chdir=work)
+    assert (policy.writable, policy.read_only, policy.masked) == ((str(work),), (str(ca),), ())
+    assert (policy.devices, policy.app_only, policy.sys_paths) == (
+        ("/dev/kfd",),
+        (str(tmp_path / "state"),),
+        ("/sys/devices/system/cpu",),
+    )
+    assert (policy.tmp, policy.shm, policy.chdir, policy.own_network) == (scratch.tmp, scratch.shm, str(work), True)
+
+
+def test_a_linked_path_is_bound_at_its_target_and_is_the_same_link_inside(tmp_path):
+    real = tmp_path / "usr" / "bin"
+    real.mkdir(parents=True)
+    link = tmp_path / "bin"
+    link.symlink_to(real)
+    policy = Confinement(readable=(tmp_path / "usr", link)).policy()
+    assert policy.read_only == (str(tmp_path / "usr"), str(link)), "usr/bin is under usr, already shown"
+    argv = policy.argv(PROBE, ["true"])
+    assert argv[argv.index(str(link)) - 2 : argv.index(str(link)) + 1] == ["--symlink", str(real), str(link)]
+
+
+def test_a_read_only_path_below_a_read_only_bind_is_left_out_and_a_writable_one_also_readable_kept_once(tmp_path):
+    (tmp_path / "ro" / "deeper").mkdir(parents=True)
+    (tmp_path / "rw").mkdir()
+    policy = Confinement(
+        writable=(tmp_path / "rw",),
+        readable=(tmp_path / "ro", tmp_path / "ro" / "deeper", tmp_path / "rw"),
+    ).policy()
+    assert policy.read_only == (str(tmp_path / "ro"),)
+    assert policy.writable == (str(tmp_path / "rw"),)
+
+
+# ---- nothing is resolved through what the agent writes ----
+
+
+def _planted(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """An app home with an SSH key, and the agent's work tree: what it leaves for the next launch is up to each test."""
+    home, work = tmp_path / "home", tmp_path / "work"
+    key = _write(home / ".ssh" / "id_rsa", "SECRET-SSH-KEY")
+    _write(home / ".ssh" / "authorized_keys")
+    work.mkdir()
+    return home, work, key
+
+
+def _shows(policy, path: Path) -> list[str]:
+    """The binds of ``policy`` that show ``path`` (resolved) at its own place."""
+    real = os.path.realpath(path)
+    return [bind for bind in (*policy.read_only, *policy.writable) if real == bind or real.startswith(bind + "/")]
+
+
+def test_a_path_entry_the_agent_turned_into_a_link_is_never_bound_at_its_target(tmp_path, no_child_python):
+    home, work, key = _planted(tmp_path)
+    (work / "bin").symlink_to(home / ".ssh")
+    environ = {"HOME": str(home), "PATH": f"{work / 'bin'}:/usr/bin"}
+
+    found = toolchain_paths(environ, "sh", writable=(work,))
+
+    assert [path for path in found if os.path.realpath(path).startswith(str(home))] == []
+    masked = credential_paths(environ, allowed=(*found, work), writable=(work,))
+    policy = Confinement(writable=(work,), readable=found, masked=masked).policy()
+    assert _shows(policy, key) == [] and _absent_inside(key, policy)
+
+
+def test_a_writable_path_below_another_is_never_bound_at_a_target_the_agent_chose(tmp_path):
+    """The re-pointed config directory, home and caches lie in the work tree; the agent can make one a link."""
+    home, work, key = _planted(tmp_path)
+    (work / ".claude").symlink_to(home / ".ssh")
+    (work / ".cache").mkdir()
+
+    policy = Confinement(writable=(work, work / ".claude", work / ".cache")).policy()
+
+    assert (policy.writable, policy.read_only) == ((str(work),), ())
+    assert _shows(policy, key) == [] and _shows(policy, home / ".ssh" / "authorized_keys") == []
+
+
+def test_a_nested_writable_path_the_agent_re_points_never_becomes_a_tree_the_agent_writes(tmp_path, no_child_python):
+    """Else the agent could point its config directory at the toolchain and have its next launch refused."""
+    _home, work, _key = _planted(tmp_path)
+    tools = tmp_path / "tools"
+    (tools / "bin").mkdir(parents=True)
+    (work / ".claude").symlink_to(tools)
+
+    policy = Confinement(writable=(work, work / ".claude"), readable=(tools / "bin",)).policy()
+
+    assert (policy.writable, policy.read_only) == ((str(work),), (str(tools / "bin"),))
+    environ = {"PATH": f"{tools / 'bin'}:/usr/bin"}
+    assert tools / "bin" in toolchain_paths(environ, "sh", writable=(work, work / ".claude"))
+
+
+def test_a_writable_path_reached_through_another_never_adds_where_it_points_to_the_trees(tmp_path, no_child_python):
+    """``into-work/sub`` is not below ``work`` as given, but ``into-work`` links to ``work``, so the agent decides what
+    ``sub`` is. Pointed at the toolchain, it is left out, and the toolchain is not taken for a tree the agent writes:
+    else its next launch would be refused, and a credential location there left unmasked as the agent's own."""
+    _home, work, _key = _planted(tmp_path)
+    tools = tmp_path / "tools"
+    (tools / "bin").mkdir(parents=True)
+    kube = _write(tools / "kube" / "config")
+    (tmp_path / "into-work").symlink_to(work)
+    (work / "sub").symlink_to(tools)
+    writable = (work, tmp_path / "into-work" / "sub")
+
+    policy = Confinement(writable=writable, readable=(tools / "bin",)).policy()
+
+    assert (policy.writable, policy.read_only) == ((str(work),), (str(tools / "bin"),))
+    environ = {"PATH": f"{tools / 'bin'}:/usr/bin", "KUBECONFIG": str(kube)}
+    assert tools / "bin" in toolchain_paths(environ, "sh", writable=writable)
+    assert kube in credential_paths(environ, allowed=(tools, work), writable=writable)
+
+
+@pytest.mark.parametrize("target", ["root", "parent", "link_holder"])
+def test_a_writable_path_re_pointed_through_another_never_takes_a_tree_from_the_agent(
+    tmp_path, no_child_python, target
+):
+    """``into-work/sub`` leads into ``work`` (as ``via/work``, the worktree as given, does), so the agent decides what
+    it is. Pointed at ``/``, at ``work``'s parent, or at ``via`` (which holds the app's link), it has ``work`` reached
+    through it; yet ``work`` stays a tree: nothing reached through it is bound or read. Pointed at ``via``, the two
+    are reached through each other's trees: neither is bound, both stay trees, and a credential location of the
+    child's in ``via`` is masked, not taken for one the agent writes."""
+    _home, work, _key = _planted(tmp_path)
+    (work / "bin").mkdir()
+    (tmp_path / "via").mkdir()
+    (tmp_path / "via" / "work").symlink_to(work)
+    (tmp_path / "into-work").symlink_to(work)
+    (work / "sub").symlink_to({"root": Path("/"), "parent": tmp_path, "link_holder": tmp_path / "via"}[target])
+    kube = _write(tmp_path / "via" / "kubeconfig")
+    writable = (tmp_path / "via" / "work", tmp_path / "into-work" / "sub")
+
+    assert Confinement(writable=writable).policy().writable == (() if target == "link_holder" else (str(work),))
+    with pytest.raises(BwrapPolicyError):
+        Confinement(writable=writable, readable=(work / "bin",)).policy()
+    environ = {"PATH": f"{work / 'bin'}:/usr/bin", "KUBECONFIG": str(kube)}
+    assert work / "bin" not in toolchain_paths(environ, "sh", writable=writable)
+    assert kube in credential_paths(environ, writable=writable)
+
+
+@pytest.mark.parametrize("planted", [False, True], ids=["directory", "link"])
+def test_a_readable_path_reached_through_a_tree_the_agent_writes_is_refused(tmp_path, planted):
+    """Its target would be the agent's choice, and a read-only bind over a tree the agent writes cannot hold."""
+    home, work, _key = _planted(tmp_path)
+    if planted:
+        (work / "ro").symlink_to(home / ".ssh")
+    else:
+        (work / "ro").mkdir()
+    with pytest.raises(BwrapPolicyError) as refused:
+        Confinement(writable=(work,), readable=(Path("/usr"), work / "ro")).policy()
+    assert refused.value.problems == (
+        f"{work / 'ro'} is reached through a tree the agent writes, which decides what it is",
+    )
+
+
+def test_a_path_reached_through_an_app_link_into_the_agents_tree_or_its_scratch_is_not_bound(tmp_path):
+    """Also as a bind names it: ``link/../tmp/left`` resolves beside ``link``'s target, and bubblewrap is handed it
+    normalized, ``tmp/left``, inside the scratch the agent writes."""
+    home, work, _key = _planted(tmp_path)
+    (work / "sub").symlink_to(home / ".ssh")
+    (tmp_path / "into-work").symlink_to(work)
+    scratch = Scratch(str(tmp_path / "tmp"), str(tmp_path / "shm"))
+    (tmp_path / "tmp" / "left").mkdir(parents=True)
+    (tmp_path / "shm").mkdir()
+    (tmp_path / "image" / "tmp" / "left").mkdir(parents=True)
+    (tmp_path / "image" / "inner").mkdir()
+    (tmp_path / "to-image").symlink_to(tmp_path / "image" / "inner")
+    beside = Path(f"{tmp_path / 'to-image'}/../tmp/left")
+
+    policy = Confinement(writable=(work, tmp_path / "into-work" / "sub")).policy(scratch=scratch)
+
+    assert (policy.writable, policy.read_only) == ((str(work),), ())
+    for readable in (tmp_path / "into-work" / "sub", tmp_path / "tmp" / "left", beside):
+        with pytest.raises(BwrapPolicyError):
+            Confinement(writable=(work,), readable=(readable,)).policy(scratch=scratch)
+    (tmp_path / "loop").symlink_to(tmp_path / "loop")
+    assert Confinement(writable=(work,), readable=(tmp_path / "loop" / "x",)).policy().read_only == (), (
+        "a link loop ends the walk where the kernel's ends (ELOOP), and nothing is bound"
+    )
+    through_work = Path(f"{tmp_path / 'into-work'}/../work")
+    assert Confinement(writable=(work,), readable=(through_work,)).policy().writable == (str(work),), (
+        "a path that resolves to the writable tree itself is that tree"
+    )
+
+
+def test_a_program_the_agent_linked_elsewhere_binds_nothing_of_where_it_points(tmp_path, monkeypatch, no_child_python):
+    """By name, by absolute path, and by a relative path, which names a program relative to the working directory
+    inside (this process's own one is the agent's tree here)."""
+    home, work, key = _planted(tmp_path)
+    (work / "bin").mkdir()
+    (work / "bin" / "claude").symlink_to(key)
+    environ = {"HOME": str(home), "PATH": f"{work / 'bin'}:/usr/bin"}
+    monkeypatch.chdir(work)
+
+    for argv0 in ("claude", str(work / "bin" / "claude"), "bin/claude", "./bin/claude"):
+        found = toolchain_paths(environ, argv0, writable=(work,))
+        assert [path for path in found if os.path.realpath(path).startswith(str(home))] == [], argv0
+        assert [path for path in found if not path.is_absolute()] == [], argv0
+
+
+def test_a_relative_program_path_binds_nothing_wherever_it_lies(tmp_path, monkeypatch, no_child_python):
+    """Resolved against this process's working directory, a relative path names a program the child, started in
+    another one, may not run; nothing is bound for it, outside the agent's tree too."""
+    tools = tmp_path / "tools"
+    program = _write(tools / "bin" / "tool", "#!/bin/sh\n")
+    program.chmod(0o755)
+    monkeypatch.chdir(tools)
+
+    assert tools / "bin" in toolchain_paths({"PATH": "/usr/bin"}, str(program), writable=())
+    found = toolchain_paths({"PATH": "/usr/bin"}, "bin/tool", writable=())
+    assert [path for path in found if os.path.realpath(path).startswith(str(tools))] == []
+
+
+def test_masks_are_only_paths_a_bind_shows(tmp_path):
+    hf = tmp_path / "hf"
+    secrets, elsewhere = _write(hf / "secrets" / "token"), _write(tmp_path / "home" / ".aws" / "credentials")
+    policy = Confinement(readable=(hf,), masked=(secrets.parent, elsewhere, tmp_path / "missing")).policy()
+    assert policy.masked == (str(secrets.parent),), "a credential no bind shows does not exist inside: nothing to mask"
+
+
+def test_a_login_file_in_a_bound_tree_is_left_out_by_binding_what_is_beside_it(tmp_path):
+    """A mount over a file goes with the file's first rename, and none covers one made later: the tree that holds a
+    login file (``token``, there or not) is bound entry by entry instead, without it, down the way to it."""
+    hf = tmp_path / "hf"
+    model, kube = _write(hf / "hub" / "model"), _write(hf / "deep" / "kube" / "config")
+    _write(hf / "deep" / "kube" / "cache" / "entry")
+    _write(hf / "deep" / "other")
+    policy = Confinement(readable=(hf,), masked=(hf / "token", kube)).policy()
+    expected = [hf / "deep" / "kube" / "cache", hf / "deep" / "other", model.parent]
+    assert policy.read_only == tuple(map(str, expected))
+    assert policy.masked == ()
+
+
+def test_a_link_beside_a_login_file_stays_a_link_only_to_what_is_shown(tmp_path):
+    """Bound entry by entry, a link is recreated where another bind shows its target; one to the login file, or to
+    what nothing shows, is left out (a bind of it would show its target)."""
+    tree, outside = tmp_path / "tree", _write(tmp_path / "outside" / "key")
+    secret, visible = _write(tree / "secret"), _write(tree / "visible")
+    for name, target in (("to_secret", secret), ("to_visible", visible), ("to_outside", outside)):
+        (tree / name).symlink_to(target)
+    policy = Confinement(readable=(tree,), masked=(secret,)).policy()
+    assert policy.read_only == (str(tree / "to_visible"), str(visible))
+    assert policy.masked == ()
+
+
+def test_a_login_file_in_a_tree_the_agent_writes_is_refused_by_name(tmp_path):
+    """The agent's own tree is never bound entry by entry: a login file the app keeps there stays a mask, which
+    :meth:`BwrapPolicy.problems` refuses by name."""
+    work = tmp_path / "work"
+    login = _write(work / "login")
+    policy = Confinement(writable=(work,), masked=(login, work / "token")).policy()
+    assert policy.writable == (str(work),)
+    assert policy.masked == (str(login),)
+    assert [problem for problem in policy.problems((0, 13, 1)) if str(login) in problem]
+
+
+def test_a_credential_reached_through_a_linked_directory_is_left_out_at_both_paths(tmp_path):
+    """``link/data`` with ``link -> real`` shows ``real/data`` at both paths, so both are bound entry by entry,
+    without its credential."""
+    secret = _write(tmp_path / "real" / "data" / "secret")
+    _write(tmp_path / "real" / "data" / "visible")
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    given = tmp_path / "link" / "data"
+    policy = Confinement(readable=(given,), masked=(secret,)).policy()
+    assert policy.read_only == (str(tmp_path / "real" / "data" / "visible"), str(given / "visible"))
+    assert policy.masked == ()
+
+
+def test_a_mask_below_another_mask_is_left_out(tmp_path):
+    inner = _write(tmp_path / "tree" / "a" / "b")
+    policy = Confinement(readable=(tmp_path / "tree",), masked=(inner, tmp_path / "tree" / "a")).policy()
+    assert policy.masked == (str(tmp_path / "tree" / "a"),), "a mask below a read-only mask could not be mounted"
+
+
+def test_a_toolchain_policy_never_binds_proc_or_sys():
+    environ = dict(os.environ)
+    policy = Confinement(readable=toolchain_paths(environ, sys.executable, writable=())).policy()
+    argv = policy.argv(PROBE, ["true"])
+    binds = [argv[at + 2] for at, arg in enumerate(argv) if arg in ("--ro-bind-try", "--bind")]
+    assert [path for path in binds if path in ("/proc", "/sys") or path.startswith("/proc/")] == ["/sys"]
+    assert argv[argv.index("--proc") + 1] == "/proc"
+    assert "/sys" in policy.sys_paths and "/sys" not in policy.read_only

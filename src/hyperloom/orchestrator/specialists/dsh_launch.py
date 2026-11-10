@@ -19,7 +19,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom_common.llm.deepseek_session import DEEPSEEK_PROVIDER_ROUTE, DeepSeekSessionUnavailableError, gateway_env
+from hyperloom_common.llm.deepseek_session import (
+    COMPACTION_PATCH,
+    DEEPSEEK_PROVIDER_ROUTE,
+    DeepSeekSessionUnavailableError,
+    gateway_env,
+)
 from hyperloom_common.fs_utils import write_text_nofollow
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 from hyperloom.inference_optimizer.trace.parse_dsh_session import parse_dsh_session_trace
@@ -211,6 +216,7 @@ def _render_patch(*, model: str, instruction_bytes: int, mcp_rows: list[str]) ->
         "- id: agent-instructions",
         _PATCH_CONFIG,
         f"    maxBytes: {instruction_bytes + _DEFAULT_INSTRUCTION_BYTES}",
+        *COMPACTION_PATCH.splitlines(),
     ]
     if mcp_rows:
         lines.append("- insert:")

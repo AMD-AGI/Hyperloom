@@ -3,6 +3,7 @@
 
 """Concrete ActionRunner implementations."""
 
+from ._proposal_identity import content_fingerprint, controls_of, normalize_proposal
 from .baseline import baseline_executor
 from .explore import explore_executor
 from .conc_sweep import conc_sweep_executor
@@ -28,8 +29,7 @@ from ._inferencex_patcher import (
 from ._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabled
 from ._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid
 from ._ray_backend import strip_visible_devices_from_config
-from ._server_lifecycle import REUSE_PORT_DEFAULT, resolve_lifecycle_params, teardown_lifecycle_server
-from ._server_lifecycle import _assign_free_port as assign_free_port
+from ._server_lifecycle import resolve_lifecycle_params, teardown_lifecycle_server
 from ._subprocess_kill import (
     COOPERATIVE_REAP_BUDGET_SEC,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -45,6 +45,7 @@ from ._spec_decode_pin import (
     SPECULATIVE_DECODING_PINNED,
     SpeculativeDecodingPinnedError,
     refuse_unpinned_speculative_change,
+    speculative_pin_reason,
 )
 from ._patch_laying import PatchedServer, is_patched_copy
 from ._profile_setup import SGLANG_PATCH_SERVER_FLAG
@@ -71,7 +72,6 @@ __all__ = [
     "LaunchLayer",
     "MaterializeOptions",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
-    "REUSE_PORT_DEFAULT",
     "RequestedLaunch",
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
@@ -79,11 +79,12 @@ __all__ = [
     "SpeculativeDecodingPinnedError",
     "TargetAnalysisExecutor",
     "VariantResult",
-    "assign_free_port",
     "baseline_executor",
     "benchmark_serving_path_in",
     "build_launch_evidence",
     "conc_sweep_executor",
+    "content_fingerprint",
+    "controls_of",
     "context_copy_refusal",
     "default_baseline_config",
     "ensure_benchmark_lib_patched",
@@ -91,6 +92,7 @@ __all__ = [
     "explore_executor",
     "harvest_leaked_artifacts",
     "materialize_benchmark_config",
+    "normalize_proposal",
     "refuse_cacheless_agentx_baseline",
     "refuse_unpinned_speculative_change",
     "report_executor",
@@ -99,6 +101,7 @@ __all__ = [
     "run_grid_warmup_enabled",
     "run_with_session_kill",
     "session_breakdown_executor",
+    "speculative_pin_reason",
     "strip_visible_devices_from_config",
     "teardown_lifecycle_server",
 ]

@@ -21,7 +21,8 @@ from kernelforge.workflows.forge_loop.search.search_policy import (
     SearchPolicyDecision,
     SearchState,
 )
-from kernelforge.workflows.forge_loop.roles.contracts import OrchestrationContext
+from kernelforge.workflows.forge_loop.roles.contracts import EvidenceRef, OrchestrationContext
+from kernelforge.workflows.forge_loop.roles.supervisor import latest_supervisor_ruling_path
 
 
 class RoundAdmissionMixin:
@@ -29,8 +30,10 @@ class RoundAdmissionMixin:
 
     def _time_remaining(self) -> float:
         """Seconds remaining in the budget."""
-        elapsed = time.time() - self.start_time
-        return max(0, self.ic.max_time_hours * 3600 - elapsed)
+        deadline = self.start_time + self.ic.max_time_hours * 3600
+        if self.ic.deadline_unix is not None:
+            deadline = min(deadline, self.ic.deadline_unix)
+        return max(0, deadline - time.time())
 
     def _analysis_deadline_unix(self) -> float:
         """Absolute Analysis deadline preserving iteration/finalization reserve."""
@@ -286,6 +289,39 @@ class RoundAdmissionMixin:
         if decision.mode != previous_mode or decision.reason_codes != previous_reasons:
             print(f"  [search-policy] {decision.mode}: " + ", ".join(decision.reason_codes))
         return decision
+
+    def _with_loop_state(self, context: OrchestrationContext) -> OrchestrationContext:
+        """``context`` carrying the active Supervisor ruling, the last Plan Critic ruling and the search policy.
+
+        Each is read from its owner as it stands now. The Analysis context is resolved before the Supervisor runs and
+        the policy is decided after it, so a context taken from Analysis carries none of them.
+        """
+        ruling_path = latest_supervisor_ruling_path(self.ic.workspace_dir)
+        ruling_refs = (
+            (
+                EvidenceRef(
+                    kind="supervisor_guidance",
+                    path=str(ruling_path.resolve()),
+                    summary=(
+                        "Latest free-form Supervisor Ruling. It overrides subjective conclusions in historical "
+                        "lesson records but not objective measurements."
+                    ),
+                ),
+            )
+            if self._supervisor_ruling and ruling_path.is_file()
+            else ()
+        )
+        return replace(
+            context,
+            supervisor_guidance=self._supervisor_ruling,
+            last_critic_verdict=self._last_critic_verdict,
+            last_critic_review=self._last_critic_review,
+            search_mode=self.run_state.search_mode,
+            search_reason_codes=tuple(self.run_state.search_reason_codes),
+            search_objective=self.run_state.search_objective,
+            search_mode_residence_remaining=self.run_state.search_mode_residence_remaining,
+            evidence_refs=(*context.evidence_refs, *ruling_refs),
+        )
 
     def _previous_round_kept(self) -> bool | None:
         """Whether the last round that planned kept a candidate of its own, or ``None`` before any round planned.

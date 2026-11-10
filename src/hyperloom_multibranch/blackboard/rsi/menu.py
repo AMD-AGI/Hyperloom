@@ -32,8 +32,9 @@ The cost of a test is the median GPU seconds of this session's tests of the list
 
 No list offers a family that cannot act on the session's task: parallelism and communication on a server of one GPU,
 or an op family none of whose ops the profile shows, such as moe on a dense model. A line says whether its family was
-tried on the commit, another branch holds a claim in it, or the integration head holds a commit of it. One branch in
-four gets no menu (:func:`in_control`): its tests are the menu's control. Every menu given is logged
+tried on the commit, another branch holds a claim in it, or the integration head holds a commit of it. A line stays on
+its list when a direction Arbor's map set aside names one of the ops it acts on, and says under it which and why. One
+branch in four gets no menu (:func:`in_control`): its tests are the menu's control. Every menu given is logged
 (:class:`MenuLog`), for CLOSE to read what the specialists chose from it.
 
 A claim's note (:func:`direction_note`) gives the claimed family's commit odds and says when the archive tried it
@@ -59,6 +60,7 @@ from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer, Purpose, TestKind
 from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
+    MapDirection,
     OpShares,
     SessionProfile,
     TestRecord,
@@ -72,6 +74,7 @@ from hyperloom_multibranch.blackboard.families import (
     Component,
     Family,
     Mechanism,
+    direction_names_op,
     family_of,
     op_family,
 )
@@ -118,6 +121,8 @@ STRUCTURAL = frozenset(
 DROP_MISSES = 3
 #: How the ops a line acts on sit under it, the largest first, as many as the brief's line holds.
 OPS_LINE = "  ops "
+#: How a direction of Arbor's map that set aside an op the line acts on sits under the line, with its id and why.
+SET_ASIDE_LINE = "  set aside by Arbor's map "
 SETTINGS = "settings"
 CODE = "code"
 UNTOUCHED = "no test or claim has acted on it yet"
@@ -387,7 +392,7 @@ class MenuItem:
     """One line of the menu: its family, of no one layer on the code list, which folds the source and kernel layers;
     the draw it ranked by, its mean commit odds over its ``tests``, the gain a commit of it has within reach, what it
     scored, its marks, and for an op family the ops it acts on, the largest first, with their shares of the profile of
-    ``profile``."""
+    ``profile``, and the directions of Arbor's map that set one of those ops aside, ``set_aside``."""
 
     family: Family
     draw: float
@@ -398,6 +403,7 @@ class MenuItem:
     marks: tuple[str, ...] = ()
     ops: tuple[tuple[str, float], ...] = ()
     profile: str = ""
+    set_aside: tuple[MapDirection, ...] = ()
 
     @property
     def families(self) -> tuple[Family, ...]:
@@ -412,7 +418,8 @@ class MenuItem:
         return f"{self.family.label.removesuffix(ANY_LAYER)}{CODE_LAYER}"
 
     def lines(self) -> tuple[str, ...]:
-        """The line, and under it the ops it acts on when it names any: the brief clips each line on its own."""
+        """The line, and under it the ops it acts on when it names any, then each direction that set one of them
+        aside with why: the brief clips each line on its own."""
 
         marks = f"; {', '.join(self.marks)}" if self.marks else ""
         line = f"{self.label}: odds {self.odds:.2f} over {self.tests:.1f} tests, up to {self.gain_pct:+.1f}%{marks}"
@@ -420,7 +427,8 @@ class MenuItem:
             return (line,)
         named = ", ".join(f"{op} {share:.1f}%" for op, share in self.ops)
         total = sum(share for _, share in self.ops)
-        return line, f"{OPS_LINE}{total:.1f}% of the profile of {self.profile[:12]}: {named}"
+        aside = (f"{SET_ASIDE_LINE}({item.id}): {item.why or 'not given'}" for item in self.set_aside)
+        return line, f"{OPS_LINE}{total:.1f}% of the profile of {self.profile[:12]}: {named}", *aside
 
 
 @dataclass(frozen=True)
@@ -580,6 +588,17 @@ def _code(
     return tuple(item for _, item in ranked[:MENU_ITEMS])
 
 
+def _set_aside(items: Iterable[MenuItem], directions: Sequence[MapDirection]) -> tuple[MenuItem, ...]:
+    """``items``, each with the ``directions`` Arbor's map set aside that name an op it acts on."""
+
+    aside = [direction for direction in directions if not direction.open]
+    found = []
+    for item in items:
+        named = (direction for direction in aside if any(direction_names_op(direction, op) for op, _ in item.ops))
+        found.append(replace(item, set_aside=tuple(named)))
+    return tuple(found)
+
+
 def direction_menu(
     snapshot: BlackboardSnapshot, branch: str, commit: str, evidence: MenuEvidence, *, metric: str
 ) -> DirectionMenu:
@@ -596,8 +615,8 @@ def direction_menu(
     headroom = _headroom(snapshot, branch, commit, metric)
     scoring = _Scoring(draws, usual, snapshot.op_shares.get(profiled), profiled, headroom, _costs(snapshot), bar)
     known = _Known(evidence.archived, seen, _marks(snapshot, branch, commit))
-    settings = _settings(scoring, known, snapshot.profile)
-    code = _code(scoring, known, snapshot.profile, snapshot, commit)
+    settings = _set_aside(_settings(scoring, known, snapshot.profile), snapshot.agent_map)
+    code = _set_aside(_code(scoring, known, snapshot.profile, snapshot, commit), snapshot.agent_map)
     return DirectionMenu(branch, commit, snapshot.taken_at, in_control(session, branch), settings, code)
 
 
@@ -757,6 +776,7 @@ __all__ = [
     "ON_INTEGRATION",
     "OPS_LINE",
     "SETTINGS",
+    "SET_ASIDE_LINE",
     "STRUCTURAL",
     "TRIED_HERE",
     "UNTOUCHED",

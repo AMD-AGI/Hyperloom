@@ -17,6 +17,7 @@ from typing import Any, Mapping, NamedTuple, Sequence
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.outside_facts import AITER_LOG_TUNED_CONFIG_ENV
 from hyperloom_common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
@@ -57,6 +58,8 @@ class RecipeLaunch(NamedTuple):
 
     argv: Sequence[str] = ()
     env: Mapping[str, str] = MappingProxyType({})
+    # The whole environment the launch ran with, the launcher's injections included; ``env`` stays what it set.
+    ran_env: Mapping[str, str] = MappingProxyType({})
 
 
 def recipe_base_launch(config_path: Path) -> RecipeLaunch:
@@ -67,6 +70,8 @@ def recipe_base_launch(config_path: Path) -> RecipeLaunch:
     already set: which options and variables it owns, and which settings a candidate composed on top of it is not
     free to change.
     """
+    from hyperloom.inference_optimizer.agentx.report import server_launch_environment
+
     receipt_path = config_path.parent / "launch_evidence.json"
     if not receipt_path.is_file():
         return RecipeLaunch()
@@ -79,6 +84,7 @@ def recipe_base_launch(config_path: Path) -> RecipeLaunch:
         [str(token) for token in launch.get("base_argv", [])],
         # A ``None`` value records a name the launch cleared, so it is not part of the environment it ran with.
         {str(name): str(value) for name, value in (launch.get("effective_env") or {}).items() if value is not None},
+        server_launch_environment(launch)[0],
     )
 
 
@@ -157,7 +163,7 @@ def _launch_envs(recipe: RecipeLaunch, benchmark: Mapping[str, Any], launch: Map
     ``benchmark.envs``, so they are the bottom layer a composing layer sees.
     """
     unset = set(launch.get("unset_env", []))
-    envs = {**recipe.env, **(benchmark.get("envs") or {}), **(launch.get("env") or {})}
+    envs = {**recipe.ran_env, **recipe.env, **(benchmark.get("envs") or {}), **(launch.get("env") or {})}
     return {name: value for name, value in envs.items() if name not in unset}
 
 
@@ -260,6 +266,7 @@ def materialize_agentx(
     """Keep the workload YAML intact while changing only the server candidate."""
     config = copy.deepcopy(config)
     bench = config["benchmark"]
+    _log_tuned_config_hits(bench)
     envs = bench.setdefault("envs", {})
     if model_path and Path(model_path).is_dir():
         envs["MODEL_PATH"] = model_path
@@ -270,6 +277,16 @@ def materialize_agentx(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
     return output
+
+
+def _log_tuned_config_hits(bench: dict[str, Any]) -> None:
+    """Have the server log aiter's tuned-config hits unless the candidate unsets it; apply verification reads them."""
+    agentx = bench.get("agentx")
+    if not isinstance(agentx, dict):
+        return
+    launch = agentx.setdefault("launch_overrides", {"version": 1})
+    if AITER_LOG_TUNED_CONFIG_ENV not in launch.get("unset_env", []):
+        launch.setdefault("env", {}).setdefault(AITER_LOG_TUNED_CONFIG_ENV, "1")
 
 
 def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> None:
@@ -313,7 +330,6 @@ def enable_profile(config_path: Path) -> None:
     from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 
     from ._profile_setup import (
-        annotations_supported,
         apply_sglang_shape_tool,
         patch_for_profile,
         shape_discovery_enabled,
@@ -347,7 +363,7 @@ def enable_profile(config_path: Path) -> None:
     torch_profiler.setdefault("num_profiles", 1)
     torch_profiler.setdefault("start_seconds", 300)
     torch_profiler.setdefault("interval_seconds", 900)
-    torch_profiler.setdefault("detailed_annotations", annotations_supported(bench["envs"]))
+    torch_profiler.setdefault("detailed_annotations", patch.annotations)
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 

@@ -5,7 +5,7 @@ isolated phase of one engine step, plus enough bookkeeping to tell an honest
 component share from a silently-partial one.
 
 Three properties the pack's evaluators depend on, and which the first-generation
-``sikl_profile_decode.sh`` / ``profile_decode_vllm.py`` scripts did not provide:
+profiling scripts did not provide:
 
 1. **The denominator is the whole step.** A record carries every op, not a
    top-N slice, so ``share = matched / total`` means what it says.

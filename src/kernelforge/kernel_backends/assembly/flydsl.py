@@ -69,7 +69,7 @@ def with_assembly(
     """Return an independently owned callable using an edited AMDHSA assembly file.
 
     ``compiled`` comes from ``flydsl.compiler.compile``; the result keeps its
-    argument and stream ABI. FlyDSL 0.2.0/0.2.4 variants get separate engines,
+    argument and stream ABI. FlyDSL 0.2.0-0.5.0 variants get separate engines,
     without compiler patches or JIT-cache mutation. Build before timing or graph
     capture and run the full correctness driver before accepting a candidate.
     """
@@ -79,7 +79,7 @@ def with_assembly(
         from flydsl.compiler.jit_function import CallState, CompiledFunction, _create_mlir_context
     except ImportError as exc:
         raise AssemblyError(
-            "FlyDSL with the CompiledFunction/CompiledArtifact API is required (tested with 0.2.0 and 0.2.4)"
+            "FlyDSL with the CompiledFunction/CompiledArtifact API is required (tested with 0.2.0, 0.2.4, 0.3.4.1, 0.4.2 and 0.5.0)"
         ) from exc
 
     if not isinstance(compiled, CompiledFunction):
@@ -93,7 +93,7 @@ def with_assembly(
         has_dependencies = reference._link_libs or reference._post_load_processors or reference._uses_explicit_module
     except AttributeError as exc:
         raise AssemblyError(
-            f"Unsupported FlyDSL CompiledFunction/CompiledArtifact API (tested with 0.2.0 and 0.2.4): {exc}"
+            f"Unsupported FlyDSL CompiledFunction/CompiledArtifact API (tested with 0.2.0, 0.2.4, 0.3.4.1, 0.4.2 and 0.5.0): {exc}"
         ) from exc
     if has_dependencies:
         raise AssemblyError(

@@ -4,7 +4,7 @@
 """The accuracy checks a test runs on its own server, after its measured rounds and before the server's teardown.
 
 Both checks judge the recipe's answers, not one server process, so the server the test measured on is as good as a fresh
-one and costs no boot (InferenceX already evaluates on the measured server: ``local._eval_then_measure``). The local backend
+one and costs no boot (InferenceX already evaluates on the measured server: ``local._held_rounds``). The local backend
 holds the server up past its last measured round (Magpie would stop it at the end of that round) and runs
 :func:`run_held_checks` before the teardown: the short-prompt check (``short_prompts.rounds.answer_held``) and the
 long-context check. Neither boots a server of its own.

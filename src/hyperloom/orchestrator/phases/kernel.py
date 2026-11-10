@@ -97,8 +97,13 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
     async def exit_facts(self) -> KernelExitFacts:
         """Advance the idle streak for this tick and report the facts the KERNEL exit decision reads."""
         await self._track_idle_streak()
-        in_kernel = str(self.shared_state.phase or "").upper() == _phase_state.PHASE_KERNEL_AGENT
-        return KernelExitFacts(agent_in_flight=in_kernel and await self._agent_in_flight())
+        return KernelExitFacts(agent_in_flight=await self.agent_in_flight())
+
+    async def agent_in_flight(self) -> bool:
+        """Whether KERNEL is the phase and its ``kernel_agent`` task is queued or running; reads only."""
+        if str(self.shared_state.phase or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
+            return False
+        return any(task.kind == "kernel_agent" for task in [*await self.tasks.queued(), *await self.tasks.running()])
 
     async def _inflight_task_ids(self) -> tuple[str, ...]:
         """Return the ids of queued/running tasks doing KERNEL-lane work."""
@@ -107,11 +112,6 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         return tuple(
             sorted(str(task.task_id) for task in tasks if str(getattr(task, "kind", "") or "").strip() in kinds)
         )
-
-    async def _agent_in_flight(self) -> bool:
-        """Whether the ``kernel_agent`` task is queued or running."""
-        tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
-        return any(task.kind == "kernel_agent" for task in tasks)
 
     async def _track_idle_streak(self) -> None:
         """Advance or reset the KERNEL idle-streak counters for this tick."""
@@ -208,20 +208,17 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         stack_len = int(self.shared_state.cumulative_gain_validated_stack_len or 0)
         return f"kernel_entry_g{stack_len}_{hashlib.sha256(identity).hexdigest()[:12]}"
 
-    def _adopt_reprofile_snapshot(self, *, before: float, snapshot_id_before: int, snapshots_before: int) -> bool:
+    def _adopt_reprofile_snapshot(self, *, anchor_tput: float, snapshot_id_before: int, snapshots_before: int) -> bool:
         state = self.shared_state
-        after = self._last_measured_roofline_tput()
-        # A reprofile that reproduces the same tput under the same snapshot id still landed: the third signal is
-        # that the run appended a snapshot at all, and without it a same-tput reprofile never adopts its workload.
         landed = (
-            after != before
-            or int(state.roofline_snapshot_id or 0) != snapshot_id_before
+            int(state.roofline_snapshot_id or 0) != snapshot_id_before
             or len(state.roofline_snapshots or []) != snapshots_before
         )
-        if after <= 0 or not landed:
+        if not landed:
             log.warning("kernel-entry reprofile produced no new snapshot; the phase targets the existing trace")
             return landed
-        state.last_roofline_tput = after
+        # The anchor is the projection the trace was taken at, the quantity the watermark compares it with.
+        state.last_roofline_tput = anchor_tput
         # Record the workload (incl. serving_config) that this trace reflects; _profile_config_changed derives the
         # config signature from it, so last_profile_args stays the plain-args field it is everywhere else.
         state.last_profile_workload = state.profile_workload_context()
@@ -229,8 +226,8 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         return landed
 
     async def _maybe_reprofile_for_kernel(self) -> None:
-        """Reprofile inline when projected tput diverges from the last measured trace, so the phase targets the live bottleneck."""
-        before = self._last_measured_roofline_tput()
+        """Reprofile inline when projected tput moved off the last trace's anchor, so the phase targets the live bottleneck."""
+        before = self.shared_state.last_roofline_tput
         cur = self.current_tput_from_validated_gain()
         profile_signature = self._current_profile_config_signature()
         config_changed = self._profile_config_changed(profile_signature)
@@ -284,7 +281,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             _note_reprofile(replace(attempt, ran=True, skipped_reason="dispatch_failed"))
             return
         snapshot_landed = self._adopt_reprofile_snapshot(
-            before=before, snapshot_id_before=snapshot_id_before, snapshots_before=snapshots_before
+            anchor_tput=cur, snapshot_id_before=snapshot_id_before, snapshots_before=snapshots_before
         )
         _note_reprofile(
             replace(
@@ -901,6 +898,8 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
                 result["reclaimed_repositories"] = reclaimed
         except ValueError:
             log.exception("KERNEL entry: reclaiming the campaign repositories failed")
+        if result["status"] == "cancelled":  # unsettled: the resumed entry runs a fresh Controller
+            return
         await self._integrate_controller_output(result, output_dir)
         self._record_kernel_rewrite_controller_timeline(result)
         self.shared_state.kernel_rewrite_controller_result = result
@@ -1087,20 +1086,6 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             gain = 0.0
         return base * (1.0 + gain / 100.0)
 
-    def _last_measured_roofline_tput(self) -> float:
-        """Measured tok/s of the most recent roofline snapshot; 0.0 when none."""
-        snaps = self.shared_state.roofline_snapshots or []
-        for snap in reversed(snaps):
-            if not isinstance(snap, dict):
-                continue
-            try:
-                tput = float(snap.get("achieved_tok_per_sec") or 0.0)
-            except (TypeError, ValueError):
-                tput = 0.0
-            if tput > 0:
-                return tput
-        return 0.0
-
     def _needs_roofline_for_watermark(self) -> bool:
         """True iff projected tput crossed the watermark over ``last_roofline_tput`` (False until PRELUDE roofline ran, or while auto_roofline_pending_task_id is in-flight)."""
         state = self.shared_state
@@ -1143,11 +1128,10 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             task = None
         if task is not None and str(getattr(task, "state", "")) not in TERMINAL_STATES:
             return
+        if self._coord.dispatcher.owes_result(pending):
+            return
         self.shared_state.auto_roofline_pending_task_id = ""
-        log.info(
-            "watermark-roofline: released in-flight gate held by finished task=%s",
-            pending,
-        )
+        log.info("watermark-roofline: released in-flight gate held by finished task=%s", pending)
 
     async def maybe_enqueue_watermark_roofline(
         self,

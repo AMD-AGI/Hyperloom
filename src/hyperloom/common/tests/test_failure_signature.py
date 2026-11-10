@@ -431,6 +431,52 @@ def test_a_hip_call_that_failed_while_running_is_not_a_missing_kernel(log: str) 
     assert is_targeted_build_candidate(sig) is True
 
 
+#: The HIP runtime's queue abort when a kernel that is running faults, as it prints it to stderr before the process dies.
+HSA_QUEUE_ABORT_LINE = (
+    ":0:rocdevice.cpp            :3020: 2245381405 us:  Callback: Queue 0x7f2b44400000 aborting with error : "
+    "HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. "
+    "code: 0x29\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("log", "status"),
+    [
+        (HSA_QUEUE_ABORT_LINE, "HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION"),
+        (
+            ":0:rocdevice.cpp            :2984: 7339452061 us:  Callback: Queue 0x7f6a2c600000 aborting with error : "
+            "HSA_STATUS_ERROR_EXCEPTION: An HSAIL operation resulted in a hardware exception. code: 0x1016\n",
+            "HSA_STATUS_ERROR_EXCEPTION",
+        ),
+    ],
+)
+def test_an_hsa_queue_abort_is_a_gpu_fault_not_a_missing_kernel(log: str, status: str) -> None:
+    """A queue the runtime aborted with an HSA status is a kernel that ran and faulted: a runtime error naming the status."""
+    sig = classify_failure("INFO decode batch\n" + log + "Aborted (core dumped)\n")
+
+    assert sig.kind == HIP_RUNTIME_ERROR
+    assert HIP_KERNEL_MISSING not in sig.secondary_kinds
+    assert sig.offending_symbol == status
+    assert sig.bridge_layer == "rocm_hip"
+    assert is_targeted_build_candidate(sig) is True
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        "RuntimeError: HIP error: no kernel image is available for execution on the device\n",
+        "hipErrorNoBinaryForGpu: Unable to find code object for all current devices!\n",
+        "ImportError: /opt/sgl-kernel/common_ops.so: undefined symbol: _ZN4aiter8fmha_fwdEv\n",
+    ],
+)
+def test_an_absent_kernel_stays_a_missing_kernel_beside_an_hsa_queue_abort(log: str) -> None:
+    """What says a kernel is absent keeps its kind, alone and ahead of a queue abort in the same log."""
+    assert classify_failure(log).kind == HIP_KERNEL_MISSING
+    both = classify_failure(log + HSA_QUEUE_ABORT_LINE)
+    assert both.kind == HIP_KERNEL_MISSING
+    assert HIP_RUNTIME_ERROR in both.secondary_kinds
+
+
 def test_an_absent_symbol_beside_a_runtime_error_stays_a_missing_kernel() -> None:
     sig = classify_failure(
         "hipErrorIllegalAddress\nImportError: /opt/sglang/_C.so: undefined symbol: _ZN4aiter8fmha_fwdEv\n"

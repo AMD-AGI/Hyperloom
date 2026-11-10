@@ -76,7 +76,7 @@ from hyperloom.measure.runner.native.aiter_modules import (
     buildable_modules,
 )
 from hyperloom.measure.runner.native.builder import BuildMachine
-from hyperloom.measure.runner.native.isolated import IsolatedBuilds, Isolation, local_isolation
+from hyperloom.measure.runner.native.isolated import IsolatedBuilds, Isolation, Unisolated, local_isolation
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.orchestrator.actions.executors._aiter_jit import (
     AITER_ENV_TO_SERVING_MODULES,
@@ -164,7 +164,7 @@ def build_environment(environ: Mapping[str, str], cu_num: int | None) -> dict[st
 def isolated_builder(
     machine: BuildMachine,
     *,
-    isolation: Callable[[], Isolation | None] = local_isolation,
+    isolation: Callable[[], Isolation | Unisolated] = local_isolation,
     factory: str = AITER_RECIPE_FACTORY,
     environ: Mapping[str, str] | None = None,
 ) -> ModuleBuilder:
@@ -176,17 +176,19 @@ def isolated_builder(
         located = locate_package(AITER_PACKAGE, machine.python, scratch)
         if located.resolve() != Path(package).resolve():
             raise PrewarmError(f"{machine.python} imports aiter from {located}, not from {package}")
-        # The compile's user passes through ``scratch`` to its work directory below it, without listing it.
-        os.chmod(scratch, stat.S_IMODE(os.stat(scratch).st_mode) | stat.S_IXOTH)
         blobs = LocalBlobStore(scratch / BLOBS_DIR)
         planner = NativePlanner(NativeSite(machine, {}, scratch / "sources", Path(package).parent), blobs)
         image = EnvRoot(AITER_PACKAGE, AITER_PACKAGE, *_UNREAD_DIST, ())
         planned = AiterModules(planner, environ=environ)((image,), read_config(config_path(package)), modules)
         if planned is None:
             return {}
+        isolated = isolation()
+        if isinstance(isolated, Isolation) and isolated.uid is not None:
+            # The compile's user passes through ``scratch`` to its work directory below it, without listing it.
+            os.chmod(scratch, stat.S_IMODE(os.stat(scratch).st_mode) | stat.S_IXOTH)
         work = scratch / "build"
         work.mkdir(mode=0o700)
-        staged = IsolatedBuilds(planner, blobs, isolation(), {AITER_COMPONENT: factory})(planned.inputs)(work)
+        staged = IsolatedBuilds(planner, blobs, isolated, {AITER_COMPONENT: factory})(planned.inputs)(work)
         if staged.status != READY:
             raise PrewarmError(f"the build failed: {staged.failure}: {staged.log.strip()[-_LOG_TAIL:]}")
         outputs = {
