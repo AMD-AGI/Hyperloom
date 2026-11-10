@@ -29,6 +29,8 @@ _STEP = os.O_NOFOLLOW | os.O_CLOEXEC
 #: What opening a link's own name with ``O_NOFOLLOW`` fails with: ``ELOOP``, or ``ENOTDIR`` with ``O_DIRECTORY``.
 _A_LINK_MAYBE = (errno.ELOOP, errno.ENOTDIR)
 _PARENT = ".."
+#: The mode of a file the walk creates.
+_FILE_MODE = 0o600
 
 
 def _parts(path: str) -> list[str]:
@@ -91,11 +93,11 @@ class _Walk:
         return inside[0]
 
 
-def open_rooted(root: Path, virtual: str, flags: int, *, make_parents: bool = False, mode: int = 0o600) -> int:
+def open_rooted(root: Path, virtual: str, flags: int, *, make_parents: bool = False) -> int:
     """A descriptor of ``virtual`` (a path in the root, ``/`` its top) below the directory ``root``, opened with
-    ``flags`` (plus ``O_NOFOLLOW``; a file it creates gets ``mode`` less the umask, owner-only by default), by a walk
-    no link leads out of the root (see the module doc). ``make_parents`` makes each directory that is missing on the
-    way. The caller closes the descriptor.
+    ``flags`` (plus ``O_NOFOLLOW``; a file it creates is this account's alone, ``0o600``), by a walk no link leads out
+    of the root (see the module doc). ``make_parents`` makes each directory that is missing on the way. The caller
+    closes the descriptor.
 
     Raises:
         SandboxDenied: A link on the way leads out of the root, or the walk follows more than :data:`MAX_LINKS`.
@@ -112,7 +114,7 @@ def open_rooted(root: Path, virtual: str, flags: int, *, make_parents: bool = Fa
                 continue
             last = not pending
             try:
-                opened = os.open(name, (flags if last else _DIRECTORY) | _STEP, mode, dir_fd=walk.stack[-1])
+                opened = os.open(name, (flags if last else _DIRECTORY) | _STEP, _FILE_MODE, dir_fd=walk.stack[-1])
             except FileNotFoundError:
                 if last or not make_parents or made == (len(walk.stack), name):
                     raise
