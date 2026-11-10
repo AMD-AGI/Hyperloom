@@ -85,7 +85,7 @@ from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.specialist.agent_manifest import EXIT_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.worktree import SKIPPED
-from inference_suite.argv import remove_server_args, tokenize_server_args_preserving_json
+from inference_suite.argv import remove_server_args, reserialize_json_blobs, tokenize_server_args_preserving_json
 from inference_suite.contracts import BASE_LAUNCH_SCHEMA, BaseLaunch, BaseLaunchError, RunStatus
 from inference_suite.contracts.layout import REPORT_FILE
 
@@ -322,9 +322,9 @@ class ResolvedLaunch:
 def read_launch(path: Path) -> ResolvedLaunch:
     """The launch in the file ``path``, a JSON object of :data:`LAUNCH_KEYS` (the repository's
     ``examples/multibranch-arbor-launch`` has a template), or a base launch record (:func:`_read_record`); raise
-    :class:`ArborRefused` with every reason it cannot be used: unreadable, a key it does not have, no ``server_flags``,
-    a ``server_env`` that is not an object of strings, a template placeholder left unfilled, or a ``client`` Arbor
-    could not fill."""
+    :class:`ArborRefused` with every reason it cannot be used: unreadable, a key it does not have, no ``server_flags``
+    or ones with a quote left open, a ``server_env`` that is not an object of strings, a template placeholder left
+    unfilled, or a ``client`` Arbor could not fill."""
 
     try:
         document = json.loads(path.read_text(encoding=ENCODING))
@@ -339,6 +339,8 @@ def read_launch(path: Path) -> ResolvedLaunch:
     flags, env = document.get("server_flags"), document.get("server_env")
     if not isinstance(flags, str) or not flags.strip():
         reasons.append("it gives no server_flags, the launch's server arguments")
+    elif not _splits_as_shell(flags):
+        reasons.append("its server_flags do not split into shell words: a quote is left open")
     if not isinstance(env, dict) or not all(isinstance(value, str) for value in env.values()):
         reasons.append("its server_env is not an object of strings")
     texts = {key: document.get(key, "") for key in LAUNCH_KEYS[2:]}
@@ -378,15 +380,46 @@ def _read_record(path: Path, document: Mapping[str, Any]) -> ResolvedLaunch:
 
 
 def _flag_word(word: str) -> str:
-    """A record's word as Arbor's server_flags carry it: a JSON value compact and unquoted, as Arbor splits one;
-    another word quoted for the shell only when it must be."""
+    """``word`` as Arbor's server_flags carry it, which Arbor launches through a shell: quoted for the shell, a JSON
+    value compacted first, and of a ``--name=value`` word only its value, so that it still reads as a flag."""
 
-    if word[:1] in "{[":
+    flag, value = _flag_and_value(word)
+    if value[:1] in "{[":
         try:
-            return json.dumps(json.loads(word), separators=(",", ":"))
+            value = json.dumps(json.loads(value), separators=(",", ":"))
         except ValueError:
             pass
-    return shlex.quote(word)
+    return flag + shlex.quote(value)
+
+
+def _shell_line(args: str) -> str:
+    """Server arguments as MB composes them, a JSON value unquoted, as the shell line Arbor's server_flags are: each
+    word as Arbor splits it, one pair of outer quotes taken off it or off its value, quoted by :func:`_flag_word`."""
+
+    words = []
+    for word in shlex.split(reserialize_json_blobs(args), posix=False):
+        flag, value = _flag_and_value(word)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        words.append(_flag_word(flag + value))
+    return " ".join(words)
+
+
+def _splits_as_shell(args: str) -> bool:
+    try:
+        shlex.split(args)
+    except ValueError:
+        return False
+    return True
+
+
+def _flag_and_value(word: str) -> tuple[str, str]:
+    """A ``--name=value`` word as ``--name=`` and its value; any other word as ``""`` and itself."""
+
+    if word.startswith("-") and "=" in word:
+        name, _, value = word.partition("=")
+        return f"{name}=", value
+    return "", word
 
 
 @dataclass(frozen=True)
@@ -723,21 +756,21 @@ def _arbor_objective(objective: AgentXObjective) -> dict[str, Any]:
 
 
 def server_flags(spec: AgentSpec, resolved: str = "") -> str:
-    """The recipe's server arguments as Arbor launches them, after the ``resolved`` launch's, less the flags the recipe
-    removes from it, when there is one, with the workload's TP size unless the arguments set it (SGLang and vLLM); on
-    SGLang also its expert-parallel size, unless the arguments set it, and only when it divides the TP, as MB's own
-    launch has it."""
+    """The recipe's server arguments as the shell line Arbor launches them with (:func:`_shell_line`), after the
+    ``resolved`` launch's, less the flags the recipe removes from it, when there is one, with the workload's TP size
+    unless the arguments set it (SGLang and vLLM); on SGLang also its expert-parallel size, unless the arguments set
+    it, and only when it divides the TP, as MB's own launch has it."""
 
     args = merge_server_args(remove_server_args(resolved, spec.remove_args), spec.server_args)
     tp_flags = {SGLANG: SGLANG_TP_FLAGS, VLLM: VLLM_TP_FLAGS}.get(spec.framework)
     if tp_flags is None:
-        return args
+        return _shell_line(args)
     named = _flag_names(args)
     added = [] if named & set(tp_flags) else [f"{tp_flags[0]} {spec.tp}"]
     flag, aliases, _ = expert_parallel_flag(SGLANG)
     if spec.framework == SGLANG and spec.ep > 1 and spec.tp % spec.ep == 0 and not named & set(aliases):
         added.append(f"{flag} {spec.ep}")
-    return merge_server_args(args, *added)
+    return _shell_line(merge_server_args(args, *added))
 
 
 def _launch_refusals(spec: AgentSpec) -> list[str]:
