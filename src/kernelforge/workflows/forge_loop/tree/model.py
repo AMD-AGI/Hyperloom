@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass, field, replace
 from enum import Enum
 
@@ -54,6 +55,14 @@ class SlotStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class NodeMeasurement:
+    """What one measurement of a node's code adds to its record: a score and each case's time for every bench run."""
+
+    samples: tuple[float, ...]
+    case_runs: tuple[dict[str, float], ...]
+
+
+@dataclass(frozen=True)
 class TreeNode:
     """One validated and measured kernel version, held as a git commit."""
 
@@ -79,6 +88,9 @@ class TreeNode:
     focus_cases: tuple[str, ...] = ()
     # The Agent profile whose session wrote the node; empty for the root, a mechanical merge, and a session without one.
     agent_profile_id: str = ""
+    # Each case's time in every bench run of every measurement of the node: ``case_times`` is its median and
+    # ``case_spreads`` its standard deviation. Empty for a node a tree recorded without it.
+    case_samples: dict[str, tuple[float, ...]] = field(default_factory=dict)
 
     @property
     def score(self) -> float:
@@ -88,6 +100,21 @@ class TreeNode:
     @property
     def is_root(self) -> bool:
         return not self.parent
+
+    def with_measurement(self, measurement: NodeMeasurement) -> "TreeNode":
+        """The node with one more measurement folded into its samples and its per-case statistics."""
+        runs = {case: list(times) for case, times in self.case_samples.items()}
+        for run in measurement.case_runs:
+            for case, ms in run.items():
+                runs.setdefault(case, []).append(ms)
+        case_samples = {case: tuple(times) for case, times in runs.items()}
+        return replace(
+            self,
+            samples=(*self.samples, *measurement.samples),
+            case_samples=case_samples,
+            case_times={case: statistics.median(times) for case, times in case_samples.items()},
+            case_spreads={case: statistics.stdev(times) for case, times in case_samples.items() if len(times) >= 2},
+        )
 
 
 @dataclass(frozen=True)
@@ -281,9 +308,9 @@ class SearchTree:
             raise ValueError(f"node {node.commit} names an unknown direction {node.direction!r}")
         self.nodes.append(node)
 
-    def add_samples(self, commit: str, samples: tuple[float, ...]) -> TreeNode:
+    def add_measurement(self, commit: str, measurement: NodeMeasurement) -> TreeNode:
         """Fold a later measurement of a node into its record."""
-        updated = replace(self.require_node(commit), samples=(*self.require_node(commit).samples, *samples))
+        updated = self.require_node(commit).with_measurement(measurement)
         self.nodes = [updated if item.commit == commit else item for item in self.nodes]
         return updated
 
@@ -389,6 +416,7 @@ __all__ = [
     "DirectionProposal",
     "DirectionStatus",
     "MergeFailure",
+    "NodeMeasurement",
     "NodeSource",
     "Round",
     "SearchTree",

@@ -68,13 +68,19 @@ def _kernel(values: dict[str, int]) -> str:
     return "".join(f"{name} = {value}\n" for name, value in values.items())
 
 
-def _stub_device(monkeypatch, measured: list[dict[str, int]]):
-    """Time a checkout by its kernel's constants: each constant is the case of its lowercased name, 10 in 1.0 ms."""
+def _stub_device(monkeypatch, measured: list[dict[str, int]], *, incorrect=frozenset(), slower_in: Path | None = None):
+    """Time a checkout by its kernel's constants: each constant is the case of its lowercased name, 10 in 1.0 ms.
+
+    A kernel whose source is in ``incorrect`` fails validation; every case of a checkout at ``slower_in`` takes three
+    times as long.
+    """
 
     async def bench(run, **_kwargs):
-        values = _constants(Path(run.driver_script).parent / "kernel.py")
+        checkout = Path(run.driver_script).parent
+        values = _constants(checkout / "kernel.py")
         measured.append(values)
-        case_times = {name.lower(): value / 10.0 for name, value in values.items()}
+        slowdown = 3.0 if slower_in is not None and checkout.resolve() == slower_in.resolve() else 1.0
+        case_times = {name.lower(): value / 10.0 * slowdown for name, value in values.items()}
         runs = [
             {
                 "success": True,
@@ -86,11 +92,21 @@ def _stub_device(monkeypatch, measured: list[dict[str, int]]):
         return {"success": True, "median_ms": sum(case_times.values()), "case_times": case_times, "measurements": runs}
 
     async def validation(*, driver_script, **_kwargs):
+        passed = (Path(driver_script).parent / "kernel.py").read_text() not in incorrect
+        stage = SimpleNamespace(
+            stage=5,
+            stage_name="full",
+            passed=passed,
+            status_label="PASS" if passed else "FAIL",
+            snr_db=50.0 if passed else None,
+        )
         return SimpleNamespace(
-            all_passed=True,
-            results=[SimpleNamespace(stage=5, stage_name="full", passed=True, status_label="PASS", snr_db=50.0)],
-            summary=lambda: "PASS",
-            failed_stage=None,
+            all_passed=passed,
+            results=[stage],
+            summary=lambda: "PASS" if passed else "FAIL: the output differs from the reference",
+            failed_stage=None if passed else 5,
+            failed_outcome=None,
+            failed_output="",
         )
 
     async def registers(**_kwargs):
@@ -325,11 +341,17 @@ def _run_campaign(
     selector_type=_Selector,
     relay: bool = False,
     split=None,
+    incorrect=frozenset(),
+    slower_campaign: bool = False,
 ):
-    """Run a tree campaign; ``split`` turns the round's agents into the relay whose profiles share each round."""
+    """Run a tree campaign; ``split`` turns the round's agents into the relay whose profiles share each round.
+
+    ``incorrect`` names kernel sources that fail validation; ``slower_campaign`` times the campaign workspace three
+    times slower than any start's checkout.
+    """
     workspace = workspace or _workspace(tmp_path)
     measured: list[dict[str, int]] = []
-    _stub_device(monkeypatch, measured)
+    _stub_device(monkeypatch, measured, incorrect=incorrect, slower_in=workspace if slower_campaign else None)
     baseline = {name.lower(): 1.0 for name in _constants(workspace / "kernel.py")}
     config = IterationConfig(
         kernel_file=str(workspace / "kernel.py"),
@@ -371,6 +393,10 @@ def test_a_round_keeps_a_slower_route_and_publishes_the_faster_one(tmp_path, mon
     assert [round(node.score, 3) for node in tree.nodes] == [1.0, 2.0, 0.833]
     assert [item.name for item in tree.directions] == ["fast table", "structural route"]
     fast, slow = tree.nodes[1], tree.nodes[2]
+    # The root is measured in its own checkout like every node, so its cases carry the noise they are read against.
+    assert len(tree.root.samples) == 3 and set(tree.root.case_spreads) == {"value"}
+    # The publication's measurement on the campaign branch joins the published node's own.
+    assert len(fast.samples) == 6 and len(fast.case_samples["value"]) == 6
     # Each node keeps what set its lane apart, for the selector to read in later rounds.
     assert (fast.approach, fast.focus_cases, slow.approach) == ("shrink the table", ("value",), "restructure the loop")
     assert tree.published_best == fast.commit
@@ -433,7 +459,8 @@ def test_a_round_whose_lanes_left_the_device_held_measures_and_publishes_nothing
     )
     tree = SearchTreeStore(ExperimentsLayout.of(workspace).search_tree).load()
 
-    assert measured == [] and len(tree.nodes) == 1 and tree.published_best == tree.root.commit
+    # The root, measured as the tree was rooted, is all the campaign measured: not the lanes' work, not the re-measure.
+    assert measured == [{"VALUE": 10}] and len(tree.nodes) == 1 and tree.published_best == tree.root.commit
     assert loop.results[-1].workspace_contention and not loop.results[-1].kept
 
 
@@ -469,6 +496,8 @@ def test_a_resume_records_the_round_a_killed_session_left_open_and_carries_on(tm
     assert [item.outcome for item in second if item.outcome is not AttemptOutcome.ERROR] == [AttemptOutcome.NODE] * 2
     assert resumed.round is None
     assert len(resumed.nodes) == 5
+    # The resumed campaign keeps the root it measured when it began.
+    assert len(resumed.root.samples) == 3
 
 
 def test_a_round_that_publishes_nothing_counts_against_the_profile_that_ran_it(tmp_path, monkeypatch):
@@ -538,3 +567,35 @@ def test_a_workspace_with_untracked_sources_is_refused(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="helper.py"):
         _run_campaign(tmp_path, monkeypatch, rounds=1, workspace=workspace)
+
+
+def test_a_campaign_whose_root_does_not_measure_correct_never_starts_its_search(tmp_path, monkeypatch):
+    with pytest.raises(RuntimeError, match="did not measure correct"):
+        _run_campaign(tmp_path, monkeypatch, rounds=1, incorrect={"VALUE = 10\n"})
+
+
+def test_the_selector_sees_the_cases_a_slower_node_loses_to_the_root(tmp_path, monkeypatch):
+    _loop, _workspace, selector, _measured = _run_campaign(tmp_path, monkeypatch, rounds=2, planning=_SlowerPlanning)
+
+    # Round 1 published nothing, so round 2 reads its nodes against the root and its measured noise.
+    assert "beats published beyond noise on: none; loses on: value" in selector.facts[1]
+
+
+def test_a_re_measure_joins_the_node_with_its_case_runs(tmp_path, monkeypatch):
+    _loop, workspace, _selector, _measured = _run_campaign(
+        tmp_path, monkeypatch, rounds=1, selector_type=_RemeasuringSelector
+    )
+    root = SearchTreeStore(ExperimentsLayout.of(workspace).search_tree).load().root
+
+    assert len(root.samples) == 6 and len(root.case_samples["value"]) == 6
+    assert root.case_spreads["value"] > 0.0
+
+
+def test_a_publication_that_reverts_still_joins_the_node_it_measured(tmp_path, monkeypatch):
+    _loop, workspace, _selector, _measured = _run_campaign(tmp_path, monkeypatch, rounds=1, slower_campaign=True)
+    tree = SearchTreeStore(ExperimentsLayout.of(workspace).search_tree).load()
+    fast = tree.nodes[1]
+
+    # Its own checkout timed it at 2x; the campaign branch, three times slower, at 0.67x, which reverts it.
+    assert tree.published_best == tree.root.commit
+    assert len(fast.samples) == 6 and round(fast.score, 3) == 1.333

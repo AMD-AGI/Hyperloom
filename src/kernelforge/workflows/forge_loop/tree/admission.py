@@ -15,12 +15,12 @@ from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.workflows.forge_loop.iteration.fanout import LanePlan, LaneResult, run_lanes
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
 from kernelforge.workflows.forge_loop.iteration.lane_runtime import _lane_prompt
-from kernelforge.workflows.forge_loop.iteration.merge_candidates import case_spreads
 from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
 from kernelforge.workflows.forge_loop.tree.model import (
     Attempt,
     AttemptOutcome,
     DirectionProposal,
+    NodeMeasurement,
     NodeSource,
     SearchTree,
     Slot,
@@ -87,6 +87,24 @@ def measured_correct(result: IterationResult | None) -> bool:
         return False
     detail = result.bench_detail or {}
     return bool(detail.get("success")) and bool(detail.get("measurement_mean_case_speedups"))
+
+
+def node_measurement(result: IterationResult) -> NodeMeasurement:
+    """What a correct measurement adds to a node: the score and each case's time of every bench run."""
+    detail = result.bench_detail or {}
+    runs = (_case_run(item) for item in detail.get("measurements") or () if isinstance(item, dict))
+    return NodeMeasurement(
+        samples=tuple(float(item) for item in detail["measurement_mean_case_speedups"]),
+        case_runs=tuple(run for run in runs if run),
+    )
+
+
+def _case_run(measurement: dict) -> dict[str, float]:
+    return {
+        str(case): float(ms)
+        for case, ms in (measurement.get("case_times") or {}).items()
+        if isinstance(ms, (int, float)) and float(ms) > 0.0
+    }
 
 
 def _summary(text: str) -> str:
@@ -325,7 +343,7 @@ class TreeAdmissionMixin:
             worktree = self._start_worktrees.ensure(commit)
             result = await self._measure_at(iteration, f"re-measure {commit}", worktree)
             if measured_correct(result):
-                tree.add_samples(commit, tuple(result.bench_detail["measurement_mean_case_speedups"]))
+                tree.add_measurement(commit, node_measurement(result))
                 self._tree_store.save(tree)
 
     def _attempt(
@@ -372,7 +390,6 @@ class _Placement:
 
 
 def _node_of(result: IterationResult, placement: _Placement, *, slot: Slot | None, plan: str) -> TreeNode:
-    detail = result.bench_detail or {}
     return TreeNode(
         commit=placement.commit,
         parent=placement.parent,
@@ -380,15 +397,15 @@ def _node_of(result: IterationResult, placement: _Placement, *, slot: Slot | Non
         slot_type=None if slot is None else slot.slot_type,
         iteration=result.iteration,
         slot=0 if slot is None else slot.index,
-        samples=tuple(float(item) for item in detail["measurement_mean_case_speedups"]),
+        samples=(),
         wall_ms=result.wall_ms,
-        case_times={str(key): float(value) for key, value in dict(detail.get("case_times") or {}).items()},
-        case_spreads=case_spreads(detail.get("measurements")),
+        case_times={},
+        case_spreads={},
         snr_db=result.snr_db,
         plan=_summary(plan),
         source=_source_of(slot),
         provenance=placement.provenance,
-    )
+    ).with_measurement(node_measurement(result))
 
 
 def _source_of(slot: Slot | None) -> NodeSource:
@@ -434,5 +451,6 @@ __all__ = [
     "StagedCandidate",
     "TreeAdmissionMixin",
     "measured_correct",
+    "node_measurement",
     "slot_prompt",
 ]

@@ -16,6 +16,7 @@ from kernelforge.workflows.forge_loop.tree.model import (
     AttemptOutcome,
     DirectionProposal,
     DirectionStatus,
+    NodeMeasurement,
     NodeSource,
     Round,
     SearchTree,
@@ -104,6 +105,31 @@ def test_a_slower_node_is_kept_and_the_direction_best_is_its_highest_node():
     assert tree.published_best == tree.root.commit
 
 
+def test_every_measurement_joins_the_node_and_its_case_statistics_cover_every_run():
+    tree = _grown_tree()
+    unmeasured = replace(_node("4" * 40, "3" * 40, "d002", iteration=3), samples=(), case_times={}, case_spreads={})
+    tree.add_node(unmeasured.with_measurement(NodeMeasurement((1.0, 1.1), ({"m_1": 1.0}, {"m_1": 1.2}))))
+
+    node = tree.add_measurement("4" * 40, NodeMeasurement((0.9,), ({"m_1": 1.4, "m_2": 3.0},)))
+
+    assert tree.node("4" * 40) == node
+    assert node.samples == (1.0, 1.1, 0.9)
+    assert node.case_samples == {"m_1": (1.0, 1.2, 1.4), "m_2": (3.0,)}
+    assert node.case_times == {"m_1": pytest.approx(1.2), "m_2": 3.0}
+    # One run cannot say how noisy its case is.
+    assert node.case_spreads == {"m_1": pytest.approx(0.2)}
+
+
+def test_a_node_recorded_without_its_runs_takes_its_case_statistics_from_its_next_measurement():
+    recorded = _node("1" * 40, "a" * 40, "d001", iteration=1)
+
+    measured = recorded.with_measurement(NodeMeasurement((1.0, 1.0), ({"m_1": 2.0}, {"m_1": 2.2})))
+
+    assert len(measured.samples) == 5
+    assert measured.case_samples == {"m_1": (2.0, 2.2)}
+    assert measured.case_times == {"m_1": pytest.approx(2.1)}
+
+
 def test_a_node_must_grow_from_a_known_parent_on_a_known_direction():
     tree = _grown_tree()
 
@@ -163,6 +189,7 @@ def test_the_tree_round_trips_through_its_store(tmp_path):
         approach="stage via LDS",
         focus_cases=("m_1",),
         agent_profile_id="codex",
+        case_samples={"m_1": (1.0, 1.01, 0.99)},
     )
     tree.add_node(focused)
     store = SearchTreeStore(tmp_path / "search_tree.json")
@@ -174,20 +201,21 @@ def test_the_tree_round_trips_through_its_store(tmp_path):
     assert store.load().node(focused.commit) == focused
 
 
-def test_a_tree_saved_before_it_recorded_lane_focus_and_agent_profiles_still_loads():
+def test_a_tree_saved_before_it_recorded_lane_focus_agent_profiles_and_bench_runs_still_loads():
     tree = _grown_tree()
     tree.open_round(Round(iteration=3, slots=(Slot(1, SlotType.DEEPEN, "3" * 40, "r", direction="d002"),)))
     tree.close_round([lost_attempt(3, tree.round.slots[0], "lost")])
     tree.open_round(Round(iteration=4, slots=(Slot(1, SlotType.DEEPEN, "3" * 40, "r", direction="d002"),)))
     payload = json.loads(json.dumps(tree_to_dict(tree)))
     for node in payload["nodes"]:
-        del node["approach"], node["focus_cases"], node["agent_profile_id"]
+        del node["approach"], node["focus_cases"], node["agent_profile_id"], node["case_samples"]
     for record in (*payload["attempts"], *payload["round"]["slots"]):
         del record["agent_profile_id"]
 
     loaded = tree_from_dict(payload)
 
     assert [(node.approach, node.focus_cases, node.agent_profile_id) for node in loaded.nodes] == [("", (), "")] * 4
+    assert [node.case_samples for node in loaded.nodes] == [{}] * 4
     assert [item.agent_profile_id for item in (*loaded.attempts, *loaded.round.slots)] == ["", ""]
 
 

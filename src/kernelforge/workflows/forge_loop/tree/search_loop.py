@@ -36,6 +36,7 @@ from kernelforge.workflows.forge_loop.tree.admission import (
     SlotOutcome,
     TreeAdmissionMixin,
     measured_correct,
+    node_measurement,
 )
 from kernelforge.workflows.forge_loop.tree.facts import FactSources, RoundOutlook, render_facts
 from kernelforge.workflows.forge_loop.tree.merge import TreeMergeMixin
@@ -69,7 +70,7 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
 
     async def _begin_locked_run(self, agents: LoopAgents, *, callbacks: LoopCallbacks, usage=None) -> LoopAgents:
         actors = await super()._begin_locked_run(agents, callbacks=callbacks, usage=usage)
-        self._begin_search_tree()
+        await self._begin_search_tree()
         if self.ic.split_relay and len(self._split_profiles()) < 2:
             print(
                 "  [tree] relay mode split: fewer than two Agent profiles can run this session, so every slot runs on "
@@ -87,8 +88,8 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
     def _update_search_policy(self, _iteration: int) -> None:
         """A tree campaign has no campaign-wide search mode: each start's slots decide how it is planned."""
 
-    def _begin_search_tree(self) -> None:
-        """Root a fresh campaign's tree at the published best, or reconcile a resumed one with the repository."""
+    async def _begin_search_tree(self) -> None:
+        """Root a fresh campaign's tree at a measurement of the published best, or reconcile a resumed one."""
         untracked = untracked_outside(self.ic.workspace_dir, [self._experiments.root.name])
         if untracked:
             raise ValueError(
@@ -99,7 +100,7 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
         if self._tree_store.exists():
             self._tree = self._resumed_tree()
         else:
-            self._tree = SearchTree.create(self._root_node(), root_branch=self.ic.git_branch)
+            self._tree = SearchTree.create(await self._measured_root(), root_branch=self.ic.git_branch)
             pin_node(self.ic.workspace_dir, self._tree.root.commit)
         self._tree_store.save(self._tree)
         print(f"  [tree] {len(self._tree.nodes)} node(s), published best {self._tree.published_best[:12]}")
@@ -107,24 +108,31 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
     def _rev_parse(self, revision: str) -> str:
         return git("rev-parse", revision, cwd=self.ic.workspace_dir).stdout.strip()
 
-    def _root_node(self) -> TreeNode:
+    async def _measured_root(self) -> TreeNode:
+        """The node a fresh campaign starts from, measured in its own worktree as every other node is."""
         head = self._rev_parse("HEAD")
-        score = self.best_mean_case_speedup or 1.0
-        return TreeNode(
+        result = await self._measure_at(0, "measure the search tree's root", self._start_worktrees.ensure(head))
+        if not measured_correct(result):
+            raise RuntimeError(
+                f"the search tree's root {head[:12]} did not measure correct, so the search has no per-case noise to "
+                f"read its nodes against: {result.validation_summary}"
+            )
+        root = TreeNode(
             commit=head,
             parent="",
             direction="",
             slot_type=None,
             iteration=0,
             slot=0,
-            samples=(score,),
-            wall_ms=self.best_wall_ms,
-            case_times=dict(self._best_case_times or self._baseline_case_times),
+            samples=(),
+            wall_ms=result.wall_ms,
+            case_times={},
             case_spreads={},
-            snr_db=None,
+            snr_db=result.snr_db,
             plan=self.run_state.best.plan,
             source=NodeSource.WARM_START if self.ic.warm_start_commit else NodeSource.BASELINE,
         )
+        return root.with_measurement(node_measurement(result))
 
     def _resumed_tree(self) -> SearchTree:
         tree = self._tree_store.load()
@@ -356,15 +364,21 @@ class TreeSearchLoop(TreePlanningMixin, TreeMergeMixin, TreeAdmissionMixin, Iter
         await self._settle_locked_attempt(attempt, frame, callbacks=callbacks)
 
     async def _publish_node(self, node: TreeNode, frame: _IterationFrame, callbacks) -> None:
-        """Stage ``node``'s tree in the campaign workspace and settle it as this iteration's candidate."""
+        """Stage ``node``'s tree in the campaign workspace and settle it as this iteration's candidate.
+
+        The settle measures the node once more, KEEP or not, and that measurement joins the node's own.
+        """
         git("read-tree", "--reset", "-u", node.commit, cwd=self.ic.workspace_dir)
         frame.session_sink["plan"] = node.plan
         attempt = _Attempt(None, "", node.plan, self._read_kernel_source(), self._working_tree_diff(), None, "", True)
         await self._settle_locked_attempt(attempt, frame, callbacks=callbacks)
-        if self.results and self.results[-1].kept:
+        result = self.results[-1] if self.results and self.results[-1].iteration == frame.iteration else None
+        if measured_correct(result):
+            self._tree.add_measurement(node.commit, node_measurement(result))
+        if result is not None and result.kept:
             self._tree.publish(node.commit, head=self.run_state.best.commit_hash)
-            self._tree_store.save(self._tree)
             print(f"  [tree] published node {node.commit[:12]} as the new best")
+        self._tree_store.save(self._tree)
 
 
 def _held_device_result(iteration: int, detail: str) -> IterationResult:
