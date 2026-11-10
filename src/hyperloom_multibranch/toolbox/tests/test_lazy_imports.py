@@ -24,15 +24,7 @@ OWN_PACKAGES = ("hyperloom.", "hyperloom_multibranch.")
 #: The specialist sessions the scheduler's wiring imports when it runs, which the specialist package does not have yet.
 #: The change that adds them to the package removes them from here: once one of them is importable,
 #: ``test_not_yet_in_package_names_only_modules_that_are_absent`` fails until it is removed.
-NOT_YET_IN_PACKAGE = frozenset(
-    {
-        "hyperloom_multibranch.specialist.agent_sessions",
-        "hyperloom_multibranch.specialist.autonomous_session",
-        "hyperloom_multibranch.specialist.dossier_pass",
-        "hyperloom_multibranch.specialist.map_session",
-        "hyperloom_multibranch.specialist.model_sessions",
-    }
-)
+NOT_YET_IN_PACKAGE: frozenset[str] = frozenset()
 
 
 def _type_checking(test: ast.expr) -> bool:

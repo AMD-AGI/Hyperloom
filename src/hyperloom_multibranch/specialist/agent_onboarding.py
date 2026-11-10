@@ -40,6 +40,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Protocol
 
+from hyperloom.sandbox import SandboxError
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_common.git_safety import NO_PROGRAMS
 from hyperloom_multibranch.repo.isolated_git import NO_LAZY_FETCH, blank_driver_programs, leading_options, trusting
@@ -220,7 +221,7 @@ async def make_ready(source: str, spec: AgentSpec, agent_dir: Path, setup: Onboa
                 pause = min(pause * 2, GATEWAY_PAUSE_SECONDS)
                 continue
             failures.append(f"attempt {attempt}: {error}")
-        except (AttemptFailed, OSError) as error:
+        except (AttemptFailed, OSError, SandboxError) as error:
             failures.append(f"attempt {attempt}: {error}")
         if attempt == ATTEMPTS:
             raise PreflightFailed(failures)
