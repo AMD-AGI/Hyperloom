@@ -235,13 +235,14 @@ class IntegrationProfiler:
         """Start profiling ``head``, which the integration head moved to from ``moved_from``, unless the backend
         cannot profile.
 
-        A head that moves while a profile runs waits for that profile to end rather than going unprofiled: the
-        refills opened on it are focused on its own shares, and only the latest head is worth waiting for.
+        A head that moves while a profile runs, or before :meth:`take_outcome` read the one that ended, waits for it
+        rather than going unprofiled or replacing an outcome nobody read: the refills opened on it are focused on its
+        own shares, and only the latest head is worth waiting for.
         """
 
         if not self._available:
             return
-        if self.running:
+        if self._task is not None:
             self._waiting = (head, moved_from)
         else:
             self._task = asyncio.ensure_future(self._profile(head, moved_from))
