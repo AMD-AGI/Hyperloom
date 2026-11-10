@@ -1,15 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""One local sandbox: a private directory tree plus the processes started in it.
-
-A sandbox its provider confines (:mod:`hyperloom.sandbox.confined`) starts every process in bubblewrap, its launcher
-inside; the reap, the tag sweep and the card guard find its processes as before.
-"""
+"""One local sandbox: a private directory tree plus the processes started in it."""
 
 from __future__ import annotations
 
-import contextlib
 import errno
 import logging
 import os
@@ -19,15 +14,11 @@ import stat
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
-from hyperloom_common.bwrap import BwrapSetupError
-
-from hyperloom.common.agent_isolation import IsolationRefused
-from hyperloom.sandbox.confined import SandboxConfinement, SandboxConfiner, SandboxShape
 from hyperloom.sandbox.launcher import StatusPipe, launcher_argv
 from hyperloom.sandbox.reaper import Leftovers, kill_launchers, reap_sandbox_processes, wait_exited
 from hyperloom.sandbox.rooted import open_rooted
@@ -75,13 +66,11 @@ class SandboxPlan:
 
 @dataclass(frozen=True)
 class SandboxRuntime:
-    """How a sandbox's processes run: the end callback, the launcher's python, the account they run as, and what
-    confines them where no account is named (:class:`~hyperloom.sandbox.confined.SandboxConfiner`)."""
+    """How a sandbox's processes run: the end callback, the launcher's python and the account they run as."""
 
     on_end: Callable[[LocalSandbox, bool], None]
     launcher_python: str
     user: tuple[int, int] | None = None
-    confiner: SandboxConfiner | None = None
 
 
 class LocalSandbox:
@@ -90,9 +79,6 @@ class LocalSandbox:
     Layout under the sandbox directory: ``fs/`` is the root callers see
     (``/in``, ``/out``, ``/work``), ``private/`` holds the signing key and process logs
     and is not reachable through the file API.
-
-    Raises:
-        SandboxDenied: Its runtime must confine it (a hosted run's) and cannot.
     """
 
     def __init__(self, plan: SandboxPlan, runtime: SandboxRuntime) -> None:
@@ -107,12 +93,6 @@ class LocalSandbox:
         self._on_end = runtime.on_end
         self._launcher_python = runtime.launcher_python
         self._user = runtime.user
-        self._confined: SandboxConfinement | None = None
-        if runtime.confiner is not None:
-            shape = SandboxShape(
-                self.directory, self._base_env, self.template.command, self.template.gpus > 0, self.template.sealed
-            )
-            self._confined = runtime.confiner.confine(shape)
         self._lock = threading.RLock()
         self._ended = False
         self._procs: list[subprocess.Popen[bytes]] = []
@@ -124,11 +104,6 @@ class LocalSandbox:
         # launcher was waited, so ``kill()`` looks for these by name and keeps the cards leased while any of them runs.
         self._leftovers = Leftovers()
         self.set_timeout(plan.timeout_sec)
-
-    @property
-    def confined(self) -> bool:
-        """bool: Whether its processes run in bubblewrap."""
-        return self._confined is not None
 
     def _build_base_env(self, create_envs: Mapping[str, str], platform_envs: Mapping[str, str]) -> dict[str, str]:
         env = {k: os.environ[k] for k in _INHERITED_ENV if k in os.environ}
@@ -144,11 +119,6 @@ class LocalSandbox:
     def ended(self) -> bool:
         """bool: True once the sandbox was killed or timed out."""
         return self._ended
-
-    @property
-    def leftovers(self) -> Leftovers:
-        """Leftovers: What the sandbox's reaps could not confirm gone; clean while they all could."""
-        return self._leftovers
 
     def _require_alive(self) -> None:
         if self._ended:
@@ -204,10 +174,6 @@ class LocalSandbox:
             if self._startup is not None:
                 self._startup[1].close()
             reaped_now = reap_sandbox_processes(self._procs, self.sandbox_id)
-            if self._confined is not None:
-                # Ends the holder, and with it what of the sandbox left the launchers' trees.
-                self._confined.release()
-                reaped_now = wait_exited(reaped_now)
             # Looked at only now that the last reap is done: what a command timeout's reap named may have died since.
             self._leftovers = wait_exited(self._leftovers) | reaped_now
             reaped = self._leftovers.clean
@@ -366,19 +332,17 @@ class LocalSandbox:
                 extra: dict[str, object] = {}
                 if self._user is not None:
                     extra = {"user": self._user[0], "group": self._user[1], "extra_groups": []}
-                launcher = launcher_argv(self._launcher_python, write_fd, argv)
-                with self._launched(launcher, {**self._base_env, **env}, cwd) as (command, command_env, fds):
-                    proc = subprocess.Popen(
-                        command,
-                        env=command_env,
-                        cwd=cwd,
-                        stdin=subprocess.DEVNULL,
-                        stdout=stdout,
-                        stderr=stderr,
-                        start_new_session=True,
-                        pass_fds=(write_fd, *fds),
-                        **extra,
-                    )
+                proc = subprocess.Popen(
+                    launcher_argv(self._launcher_python, write_fd, argv),
+                    env={**self._base_env, **env},
+                    cwd=cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout,
+                    stderr=stderr,
+                    start_new_session=True,
+                    pass_fds=(write_fd,),
+                    **extra,
+                )
                 self._procs.append(proc)
         except BaseException:
             os.close(read_fd)
@@ -386,28 +350,6 @@ class LocalSandbox:
         finally:
             os.close(write_fd)
         return proc, read_fd
-
-    @contextlib.contextmanager
-    def _launched(
-        self, argv: Sequence[str], env: Mapping[str, str], cwd: Path
-    ) -> Iterator[tuple[list[str], dict[str, str], tuple[int, ...]]]:
-        """``argv`` with ``env`` in ``cwd`` as this sandbox starts it: in bubblewrap when it is confined, its launcher
-        inside; the command line, its environment and the descriptors to pass besides the status pipe.
-
-        Raises:
-            SandboxUnavailable: bubblewrap could not set the sandbox's holder up, or must not launch its policy.
-        """
-        if self._confined is None:
-            yield list(argv), dict(env), ()
-            return
-        with contextlib.ExitStack() as stack:
-            try:
-                launch = stack.enter_context(self._confined.launched(argv, env, cwd))
-            except (BwrapSetupError, IsolationRefused, ProcessLookupError, TimeoutError) as exc:
-                raise SandboxUnavailable(
-                    f"sandbox {self.sandbox_id}: bubblewrap cannot start the process: {exc}"
-                ) from exc
-            yield launch
 
     def spawn(
         self, argv: list[str], *, env: Mapping[str, str], cwd: Path, stdout: _Sink, stderr: _Sink
@@ -441,9 +383,7 @@ class LocalSandbox:
 
     def startup_exit_code(self) -> int | None:
         """The exit code of the template's startup command once it has exited; ``None`` while it runs, when the template
-        has none, or when its launcher died without reporting one (in a confined sandbox, bubblewrap's exit code once
-        its own process ended: ``1`` when it could not set the sandbox up, ``128 + n`` for a launcher killed by
-        signal ``n``)."""
+        has none, or when its launcher died without reporting one."""
         with self._lock:
             if self._startup is not None and self._startup_exit is None and not self._ended:
                 proc, status = self._startup
@@ -451,11 +391,6 @@ class LocalSandbox:
                     self._startup_exit = status.wait_exit(proc, 0)
                 except TimeoutError:
                     pass  # still running: no exit code yet
-                else:
-                    if self._startup_exit is None and self._confined is not None:
-                        # No launcher reported, so bubblewrap's own process may have ended (one that could not set
-                        # the sandbox up exits 1, its line in the log): its code is the runner's.
-                        self._startup_exit = proc.poll()
             return self._startup_exit
 
     def _check_run_args(self, envs: Mapping[str, str] | None) -> dict[str, str]:

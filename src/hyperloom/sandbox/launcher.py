@@ -21,7 +21,7 @@ import select
 import subprocess
 import time
 
-__all__ = ["LAUNCHER_SOURCE", "StatusPipe", "launcher_argv", "runs_launcher"]
+__all__ = ["LAUNCHER_SOURCE", "StatusPipe", "launcher_argv"]
 
 #: Self-contained (standard library only) so it runs under any python3 and
 #: under another account.
@@ -64,15 +64,6 @@ while True:
 def launcher_argv(python: str, status_fd: int, argv: list[str]) -> list[str]:
     """Wrap ``argv`` so it runs under a launcher that reports its exit code on ``status_fd``."""
     return [python, "-I", "-c", LAUNCHER_SOURCE, str(status_fd), *argv]
-
-
-def runs_launcher(pid: int) -> bool:
-    """Whether process ``pid`` runs a launcher; ``False`` when it is gone."""
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as handle:
-            return LAUNCHER_SOURCE.encode() in handle.read().split(b"\0")
-    except OSError:
-        return False
 
 
 class StatusPipe:

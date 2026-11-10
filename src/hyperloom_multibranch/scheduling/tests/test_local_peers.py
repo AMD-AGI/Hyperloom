@@ -887,7 +887,7 @@ async def test_peers_measuring_in_the_services_sandboxes_record_their_sandboxes_
         isolation = built.peers.isolation
 
     assert (isolation.sandboxes, isolation.tests) == (HOSTED, HOSTED), "the grant's sandboxes run them, not this host"
-    here = (agent_isolation.SANDBOX_ACCOUNT, agent_isolation.TEST_ACCOUNT, SANDBOX_UNCONFINED, TESTS_UNCONFINED)
+    here = (agent_isolation.SANDBOX_ACCOUNT, SANDBOX_UNCONFINED, TESTS_UNCONFINED)
     assert not any(why in reason for reason in isolation.reasons for why in here), "nor why they are not isolated here"
 
 
