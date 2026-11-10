@@ -6,18 +6,22 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy, latest_exhausted
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
+    BranchLogRecord,
     BranchNode,
     CommittedCommit,
     MapDirection,
     OpShares,
 )
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, LineageKind
-from hyperloom_multibranch.blackboard.rsi.open_areas import FocusHistory, OpenOp, open_areas
+from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
+from hyperloom_multibranch.blackboard.rsi.open_areas import FocusHistory, OpenOp, open_areas, stopped_on_focus
 from hyperloom_multibranch.blackboard.rsi.playbook import H0, replaced
 from hyperloom_multibranch.blackboard.rsi.session import judge_open_areas
 from hyperloom_multibranch.blackboard.rsi.tests.trees import branch, tree
@@ -176,6 +180,135 @@ def test_an_op_whose_focused_branches_on_the_head_ended_without_a_commit_is_spen
     ]
     assert not tolerant.spent and not moved.spent
     assert ALLREDUCE in [item.op for item in tolerant.ops] and ALLREDUCE in [item.op for item in moved.ops]
+
+
+def _exhausted(
+    snapshot: BlackboardSnapshot,
+    branch_name: str,
+    why: ExhaustedWhy,
+    head: str,
+    detail: str = "every allreduce variant within 1% of the default",
+) -> BlackboardSnapshot:
+    """``snapshot`` with ``branch_name``'s log ending in an EXHAUSTED record of ``why`` on ``head``."""
+
+    record = {
+        "direction": "Small-M GEMM kernels",
+        "head": head,
+        "tried": ["r9"],
+        "why": why.value,
+        "detail": detail,
+        "reopen_if": "the batch grows past 256",
+    }
+    entry = BranchLogEntry(branch_name, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
+    logs = dict(snapshot.branch_logs)
+    logs[branch_name] = (*logs.get(branch_name, ()), BranchLogRecord(f"e-{len(logs)}", 2.0, entry))
+    return dataclasses.replace(snapshot, branch_logs=logs)
+
+
+def _stopped(snapshot: BlackboardSnapshot, branch_name: str, reason: str) -> BlackboardSnapshot:
+    nodes = tuple(
+        dataclasses.replace(node, stop_reason=reason) if node.branch == branch_name else node
+        for node in snapshot.lineage.branches
+    )
+    return dataclasses.replace(snapshot, lineage=dataclasses.replace(snapshot.lineage, branches=nodes))
+
+
+def _gave_up(snapshot: BlackboardSnapshot, branch_name: str) -> BlackboardSnapshot:
+    """``snapshot`` with ``branch_name`` stopped as the scheduler stops a give-up, quoting its latest record."""
+
+    record = latest_exhausted(item.entry for item in snapshot.branch_logs[branch_name])
+    assert record is not None
+    return _stopped(snapshot, branch_name, f"gave_up: its specialist gave up: {record.summary()}")
+
+
+def test_an_op_a_focused_branch_gave_up_on_quoting_a_done_record_on_the_head_is_spent_and_says_why(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    worked = _committed(_worked(snapshot, _focused("b8", ALLREDUCE, start="c0"), _focused("b9", ALLREDUCE)), "b8", 3.0)
+    exhausted = _gave_up(_exhausted(worked, "b9", ExhaustedWhy.NO_CEILING_ABOVE_BAR, "i1"), "b9")
+
+    found = open_areas(exhausted, seconds_left=4 * HOUR, first_commit_minutes=42.0)
+
+    assert ALLREDUCE not in [item.op for item in found.ops]
+    history = found.spent[ALLREDUCE]
+    assert (history.opened, history.ended_without_commit, history.commits, history.best_gain_pct) == (2, 1, 1, 3.0)
+    assert history.exhausted is not None and history.exhausted.why is ExhaustedWhy.NO_CEILING_ABOVE_BAR
+    assert found.render().splitlines()[-2:] == [
+        "Spent focus, exhausted here and left out until the integration head moves: a branch focused on it gave up "
+        "on this head for the reason shown. Open one again only when its 'worth again if' holds:",
+        f"- {ALLREDUCE}: no_ceiling_above_bar: every allreduce variant within 1% of the default; worth again if the "
+        "batch grows past 256 (opened 2, ended without a commit 1, commits 1, best +3.0%)",
+    ]
+
+
+def test_a_done_record_of_one_direction_spends_nothing_when_the_branch_stopped_without_giving_up_on_it(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    exhausted = _exhausted(_worked(snapshot, _focused("b9", ALLREDUCE)), "b9", ExhaustedWhy.NO_CEILING_ABOVE_BAR, "i1")
+
+    for reason in (
+        "judge: stalled 6 tests since it opened",
+        "session_end: time_exhausted",
+        "gave_up: its specialist gave up after 3 crashes",
+        "gave_up: its specialist gave up: its sessions in a row found nothing to test",
+    ):
+        stopped = _stopped(exhausted, "b9", reason)
+        found = open_areas(stopped, seconds_left=4 * HOUR, first_commit_minutes=42.0)
+
+        assert ALLREDUCE in [item.op for item in found.ops] and ALLREDUCE not in found.spent, reason
+        (item,) = stopped_on_focus(stopped, ALLREDUCE)
+        assert item.exhausted is not None and item.gave_up_on is None, reason
+
+
+def test_records_on_other_heads_of_another_reason_or_of_branches_on_another_focus_leave_the_op_open(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    worked = _committed(
+        _worked(
+            snapshot,
+            _focused("b3", ALLREDUCE, start="c0"),
+            _focused("b4", ALLREDUCE),
+            _focused("b5", ALLREDUCE),
+            _focused("b7", ACT_MUL),
+            _focused("b6", ""),
+        ),
+        "b5",
+        2.0,
+    )
+    tool = "custom_all_reduce.py raised: not supported"
+    for name, why, head, detail in (
+        ("b3", ExhaustedWhy.ALL_TESTED_OR_CLAIMED, "c0", ""),
+        ("b4", ExhaustedWhy.BLOCKED_BY_TOOL, "i1", tool),
+        ("b5", ExhaustedWhy.NO_CEILING_ABOVE_BAR, "i1", ""),
+        ("b5", ExhaustedWhy.NEEDS_CAPABILITY, "i1", tool),
+        ("b6", ExhaustedWhy.NO_CEILING_ABOVE_BAR, "i1", ""),
+        ("b7", ExhaustedWhy.NO_CEILING_ABOVE_BAR, "i1", ""),
+    ):
+        worked = _gave_up(_exhausted(worked, name, why, head, detail or "every variant within 1% of the default"), name)
+
+    found = open_areas(worked, seconds_left=4 * HOUR, first_commit_minutes=42.0)
+
+    assert ALLREDUCE in [item.op for item in found.ops] and ALLREDUCE not in found.spent
+    records = {item.node.branch: item.exhausted for item in stopped_on_focus(worked, ALLREDUCE)}
+    assert {name: record.why for name, record in records.items() if record is not None} == {
+        "b3": ExhaustedWhy.ALL_TESTED_OR_CLAIMED,
+        "b4": ExhaustedWhy.BLOCKED_BY_TOOL,
+        "b5": ExhaustedWhy.NEEDS_CAPABILITY,
+    }
+
+
+def test_an_op_exhausted_on_an_older_head_opens_again_once_the_integration_head_moves(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    def exhausted_at(head: str) -> BlackboardSnapshot:
+        worked = _worked(snapshot, _focused("b9", ALLREDUCE), head=head)
+        return _gave_up(_exhausted(worked, "b9", ExhaustedWhy.ALL_TESTED_OR_CLAIMED, "i1"), "b9")
+
+    on_head = open_areas(exhausted_at("i1"), seconds_left=4 * HOUR, first_commit_minutes=42.0)
+    moved = open_areas(exhausted_at("i2"), seconds_left=4 * HOUR, first_commit_minutes=42.0)
+
+    assert ALLREDUCE in on_head.spent and ALLREDUCE not in [item.op for item in on_head.ops]
+    assert not moved.spent and ALLREDUCE in [item.op for item in moved.ops]
 
 
 def test_too_little_time_left_for_a_first_commit_says_to_open_no_branch(snapshot: BlackboardSnapshot) -> None:

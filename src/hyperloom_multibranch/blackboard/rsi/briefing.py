@@ -55,7 +55,6 @@ from typing import Protocol
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply
 from hyperloom_multibranch.contracts.blackboard.interfaces import Blackboard, StartupBriefProvider
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer
-from hyperloom_multibranch.contracts.blackboard.exhausted import latest_exhausted
 from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
     FocusBranch,
@@ -91,6 +90,7 @@ from hyperloom_multibranch.blackboard.learning_search import (
 from hyperloom_multibranch.blackboard.rsi.analysis import FailureTier, failures_at, repeated_failures
 from hyperloom_multibranch.blackboard.rsi.cases import CasePool, known_defects
 from hyperloom_multibranch.blackboard.rsi.menu import CODE, SETTINGS, DirectionMenus, MenuItem
+from hyperloom_multibranch.blackboard.rsi.open_areas import stopped_on_focus
 from hyperloom_multibranch.blackboard.tools import render_brief
 
 log = logging.getLogger(__name__)
@@ -212,24 +212,19 @@ def _focus_history(snapshot: BlackboardSnapshot, branch: str, start_commit: str)
         return ()
     tests = {item.branch: item.tests for item in snapshot.progress}
     under = set(snapshot.lineage.ancestry(start_commit))
-    stopped = [
-        node
-        for node in snapshot.lineage.branches
-        if node.branch != branch and node.stop_reason is not None and node.focus == focus
-    ]
-    stopped.sort(key=lambda node: node.stopped_at or 0.0, reverse=True)
     return tuple(
         FocusBranch(
-            node.branch,
-            node.start_commit,
-            node.head_commit,
-            tests.get(node.branch, 0),
-            tuple(item.gain_pct for item in snapshot.committed if item.branch == node.branch),
-            node.stop_reason or "",
-            latest_exhausted(record.entry for record in snapshot.branch_logs.get(node.branch, ())),
-            node.head_commit in under,
+            item.node.branch,
+            item.node.start_commit,
+            item.node.head_commit,
+            tests.get(item.node.branch, 0),
+            tuple(commit.gain_pct for commit in snapshot.committed if commit.branch == item.node.branch),
+            item.node.stop_reason or "",
+            item.exhausted,
+            item.node.head_commit in under,
         )
-        for node in stopped
+        for item in stopped_on_focus(snapshot, focus)
+        if item.node.branch != branch
     )
 
 
