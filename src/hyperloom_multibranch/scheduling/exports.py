@@ -12,7 +12,8 @@ learnings go nowhere while the session runs on no Experience KB, see
 outcomes next to the chosen commit's recipe and how FINAL chose it; once the search tree is archived, the scheduler's
 LLM proposes one change to the scheduling playbook into the pool beside the archive (:func:`author_playbook`) and
 curates the RSI lesson pool the knowledge steps published the session's learnings to (:func:`curate_lessons`), steps
-that never stop CLOSE; ``session_breakdown.json``, which also counts how the merges went and how each met a
+that never stop CLOSE. A later CLOSE of a session whose earlier CLOSE archived its tree (:func:`archived_before`), a
+resumed session's or a ``final-only``'s, runs none of these steps and reports each as :data:`ARCHIVED_BEFORE`; ``session_breakdown.json``, which also counts how the merges went and how each met a
 conflicting patch from the integrator's merge log, the knowledge steps' receipts and :data:`IMAGE_CHECK_FILE`, the
 whole image check the session ran before its first phase, land in ``MB-reports/``, and the dashboard is rebuilt a last
 time with the queue the stop left.
@@ -23,11 +24,11 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.jsonio import read_jsonl
+from hyperloom_common.jsonio import read_json_strict, read_jsonl
 from hyperloom.common.outside_facts.image_check import ImageCheckReport
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom.measure.compile import BlobError, BlobStore
@@ -51,6 +52,8 @@ from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import SKIPPED,
 from hyperloom_multibranch.blackboard.knowledge.warm_start import WarmLead
 from hyperloom_multibranch.blackboard.rsi.authoring import author_playbook
 from hyperloom_multibranch.blackboard.rsi.lesson_curation import curate_lessons
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVED
+from hyperloom_multibranch.blackboard.rsi.archive import SKIPPED as STEP_SKIPPED
 from hyperloom_multibranch.blackboard.rsi.session import CloseStep, KnowledgeClose
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.final import FinalChoice
@@ -66,6 +69,9 @@ KB_DISABLED = "disabled"
 KB_FAILED = "failed"
 #: The whole image check's report, under ``MB-reports/``.
 IMAGE_CHECK_FILE = "image_check.json"
+#: Why a CLOSE writes no knowledge step: an earlier CLOSE of the session archived its search tree, and the archive, the
+#: playbook trials and the RSI pools keep what one session wrote once.
+ARCHIVED_BEFORE = "an earlier CLOSE of this session archived its search tree"
 #: The merge-log fields that name the patches a merge recovered a conflict with, by their key in
 #: ``close.merges.conflicts``.
 _RECOVERED_CONFLICTS = {"rebased": "rebased_patches", "replaced": "replaced_patches", "resolved": "resolved_patches"}
@@ -92,6 +98,16 @@ def step_lines(steps: Mapping[str, CloseStep]) -> list[str]:
     return [
         f"{name.replace('_', ' ').capitalize()}: {step.status} {step.reason}".rstrip() for name, step in steps.items()
     ]
+
+
+def archived_before(report: Path) -> bool:
+    """Whether the CLOSE report at ``report``, which an earlier CLOSE of the session wrote, says it archived the
+    session's search tree; ``False`` with no report."""
+
+    if not report.is_file():
+        return False
+    exports = read_json_strict(report, require_dict=True)["exports"]
+    return exports is not None and exports["knowledge"]["archive"]["status"] == ARCHIVED
 
 
 def _recovered_by(row: Mapping[str, Any]) -> tuple[str, ...]:
@@ -230,16 +246,21 @@ class SessionExports:
         snapshot = await self._blackboard.snapshot()
         chosen = await self._final_recipe(final)
         kb_write_back = await self._publish(snapshot, chosen)
-        knowledge = await asyncio.to_thread(
-            mb_fake_close_knowledge,
-            snapshot,
-            self._metric,
-            budget_seconds=self._budget_seconds,
-            layout=self._layout,
-            cross_image=_cross_image(self._warm_leads),
-        )
-        playbook = await author_playbook(snapshot, self._ask_author, model=self._author.model)
-        curation = await self._curate(snapshot)
+        if await asyncio.to_thread(archived_before, self._layout.report):
+            skipped = CloseStep(STEP_SKIPPED, ARCHIVED_BEFORE)
+            knowledge = KnowledgeClose(**{step.name: skipped for step in fields(KnowledgeClose)})
+            playbook = curation = skipped
+        else:
+            knowledge = await asyncio.to_thread(
+                mb_fake_close_knowledge,
+                snapshot,
+                self._metric,
+                budget_seconds=self._budget_seconds,
+                layout=self._layout,
+                cross_image=_cross_image(self._warm_leads),
+            )
+            playbook = await author_playbook(snapshot, self._ask_author, model=self._author.model)
+            curation = await self._curate(snapshot)
         # The playbook author and the curator record their LLM spend after the first snapshot, so the breakdown reads a
         # fresh one, or ``spend.llm_usd`` would miss CLOSE's own calls.
         snapshot = await self._blackboard.snapshot()
@@ -304,11 +325,13 @@ __all__ = [
     "KB_DISABLED",
     "IMAGE_CHECK_FILE",
     "KB_FAILED",
+    "ARCHIVED_BEFORE",
     "CloseExports",
     "ExportServices",
     "CloseAuthoring",
     "ExportSources",
     "SessionExports",
+    "archived_before",
     "knowledge_document",
     "knowledge_steps",
     "step_lines",
