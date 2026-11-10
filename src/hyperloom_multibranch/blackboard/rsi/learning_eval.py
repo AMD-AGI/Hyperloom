@@ -150,7 +150,7 @@ def branch_tests(snapshot: BlackboardSnapshot) -> dict[str, list[BranchTest]]:
         if record.request.kind is TestKind.TEST:
             intent = snapshot.intents.get(record.request.intent_fingerprint)
             change = frozenset(str(change_document(record.request.delta)["summary"]).split())
-            committed = record.conclusion in COMMITTING
+            committed = record.conclusion in COMMITTING and not record.landed_retraction
             ended = record.result is not None
             families: frozenset[Family] = frozenset()
             if intent is not None:

@@ -99,6 +99,8 @@ def lesson_of(record: TestRecord, snapshot: BlackboardSnapshot) -> Lesson | None
     gain = f"{judged.gain_pct:+.2f}%"
     if record.conclusion is Conclusion.ACCURACY_FAILED:
         return lesson(LessonKind.PITFALL, f"{gain} but failed the accuracy check", judged.gain_pct)
+    if record.landed_retraction:
+        return lesson(LessonKind.PITFALL, f"{gain}, retracts {record.retracts}", judged.gain_pct)
     if record.conclusion in _WORKED:
         kept = f"{gain}, {record.conclusion.value} as {record.commit_id}{_unchecked(snapshot.profile)}"
         return lesson(LessonKind.WORKED, kept, judged.gain_pct)
