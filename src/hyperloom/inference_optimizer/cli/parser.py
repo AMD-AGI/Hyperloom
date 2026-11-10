@@ -578,6 +578,15 @@ def _build_parser() -> argparse.ArgumentParser:
     add_conc_sweep_arguments(opt)
     add_plateau_arguments(opt)
     add_phase_budget_arguments(opt)
+    opt.add_argument(
+        "--forge-controller-allocation-minutes",
+        dest="forge_controller_allocation_minutes",
+        type=_positive_int_arg,
+        default=None,
+        help="Optional total Forge rewrite-controller minutes shared across macro cycles. "
+        "Recorded in the session manifest and state; omitted keeps the usual per-cycle KERNEL budget. "
+        "On resume, an explicit value must match the stored allocation.",
+    )
 
     add_session_dir_argument(opt)
     add_recover_subparser(sub, common)

@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from . import machine_state as _phase_state
-from .kernel_round_budget import controller_round_stop, measurement_round_sec
+from .kernel_round_budget import controller_round_stop
 from hyperloom_common.coerce import first_str, to_int
 from hyperloom_common.env import env_bool, env_float
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_NO_PROMOTE
@@ -43,15 +43,13 @@ from ..collaborator import CoordinatorCollaborator
 from .kernel_geak_dispatch import _GeakDispatchMixin
 from .kernel_geak_promotion import _GeakPromotionMixin, _covered_step
 from .kernel_gemm_tuning import _GemmTuningMixin, _first_text
+from .kernel_controller_attempt import _ForgeControllerMixin
 
 if TYPE_CHECKING:
     from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import KernelEventRecorder
     from .machine import Transition
 
 log = _logging.getLogger(__name__)
-
-# What the phase, not the Controller subprocess, decides about a rewrite-controller attempt.
-_CONTROLLER_ATTEMPT_FACTS = ("macro_cycle", "handoff_dir", "budget_minutes", "hard_timeout_sec")
 
 ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 
@@ -88,7 +86,9 @@ class KernelExitFacts:
     agent_in_flight: bool
 
 
-class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, CoordinatorCollaborator):
+class KernelPhase(
+    _GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, _ForgeControllerMixin, CoordinatorCollaborator
+):
     """KERNEL_AGENT phase handler: drives kernel-level optimization tasks."""
 
     # Relative-change floor for the Forge kernel-entry reprofile: effectively "any change", absorbing float noise.
@@ -690,19 +690,6 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         await self._finish_kernel_entry()
         return {"status": "ok", "route": "forge_gemm"}
 
-    def _kernel_rewrite_controller_timeouts(self) -> tuple[int, int]:
-        """Return the Controller soft budget and Hyperloom hard timeout."""
-        candidates: list[float] = []
-        session_remaining = _phase_state.session_remaining_seconds(self.shared_state)
-        if session_remaining is not None:
-            candidates.append(max(0.0, float(session_remaining) - self.shared_state.closing_reserve_sec()))
-        phase_remaining = _phase_state.phase_budget_remaining_seconds(self.shared_state)
-        if phase_remaining is not None:
-            candidates.append(max(0.0, float(phase_remaining)))
-        # The phase still measures the Controller's patches E2E after the Controller exits.
-        hard_timeout = int(min(candidates) - measurement_round_sec(self.shared_state)) if candidates else 90 * 60
-        return max(0, hard_timeout - 30), max(0, hard_timeout)
-
     def reject_geak_promotion(
         self,
         result: dict[str, Any],
@@ -792,41 +779,6 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         )
         log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
         await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
-
-    async def _controller_attempt_result(self, handoff_dir: Path, output_dir: Path) -> dict[str, Any]:
-        from ..kernel.controller_submit import run_controller_subprocess
-
-        controller_budget_sec, hard_timeout_sec = self._kernel_rewrite_controller_timeouts()
-        budget_minutes = controller_budget_sec / 60.0
-        attempt = {
-            "macro_cycle": int(self.shared_state.macro_cycle or 0),
-            "handoff_dir": str(handoff_dir),
-            "budget_minutes": budget_minutes,
-            "hard_timeout_sec": hard_timeout_sec,
-            "patch_count": 0,
-            "task_count": 0,
-            "output_dir": str(output_dir),
-        }
-        if controller_budget_sec <= 0 or hard_timeout_sec <= 0:
-            return {
-                **attempt,
-                "status": "no_result",
-                "reason": "no KERNEL phase budget remains for the rewrite controller",
-            }
-        try:
-            result = await asyncio.to_thread(
-                run_controller_subprocess,
-                handoff_dir=handoff_dir,
-                output_dir=output_dir,
-                budget_minutes=budget_minutes,
-                hard_timeout_sec=hard_timeout_sec,
-            )
-        except (OSError, ValueError) as error:
-            log.exception("KERNEL entry: kernel rewrite controller failed")
-            return {**attempt, "status": "failed", "reason": f"controller invocation failed: {error}"}
-        # The four facts the phase owns are re-pinned over the child's own output: the Controller writes
-        # ``state.json`` itself and must not be able to report a budget other than the one it was given.
-        return {**attempt, **result, **{key: attempt[key] for key in _CONTROLLER_ATTEMPT_FACTS}}
 
     async def _integrate_controller_output(self, result: dict[str, Any], output_dir: Path) -> None:
         if int(result.get("patch_count") or 0) <= 0:

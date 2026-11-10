@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from kernelforge.workflows.rewrite_controller import ControllerLayout, published_operator_dirs
 
@@ -35,9 +35,10 @@ def build_controller_command(
     handoff_dir: Path,
     output_dir: Path,
     budget_minutes: float,
+    explicit_allocation: bool = False,
 ) -> list[str]:
     """Build the only Hyperloom-to-Controller CLI contract."""
-    return [
+    command = [
         sys.executable,
         "-m",
         "kernelforge.cli",
@@ -49,6 +50,9 @@ def build_controller_command(
         "--output-dir",
         str(Path(output_dir).resolve()),
     ]
+    if explicit_allocation:
+        command.append("--explicit-allocation")
+    return command
 
 
 def _controller_environment() -> dict[str, str]:
@@ -152,13 +156,14 @@ def run_controller_subprocess(
     output_dir: Path,
     budget_minutes: float,
     hard_timeout_sec: int,
-    on_output: Callable[[], None] | None = None,
+    explicit_allocation: bool = False,
 ) -> dict[str, Any]:
     """Run Controller and reclaim its complete descendant process tree."""
     command = build_controller_command(
         handoff_dir=handoff_dir,
         output_dir=output_dir,
         budget_minutes=budget_minutes,
+        explicit_allocation=explicit_allocation,
     )
     timed_out = False
     try:
@@ -166,7 +171,6 @@ def run_controller_subprocess(
             command,
             env=_controller_environment(),
             watch=RoundWatch(timeout=max(1, int(hard_timeout_sec))),
-            on_output=on_output,
         )
         returncode = int(completed.returncode)
         stderr = str(completed.stderr or "")
