@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.agentx_objective import AgentXObjective
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT
 from hyperloom.measure.compile import (
     ComponentLayout,
@@ -26,11 +27,9 @@ from hyperloom_multibranch.specialist import arbor_adapter
 from hyperloom_multibranch.specialist.agent_manifest import REFUSED_FILE, AgentManifest
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, make_ready, root_profile
 from hyperloom_multibranch.specialist.arbor_adapter import (
-    ARBOR_OBJECTIVES,
     ARBOR_PYTHON,
     OBJECTIVE_KEY,
     OBJECTIVE_MODULE,
-    OBJECTIVE_SINCE,
     BRANCH_RUN,
     DOSSIER_DIR,
     DOSSIER_PASS,
@@ -82,7 +81,9 @@ from hyperloom_multibranch.tests.agent_rig import (
     _write,
 )
 from hyperloom_multibranch.tests.base_records import base_record, write_record
+from inference_suite.contracts import AgentxResult, RunStatus
 from inference_suite.contracts import Workload as LaunchWorkload
+from inference_suite.contracts.report import AGENTX_COUNT_KEYS, AGENTX_LATENCY_KEYS, AGENTX_THROUGHPUT_KEYS
 
 
 def _filled(command: str, port: int, out: str) -> str:
@@ -323,7 +324,6 @@ def test_an_agentx_arbor_on_the_session_s_base_measures_with_the_gate_s_round_an
     assert component["phase_minutes"] == {"bench": 80}
     assert config["server_env"] == {arbor_adapter.ACCURACY_FLOOR_ENV: "0.5", **read_launch(record).server_env}
     assert _arbor_config_errors(config) == [] and _arbor_start_check(config) == []
-    assert "report.json" in " ".join(config["directives"])
 
 
 def test_a_client_bounded_by_the_agent_s_own_cap_leaves_arbor_s_phase_minutes_alone(tmp_path: Path) -> None:
@@ -507,67 +507,79 @@ def test_arbor_runs_the_pack_the_spec_names_and_one_its_checkout_lacks_is_refuse
     assert arbor_config(spec, checkout, BRANCH_RUN)["pack"] == "serving"
 
 
-#: Arbor's arbor/objective.py as far as the adapter reads it: the metric keys it optimizes on opt_objective.
-OBJECTIVE_9C455DF = 'KNOWN = {"e2e_norm_intvty_p50": ("max", ""), "total_throughput": ("max", "")}\n'
-OBJECTIVE_E8D31B7 = 'KNOWN = {"p50_interactivity": ("max", ""), "total_throughput": ("max", "")}\n'
-OBJECTIVE_DF9B55A = (
-    'KNOWN = {"e2e_norm_intvty_p50": ("max", ""), "total_throughput": ("max", ""), '
-    '"total_token_throughput": ("max", "")}\n'
-)
+#: Arbor's arbor/objective.py as far as the adapter reads it: the forms opt_objective takes. 29c72f9 added the
+#: structured one; df9b55a knew both AgentX metrics by name only.
+OBJECTIVE_29C72F9 = 'FORMS = ("text", "structured")\n'
+OBJECTIVE_DF9B55A = 'KNOWN = {"e2e_norm_intvty_p50": ("max", ""), "total_token_throughput": ("max", "")}\n'
+
+
+def _structured(objective: AgentXObjective) -> dict[str, object]:
+    return {
+        "metric": objective.metric,
+        "bar_pct": objective.bar_pct,
+        "guards": [{"metric": guard.metric, "band_pct": objective.guard_band_pct} for guard in objective.guards],
+    }
+
+
+def _vendored_objective(asked: Mapping[str, object]) -> dict[str, object]:
+    """The vendored Arbor's reading of a structured opt_objective (arbor/objective.py's ``structured``)."""
+
+    script = (
+        "import json, sys; from arbor import objective; print(json.dumps(objective.structured(json.load(sys.stdin))))"
+    )
+    run = subprocess.run(
+        [sys.executable, "-c", script], input=json.dumps(asked), cwd=VENDORED_ARBOR, capture_output=True, text=True
+    )
+    assert run.returncode == 0, run.stderr
+    return json.loads(run.stdout)
+
+
+@pytest.mark.parametrize("objective", list(AgentXObjective))
+def test_arbor_keeps_on_the_agentx_session_s_rule_its_objective_bar_and_guards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, objective: AgentXObjective
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "4")
+    spec = _spec(tmp_path, workload=AGENTX_WORKLOAD, metric=objective.metric)
+
+    asked = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)[OBJECTIVE_KEY]
+
+    assert asked == _structured(objective)
+    assert objective.bar_pct == 2.0 and objective.guard_band_pct == 4.0
+    read = _vendored_objective(asked)
+    assert (read["metric"], read["direction"], read["bar_pct"]) == (objective.metric, "max", objective.bar_pct)
+    assert [(guard["metric"], guard["band_pct"]) for guard in read["guards"]] == [
+        (guard.metric, 4.0) for guard in objective.guards
+    ]
+
+
+def test_a_session_on_output_throughput_keeps_its_pack_s_objective(tmp_path: Path) -> None:
+    assert OBJECTIVE_KEY not in arbor_config(_spec(tmp_path), tmp_path / "checkout", BRANCH_RUN)
 
 
 @pytest.mark.parametrize(
-    ("metric", "written"),
-    [
-        (GRADED_INTVTY_P50, "e2e_norm_intvty_p50"),
-        (TOTAL_TOKEN_THROUGHPUT, "total_token_throughput"),
-        ("output_throughput", None),
-    ],
+    ("objective", "refused"),
+    [(OBJECTIVE_29C72F9, False), (OBJECTIVE_DF9B55A, True), (None, True)],
+    ids=["29c72f9", "df9b55a", "older"],
 )
-def test_arbor_optimizes_the_metric_the_session_keeps_on(tmp_path: Path, metric: str, written: str | None) -> None:
-    config = arbor_config(replace(_spec(tmp_path), metric=metric), tmp_path / "checkout", BRANCH_RUN)
-
-    assert config.get(OBJECTIVE_KEY) == written
-
-
-@pytest.mark.parametrize(
-    ("objective", "metric", "refused"),
-    [
-        (OBJECTIVE_DF9B55A, GRADED_INTVTY_P50, False),
-        (OBJECTIVE_DF9B55A, TOTAL_TOKEN_THROUGHPUT, False),
-        (OBJECTIVE_9C455DF, GRADED_INTVTY_P50, False),
-        (OBJECTIVE_9C455DF, TOTAL_TOKEN_THROUGHPUT, True),
-        (OBJECTIVE_E8D31B7, GRADED_INTVTY_P50, True),
-        (OBJECTIVE_E8D31B7, TOTAL_TOKEN_THROUGHPUT, True),
-        (None, GRADED_INTVTY_P50, False),
-        (None, TOTAL_TOKEN_THROUGHPUT, True),
-    ],
-    ids=[
-        "df9b55a-p50",
-        "df9b55a-total",
-        "9c455df-p50",
-        "9c455df-total",
-        "e8d31b7-p50",
-        "e8d31b7-total",
-        "older-p50",
-        "older-total",
-    ],
-)
-def test_an_arbor_that_cannot_optimize_the_session_s_objective_is_refused_naming_the_commit(
-    tmp_path: Path, objective: str | None, metric: str, refused: bool
+@pytest.mark.parametrize("metric", [GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT])
+def test_an_arbor_without_the_structured_objective_is_refused_naming_29c72f9(
+    tmp_path: Path, objective: str | None, refused: bool, metric: str
 ) -> None:
     files = {**CHECKOUT_FILES, **({OBJECTIVE_MODULE: objective} if objective else {})}
     checkout = _write(tmp_path / "checkout", files)
+    launch = _launch_file(tmp_path, RESOLVED)
     run = partial(
-        arbor_manifest, replace(_spec(tmp_path), metric=metric), ArborCheckout("arbor", "abc", checkout), BRANCH_RUN
+        arbor_manifest,
+        replace(_spec(tmp_path), workload=AGENTX_WORKLOAD, metric=metric, client="", launch=launch),
+        ArborCheckout("arbor", "abc", checkout),
+        BRANCH_RUN,
     )
 
     if refused:
-        since = OBJECTIVE_SINCE[ARBOR_OBJECTIVES[metric]]
-        with pytest.raises(ArborRefused, match=f"cannot optimize .*pin Arbor {since} or later"):
+        with pytest.raises(ArborRefused, match="has no structured opt_objective: pin Arbor 29c72f9 or later"):
             run()
     else:
-        assert run().config.get(OBJECTIVE_KEY) == ARBOR_OBJECTIVES[metric]
+        assert run().config[OBJECTIVE_KEY]["metric"] == metric
 
 
 def test_arbor_runs_the_validator_scripts_its_pack_names(tmp_path: Path) -> None:
@@ -687,18 +699,116 @@ def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(
     assert "e2e_norm_intvty_p90 and total_token_throughput within 5%" in agentx_kept
     assert "at least 0.5" in accuracy and "at most 0.05" in accuracy
     assert "the root it measures itself" in accuracy
-    assert "error rate stays at or under 10%" in agentx_rules[2]
-    assert "agentx.e2e_norm_intvty.p50" in agentx_rules[3] and "report.json" in agentx_rules[3]
+    assert len(agentx_rules) == 3 and "error rate stays at or under 10%" in agentx_rules[2]
+    assert not [rule for rule in agentx_rules if "agentx." in rule or "run_status" in rule], "bench_read holds both"
     total = host_rules(replace(agentx, metric=TOTAL_TOKEN_THROUGHPUT))
-    assert (
-        "agentx.e2e_norm_intvty.p90" in agentx_rules[3]
-        and "agentx.throughput.total_tokens_per_second" in agentx_rules[3]
-    )
-    assert "output_tokens_per_second" not in agentx_rules[3]
-    assert "agentx.throughput.total_tokens_per_second is the total_token_throughput" in total[3]
     assert "e2e_norm_intvty_p90 and e2e_norm_intvty_p50 within 5%" in total[1] and "output" not in total[1]
+    assert not [rule for rule in total if "agentx." in rule]
     unmeasured = host_rules(replace(agentx, client=""))
     assert len(unmeasured) == 3 and "error rate stays at or under 10%" in unmeasured[-1]
+
+
+#: MB's AgentX round as the gate stages it, enough of it for the adapter.
+AGENTX_CLIENT = "python -m inference_suite run --config /s/mb-bench.yaml --run-dir /s/mb-bench"
+
+
+@pytest.mark.parametrize("metric", [GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT])
+def test_an_agentx_arbor_given_mb_s_round_has_its_harness_read_the_round_s_report_by_path(
+    tmp_path: Path, metric: str
+) -> None:
+    spec = _spec(tmp_path, workload=AGENTX_WORKLOAD, metric=metric, client=AGENTX_CLIENT)
+
+    config = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
+
+    read = config["component"]["bench_read"]
+    assert read == {
+        "file": "report.json",
+        "keys": {
+            "e2e_norm_intvty_p50": "agentx.e2e_norm_intvty.p50",
+            "total_token_throughput": "agentx.throughput.total_tokens_per_second",
+            "e2e_norm_intvty_p90": "agentx.e2e_norm_intvty.p90",
+            "output_throughput": "agentx.throughput.output_tokens_per_second",
+        },
+        "require": {"run_status": "completed", "agentx.stopped_by_threshold": False, "agentx.fast_mode": False},
+    }
+    asked = config[OBJECTIVE_KEY]
+    assert {asked["metric"], *(guard["metric"] for guard in asked["guards"])} <= set(read["keys"])
+    assert _arbor_config_errors(config) == []
+
+
+def _agentx_report(status: RunStatus, stopped_by_threshold: bool = False) -> dict[str, object]:
+    """A round's report.json, its AgentX section as the round writes it, with the numbers a stopped round keeps."""
+
+    agentx = AgentxResult(
+        counts={**dict.fromkeys(AGENTX_COUNT_KEYS, 10), "dropped_total": 0},
+        throughput={**dict.fromkeys(AGENTX_THROUGHPUT_KEYS, 100.0), "total_tokens_per_second": 9000.0},
+        latency_seconds=dict.fromkeys(AGENTX_LATENCY_KEYS, 0.5),
+        e2e_norm_intvty={"p50": 30.0, "p90": 20.0},
+        stopped_by_threshold=stopped_by_threshold,
+        fast_mode=False,
+    )
+    return {"run_status": status.value, "agentx": agentx.to_document()}
+
+
+def _read_report(read: Mapping[str, object], metric: str, report: Mapping[str, object], out: Path) -> dict:
+    """What the vendored Arbor's bench_read block (arbor/policy/claude_loop.py) books for one replay's ``report``."""
+
+    out.mkdir(parents=True)
+    (out / "report.json").write_text(json.dumps(report))
+    dest = out / "bench.json"
+    script = (
+        "import json, sys; from arbor.policy import claude_loop; a = json.load(sys.stdin);"
+        " print(claude_loop._read_block(a['out'], a['dest'], a['read'], [a['metric']]))"
+    )
+    asked = {"out": str(out), "dest": str(dest), "read": read, "metric": metric}
+    block = subprocess.run(
+        [sys.executable, "-c", script], input=json.dumps(asked), cwd=VENDORED_ARBOR, capture_output=True, text=True
+    )
+    assert block.returncode == 0, block.stderr
+    subprocess.run(["bash", "-c", block.stdout], cwd=out, check=True, capture_output=True)
+    return json.loads(dest.read_text())
+
+
+@pytest.mark.parametrize("metric", [GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT])
+def test_arbor_s_harness_books_a_completed_round_and_not_one_mb_s_gate_refuses(tmp_path: Path, metric: str) -> None:
+    config = arbor_config(
+        _spec(tmp_path, workload=AGENTX_WORKLOAD, metric=metric, client=AGENTX_CLIENT), tmp_path / "c", BRANCH_RUN
+    )
+    read = config["component"]["bench_read"]
+
+    completed = _read_report(read, metric, _agentx_report(RunStatus.COMPLETED), tmp_path / "completed")
+    partial = _read_report(read, metric, _agentx_report(RunStatus.PARTIAL), tmp_path / "partial")
+    stopped = _read_report(read, metric, _agentx_report(RunStatus.COMPLETED, True), tmp_path / "stopped")
+
+    assert completed == {
+        "status": "ok",
+        "source": "bench_command",
+        "e2e_norm_intvty_p50": 30.0,
+        "e2e_norm_intvty_p90": 20.0,
+        "total_token_throughput": 9000.0,
+        "output_throughput": 100.0,
+    }
+    assert partial == {"status": "failed", "error": 'bench_read: run_status is "partial", not "completed"'}
+    assert stopped["status"] == "failed" and "agentx.stopped_by_threshold is true, not false" in stopped["error"]
+
+
+def test_only_an_agentx_arbor_measured_by_mb_s_round_has_its_report_read_by_path(tmp_path: Path) -> None:
+    launch = _launch_file(tmp_path, {**RESOLVED, "client": AGENTX_CLIENT})
+    inferencex = _spec(tmp_path, client=AGENTX_CLIENT)
+    agentx = replace(inferencex, workload=AGENTX_WORKLOAD, metric=GRADED_INTVTY_P50)
+    specs = [
+        inferencex,
+        replace(agentx, client=""),
+        replace(agentx, client="", launch=launch),
+    ]
+
+    components = [arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)["component"] for spec in specs]
+
+    assert [("bench_command" in each, "bench_read" in each) for each in components] == [
+        (True, False),
+        (False, False),
+        (True, False),
+    ]
 
 
 def test_arbor_is_told_its_source_changes_cannot_be_kept_when_the_spec_says_why(tmp_path: Path) -> None:
@@ -732,7 +842,7 @@ def test_a_launch_file_s_client_measures_arbor_only_when_mb_gives_none(tmp_path:
 
 
 def test_an_agentx_branch_is_refused_before_arbor_starts_unless_it_is_given_the_resolved_launch(tmp_path: Path) -> None:
-    checkout = _write(tmp_path / "checkout", CHECKOUT_FILES)
+    checkout = _write(tmp_path / "checkout", {**CHECKOUT_FILES, OBJECTIVE_MODULE: OBJECTIVE_29C72F9})
     spec = _spec(tmp_path, framework="sglang", server_args="", workload=AGENTX_WORKLOAD, metric=GRADED_INTVTY_P50)
 
     with pytest.raises(ArborRefused, match="--agent-launch"):
