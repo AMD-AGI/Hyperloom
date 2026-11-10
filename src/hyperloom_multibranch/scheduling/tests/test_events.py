@@ -678,6 +678,32 @@ async def test_an_agentx_merge_leaves_the_head_unprofiled_until_branches_open_on
     assert [aim.op for aim in await events.focus_on("c-merged", (), 2)] == ["gemm", "attn"]
 
 
+async def test_an_agentx_profile_that_ended_unread_is_reported_before_the_next_head_opened_on_is_profiled(
+    log: Path,
+) -> None:
+    shares = _Shares({"c-root": _op_shares("c-root", BEFORE)})
+    toolbox = _AnalysingToolbox(shares)
+    events = _events(_Health(), log, toolbox, shares, workload=AGENTX)
+    events.note_merges((_moved_onto("c-h1"),))
+    await events.detect()
+    events.branches_opened_on("c-h1")
+    await _until(lambda: toolbox.analyses)
+
+    events.note_merges((_moved_onto("c-h2"),))
+    assert await events.detect()
+    toolbox.finish("c-h1", {"gemm": 55.0, "attn": 30.0})
+    await _until(lambda: not events.profiling)
+    events.branches_opened_on("c-h2")
+
+    assert await events.detect()
+    profiles = [row for row in _logged(log) if row["kind"] == "profile"]
+    assert [(row["reason"], row["detail"]["commit"]) for row in profiles] == [(PROFILED, "c-h1")]
+    assert EventKind.BOTTLENECK_MOVED in [event.kind for event in events.hand_over()]
+    await _until(lambda: len(toolbox.requests) == 2)
+    assert [request.parent_commit for request in toolbox.requests.values()] == ["c-h1", "c-h2"]
+    await events.stop_profiling()
+
+
 async def _branch_profiled(toolbox: _AnalysingToolbox, commit: str) -> str:
     return await toolbox.submit_test(
         replace(integration_test_request(TestKind.PROFILE, Purpose.PROFILE, commit), branch_id="b01")

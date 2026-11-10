@@ -39,7 +39,11 @@ from ._round_folder import RoundFolder, is_round_folder
 from ._suite.config import fixed_workload
 from ._suite.rounds import TOOL_CACHE_ENV, SuiteRoundRefused, external_agentx_config, staged_tool_cache
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
-from ._spec_decode_pin import SpeculativeDecodingPinnedError, refuse_unpinned_speculative_change
+from ._spec_decode_pin import (
+    SpeculativeDecodingPinnedError,
+    refuse_unpinned_speculative_change,
+    speculative_pin_reason,
+)
 from ._patch_laying import PatchedServer, is_patched_copy
 from ._profile_setup import SGLANG_PATCH_SERVER_FLAG
 from ._server_patcher import ensure_patched_copy, lay_tracelens_patch
@@ -97,6 +101,7 @@ __all__ = [
     "run_with_session_kill",
     "session_breakdown_executor",
     "staged_tool_cache",
+    "speculative_pin_reason",
     "strip_visible_devices_from_config",
     "teardown_variant_server",
 ]

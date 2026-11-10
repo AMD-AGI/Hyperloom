@@ -86,6 +86,7 @@ FAILED_STEP_ERROR_CLASSES: Mapping[FailedStep, str] = {
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]")
 _CANDIDATE_ERROR_CLASSES = frozenset(
     {
+        ARGV_INVALID,
         "capability_unsupported",
         "invalid_argument",
         "unsupported_config",

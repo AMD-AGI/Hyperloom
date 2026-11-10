@@ -880,21 +880,17 @@ class IntentRouter(CoordinatorCollaborator):
                 f"{action} idempotency_key={task.idempotency_key!r}",
                 rule="duplicate_idempotency_key_running",
                 hint=(
-                    f"task {task.task_id} is still {task.state!r}; wait for the "
-                    f"delegated_result event instead of re-emitting the same key."
+                    f"task {task.task_id} is still {task.state!r}; wait for its "
+                    f"delegated_result event instead of re-sending the same request."
                 ),
             )
         await self.record_policy_denied(request.source, request.intent, denied, action_name=request.action_name)
         return None
 
     async def _explore_grid_covered(
-        self, action_name: str, source: str, intent: Intent, params: dict[str, Any], idempotency_key: str
+        self, action_name: str, source: str, intent: Intent, params: dict[str, Any]
     ) -> bool:
-        """Refuse an explore grid that adds nothing new, recording the denial; report whether it was refused.
-
-        A task already queued or running under ``idempotency_key`` is not counted against the grid: re-sending the key
-        is answered as a duplicate by the enqueue below, not as coverage.
-        """
+        """Refuse an explore grid that adds nothing new, recording the denial; report whether it was refused."""
         if action_name != "explore":
             return False
         from ..actions.executors.explore import framework_lever_grid
@@ -904,12 +900,7 @@ class IntentRouter(CoordinatorCollaborator):
             # The executor adds its pending rewrite levers to this grid, so the grid is not all there is to measure.
             return False
 
-        retry_prefix = f"{idempotency_key}-retry"
-        active = [
-            task
-            for task in (*await self.tasks.queued(), *await self.tasks.running())
-            if task.idempotency_key != idempotency_key and not task.idempotency_key.startswith(retry_prefix)
-        ]
+        active = (*await self.tasks.queued(), *await self.tasks.running())
         covered = explore_grid_already_covered(params, active, self.shared_state.explore_search)
         if covered is None:
             return False
@@ -945,16 +936,19 @@ class IntentRouter(CoordinatorCollaborator):
             return
         if not await self._prepare_specialist_dispatch(request, nested_idempotency_key):
             return
-        # Idempotency-key chain: top-level -> nested compat alias -> content-fingerprint auto-key.
-        raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
-        if not raw_key:
-            content_fp = hashlib.sha1(
-                json.dumps(params, sort_keys=True, default=str).encode(),
-                usedforsecurity=False,
-            ).hexdigest()[:10]
-            raw_key = f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
-        idempotency_key = str(raw_key)
-        if await self._explore_grid_covered(action_name, source, intent, params, idempotency_key):
+        content_fp = hashlib.sha1(
+            json.dumps(params, sort_keys=True, default=str).encode(), usedforsecurity=False
+        ).hexdigest()[:10]
+        # An explore round is the grid it measures, so it is keyed by that alone. Other delegates take the top-level
+        # key, then the nested compat alias, then a tick-scoped content key.
+        raw_key = (
+            f"explore:{content_fp}"
+            if action_name == "explore"
+            else intent.payload.get("idempotency_key")
+            or nested_idempotency_key
+            or f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
+        )
+        if await self._explore_grid_covered(action_name, source, intent, params):
             return
         # The grid's attempts join its proposal row through this id, as an approved proposal's do. Added after the
         # key is derived, so an identical re-emit still lands on the task already running.

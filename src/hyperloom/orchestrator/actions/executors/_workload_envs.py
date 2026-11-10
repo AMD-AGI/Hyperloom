@@ -224,6 +224,16 @@ def geak_acceptance(metric_basis: str, noise_pct: float) -> dict[str, Any] | Non
     return {"objective": metric_basis, "min_gain_pct": objective.bar_pct, "guard_max_drop_pct": guards}
 
 
+def geak_grading_fields(grading: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The axis, noise band and KEEP rule an AgentX ``workload_spec`` hands GEAK for ``SharedState.grading``."""
+    metric_basis = geak_metric_axis(benchmark_mode="agentx", grading=grading)[1]
+    noise = grading.get("noise_pct") if isinstance(grading, Mapping) else None
+    noise_pct = float(noise) if isinstance(noise, (int, float)) else parse_intvty_noise_pct()
+    acceptance = geak_acceptance(metric_basis, noise_pct)
+    keep_rule = {"acceptance": acceptance} if acceptance else {}
+    return {"metric_basis": metric_basis, "intvty_p90_veto_pct": noise_pct, **keep_rule}
+
+
 def build_agentx_workload_spec(
     envs: dict[str, Any],
     *,
@@ -276,14 +286,6 @@ def build_agentx_workload_spec(
         return str(proc_env.get(key) or envs.get(key) or default)
 
     conc = int(served_knob("CONC", DEFAULT_CONC))
-    metric_basis = geak_metric_axis(benchmark_mode="agentx", grading=grading)[1]
-    intvty_p90_veto_pct = (
-        float(grading["noise_pct"])
-        if isinstance(grading, Mapping) and isinstance(grading.get("noise_pct"), (int, float))
-        else parse_intvty_noise_pct()
-    )
-    acceptance = geak_acceptance(metric_basis, intvty_p90_veto_pct)
-    keep_rule = {"acceptance": acceptance} if acceptance else {}
     isl_osl_placeholder = {
         "isl": int(served_knob("ISL", DEFAULT_ISL)),
         "osl": int(served_knob("OSL", DEFAULT_OSL)),
@@ -299,9 +301,7 @@ def build_agentx_workload_spec(
         "duration_s": 0,
         "geak_loop_duration_s": 0,
         "concurrency": conc,
-        "metric_basis": metric_basis,
-        "intvty_p90_veto_pct": intvty_p90_veto_pct,
-        **keep_rule,
+        **geak_grading_fields(grading),
         "metric_window_s": 0.0,
         "flow": mlperf_flow(envs),
         "port": int(envs.get("PORT") or MLPERF_PORT),

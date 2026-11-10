@@ -92,12 +92,16 @@ gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" \
 TOTAL_COMMITS=$(head -1 "$WORK/.commits.raw")
 tail -n +2 "$WORK/.commits.raw" > "$WORK/commits.txt"
 rm -f "$WORK/.commits.raw"
+# X9 reads whole messages: a trailer is how a link to an internal discussion reaches the base branch's history.
+gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" \
+  --jq '.commits[] | "--- \(.sha)\n\(.commit.message)"' > "$WORK/messages.txt"
 LISTED_COMMITS=$(wc -l < "$WORK/commits.txt" | tr -d ' ')
 if [ "$LISTED_COMMITS" -lt "$TOTAL_COMMITS" ]; then
+  HEAD_MESSAGE=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq '.commit.message')
   printf '# TRUNCATED: %s of %s commits listed, oldest first. Head commit: %s\n' \
-    "$LISTED_COMMITS" "$TOTAL_COMMITS" \
-    "$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq '.commit.message | split("\n")[0]')" \
-    >> "$WORK/commits.txt"
+    "$LISTED_COMMITS" "$TOTAL_COMMITS" "${HEAD_MESSAGE%%$'\n'*}" >> "$WORK/commits.txt"
+  printf '# TRUNCATED: %s of %s messages listed, oldest first; the head commit follows.\n--- %s\n%s\n' \
+    "$LISTED_COMMITS" "$TOTAL_COMMITS" "$HEAD_SHA" "$HEAD_MESSAGE" >> "$WORK/messages.txt"
 fi
 
 gh api -H "Accept: application/vnd.github.v3.diff" \
@@ -259,7 +263,7 @@ if [ "$LISTED_PRS" -lt "$OPEN_PRS" ]; then
 fi
 
 for artifact in meta.txt title.txt body.txt diff.txt files.txt numstat.txt netlines.txt commits.txt \
-  base.txt ci.txt comments.txt testfiles.txt docfiles.txt openprs.txt skill.txt risk.txt; do
+  messages.txt base.txt ci.txt comments.txt testfiles.txt docfiles.txt openprs.txt skill.txt risk.txt; do
   printf '%-16s %s line(s)\n' "$artifact" "$(wc -l < "$WORK/$artifact" | tr -d ' ')"
 done
 

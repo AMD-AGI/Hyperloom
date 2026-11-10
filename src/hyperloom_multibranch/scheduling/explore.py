@@ -26,9 +26,10 @@ commits fail to merge, whether a profile of the integration head runs, the GPU h
 time any lease holds) and the LLM dollars the specialists and the scheduler itself spent so far, and what is known
 of each running branch's specialist (given up, stopped because its judging failed, its heartbeat lost again and
 again), which explore tests each branch has queued and which native builds its tests wait for, and decides
-what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed,
-and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background
-task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
+what to stop. No judge round starts once less of EXPLORE is left than a branch needs to start, since nothing it
+decided could take effect; a judge call that has not answered by the EXPLORE deadline counts as failed, and a
+branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background task
+of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
 integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and no merge
 test competes with FINAL's measurements; a profile of the integration head still running is cancelled before that,
 taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used the GPU
@@ -283,7 +284,7 @@ class Explorer:
             freed = await self._start_admitted(window.explore_end) or overrun or given_up
             if await self._events.detect() or freed:
                 next_judge = now
-            if now >= next_judge:
+            if now >= next_judge and window.explore_end - now >= SPECIALIST_START_SECONDS:
                 next_judge = now + self._interval
                 decision = await self._ask(window, opening=False)
                 if decision is not None and await self._apply(decision, await self._refill(window)):

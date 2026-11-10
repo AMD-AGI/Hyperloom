@@ -102,11 +102,14 @@ size, method or draft model, or adds, changes or unsets any
 `SGLANG_SIMULATE_ACC_*` env or synthetic-acceptance value, or drops
 `--speculative-config` (a replacing argument string that omits it included), is
 refused before it is benchmarked as a `serve_flag` failure naming the golden-owned key.
-The lookup above then only confirms the base's own cell; spend variants on other
-knobs. A `--speculative-config` replaces the whole object, so a variant that
-changes a key that does not describe the draft (e.g. `attention_backend`) must
-restate the base's pinned keys unchanged, or set that key alone with vLLM's
-per-key form `--speculative-config.<key> <value>`, which merges over the object.
+In an explore round that refusal comes at admission: the variant is dropped
+pre-flight and listed among the round's skipped variants, so proposing it spends
+a slot on nothing. The lookup above then only confirms the base's own cell;
+spend variants on other knobs. A `--speculative-config` replaces the whole
+object, so a variant that changes a key that does not describe the draft (e.g.
+`attention_backend`) must restate the base's pinned keys unchanged, or set that
+key alone with vLLM's per-key form `--speculative-config.<key> <value>`, which
+merges over the object.
 
 A base that **verifies a real draft** (GLM's
 `SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token`, Kimi's

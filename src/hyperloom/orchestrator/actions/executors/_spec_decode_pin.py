@@ -60,6 +60,45 @@ def _configures_a_draft(identity: Mapping[str, Any]) -> bool:
     return any(not key.startswith(GOLDEN_OWNED_ENV_PREFIXES) for key in identity)
 
 
+def speculative_pin_reason(
+    base_args: str,
+    base_envs: Mapping[str, Any],
+    candidate_args: str,
+    candidate_envs: Mapping[str, Any],
+) -> str | None:
+    """Why this candidate's acceptance length is not comparable with its base launch's; ``None`` when it is.
+
+    A base that simulates acceptance pins its draft and simulated acceptance: both launches are judged as composed,
+    so adding, changing, removing or unsetting a pinned setting, and a replacing argument string that drops one, all
+    count as a change. A base that verifies a real draft leaves the draft open, but its acceptance is measured, so a
+    candidate may not switch to a simulated length. A base with no speculative decoding has no acceptance to compare
+    against, so a candidate may enable it either way.
+
+    This is the rule itself, so a layer that admits candidates can ask it of a proposal before a round spends a slot
+    on it; :func:`refuse_unpinned_speculative_change` is the same rule stated as a refusal, for a launch being built.
+    """
+    base = _speculative_identity(base_args, base_envs)
+    candidate = _speculative_identity(candidate_args, candidate_envs)
+    changed = sorted(key for key in base.keys() | candidate.keys() if base.get(key) != candidate.get(key))
+    if not _simulates_acceptance(base):
+        if _configures_a_draft(base) and _simulates_acceptance(candidate):
+            return (
+                f"{SERVE_FLAG}: golden-owned {', '.join(changed)}: the base launch verifies a real draft, so its "
+                "acceptance is measured; this candidate switches to a simulated acceptance length, which is declared, "
+                "so its gain would not be comparable. Keep real draft verification and vary the draft or other knobs."
+            )
+        return None
+    if not changed:
+        return None
+    changes = ", ".join(f"{key} ({base.get(key)!r} -> {candidate.get(key)!r})" for key in changed)
+    return (
+        f"{SERVE_FLAG}: golden-owned {', '.join(changed)}: the base launch simulates speculative-decoding "
+        "acceptance, which is only valid for the draft it was set for, so the draft and its simulated acceptance "
+        f"are pinned; this candidate changes {changes}. Keep them as the base sets them "
+        f"(a --{SPECULATIVE_CONFIG_FLAG} must restate its pinned keys) and vary other knobs."
+    )
+
+
 def refuse_unpinned_speculative_change(
     base_args: str,
     base_envs: Mapping[str, Any],
@@ -68,38 +107,17 @@ def refuse_unpinned_speculative_change(
 ) -> None:
     """Refuse a candidate whose acceptance length is not comparable with its base launch's.
 
-    A base that simulates acceptance pins its draft and simulated acceptance: both launches are judged as composed,
-    so adding, changing, removing or unsetting a pinned setting, and a replacing argument string that drops one, all
-    count as a change. A base that verifies a real draft leaves the draft open, but its acceptance is measured, so a
-    candidate may not switch to a simulated length. A base with no speculative decoding has no acceptance to compare
-    against, so a candidate may enable it either way.
-
     Raises:
         SpeculativeDecodingPinnedError: When the base simulates acceptance and the candidate's pinned settings differ,
             or the base verifies a real draft and the candidate simulates acceptance.
     """
-    base = _speculative_identity(base_args, base_envs)
-    candidate = _speculative_identity(candidate_args, candidate_envs)
-    changed = sorted(key for key in base.keys() | candidate.keys() if base.get(key) != candidate.get(key))
-    if not _simulates_acceptance(base):
-        if _configures_a_draft(base) and _simulates_acceptance(candidate):
-            raise SpeculativeDecodingPinnedError(
-                f"{SERVE_FLAG}: golden-owned {', '.join(changed)}: the base launch verifies a real draft, so its "
-                "acceptance is measured; this candidate switches to a simulated acceptance length, which is declared, "
-                "so its gain would not be comparable. Keep real draft verification and vary the draft or other knobs."
-            )
-        return
-    if changed:
-        changes = ", ".join(f"{key} ({base.get(key)!r} -> {candidate.get(key)!r})" for key in changed)
-        raise SpeculativeDecodingPinnedError(
-            f"{SERVE_FLAG}: golden-owned {', '.join(changed)}: the base launch simulates speculative-decoding "
-            "acceptance, which is only valid for the draft it was set for, so the draft and its simulated acceptance "
-            f"are pinned; this candidate changes {changes}. Keep them as the base sets them "
-            f"(a --{SPECULATIVE_CONFIG_FLAG} must restate its pinned keys) and vary other knobs."
-        )
+    reason = speculative_pin_reason(base_args, base_envs, candidate_args, candidate_envs)
+    if reason:
+        raise SpeculativeDecodingPinnedError(reason)
 
 
 __all__ = [
     "SpeculativeDecodingPinnedError",
     "refuse_unpinned_speculative_change",
+    "speculative_pin_reason",
 ]

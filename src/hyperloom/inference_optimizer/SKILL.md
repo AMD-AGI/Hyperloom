@@ -1225,15 +1225,15 @@ python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hour
 GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
-Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`,
+Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`, `r9600d`,
 `radeon8060s`. The GPU type is the board the base launch is resolved for:
 a recipe for another board is used only when both share the gfx target and
 HBM size (`mi350x` / `mi355x` do; `mi300x` / `mi325x` do not), and its point
 is chosen for `--nodes` × `--gpus-per-node` (default 8) GPUs.
 
-`r9700` (Radeon AI PRO R9700, gfx1201) runs with `--framework vllm` only:
-pass `--framework vllm`, since another framework (including the default)
-exits with code 2 at launch.
+`r9700` (Radeon AI PRO R9700, gfx1201) and `r9600d` (Radeon AI PRO R9600D,
+gfx1201) run with `--framework vllm` only: pass `--framework vllm`, since
+another framework (including the default) exits with code 2 at launch.
 
 Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use

@@ -250,6 +250,43 @@ async def test_infra_failures_retry_up_to_the_limit_then_measurement_failed_is_s
     assert {event.node for event in await rig.blackboard.quarantined()} == {"n1", "n2", "n3", "n4"}
 
 
+@pytest.mark.parametrize(
+    "reason, deadline_in, waits",
+    [
+        ("foreign_process_on_card: card 3 held by pid 4242", None, [60.0, 120.0, 240.0]),
+        ("foreign_process_on_card: card 3 held by pid 4242", 100.0, [60.0, 40.0]),
+        ("runner_start_timeout", None, [60.0, 120.0, 240.0]),
+        ("pull failed", None, []),
+    ],
+    ids=["busy_cards_no_deadline", "busy_cards_deadline", "no_sandbox", "node_s_failure"],
+)
+async def test_infra_retries_wait_their_backoff_only_when_not_the_node_s_and_never_past_the_exploration_end(
+    tmp_path: Path, reason: str, deadline_in: float | None, waits: list[float]
+) -> None:
+    from hyperloom_multibranch.blackboard.tests.factories import FakeClock
+    from hyperloom_multibranch.toolbox.attempts import INFRA_BACKOFF_SECONDS
+
+    clock, slept = FakeClock(), []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.advance(seconds)
+
+    deadline = {} if deadline_in is None else {"b1": clock.now + deadline_in}
+    nodes = iter(["n1", "n2", "n3", "n4"])
+    executor = ScriptedExecutor([lambda j: failed(j, FailureClass.INFRA, next(nodes), reason)])
+    policy = QueuePolicy(branch_deadline=deadline)
+    rig = build(
+        tmp_path, executor=executor, clock=clock, policy=policy, infra_backoff=INFRA_BACKOFF_SECONDS, sleep=sleep
+    )
+    request_id = await rig.toolbox.submit_test(req())
+    await rig.toolbox.drain()
+    assert len(executor.jobs) == 4, "every retry still runs"
+    assert slept == pytest.approx(waits, abs=0.1)
+    record = await _record(rig, request_id)
+    assert record.result is not None and record.result.validity is Validity.MEASUREMENT_FAILED
+
+
 async def test_a_measurement_failed_result_releases_its_claim_and_dedup_does_not_call_it_tested(
     tmp_path: Path,
 ) -> None:

@@ -10,7 +10,7 @@ import os
 import shlex
 import stat
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -211,9 +211,12 @@ def build(
     builds: BuildDriver | None = None,
     short_prompt_pool: ShortPromptPool | None = None,
     aiter_builds_missing: str | None = None,
+    infra_backoff: tuple[float, ...] = (),
+    sleep: Callable[[float], Awaitable[None]] | None = None,
 ) -> Rig:
     """A toolbox over a blackboard directory and a submit log under ``tmp_path``; building again over the same
-    ``tmp_path`` is a restart. ``builds`` drives the native builds a test waits for."""
+    ``tmp_path`` is a restart. ``builds`` drives the native builds a test waits for. Infrastructure retries wait
+    ``infra_backoff`` with ``sleep`` (none by default, so a retry goes at once)."""
 
     from hyperloom_multibranch.blackboard.tests.factories import FakeClock
 
@@ -236,7 +239,9 @@ def build(
         executor,
         AcceptanceSetup(repo, planner, active_image, workload_kind, aiter_builds_missing=aiter_builds_missing),
         tools=tools(blackboard) if tools else None,  # type: ignore[arg-type]
-        tuning=ToolboxTuning(policy=policy, clock=clock),
+        tuning=ToolboxTuning(
+            policy=policy, clock=clock, infra_backoff_seconds=infra_backoff, sleep=sleep or asyncio.sleep
+        ),
     )
     return Rig(toolbox, executor, fake, repo, blackboard, tmp_path, clock)
 

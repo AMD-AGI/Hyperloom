@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.contracts.toolbox import RequestRejected, UnknownTestRequest
 from hyperloom_multibranch.toolbox.tests.helpers import build, settle
 from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolOutput, ToolRequest, all_tools
 
@@ -40,8 +40,10 @@ async def test_a_tool_result_reaches_the_inbox_and_takes_no_slot_of_k(tmp_path: 
     job = rig.toolbox.submit_tool(ToolRequest("slow", "b1"))
     assert rig.toolbox.tool_status(job) is JobStatus.RUNNING
     assert (await rig.toolbox.queue_state()).running == 0
+    assert rig.toolbox.tool_result(job) == {}
     tool.gate.set()
     assert await jobs.wait(job) is JobStatus.SUCCEEDED
+    assert rig.toolbox.tool_result(job) == {"n": 1}
 
 
 async def test_a_stopped_branch_has_its_running_tool_jobs_cancelled(tmp_path: Path) -> None:
@@ -58,3 +60,5 @@ async def test_every_registered_tool_is_served_and_a_toolbox_without_tools_refus
     assert {"profile", "upstream_pr_search"} <= set(jobs.tool_names)
     with pytest.raises(RequestRejected, match="no asynchronous tools"):
         build(tmp_path / "other").toolbox.submit_tool(ToolRequest("profile", "b1"))
+    with pytest.raises(UnknownTestRequest):
+        build(tmp_path / "third").toolbox.tool_result("job-1")

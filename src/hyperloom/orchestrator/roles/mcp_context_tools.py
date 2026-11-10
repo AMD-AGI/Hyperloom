@@ -249,12 +249,11 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
     ),
     (
         "get_running_tasks",
-        "Return the tasks currently in flight and what each one holds: "
-        "elapsed running seconds, specialist domain / gap, idempotency key, "
-        "lease TTL and remaining time, held lanes, leased GPU ids, and "
-        "heartbeat age. A dispatched task is otherwise invisible until it "
-        "terminates, so use this to judge whether to keep waiting on it, "
-        "plan around it, or escalate.",
+        "Re-read the turn's Tasks in flight block: each running task and "
+        "queued explore round with its elapsed seconds, specialist domain / "
+        "gap, idempotency key, lease TTL and remaining time, held lanes, "
+        "leased GPU ids, heartbeat age and explore grid. Use it when a "
+        "decision later in the turn depends on whether that work has moved.",
         _NO_ARGS_SCHEMA,
         "running_tasks",
     ),

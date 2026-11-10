@@ -136,9 +136,9 @@ def stack_of_measured(against: Mapping[str, Any]) -> dict[str, Any]:
 def explore_grid_already_covered(params: Mapping[str, Any], active: Iterable[Any], ledger: Any) -> PolicyDenied | None:
     """Deny an explore grid every variant of which is already measured, queued or running on this same stack.
 
-    ``active`` is the queued and running tasks. The delegator names its own idempotency key, so two grids with the
-    same content under different keys would otherwise both run. A grid with one genuinely new variant is admitted; the
-    executor skips the rest.
+    ``active`` is the queued and running tasks. Two grids that differ only in variant names launch the same work, so
+    the comparison is by launch, not by grid content. A grid with one genuinely new variant is admitted; the executor
+    skips the rest.
     """
     keys = _launch_keys(params)
     if not keys or not all(fp for fp, _ in keys):
