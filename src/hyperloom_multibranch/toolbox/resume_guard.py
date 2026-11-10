@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,8 +30,6 @@ from hyperloom_common.shared_storage import SHARED_FILE_MODE, publish_shared_byt
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.build import CodeVersion, code_version
 from hyperloom_multibranch.toolbox.submission_log import SUBMISSIONS_FILE, LogEntry, logged_entries
-
-logger = logging.getLogger(__name__)
 
 #: The record of what the session's baseline was measured on, in the toolbox's session directory.
 BASELINE_ENVIRONMENT_FILE = "baseline-environment.json"
