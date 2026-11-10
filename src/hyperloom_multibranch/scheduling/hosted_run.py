@@ -8,8 +8,9 @@ of :class:`~hyperloom_multibranch.scheduling.settings.RunSettings` a command-lin
 the legacy entry validated, a multi-branch session needs ``multibranch.workload`` (``--workload``),
 ``workload.conc`` and ``workload.precision``; ``multibranch.max_branches`` is ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
-``--autonomous-agent``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what the grant runs at
-once. The fields ``run`` has no option for -- ``objective``, ``launch``, ``options``, ``placement.profile`` and
+``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
+``--no-make-before-break``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what the grant
+runs at once. The fields ``run`` has no option for -- ``objective``, ``launch``, ``options``, ``placement.profile`` and
 ``placement.specialist_capacity`` -- are not read. Dev sandboxes and agents run in ``dev`` sandboxes of the grant, so
 they need its ``dev`` key and the session directory on the storage ``USER_DATA_PATH`` names, which the ``dev``
 template mounts at the same path (:func:`refuse_unhosted_branches`).
@@ -103,7 +104,28 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "max-parallel-tests": min(spec.max_parallel_tests, parallel_tests),
     }
     agents = [f"--autonomous-agent={source}" for source in _agent_sources(section.get("autonomous_agents"))]
-    return ["run", *(f"--{option}={value}" for option, value in values.items() if value is not None), *agents]
+    switches = _switches(section)
+    return [
+        "run",
+        *(f"--{option}={value}" for option, value in values.items() if value is not None),
+        *agents,
+        *switches,
+    ]
+
+
+def _switches(section: Mapping[str, Any]) -> list[str]:
+    """The on/off options of ``section``: ``multibranch.make_before_break`` as ``--[no-]make-before-break``, nothing
+    when the spec leaves it to ``run``'s default (on)."""
+
+    keep = _make_before_break(section)
+    return [] if keep is None else ["--make-before-break" if keep else "--no-make-before-break"]
+
+
+def _make_before_break(section: Mapping[str, Any]) -> bool | None:
+    keep = section.get("make_before_break")
+    if keep is not None and not isinstance(keep, bool):
+        raise HostedRefused("multibranch.make_before_break must be true or false")
+    return keep
 
 
 def _agent_sources(sources: object) -> list[str]:

@@ -48,7 +48,15 @@ from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, Me
 from hyperloom_multibranch.toolbox.branch_leases import LEASE_WAIT_SECONDS, lease_wait, refuse_unfit_cards
 from hyperloom_multibranch.toolbox.lease_ledger import LeaseLedger
 
-__all__ = ["LIFETIME_MARGIN_SEC", "DevSession", "GrantLimits", "HostedBranchLease", "HostedBranchLeases", "LeaseTuning"]
+__all__ = [
+    "HANDOVER_MIN_TESTS",
+    "LIFETIME_MARGIN_SEC",
+    "DevSession",
+    "GrantLimits",
+    "HostedBranchLease",
+    "HostedBranchLeases",
+    "LeaseTuning",
+]
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +67,9 @@ LEASE_PURPOSE = "dev-lease"
 #: Between a holder's own end, or the grant's runtime, and the end of its sandbox: the holder's stop, its processes'
 #: grace and the release that ends the sandbox come first.
 LIFETIME_MARGIN_SEC = 300
+#: The fewest tests of the session's TP the grant must fit for make-before-break to keep a finished test's sandbox:
+#: the kept sandbox holds one test's room, so it costs at most a third of the tests at once, never half where two fit.
+HANDOVER_MIN_TESTS = 3
 _CLOSING = "the toolbox is closing"
 _POLL_SEC = 0.2
 
@@ -195,13 +206,14 @@ class HostedBranchLeases:
     def tests_at_once(self) -> int:
         """How many tests the cards and sandboxes left for measurement run at once, at least one so that a toolbox
         which lost them fails its tests instead of parking them. With make-before-break
-        (:meth:`keep_room_for_handover`) one test's room is left free for the kept sandbox, unless only one test fits."""
+        (:meth:`keep_room_for_handover`) one test's room is left free for the kept sandbox where what the leases leave
+        fits at least :data:`HANDOVER_MIN_TESTS` tests; where it fits fewer, every test runs and no room is left."""
 
         with self._guard:
             by_cards = self._capacity().measurement_cards // self._session.tp
             by_sandboxes = self._grant.max_sandboxes - len(self._promised)
         fits = min(by_cards, by_sandboxes)
-        if self._make_room is not None and fits >= 2:
+        if self._make_room is not None and fits >= HANDOVER_MIN_TESTS:
             fits -= 1
         return max(1, fits)
 
