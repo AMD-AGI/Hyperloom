@@ -69,6 +69,12 @@ CARDS_UNOBSERVABLE = "cards_unobservable"
 DISK_FULL = "disk_full"
 _DISK_FULL_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT})
 
+#: No sandbox started within the runner's start timeout (``hyperloom.measure.hosted``): the platform short of sandboxes,
+#: or on a local host every card held by a process outside the toolbox. Retried like any infrastructure failure.
+RUNNER_START_TIMEOUT = "runner_start_timeout"
+#: The platform had no room for the sandbox. Retried like any infrastructure failure.
+CAPACITY_UNAVAILABLE = "capacity_unavailable"
+
 #: The runner process exited without writing ``status.json`` (it died importing, say): the host stops waiting at once
 #: instead of polling until the test's timeout. Retried like any infrastructure failure.
 RUNNER_EXITED = "runner_exited"
@@ -100,7 +106,7 @@ SANDBOX_ACQUIRE_TIMEOUT = "sandbox_acquire_timeout"
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
     {
         "runner_start_failed",
-        "runner_start_timeout",
+        RUNNER_START_TIMEOUT,
         SANDBOX_ACQUIRE_TIMEOUT,
         "runner_lost",
         "preflight_mismatch",
@@ -109,7 +115,7 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
         "node_fault",
         "no_spec",
         "sandbox_create_failed",
-        "capacity_unavailable",
+        CAPACITY_UNAVAILABLE,
         "image_pull_failed",
         "result_read_failed",
         "archive_failed",
