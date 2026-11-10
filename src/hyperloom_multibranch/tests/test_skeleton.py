@@ -3033,9 +3033,9 @@ async def test_a_toolbox_without_cards_for_a_test_ends_explore_as_a_failed_sessi
 
 
 class AnalysingToolbox(LeasingToolbox):
-    """The recording toolbox with an analysis route whose TraceLens job of PRELUDE's root profile ends at once and
-    every later one never does, noting every test taken back; a double for a backend that profiles, not a
-    placeholder."""
+    """The recording toolbox with an analysis route whose TraceLens job of PRELUDE's root profile ends at once, with
+    no shares and no error class, and every later one never does, noting every test taken back; a double for a
+    backend that profiles, not a placeholder."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -3050,6 +3050,9 @@ class AnalysingToolbox(LeasingToolbox):
 
     def tool_status(self, job_id: str) -> JobStatus:
         return JobStatus.SUCCEEDED if job_id == "tracelens-1" else JobStatus.RUNNING
+
+    def tool_result(self, job_id: str) -> Mapping[str, Any]:
+        return {}
 
     async def cancel(self, request_id: str) -> CancelOutcome:
         self.taken_back.append(request_id)

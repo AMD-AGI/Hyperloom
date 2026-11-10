@@ -38,6 +38,7 @@ from hyperloom_multibranch.scheduling.events import (
     PROFILE_UNAVAILABLE,
     PROFILED,
     PROFILE_NOT_ANALYSED,
+    TRACE_UNUSABLE,
     EventKind,
     IntegrationProfiler,
     SessionEvents,
@@ -351,6 +352,7 @@ class _AnalysingToolbox(FakeToolbox):
         self._shares = shares
         self.analyses: list[tuple[str, str, dict[str, Any], str]] = []
         self.status = JobStatus.RUNNING
+        self.error_class = ""
         self.rejection: RequestRejected | None = None
 
     async def submit_analysis(
@@ -363,6 +365,9 @@ class _AnalysingToolbox(FakeToolbox):
 
     def tool_status(self, job_id: str) -> JobStatus:
         return self.status
+
+    def tool_result(self, job_id: str) -> dict[str, Any]:
+        return {"status": "failed", "error_class": self.error_class} if self.error_class else {}
 
     def finish(self, commit: str, shares: Mapping[str, float]) -> None:
         profiled = self.analyses[-1][3]
@@ -451,6 +456,35 @@ async def test_a_profile_whose_analysis_left_no_shares_is_not_a_profile_the_head
     assert profile["reason"] == PROFILE_NOT_ANALYSED
     assert (profile["detail"]["analysis"], profile["detail"]["commit"]) == ("failed", "c-merged")
     assert "largest_op" not in profile["detail"]
+
+
+@pytest.mark.parametrize(
+    ("error_class", "profiles_again"),
+    [("trace_without_gpu_kernels", False), ("trace_without_serving_steps", False), ("subprocess_timeout", True)],
+)
+async def test_a_trace_no_analysis_can_use_ends_the_profiles_and_any_other_analysis_failure_does_not(
+    log: Path, error_class: str, profiles_again: bool
+) -> None:
+    shares = _Shares({"c-root": _op_shares("c-root", BEFORE)})
+    toolbox = _AnalysingToolbox(shares)
+    events = _events(_Health(), log, toolbox, shares)
+    events.note_merges((_moved_onto("c-merged"),))
+    await events.detect()
+    await _until(lambda: toolbox.analyses)
+
+    toolbox.status, toolbox.error_class = JobStatus.FAILED, error_class
+    await _until(lambda: not events.profiling)
+    assert not await events.detect()
+    events.note_merges((_moved_onto("c-next"),))
+    await events.detect()
+
+    assert events.profiling is profiles_again
+    profiled = ["c-merged", "c-next"][: 1 + profiles_again]
+    await _until(lambda: [request.parent_commit for request in toolbox.requests.values()] == profiled)
+    [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
+    assert profile["reason"] == (PROFILE_NOT_ANALYSED if profiles_again else TRACE_UNUSABLE)
+    assert (profile["detail"]["analysis"], profile["detail"]["error_class"]) == ("failed", error_class)
+    await events.stop_profiling()
 
 
 @pytest.mark.parametrize(
