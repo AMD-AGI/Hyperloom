@@ -76,6 +76,17 @@ template's values to the paths inside the sandbox.
 The sandbox serves the model at the path the campaign spec names, so the template must mount the model storage at
 that same path.
 
+### Keeping a sandbox for the next test
+
+On a cluster that queues sandboxes, a measurement sandbox that ends gives its node back to the queue, and the next
+test's sandbox asks again behind every other job of its priority. By default the session therefore keeps a finished
+test's sandbox until the next test's sandbox runs (make-before-break), for at most 1800 s. The grant charges the kept
+sandbox like any other, so the session runs one test fewer at once to leave it room, and it does so only where the grant
+fits at least three tests at the session's TP; a grant that fits one or two, such as 3 sandboxes and 2 GPUs, keeps no
+sandbox and runs every test it fits. A dev sandbox a branch is promised takes the kept sandbox's room first. Set
+`multibranch.make_before_break: false` in the campaign spec (`--no-make-before-break` on `run --measurement hosted`) to
+run every test the grant fits and close each sandbox when its test ends.
+
 ### Starting the runner from the cache
 
 Start the runner with the step that `hyperloom.measure.runner.bootstrap.runner_template_step(...)` returns. It needs

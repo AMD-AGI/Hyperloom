@@ -48,6 +48,7 @@ from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harne
 from .kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
 from .failure_evidence import tail_excerpt
 from .retest_view import write_retest_view
+from .state_file import write_state
 from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.budget import _BudgetStateMixin
 from ._shared_state.enablement_round import EnablementRound
@@ -460,6 +461,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # The COLD round above from the server-ready marker onward (benchmark and accuracy eval), and that eval's own time.
     baseline_post_ready_runtime_sec: float = 0.0
     baseline_eval_runtime_sec: float = 0.0
+    # Wall-clock of the slowest roofline (profile + TraceLens) this session finished; CLOSE sizes its own from it.
+    roofline_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
     # Immutable measurement evidence captured with the current-best promotion.
     current_best_measurement: dict[str, Any] = field(default_factory=dict)
@@ -710,9 +713,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
     # Crash-safe stack-validation checkpoints (SWEEP-entry combo E2E).
     pending_stack_validation_result: dict[str, Any] = field(default_factory=dict)
-    pending_stack_validation_apply_results: list[dict[str, Any]] = field(
-        default_factory=list,
-    )
+    pending_stack_validation_apply_results: list[dict[str, Any]] = field(default_factory=list)
     rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
     # Kernel ids with no remaining automated path (from REVERTs + exhausted integrate attempts).
     rejected_kernel_ids: list[str] = field(default_factory=list)
@@ -1096,8 +1097,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         self.charge_elapsed()
         # Backfill scriptable/diffusion (xDiT) ``e2el_mean_ms`` from ``tput`` so current_best has the latency metric.
         self._backfill_scriptable_latency()
-        path = self.state_path(session_dir)
-        atomic_write_json(path, self.to_dict())
+        write_state(self.state_path(session_dir), self.to_dict())
         write_retest_view(session_dir, self)
         # Author-time breakdown capture: snapshot state-owned sections into the recorder spool right after persisting.
         self._session_dir = Path(session_dir)
