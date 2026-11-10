@@ -190,3 +190,20 @@ class TestCollectives:
         }
         assert {name: dg.categorize_kernel_name(name) for name in names} == names
         assert "collective" not in dg.LAUNCH_BOUND_CATEGORIES
+
+
+class TestDecodeSteps:
+    def test_the_category_shares_count_only_the_decode_steps(self, tmp_path):
+        """A bf16 add that runs only outside the step windows is no share of decode time."""
+        events = [
+            {"cat": "gpu_user_annotation", "name": "step[VERIFY bs=2]", "ts": 0, "dur": 100},
+            {"cat": "kernel", "name": "Cijk_Alik_Bljk_MT64x16x256", "ts": 10, "dur": 60},
+            {"cat": "kernel", "name": "_fused_rms_fp8_group_quant_kernel", "ts": 70, "dur": 20},
+            {"cat": "kernel", "name": "vectorized_elementwise CUDAFunctor_add<bf16>", "ts": 200, "dur": 500},
+        ]
+        trace = tmp_path / "trace.json"
+        trace.write_text(json.dumps({"traceEvents": events}))
+
+        shares, _busy, _kernels = dg.load_op_busy_from_kineto_trace(trace)
+
+        assert shares == {"gemm": 0.75, "rmsnorm": 0.25}

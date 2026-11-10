@@ -20,9 +20,11 @@ from hyperloom_common.coerce import to_float
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config.resources import resource_path
+from kernelforge.evaluation.profiling.serving_windows import step_windows
+from kernelforge.evaluation.profiling.trace_events import load_trace_events
 
 from .author import _arch_phrase
-from .diagnose import LAUNCH_BOUND_CATEGORIES, _load_trace_events, categories_in_text, categorize_kernel_name
+from .diagnose import LAUNCH_BOUND_CATEGORIES, _kernel_span, categories_in_text, categorize_kernel_name
 from .discovery_prompt import DISCOVERY_PROMPT_TEMPLATE
 from .llm_failure import (
     API_ERROR,
@@ -137,17 +139,17 @@ def _resolve_max_fusions(value: Optional[int] = None) -> int:
 def hot_kernels_from_trace(
     trace_path: str | Path, *, top_n: int = 15, launch_bound_only: bool = True
 ) -> list[dict[str, Any]]:
-    """Top GPU kernels from a kineto trace by total-duration share."""
+    """Top GPU kernels from a kineto trace by total-duration share, over its decode steps when it annotates them."""
+    events = load_trace_events(trace_path)
+    decode = [(w.start_us, w.end_us) for w in step_windows(events) if w.is_decode]
     agg: dict[str, list[float]] = {}
     total = 0.0
-    for ev in _load_trace_events(trace_path):
-        if ev.get("cat") != "kernel":
+    for ev in events:
+        span = _kernel_span(ev)
+        if span is None:
             continue
-        try:
-            dur = float(ev.get("dur"))
-        except (TypeError, ValueError):
-            continue
-        if dur <= 0:
+        dur, ts = span
+        if decode and not (ts is not None and any(lo <= ts < hi for lo, hi in decode)):
             continue
         name = str(ev.get("name") or "")
         d = agg.setdefault(name, [0.0, 0])
@@ -178,18 +180,11 @@ def hot_kernels_from_trace(
 def kernel_names_from_trace(trace_path: str | Path, *, top_n: int = 40) -> list[str]:
     """Distinct kernel names ranked by total duration, compute kernels included."""
     totals: dict[str, float] = defaultdict(float)
-    for event in _load_trace_events(trace_path):
-        if event.get("cat") != "kernel":
-            continue
-        try:
-            duration = float(event.get("dur"))
-        except (TypeError, ValueError):
-            continue
-        if duration <= 0:
-            continue
+    for event in load_trace_events(trace_path):
+        span = _kernel_span(event)
         name = str(event.get("name") or "")
-        if name:
-            totals[name] += duration
+        if span is not None and name:
+            totals[name] += span[0]
     ranked = sorted(totals.items(), key=lambda item: item[1], reverse=True)
     return [name for name, _ in ranked[:top_n]]
 
@@ -204,16 +199,11 @@ def stream_ordered_kernels(
     """
     streams: dict[tuple[Any, Any], list[dict[str, Any]]] = defaultdict(list)
     total_kernel_us = 0.0
-    for event in _load_trace_events(trace_path):
-        if event.get("cat") != "kernel":
+    for event in load_trace_events(trace_path):
+        span = _kernel_span(event)
+        if span is None or span[1] is None:
             continue
-        try:
-            timestamp = float(event.get("ts"))
-            duration = float(event.get("dur"))
-        except (TypeError, ValueError):
-            continue
-        if duration <= 0:
-            continue
+        duration, timestamp = span
         name = str(event.get("name") or "")
         args = event.get("args") if isinstance(event.get("args"), dict) else {}
         stream_key = (
