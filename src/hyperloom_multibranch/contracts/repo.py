@@ -164,8 +164,7 @@ class ExperimentRepo(Protocol):
         ``RecipeError`` when the two cannot combine or have several merge bases.
 
         ``protected`` are the commits merged into ``onto`` as foundation fixes: no head patch they contributed is
-        replaced. The set is the session's, so a head carried into a later session protects nothing until it is
-        derived from the merge log.
+        replaced. The caller re-derives the set on every call, so it holds across a resumed session too.
         """
 
     async def merge_many(
