@@ -166,6 +166,17 @@ def test_platform_router_ip_is_listed_and_stays_platform_managed(monkeypatch: py
     assert [pod["role"] for pod in pd_cmds._ordered_pods(state)] == ["prefill", "decode"]
 
 
+def test_state_records_the_user_data_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from hyperloom.inference_optimizer.session.paths import default_workspace_root
+
+    monkeypatch.delenv(topo.TOPOLOGY_FILE_ENV, raising=False)
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://10.0.0.10:8000")
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "user"))
+    assert ext.build_external_state_from_env()["user_data_path"] == str(tmp_path / "user")
+    monkeypatch.delenv("USER_DATA_PATH")
+    assert ext.build_external_state_from_env()["user_data_path"] == str(default_workspace_root())
+
+
 def test_restart_and_stop_skip_the_platform_router() -> None:
     state = {
         "pods": [

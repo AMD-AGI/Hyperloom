@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ...session.paths import workspace_root
 from ..state_paths import resolve_state_file, state_file_safe_to_read
 from .infera_support import ssh_role_port_offset
 from .ssh_client import DEFAULT_SSH_PORT
@@ -201,6 +202,7 @@ def build_external_state_from_env() -> dict[str, Any]:
         "decode_pods": _external_pods(decode, "decode", ssh_port),
         "worker_pod_ips": worker,
         "worker_pods": _external_pods(worker, "worker", ssh_port),
+        "user_data_path": str(workspace_root()),
     }
     if ssh_key:
         state["ssh_key_path"] = ssh_key
