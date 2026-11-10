@@ -12,6 +12,7 @@ the session's first baseline test.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -184,6 +185,33 @@ def test_a_restart_of_a_session_not_measured_in_the_grant_finishes_it(
     assert agent_cli == [_settings()] and RESUMED_TO == []
     [warning] = _warnings(caplog)
     assert "whose tests did not run in the grant's sandboxes" in warning.getMessage()
+
+
+@pytest.mark.usefixtures("ready_environment", "rescheduled")
+def test_a_restart_that_cannot_read_what_the_resume_checks_finishes_the_session_rather_than_crash(
+    host: Host,
+    agent_cli: list[RunSettings],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An earlier leg's file this account may not read, as another account of the group meets one an older build left
+    owner-only: the finish runs and says so itself, as before, instead of the start crashing with no ``exit.json``,
+    which would have the host start the run again and again."""
+    layout, _ = _session_of(host, tmp_path)
+
+    def unreadable(persisted: object) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", str(layout.blackboard))
+
+    monkeypatch.setattr(hosted_run, "require_resumable", unreadable)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert agent_cli == [_settings()] and RESUMED_TO == [], "finished, not resumed"
+    [warning] = _warnings(caplog)
+    assert warning.getMessage().startswith(f"hosted run: finishing {layout.root} instead of resuming it: ")
+    assert str(layout.blackboard) in warning.getMessage()
+    assert host.exit_document()["final"] is True
 
 
 # -- a reschedule onto another account of the run's group ------------------------------------------------------------
