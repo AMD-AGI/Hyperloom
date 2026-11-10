@@ -106,7 +106,11 @@ REASONS = ("deadline", "map_exhausted", "done", "sigterm", "mapped", "aborted", 
 MASK_KEYS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 
 BLOCK_KEYS = ("host", "deadline", "seconds", "notes", "bench_command", "outbox", "phase_minutes",
-              "root", "plan", "stop_at", "profile", "review", "callbacks", "base_launch", "entrypoint")
+              "root", "plan", "stop_at", "profile", "review", "callbacks", "base_launch", "entrypoint", "bench_read")
+
+# component.bench_read: where the host's client puts each metric, {"file": <under {out}>, "keys": {metric: dotted
+# path}}. With it the harness reads the metrics itself after each replay of bench_command (a fixed block the bench
+# agent runs as given), and a missing file or path makes the iteration NOT_MEASURED; without it the agent reads them.
 
 # component.base_launch: the host's frozen base launch, {"path": <its record>, "digest": ...}, which
 # Arbor's launch must equal before it starts (arbor/base_launch.py). component.entrypoint: the
@@ -299,6 +303,8 @@ def config_errors(config) -> list[str]:
     if _seconds(raw) is not None and not _positive(raw["seconds"]):
         errors.append(f"component.seconds must be a positive number (0 for none), "
                       f"not {raw['seconds']!r}")
+    if raw.get("bench_read") is not None:
+        errors += bench_read_errors(raw["bench_read"], raw.get("bench_command"))
     pm = raw.get("phase_minutes")
     if pm is not None:
         if not isinstance(pm, dict):
@@ -943,6 +949,42 @@ def bench_command(config) -> str | None:
     if not is_component(config) or not isinstance(cmd, str) or not cmd.strip():
         return None
     return cmd.strip()
+
+
+def bench_read_errors(raw, command) -> list[str]:
+    """What is wrong with ``component.bench_read``: it needs a bench_command, a file under ``{out}`` and a map of
+    metric keys to dotted paths. ``require``, optional, maps dotted paths to the scalar each must equal (a round the
+    client did not complete keeps its numbers: ``{"run_status": "completed", "agentx.stopped_by_threshold": false}``)."""
+    if not isinstance(raw, dict):
+        return ["component.bench_read must be an object: {\"file\": ..., \"keys\": {metric: path}}"]
+    errors = []
+    if not isinstance(command, str) or not command.strip():
+        errors.append("component.bench_read needs component.bench_command: it reads that command's report")
+    f = raw.get("file")
+    if not isinstance(f, str) or not f.strip() or f.startswith("/") or ".." in f.replace("\\", "/").split("/"):
+        errors.append(f"component.bench_read.file must be a path under the command's {{out}}, not {f!r}")
+    keys = raw.get("keys")
+    if not isinstance(keys, dict) or not keys or not all(
+            isinstance(k, str) and k and isinstance(v, str) and v.strip() for k, v in keys.items()):
+        errors.append("component.bench_read.keys must map each metric key to a dotted path in the file")
+    require = raw.get("require", {})
+    if not isinstance(require, dict) or not all(
+            isinstance(k, str) and k.strip() and (v is None or isinstance(v, (str, int, float, bool)))
+            for k, v in require.items()):
+        errors.append("component.bench_read.require must map dotted paths to the value each must equal "
+                      "(a string, a number, true, false or null)")
+    unknown = set(raw) - {"file", "keys", "require"}
+    if unknown:
+        errors.append(f"component.bench_read has unknown key(s) {sorted(unknown)}")
+    return errors
+
+
+def bench_read(config) -> dict | None:
+    """``component.bench_read`` when it is set and well formed; None: the bench agent reads the metrics."""
+    raw = block(config).get("bench_read")
+    if not is_component(config) or raw is None or bench_read_errors(raw, block(config).get("bench_command")):
+        return None
+    return {"file": raw["file"].strip(), "keys": dict(raw["keys"]), "require": dict(raw.get("require") or {})}
 
 
 def fill_bench(command: str, port, out) -> str:

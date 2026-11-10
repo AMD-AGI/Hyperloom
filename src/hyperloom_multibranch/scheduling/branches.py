@@ -63,6 +63,7 @@ from hyperloom_multibranch.scheduling.roster import (
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
+    from hyperloom_multibranch.scheduling.agent_map import SharedMap
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 logger = logging.getLogger(__name__)
@@ -143,6 +144,14 @@ class BranchControl:
         self._reserved = context.reserved
         self._specialists: set[str] = set()
         self._deadlines: dict[str, float] = {}
+        self._map: SharedMap | None = None
+
+    async def record_map(self, shared: SharedMap) -> None:
+        """Keep ``shared`` on the blackboard as the session's map, whose shares the agent branches open on; each share
+        names its directions' holder once a branch opens on it."""
+
+        self._map = shared
+        await self._blackboard.write_agent_map(shared.directions)
 
     async def integration_head(self) -> str:
         return await self._repo.head(INTEGRATION_BRANCH)
@@ -409,6 +418,9 @@ class BranchControl:
 
         if launch.focus is not None:
             self._briefs.for_branch(entry.branch, launch.focus.text)
+        if launch.plan and self._map is not None and launch.plan in self._map.shares.values():
+            self._map = self._map.dealt(launch.plan, entry.branch)
+            await self._blackboard.write_agent_map(self._map.directions)
         if entry.origin.cut_by_scheduler:
             reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
             repairs = launch.repair.judgement.request_ids[0] if launch.repair is not None else ""

@@ -47,7 +47,6 @@ from hyperloom_multibranch.specialist.autonomous_session import (
 )
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, transcript_dir
-from hyperloom_multibranch.specialist.arbor_adapter import host_rules
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import (
     PreflightFailed,
@@ -67,6 +66,7 @@ from hyperloom_multibranch.tests.agent_rig import (
     ROOT,
     TABLE_ENV,
     Component,
+    LocalProcess,
     LocalSandbox,
     Toolbox,
     _aiter,
@@ -365,7 +365,7 @@ WHEEL = PackageBase("vllm", Path("/usr/lib/python3/site-packages/vllm"), "vllm",
     ],
     ids=["new-component-from-a-wheel", "new-component-with-its-upstream", "component-in-the-recipe"],
 )
-async def test_an_agent_whose_source_changes_cannot_land_is_told_so_and_the_branch_log_says_why(
+async def test_an_agent_whose_source_changes_cannot_land_has_the_reason_in_its_spec_and_the_branch_log(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start: Recipe, upstream: Upstream | None, unkept: bool
 ) -> None:
     specs: list[AgentSpec] = []
@@ -383,9 +383,8 @@ async def test_an_agent_whose_source_changes_cannot_land_is_told_so_and_the_bran
     await rig.session.preflight()
     await rig.session.stop()
 
-    told = [rule for rule in host_rules(specs[0]) if "cannot be kept" in rule]
     noted = [note for note in await rig.notices() if "only launch and env changes can" in note]
-    assert bool(specs[0].source_unkept) is bool(told) is bool(noted) is unkept
+    assert bool(specs[0].source_unkept) is bool(noted) is unkept
     if unkept:
         assert "0.33.0rc1.dev711+gdd4e40142.rocm100" in specs[0].source_unkept and "wheel" in specs[0].source_unkept
         assert specs[0].source_unkept in noted[0]
@@ -435,27 +434,6 @@ async def test_an_agent_told_its_source_changes_cannot_land_that_keeps_one_ends_
     assert notices[-1].startswith(f"{NOTICE} keep 1 was refused: the delta does not fit the parent recipe")
     assert "the agent kept a source change to vllm after being told it cannot land" in notices[-1]
     assert rig.toolbox.requests == [] and rig.toolbox.released == ["L1"]
-
-
-async def test_an_agent_not_told_its_source_changes_cannot_land_goes_on_past_their_refusal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _from_a_wheel(monkeypatch)
-    monkeypatch.setattr(autonomous_session, "source_unkept", lambda _component, _recipe: "")
-    rig = await _rig(tmp_path, start=WITHOUT_VLLM)
-    rig.toolbox.refusals = [UNLABELLED]
-
-    await rig.session.preflight()
-    running = asyncio.create_task(rig.session.run())
-    await _until(lambda: rig.toolbox.requests, "the keep after the refused one")
-    await rig.toolbox_blackboard.write_result(result("r1"))
-    with pytest.raises(SessionFinished) as finished:
-        await asyncio.wait_for(running, 10)
-
-    assert not isinstance(finished.value, SessionRefused)
-    notices = await rig.notices()
-    assert any(note.startswith(f"{NOTICE} keep 1 was refused: the delta does not fit") for note in notices)
-    assert not any("after being told" in note for note in notices)
 
 
 async def test_an_onboarded_agent_never_told_its_source_changes_cannot_land_goes_on_past_their_refusal(
@@ -1570,6 +1548,28 @@ async def test_an_agent_in_component_mode_stopped_by_mb_records_its_sigterm_exit
     await asyncio.wait_for(running, 10)
 
     assert (await rig.notices())[-1] == f"{NOTICE} the agent stopped: sigterm"
+
+
+async def test_a_stop_whose_kill_times_out_is_noted_and_the_lease_still_goes_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(), tail=30.0))
+    kill = LocalProcess.kill
+
+    async def unavailable(self: LocalProcess) -> None:
+        await kill(self)
+        raise SandboxUnavailable("the sandbox service timed out")
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await asyncio.sleep(0.3)
+    monkeypatch.setattr(LocalProcess, "kill", unavailable)
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)
+    await rig.session.release()
+
+    assert any("the sandbox service timed out" in notice for notice in await rig.notices())
+    assert rig.toolbox.released == ["L1"]
 
 
 def _spec_envs(rig: Rig) -> dict[str, str]:

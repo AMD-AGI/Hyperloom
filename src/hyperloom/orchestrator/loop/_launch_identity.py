@@ -53,13 +53,15 @@ def _reproduced_flags(launch: Launch) -> str:
 def _reproduced_env(launch: Launch) -> dict[str, str]:
     # A redacted value is recorded only by digest. Credential, loader and path names are env_safety's to refuse: they
     # would be written into the handoff verbatim, or displace the overlay the env spec carries.
-    return {
+    env = {
         entry.name: entry.value
         for entry in launch.env_sources
-        if entry.source not in _ROUND_ENV_LAYERS
-        and isinstance(entry.value, str)
-        and is_allowed_external_env_key(entry.name)
+        if entry.source not in _ROUND_ENV_LAYERS and isinstance(entry.value, str)
     }
+    refused = sorted(name for name in env if not is_allowed_external_env_key(name))
+    if refused:
+        log.info("launch: credential, loader or path env not forwarded: %s", " ".join(refused))
+    return {name: value for name, value in env.items() if name not in refused}
 
 
 def _removed_env(launch: Launch) -> list[str]:

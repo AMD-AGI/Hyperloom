@@ -56,11 +56,8 @@ def _sh(container: str, cmd: str) -> str:
     return p.stdout
 
 
-def editable(config: dict) -> list[dict]:
-    """The config's editable packages other than the workspace (which landed.patch carries)."""
-    ws = str(config.get("workspace_root") or "").rstrip("/")
-    return [p for p in config.get("editable_packages") or []
-            if p.get("name") and p.get("path") and str(p["path"]).rstrip("/") != ws]
+#: The config's editable packages other than the workspace; defined in arbor/execute/trees.py, which this module imports.
+editable = trees.editable
 
 
 def image_sums(container: str):

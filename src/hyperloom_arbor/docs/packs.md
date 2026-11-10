@@ -12,9 +12,10 @@ packs/<name>/
   validator/       bench and correctness scripts (pinned at the session's start)
   knowledge/*.md   background the agent reads every iteration
   eval/            the agent's evaluators (outside the served tree)
+  tools/           helper scripts the pack's `tools:` names (not pinned, not served)
 ```
 
-Only `knowledge/`, `validator/` and `eval/` belong in a pack.
+Only `knowledge/`, `validator/`, `eval/` and `tools/` belong in a pack.
 
 **`results/` needs an opt-in.**
 - **By default it is refused.** In component mode that is at start (exit 2), with the reason.
@@ -48,6 +49,9 @@ Only `knowledge/`, `validator/` and `eval/` belong in a pack.
 | `secondary_metric`, `secondary_direction`, `secondary_noise_band_pct`, `secondary_threshold_rel` | | a second axis |
 | `secondary_regression_cap_pct`, `secondary_exchange_rate` | , 1.0 | how much the second axis may lose |
 | `correctness_regression_cap_pct` | 5.0 | what a FIX-CORRECTNESS may cost |
+| `stability_regression_cap_pct` | 3.0 | what a FIX-STABILITY may cost, its failure on record |
+| `stability_collapse_pct` | 10.0 | a cited iteration this far below the best counts as the failure |
+| `stability_signals` | collective watchdogs and timeouts, GPU faults, a dead engine | regular expressions for a failure in a server log (`arbor/measure/stability.py`) |
 | `bench_repeats` | 1 | replays per measurement |
 
 Some packs carry keys nothing reads (`tools:`, `measurement.count`, a `roadmap.yaml`); they are

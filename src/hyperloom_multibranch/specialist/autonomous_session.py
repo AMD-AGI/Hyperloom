@@ -492,7 +492,11 @@ class AutonomousSession:
         self._stopped.set()
         running = self._process is not None and self._process.returncode is None
         if self._process is not None:
-            await self._process.kill()
+            try:
+                await self._process.kill()
+            except SandboxUnavailable as error:
+                log.warning("the agent of %s could not be killed: %s", self._start.branch, error)
+                await self._note(f"the agent could not be killed: {error}")
         if running and self._manifest is not None and self._manifest.snapshots is not None:
             await self._note(f"the agent stopped: {self._exit_reason(self._manifest)}")
         watch_file = self._place.workspace / WATCH_FILE

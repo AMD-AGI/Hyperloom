@@ -7,9 +7,9 @@ multi-branch (MB) runs as a component when a session is given `--autonomous-agen
 | | |
 | --- | --- |
 | Source | `AMD-AGI/Arbor` (internal) |
-| Tag | `v0.9.4` |
-| Commit | `4fdb202` |
-| Files | 339 |
+| Tag | `v0.9.6` |
+| Commit | `1c6eef1` |
+| Files | 347 |
 | Licence | Apache-2.0, [`LICENSE`](LICENSE) (`REUSE.toml` at the repository root says so per file) |
 
 ## What it holds
@@ -26,7 +26,10 @@ The engine and what its agents read:
 - `packs/serving` (the template MB names by default), `packs/agentx`, `packs/_shared`, `packs/parallel-dossier` and
   the `evolve-asm` packs;
 - `docs/`, the operator and host documentation; `evals/`, the session tracer the skills' hooks call; `scripts/pack/`;
-  `configs/serving-template.json`.
+  `configs/serving-template.json`;
+- from `v0.9.5`, `docs/cli.md` (every command's parameters) and `docs/schema/arbor-cli-payload.schema.json` (the JSON
+  Schema of a command's `--payload`), both generated from the commands' parsers by `python3 -m arbor schema --write`.
+  The copy's parsers give the same two files, so the scrub changes no parameter's help text.
 
 ## What was left out or changed
 

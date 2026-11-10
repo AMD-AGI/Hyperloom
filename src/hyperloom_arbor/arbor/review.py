@@ -420,15 +420,21 @@ def summary(session_dir) -> dict:
     return {k: doc[k] for k in keys if k in doc}
 
 
-def main(argv: list[str] | None = None) -> int:
+def parser() -> argparse.ArgumentParser:
+    """The command's parser, built without parsing (arbor/cli/payload.py makes its argv and schema)."""
     parser = argparse.ArgumentParser(prog="arbor review",
                                      description="Review a campaign before Arbor runs it.")
-    parser.add_argument("action", choices=("show", "approve", "reject"))
+    parser.add_argument("action", choices=("show", "approve", "reject"),
+                        help="show the review, or approve or reject the campaign")
     parser.add_argument("--session", required=True, help="the campaign's session directory")
     parser.add_argument("--config", help="the campaign config (default: the one review.json names)")
     parser.add_argument("--note", default="", help="why, for the record")
     parser.add_argument("--by", default=None, help="who decides (default: the login name)")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
     session_dir = Path(args.session)
     if args.action == "show":
         doc = load(session_dir)
