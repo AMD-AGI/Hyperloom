@@ -14,8 +14,10 @@ any candidate test alike):
 2. the top-level module of each component the stack patches is imported from a farm of the patched package laid the way
    the runner lays it (:func:`~hyperloom.measure.farm.build_farm`), by the interpreter the test's server runs with (the
    point's ``HYPERLOOM_FRAMEWORK_PYTHON``, else the interpreter the toolbox compiled the stack against). The child sees
-   no GPU (``HIP_VISIBLE_DEVICES`` and ``CUDA_VISIBLE_DEVICES`` are empty), writes no bytecode, launches no server and is
-   stopped at :attr:`MergeSmoke.timeout_sec`.
+   no GPU (``ROCR_VISIBLE_DEVICES``, ``HIP_VISIBLE_DEVICES`` and ``CUDA_VISIBLE_DEVICES`` are empty: the first is
+   ROCm's runtime-level mask, beneath HIP's, so a code path that reaches the ROCm runtime without HIP would still see the
+   host's cards if it were left set), writes no bytecode, launches no server and is stopped at
+   :attr:`MergeSmoke.timeout_sec`.
 
 A file that does not compile, or a module that does not import while the image's own copy does, is the candidate's
 error: :meth:`MergeSmoke.check` returns its first line, and the executor ends the test as a candidate failure with the
@@ -74,8 +76,9 @@ SMOKE_NOT_RUN = "smoke_not_run"
 MERGE_SMOKE_ENV = "HYPERLOOM_MERGE_SMOKE"
 #: How long one child of the smoke (the compile, the import, the image's import) may run.
 SMOKE_TIMEOUT_SEC = 120.0
-#: The variables that hide every GPU from the smoke's children, each set empty.
-SMOKE_HIDDEN_DEVICES = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+#: The variables that hide every GPU from the smoke's children, each set empty. ``ROCR_VISIBLE_DEVICES`` is ROCm's
+#: runtime-level mask, applied beneath HIP's, so leaving the host's value would keep its cards visible to the runtime.
+SMOKE_HIDDEN_DEVICES = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
 _UPSERT = "upsert"
 _RUNTIME = "runtime"
 _DETAIL_CHARS = 400

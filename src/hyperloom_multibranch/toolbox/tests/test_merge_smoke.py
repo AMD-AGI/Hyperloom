@@ -121,12 +121,14 @@ def test_a_good_stack_passes_and_writes_no_bytecode_into_the_image(tmp_path: Pat
 
 
 def test_the_import_sees_no_gpu(tmp_path: Path, framework: Framework, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "2,3")
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
     probe = (
         "import os\n"
-        "seen = (os.environ.get('HIP_VISIBLE_DEVICES'), os.environ.get('CUDA_VISIBLE_DEVICES'))\n"
-        "if seen != ('', ''):\n"
+        "seen = tuple(os.environ.get(name) for name in"
+        " ('ROCR_VISIBLE_DEVICES', 'HIP_VISIBLE_DEVICES', 'CUDA_VISIBLE_DEVICES'))\n"
+        "if seen != ('', '', ''):\n"
         "    raise RuntimeError('visible: %r' % (seen,))\n"
     )
     assert _check(tmp_path, framework, {"srt/a.py": (OLD_A, probe)}) is None
