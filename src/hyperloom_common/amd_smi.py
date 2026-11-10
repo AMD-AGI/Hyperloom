@@ -97,8 +97,8 @@ def run_amd_smi(args: Sequence[str], timeout: float = _READ_TIMEOUT_SEC) -> str:
     if done.returncode != 0:
         # amd-smi prints a traceback on failure; its last line is the one that says why.
         lines = [line.strip() for line in (done.stderr or done.stdout or "").splitlines() if line.strip()]
-        detail = (lines[-1] if lines else "")[:200]
-        raise AmdSmiError(f"amd-smi {' '.join(args)} exited {done.returncode}: {detail}")
+        detail = f": {lines[-1][:200]}" if lines else " and printed nothing"
+        raise AmdSmiError(f"amd-smi {' '.join(args)} exited {done.returncode}{detail}")
     return str(done.stdout or "")
 
 
