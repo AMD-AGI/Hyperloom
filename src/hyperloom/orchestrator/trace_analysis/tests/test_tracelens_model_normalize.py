@@ -49,6 +49,14 @@ def test_already_dash_is_unchanged_on_safe(tl_module, monkeypatch):
     assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
 
 
+@pytest.mark.parametrize("model", ["gpt-5.6-sol", "deepseek-v4.1-pro"])
+def test_non_claude_model_keeps_its_dots_on_safe(tl_module, monkeypatch, model):
+    """The gateway serves non-Claude ids in dot form, so dashing them names a model it does not have."""
+    _use_safe_gateway(monkeypatch)
+    monkeypatch.setenv("CLAUDE_MODEL", model)
+    assert tl_module._resolve_tracelens_model() == model
+
+
 def test_non_safe_gateway_leaves_dot_form_untouched(tl_module, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
