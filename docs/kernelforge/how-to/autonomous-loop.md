@@ -182,8 +182,10 @@ self-terminating on plateau.
 
 `--search-strategy tree` (with `--lanes 2` or more) keeps every candidate that
 measures correct -- faster than what it was built on or not -- as a node of a
-search tree, and lets each iteration expand several nodes at once. One
-iteration is one round:
+search tree, and lets each iteration expand several nodes at once. A fresh
+campaign first measures its starting point, the tree's root, in the root's own
+worktree as every node is measured; a root that does not measure correct ends
+the campaign. One iteration is one round:
 
 1. A read-only slot selector, on the active Agent profile, reads the tree's
    facts: every node with its score, parent and per-case wins and losses
@@ -200,14 +202,19 @@ iteration is one round:
 2. Every start node is planned in a detached worktree of its own commit, beside
    the workspace in `<workspace>.tree-starts/`, all starts side by side, with
    one planned lane per slot: the specialists probe that node's code, and the
-   Plan Critic reviews that node's plans. A start with a `BRANCH` slot is
+   Plan Critic reviews that node's plans. The planners at a start read its
+   line rather than the campaign's lessons: the path from the root to it and
+   the attempts made from that path, written to
+   `tree_rounds/iter_NNN/line_<commit>.md` with each one's plan and records,
+   and the line's latest Implementer record. A start with a `BRANCH` slot is
    planned with every specialist role. The lanes of one start are materially
    different attempts, which may change the same code: the round planner gives
    each lane an approach, and may aim a lane at some of the scored cases when
    the evidence shows different cases limited by different things. A `PORT`
    slot is planned by the framework from the two nodes' diff.
 3. One Implementer lane per slot runs on a copy of its start's worktree, and is
-   asked for its record of what it tried before the copy is removed. A lane
+   asked for its record of what it tried before the copy is removed: the
+   slot's `lesson.md`, or `lesson_missing.txt` saying why there is none. A lane
    aimed at some cases is told which, and that it can time one of them alone by
    adding `--bench-case <case_id>` to the driver's bench-mode command while it
    iterates.
@@ -228,9 +235,16 @@ iteration is one round:
    `PORT`. A merge session runs only while the campaign's remaining time pays
    for it and still leaves the publication's measurement.
 6. The round's best node that cleared the published best's KEEP bar, a merge
-   included, is staged in the campaign workspace and measured there once more;
-   a KEEP commits it on the campaign branch, which is therefore the chain of
+   included, is staged in the campaign workspace and measured there once more,
+   a measurement that joins the node's own whether it KEEPs or not; a KEEP
+   commits it on the campaign branch, which is therefore the chain of
    published bests.
+
+A node keeps every measurement of its code -- the one that admitted it, each
+re-measure the selector asks for, and its publication's -- as score samples and
+each case's time in every bench run. Its score is the mean of its samples, and
+the per-case medians and spreads that the facts and the merges read are
+computed from all of its runs.
 
 The tree is `forge_experiments/search_tree.json`, saved as each node is
 added; each round's selection is `forge_experiments/tree_selection/iter_NNN.md`,
