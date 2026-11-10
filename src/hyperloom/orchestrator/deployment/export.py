@@ -18,7 +18,7 @@ from typing import Any
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 from hyperloom.orchestrator.enablement.recipe.keep_probe import probe_environment_closure
-from hyperloom.orchestrator.source_snapshot import snapshot_source_layer
+from hyperloom.orchestrator.source_snapshot import snapshot_source_layer, source_layers_in_order
 
 CONTRACT_NAME = "hyperloom_inference.json"
 _MAX_BYTES = 128 * 1024 * 1024
@@ -130,10 +130,11 @@ def _verify_accepted_source(state: dict, captured: Path) -> set[str]:
 
     The returned set lets a caller fail closed. A stack whose entries carry no
     snapshot -- a config-only KEEP touches no file, so it records none -- verifies
-    nothing here, and silently returning would ship whatever is on disk.
+    nothing here, and silently returning would ship whatever is on disk. The
+    source inert KEEPs committed is checked in the order it landed between them.
     """
     expected = {}
-    for entry in state.get("optimization_stack", []):
+    for entry in source_layers_in_order(state.get("optimization_stack", []), state.get("inert_source_layers", [])):
         if not entry.get("source_snapshot"):
             continue
         snapshot = Path(entry["source_snapshot"])

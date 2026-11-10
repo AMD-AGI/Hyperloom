@@ -753,6 +753,7 @@ async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     result, _, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
     state = _state()
     state.baseline_tput = 100.0
+    state.framework = "custom"
     state.save(tmp_path)
     coord = make_coordinator(tmp_path)
     state = coord.shared_state
@@ -763,10 +764,66 @@ async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     assert [row["switch"] for row in state.authored_framework_levers] == ["HL_HOIST", "HL_CACHE"]
     assert all(row["default_on"] is False for row in state.authored_framework_levers)
     assert not state.current_best
-    # The committed code is stacked so an export of the tree has a snapshot to match.
-    assert [entry["variant_name"] for entry in state.optimization_stack] == ["t-spec-rw:inert"]
-    assert state.optimization_stack[0]["source_snapshot"] == result["source_snapshot"] != ""
+    # The committed code is recorded beside the stack, so an export of the tree has a snapshot to match.
+    assert not state.optimization_stack
+    assert [layer["variant_name"] for layer in state.inert_source_layers] == ["t-spec-rw:inert"]
+    assert state.inert_source_layers[0]["source_snapshot"] == result["source_snapshot"] != ""
+    assert state.inert_source_layers[0]["after_stack_len"] == 0
     assert outcome.changed
+
+
+@pytest.mark.asyncio
+async def test_a_validated_keep_then_an_inert_keep_finalizes_and_exports(tmp_path, monkeypatch):
+    """Through the promotion path: KEEP, its validation, an inert KEEP; finalize runs and the tree verifies."""
+    import json as _json
+    import subprocess
+    from pathlib import Path
+
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.deployment.export import _verify_accepted_source
+    from hyperloom.orchestrator.loop.writeback import _PromoteOutcome
+
+    from .conftest import make_coordinator
+
+    inert, repo, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
+    assert inert["status"] == "kept_inert"
+    keep_snapshot = tmp_path / "keep-snapshot"
+    (keep_snapshot / "files").mkdir(parents=True)
+    (keep_snapshot / "files" / "src.py").write_bytes(
+        subprocess.run(["git", "show", "HEAD^:src.py"], cwd=repo, capture_output=True, check=True).stdout
+    )
+    (keep_snapshot / "manifest.json").write_text(
+        _json.dumps({"complete": True, "files": [{"rel": "src.py", "op": "upsert"}]})
+    )
+    keep = {
+        "status": "kept",
+        "specialist_task_id": "t-keep",
+        "output_throughput": 110.0,
+        "bench_result": {"output_throughput": 110.0},
+        "workspace": str(tmp_path),
+        "source_snapshot": str(keep_snapshot),
+        "source_snapshot_complete": True,
+        "target_files": ["src.py"],
+    }
+    state = _state()
+    state.baseline_tput = 100.0
+    state.framework = "custom"
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    state = coord.shared_state
+
+    await coord.writeback._promote_integrate_patch(keep, None, _PromoteOutcome(verdict=Verdict.RECORDED))
+    assert not state.optimization_stack_has_unvalidated_keeps()
+    await coord.writeback._promote_integrate_patch(inert, None, _PromoteOutcome(verdict=Verdict.RECORDED))
+
+    assert len(state.optimization_stack) == state.cumulative_gain_validated_stack_len == 1
+    assert not state.optimization_stack_has_unvalidated_keeps()
+    finalized = coord.recipe_journal.finalize_recipe_and_journal()
+    assert finalized.get("reason") != "unvalidated_recipe_stack"
+    snapshot = _json.loads(_json.dumps(state.to_dict(), default=str))
+    assert _verify_accepted_source(snapshot, Path(repo)) == {"src.py"}
+    with pytest.raises(ValueError, match="differs from the accepted stack"):
+        _verify_accepted_source({**snapshot, "inert_source_layers": []}, Path(repo))
 
 
 # switch-off parity

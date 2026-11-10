@@ -901,51 +901,169 @@ def _inert_result(snapshot):
     }
 
 
-def test_an_inert_keep_is_stacked_without_lifting_current_best(tmp_path):
+def _custom_coordinator(tmp_path):
     coord = _lift_coordinator(tmp_path)
+    coord.shared_state.framework = "custom"
+    return coord
+
+
+def _lift_keep(coord, tmp_path, name, content, tput):
+    snapshot = _snapshot(tmp_path, name, content)
     assert coord.writeback.lift_to_current_best(
         "integrate_patch",
-        1100.0,
+        tput,
         {
-            "name": "kept",
+            "name": name,
             "extra_server_args": "",
-            "output_throughput": 1100.0,
-            "source_snapshot": _snapshot(tmp_path, "keep", "v1\n"),
+            "output_throughput": tput,
+            "scope": "source_patch",
+            "source_snapshot": snapshot,
         },
     )
-    before = dict(coord.shared_state.current_best)
+    return snapshot
+
+
+def _validated_keep(coord, tmp_path, name, content, tput):
+    snapshot = _lift_keep(coord, tmp_path, name, content, tput)
+    assert coord.writeback.validate(tput, {"output_throughput": tput})
+    return snapshot
+
+
+def test_an_inert_keep_leaves_the_stack_and_the_validation_alone(tmp_path):
+    """The layer is not an adoption: the stack, its gain mirror, current_best and the validation stamp hold."""
+    from hyperloom.inference_optimizer.breakdown.session_facts import recovery_block
+
+    coord = _custom_coordinator(tmp_path)
+    _validated_keep(coord, tmp_path, "kept", "v1\n", 1100.0)
+    state = coord.shared_state
+    before = (list(state.optimization_stack), list(state.gain_per_stack_entry), dict(state.current_best))
+    assert not state.optimization_stack_has_unvalidated_keeps()
 
     assert coord.writeback._record_inert_source_layer(_inert_result(_snapshot(tmp_path, "inert", "v2\n")))
 
-    stack = coord.shared_state.optimization_stack
-    assert [entry["variant_name"] for entry in stack] == ["kept", "spec:inert"]
-    assert stack[-1]["source_snapshot"].endswith("inert") and stack[-1]["attribution_eligible"] is False
-    assert coord.shared_state.current_best["tput"] == before["tput"] == stack[-1]["tput"]
-    assert coord.shared_state.current_best["extra_envs"] == before["extra_envs"]
-    assert len(coord.shared_state.gain_per_stack_entry) == len(stack)
+    assert (state.optimization_stack, state.gain_per_stack_entry, state.current_best) == before
+    assert [(layer["variant_name"], layer["after_stack_len"]) for layer in state.inert_source_layers] == [
+        ("spec:inert", 1)
+    ]
+    assert not state.optimization_stack_has_unvalidated_keeps()
+    assert not recovery_block(state)["resume_pending_revalidation"]
 
 
-def test_an_inert_keep_without_a_snapshot_adds_nothing(tmp_path):
-    coord = _lift_coordinator(tmp_path)
+def test_a_keep_after_an_inert_keep_still_needs_validation(tmp_path):
+    coord = _custom_coordinator(tmp_path)
+    _validated_keep(coord, tmp_path, "kept", "v1\n", 1100.0)
+    coord.writeback._record_inert_source_layer(_inert_result(_snapshot(tmp_path, "inert", "v2\n")))
 
+    _lift_keep(coord, tmp_path, "kept2", "v3\n", 1200.0)
+
+    assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
+    assert coord.writeback.validate(1200.0, {"output_throughput": 1200.0})
+    assert not coord.shared_state.optimization_stack_has_unvalidated_keeps()
+
+
+def test_an_inert_keep_before_any_validation_does_not_stamp_one(tmp_path):
+    coord = _custom_coordinator(tmp_path)
+
+    assert coord.writeback._record_inert_source_layer(_inert_result(_snapshot(tmp_path, "inert", "v2\n")))
+
+    state = coord.shared_state
+    assert not state.optimization_stack
+    assert (state.cumulative_gain_validated_stack_len, state.cumulative_gain_validated_ts) == (0, "")
+
+
+def test_an_inert_keep_is_not_recorded_without_a_snapshot_or_outside_custom(tmp_path):
+    coord = _custom_coordinator(tmp_path)
     assert not coord.writeback._record_inert_source_layer({"status": "kept_inert", "source_snapshot": ""})
-    assert not coord.shared_state.optimization_stack
+
+    for framework in ("vllm", "xdit"):
+        other = _lift_coordinator(tmp_path)
+        other.shared_state.framework = framework
+        assert not other.writeback._record_inert_source_layer(
+            _inert_result(_snapshot(tmp_path, f"inert-{framework}", "v2\n"))
+        )
+        assert not other.shared_state.inert_source_layers and not other.shared_state.optimization_stack
 
 
-def test_export_accepts_a_tree_the_inert_keep_changed_only_once_it_is_stacked(tmp_path):
+def _tree(tmp_path, content):
+    tree = tmp_path / "tree"
+    tree.mkdir(exist_ok=True)
+    (tree / "hook.py").write_text(content)
+    return tree
+
+
+def _inert_layer(tmp_path, name, content, after_stack_len):
+    return {"source_snapshot": _snapshot(tmp_path, name, content), "after_stack_len": after_stack_len}
+
+
+def test_export_accepts_a_tree_an_inert_keep_changed_only_once_it_is_recorded(tmp_path):
     """A KEEP, then an inert KEEP that rewrites the same file: the tree matches the later snapshot only."""
     from hyperloom.orchestrator.deployment.export import _verify_accepted_source
 
-    tree = tmp_path / "tree"
-    tree.mkdir()
-    (tree / "hook.py").write_text("v2\n")
-    keep = {"source_snapshot": _snapshot(tmp_path, "keep", "v1\n")}
+    tree = _tree(tmp_path, "v2\n")
+    stack = [{"source_snapshot": _snapshot(tmp_path, "keep", "v1\n")}]
 
     with pytest.raises(ValueError, match="differs from the accepted stack"):
-        _verify_accepted_source({"optimization_stack": [keep]}, tree)
+        _verify_accepted_source({"optimization_stack": stack}, tree)
 
-    inert = {"source_snapshot": _snapshot(tmp_path, "inert", "v2\n")}
-    assert _verify_accepted_source({"optimization_stack": [keep, inert]}, tree) == {"hook.py"}
+    state = {"optimization_stack": stack, "inert_source_layers": [_inert_layer(tmp_path, "inert", "v2\n", 1)]}
+    assert _verify_accepted_source(state, tree) == {"hook.py"}
+
+
+def test_export_reads_inert_layers_in_the_order_they_landed(tmp_path):
+    """KEEP v1, inert v2, KEEP v3, inert v4: the last layer to land is the one the tree must match."""
+    from hyperloom.orchestrator.deployment.export import _verify_accepted_source
+
+    stack = [
+        {"source_snapshot": _snapshot(tmp_path, "keep1", "v1\n")},
+        {"source_snapshot": _snapshot(tmp_path, "keep2", "v3\n")},
+        {"action": "explore"},
+    ]
+    inert = [_inert_layer(tmp_path, "inert1", "v2\n", 1)]
+    assert _verify_accepted_source({"optimization_stack": stack, "inert_source_layers": inert}, _tree(tmp_path, "v3\n"))
+    with pytest.raises(ValueError, match="differs from the accepted stack"):
+        _verify_accepted_source({"optimization_stack": stack, "inert_source_layers": inert}, _tree(tmp_path, "v2\n"))
+
+    inert.append(_inert_layer(tmp_path, "inert2", "v4\n", 2))
+    assert _verify_accepted_source({"optimization_stack": stack, "inert_source_layers": inert}, _tree(tmp_path, "v4\n"))
+    with pytest.raises(ValueError, match="differs from the accepted stack"):
+        _verify_accepted_source({"optimization_stack": stack, "inert_source_layers": inert}, _tree(tmp_path, "v5\n"))
+
+
+def test_inert_layers_before_the_first_entry_and_at_one_length_keep_their_landing_order():
+    from hyperloom.orchestrator.source_snapshot import source_layers_in_order
+
+    stack = [{"id": "keep1"}, {"id": "keep2"}]
+    inert = [
+        {"id": "first", "after_stack_len": 0},
+        {"id": "a", "after_stack_len": 1},
+        {"id": "b", "after_stack_len": 1},
+        {"id": "last", "after_stack_len": 2},
+    ]
+
+    assert [layer["id"] for layer in source_layers_in_order(stack, inert)] == [
+        "first",
+        "keep1",
+        "a",
+        "b",
+        "keep2",
+        "last",
+    ]
+
+
+def test_env_spec_takes_an_inert_layer_only_once_current_best_was_measured_on_it(tmp_path):
+    """A layer that landed after the lift is not in current_best's tree, so its launch identity must not move."""
+    coord = _custom_coordinator(tmp_path)
+    keep1 = _validated_keep(coord, tmp_path, "kept", "v1\n", 1100.0)
+    spec = coord.writeback.build_env_spec()
+
+    inert = _snapshot(tmp_path, "inert", "v2\n")
+    coord.writeback._record_inert_source_layer(_inert_result(inert))
+
+    assert coord.writeback.build_env_spec()["launch_identity"] == spec["launch_identity"]
+
+    keep2 = _validated_keep(coord, tmp_path, "kept2", "v3\n", 1200.0)
+    layers = [Path(layer["snapshot_dir"]).parent for layer in coord.writeback.build_env_spec()["source_snapshots"]]
+    assert layers == [Path(keep1), Path(inert), Path(keep2)]
 
 
 def test_a_slower_winner_without_the_export_reason_is_still_held(tmp_path):

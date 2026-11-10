@@ -3041,54 +3041,32 @@ class WritebackCollaborator(CoordinatorCollaborator):
         return evidence.exported
 
     def _record_inert_source_layer(self, result: Mapping[str, Any]) -> bool:
-        """Stack the source an inert KEEP committed, leaving the running configuration alone.
+        """Record the source an inert KEEP committed, leaving the stack and ``current_best`` alone.
 
-        The code stays in the tree and later explore entries switch it on, so a
-        stack that never saw it cannot reproduce or export that tree: the export
-        compares the tree with the snapshots on the stack and refuses a mismatch.
-        The entry repeats the current configuration and is not eligible for gain
-        attribution; ``current_best`` is not lifted.
+        Later explore entries switch the code on, and the export refuses a tree
+        that no snapshot covers, so the layer is kept beside the stack. It is not
+        an adoption: on the stack it would count as an unvalidated KEEP and be
+        published as one. Only ``custom`` is handled: it is the one framework whose export reads this layer.
 
         Args:
             result: A ``kept_inert`` integrate_patch result.
 
         Returns:
-            Whether an entry was appended.
+            Whether a layer was recorded.
         """
-        if not result.get("source_snapshot"):
+        if not result.get("source_snapshot") or str(self.shared_state.framework or "").strip().lower() != "custom":
             return False
-        best = self.shared_state.current_best or {}
-        tput = float(best.get("tput") or self.shared_state.baseline_tput or 0.0)
         specialist = str(result.get("specialist_task_id") or "")
-        entry: dict[str, Any] = {
-            "stack_entry_id": uuid.uuid4().hex,
-            "action": "integrate_patch",
-            "variant_name": f"{specialist}:inert" if specialist else "inert",
-            "candidate_extra_server_args": "",
-            "candidate_extra_envs": {},
-            "extra_server_args": str(best.get("extra_server_args") or ""),
-            "extra_envs": dict(best.get("extra_envs") or {}),
-            "accuracy": None,
-            "tput": tput,
-            "workspace": result.get("workspace"),
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "operation_kind": operation_kind_for("integrate_patch", classify_change_kind("integrate_patch", {})),
-            "scope": "source_patch",
-            "attribution_eligible": False,
-            "source_only": True,
-            **_source_layer_handles(result),
-        }
-        if specialist:
-            entry["task_id"] = specialist
-        self.shared_state.optimization_stack.append(entry)
-        self.shared_state.append_stack_gain_entry(
-            action="integrate_patch",
-            variant_name=entry["variant_name"],
-            new_tput=tput,
-            extra_server_args=entry["extra_server_args"],
+        self.shared_state.inert_source_layers.append(
+            {
+                "variant_name": f"{specialist}:inert" if specialist else "inert",
+                "specialist_task_id": specialist,
+                "after_stack_len": len(self.shared_state.optimization_stack),
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "scope": "source_patch",
+                **_source_layer_handles(result),
+            }
         )
-        if self.shared_state.current_best:
-            self.shared_state.current_best["optimization_stack"] = list(self.shared_state.optimization_stack)
         return True
 
     async def _promote_integrate_patch(
@@ -3630,7 +3608,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         baseline ref is materialized from the SAME layers as ``current_best``
         (not just its flags/env), closing the cross-harness baseline gap.
         """
-        from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible
+        from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible, source_layers_in_order
 
         cb = self.shared_state.current_best if isinstance(self.shared_state.current_best, Mapping) else {}
         materialized = self.current_best_launch_config()
@@ -3638,8 +3616,14 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # mutable global stack here could attach an unrelated source patch after
         # a resume or partial state write.
         stack = [e for e in (cb.get("optimization_stack") or []) if isinstance(e, dict)]
+        # An inert layer that landed after current_best's lift was not in the tree it was measured on.
+        inert = [
+            layer
+            for layer in self.shared_state.inert_source_layers
+            if int(layer.get("after_stack_len") or 0) < len(stack)
+        ]
         source_snapshots: list[dict[str, Any]] = []
-        for entry in stack:
+        for entry in source_layers_in_order(stack, inert):
             if entry.get("scope") != "source_patch":
                 continue
             snap = str(entry.get("source_snapshot") or "").strip()

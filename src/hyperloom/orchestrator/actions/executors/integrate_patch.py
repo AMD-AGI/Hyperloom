@@ -4198,10 +4198,10 @@ class IntegratePatchExecutor:
         specialist_task_id: str,
         keep_committed: bool,
     ) -> dict[str, Any]:
-        """Snapshot the source this attempt committed, as the handles a stack entry carries.
+        """Snapshot the source this attempt committed, as the handles a source layer carries.
 
         A KEEP and a KEEP_INERT both leave committed source in the tree, so both
-        need one: the export checks the tree against the snapshots on the stack.
+        need one: the export checks the tree against the recorded source layers.
 
         Args:
             attempt: The applied attempt.
@@ -4372,7 +4372,7 @@ class IntegratePatchExecutor:
                 delta_pct=delta_pct,
                 bench_result=bench_result,
             )
-        # The code is committed to the tree, so the stack has to carry it: later explore entries switch these levers on,
+        # The code is committed to the tree, so it needs a source layer: later explore entries switch these levers on,
         # and an export of a tree no snapshot covers is refused.
         source = self._capture_source_layer(
             attempt, params=params, specialist_task_id=attempt.specialist_task_id, keep_committed=keep_committed

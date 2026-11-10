@@ -570,6 +570,32 @@ def test_lift_then_validation_leaves_the_recipe_publishable(tmp_path: Path) -> N
     assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid())["best_throughput"] == 1100.0
 
 
+def test_an_inert_keep_after_validation_leaves_the_recipe_publishable(tmp_path: Path) -> None:
+    """An inert KEEP adopts nothing, so it neither blocks finalize nor shows up as a win."""
+    coord = _make_coordinator(tmp_path)
+    state = coord.shared_state
+    state.framework = "custom"
+    state.baseline_tput = 1000.0
+    state.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
+    assert coord.writeback.lift_to_current_best(
+        "explore",
+        1100.0,
+        {"name": "page16", "extra_server_args": "--page-size 16", "candidate_extra_server_args": "--page-size 16"},
+    )
+    assert coord.writeback.validate(1100.0, {"output_throughput": 1100.0})
+
+    assert coord.writeback._record_inert_source_layer(
+        {"status": "kept_inert", "specialist_task_id": "spec", "source_snapshot": str(tmp_path / "inert")}
+    )
+    outcome = coord.recipe_journal.finalize_recipe_and_journal()
+
+    assert outcome["result_type"] == "written"
+    cid = recipe_canonical_id(
+        model=_MODEL, hardware=_HW, framework_name="custom", framework_version=_FWV, precision=_PREC
+    )
+    assert [row["name"] for row in coord.recipe_kb.get_recipe(canonical_id=cid)["what_worked"]] == ["page16"]
+
+
 # kernel_optimizations[].e2e_decision must carry the integrate verdict, not only the micro-layer decision.
 def test_kernel_e2e_decision_reflects_integrate_revert(tmp_path: Path) -> None:
     coord = _make_coordinator(tmp_path)
