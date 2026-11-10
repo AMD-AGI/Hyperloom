@@ -539,6 +539,7 @@ async def test_multiple_proposals_yield_one_verdict_each(
 async def test_empty_proposals_yields_heartbeat_no_llm(
     fake_critic_root: Path,
     fake_session_dir: Path,
+    recorded_iterations: list[Any],
 ):
     judge_bundle = {
         "merged_context": {"model": "m", "framework": "sglang"},
@@ -563,6 +564,7 @@ async def test_empty_proposals_yields_heartbeat_no_llm(
     assert res.intents[0].payload["topic"] == "heartbeat"
     # LLM short-circuited.
     assert client.completions.calls == []
+    assert recorded_iterations == []
 
 
 # Case 4: LLM returns garbage -> the turn fails
@@ -2242,13 +2244,25 @@ async def test_a_failing_iteration_record_propagates_from_the_turn(
     monkeypatch.setattr(critic_out, "record_critic_iteration", _boom)
     judge_bundle = {
         "session_id": fake_session_dir.name,
-        "proposals": [],
+        "merged_context": {"model": "m", "framework": "sglang"},
+        "proposals": [
+            {
+                "msg_id": "p1",
+                "from_agent": "orchestration",
+                "action_name": "baseline",
+                "payload": {},
+                "predicted_gain_pct": 0.0,
+            }
+        ],
+        "kb_priors_by_proposal": {"p1": []},
         "review_constraints": {},
     }
     backend, _ = _make_backend(
         fake_critic_root,
         fake_session_dir,
-        codex_replies=[],
+        codex_replies=[
+            '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve", "source": "critic"}]}'
+        ],
         judge_bundle=judge_bundle,
     )
 

@@ -509,8 +509,9 @@ class CriticAgentBackend:
             workdir=workdir,
             kb_priors=kb_priors_trace,
         )
-        # Record this critic iteration before the workdir can be pruned.
-        critic_out.record_critic_iteration(self.session_dir, iteration)
+        if proposals:
+            # Record reviewed proposals before the workdir can be pruned.
+            critic_out.record_critic_iteration(self.session_dir, iteration)
 
         # Attach what each ruling was grounded in to the ruling itself, on the
         # proposal it judged. Done here because these are the turn's own facts:
