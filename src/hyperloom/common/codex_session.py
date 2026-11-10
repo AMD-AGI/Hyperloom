@@ -40,15 +40,18 @@ _PRIVATE_HEADER_ENV_PREFIX = "HYPERLOOM_CODEX_HTTP_HEADER_"
 
 # Sandbox preset selector.
 CODEX_SANDBOX_MODE_ENV = "HYPERLOOM_CODEX_SANDBOX_MODE"
-DEFAULT_CODEX_SANDBOX_MODE = "workspace-write"
+_WORKSPACE_WRITE_MODE = "workspace-write"
+DEFAULT_CODEX_SANDBOX_MODE = _WORKSPACE_WRITE_MODE
 # Ordered so the error raised for an unknown mode lists them predictably.
-CODEX_SANDBOX_MODES: tuple[str, ...] = ("bypass", "workspace-write", "read-only")
+CODEX_SANDBOX_MODES: tuple[str, ...] = ("bypass", _WORKSPACE_WRITE_MODE, "read-only")
 
 # Private per-run Codex state is created below this directory when configured.
 HYPERLOOM_RUNTIME_DIR_ENV = "HYPERLOOM_RUNTIME_DIR"
 
 # The probe mirrors the mount/user-namespace operations Codex's bubblewrap sandbox needs.
 _BWRAP_PROBE_TIMEOUT_SEC = 10.0
+# access(2) refuses a directory whose owner is unmapped in the sandbox's user namespace, as bwrap's mkdir does.
+_BWRAP_ROOTS_WRITABLE_SCRIPT = 'for d; do test -w "$d" || exit 1; done'
 _BWRAP_PROBE_CACHE: dict[tuple[Any, ...], bool] = {}
 _BWRAP_PROBE_CACHE_LOCK = threading.Lock()
 
@@ -224,8 +227,8 @@ def _resolve_codex_sandbox_mode(*, sandbox_mode: str, source: Mapping[str, str])
     return resolved
 
 
-def _bwrap_probe_cache_key(bwrap: str, source: Mapping[str, str]) -> tuple[Any, ...]:
-    """Identify the executable, credentials and namespaces relevant to bwrap."""
+def _bwrap_probe_cache_key(bwrap: str, source: Mapping[str, str], roots: Sequence[Path] = ()) -> tuple[Any, ...]:
+    """Identify the executable, credentials, namespaces and working roots relevant to bwrap."""
     path = Path(bwrap).resolve()
     stat_result = path.stat()
 
@@ -240,6 +243,10 @@ def _bwrap_probe_cache_key(bwrap: str, source: Mapping[str, str]) -> tuple[Any, 
             return Path(pathname).read_text(encoding="utf-8").strip()
         except OSError:
             return ""
+
+    def _root_state(root: Path) -> tuple[str, int, int, int]:
+        root_stat = root.stat()
+        return (str(root), root_stat.st_uid, root_stat.st_gid, root_stat.st_mode)
 
     return (
         str(path),
@@ -258,20 +265,19 @@ def _bwrap_probe_cache_key(bwrap: str, source: Mapping[str, str]) -> tuple[Any, 
         source.get("PATH", ""),
         source.get("LD_LIBRARY_PATH", ""),
         source.get("LD_PRELOAD", ""),
+        tuple(_root_state(root) for root in roots),
     )
 
 
-def _run_bwrap_probe(bwrap: str, *, source: Mapping[str, str]) -> bool:
-    """Execute the namespace and root bind that Codex requires."""
-    command = [
-        bwrap,
-        "--unshare-user",
-        "--unshare-net",
-        "--ro-bind",
-        "/",
-        "/",
-        "/bin/true",
-    ]
+def _run_bwrap_probe(bwrap: str, *, source: Mapping[str, str], roots: Sequence[Path] = ()) -> bool:
+    """Execute the namespace and root bind that Codex requires, and a write test in each working root."""
+    command = [bwrap, "--unshare-user", "--unshare-net", "--ro-bind", "/", "/"]
+    for root in roots:
+        command.extend(["--bind", str(root), str(root)])
+    if roots:
+        command.extend(["/bin/sh", "-c", _BWRAP_ROOTS_WRITABLE_SCRIPT, "sh", *(str(root) for root in roots)])
+    else:
+        command.append("/bin/true")
     try:
         completed = subprocess.run(
             command,
@@ -293,18 +299,20 @@ def probe_codex_sandbox_capability(*, env: dict[str, str] | None = None) -> bool
     return _probe_codex_sandbox_capability(source=_effective_env(env))
 
 
-def _probe_codex_sandbox_capability(*, source: Mapping[str, str]) -> bool:
+def _probe_codex_sandbox_capability(*, source: Mapping[str, str], roots: Sequence[Path] = ()) -> bool:
     """Probe bubblewrap from one already-effective environment."""
     bwrap = shutil.which("bwrap", path=source.get("PATH"))
     if not bwrap:
         return False
+    # Codex skips a writable root that does not exist, so there is nothing to write there.
+    present_roots = tuple(resolved for resolved in (Path(root).resolve() for root in roots) if resolved.exists())
     try:
-        cache_key = _bwrap_probe_cache_key(bwrap, source)
+        cache_key = _bwrap_probe_cache_key(bwrap, source, present_roots)
     except OSError:
         return False
     with _BWRAP_PROBE_CACHE_LOCK:
         if cache_key not in _BWRAP_PROBE_CACHE:
-            _BWRAP_PROBE_CACHE[cache_key] = _run_bwrap_probe(bwrap, source=source)
+            _BWRAP_PROBE_CACHE[cache_key] = _run_bwrap_probe(bwrap, source=source, roots=present_roots)
         return _BWRAP_PROBE_CACHE[cache_key]
 
 
@@ -511,6 +519,24 @@ class CodexTurnRequest:
     output_schema: dict[str, Any] | None = None
 
 
+def _require_writable_working_roots(config: CodexSessionConfig, sandbox_mode: str, source: Mapping[str, str]) -> None:
+    """Refuse a workspace-write sandbox that cannot write the directories it creates its protected paths in.
+
+    Raises:
+        CodexSessionUnavailableError: If the capability probe fails on those directories.
+    """
+    if sandbox_mode != _WORKSPACE_WRITE_MODE or not config.writable_roots:
+        return
+    working_roots = (config.cwd, *config.writable_roots)
+    if not _probe_codex_sandbox_capability(source=source, roots=working_roots):
+        raise CodexSessionUnavailableError(
+            f"Codex sandbox mode {_WORKSPACE_WRITE_MODE!r} cannot write to its working directories "
+            f"({', '.join(str(root) for root in working_roots)}), where it must create its protected paths; "
+            "a common cause is an owner that is not mapped inside the bubblewrap user namespace. "
+            f"Fix the ownership or choose the sandbox mode explicitly with {CODEX_SANDBOX_MODE_ENV}"
+        )
+
+
 class CodexSession:
     """One Codex Agent SDK runtime held open across many turns.
 
@@ -562,6 +588,7 @@ class CodexSession:
                 f"Codex sandbox mode {resolved_sandbox_mode!r} requires a working bubblewrap sandbox, "
                 "but the capability probe failed; refusing to fall back to bypass"
             )
+        _require_writable_working_roots(self.config, resolved_sandbox_mode, effective_env)
 
         provider_config = _resolve_codex_provider_config(effective_env)
         sdk = load_codex_sdk()
