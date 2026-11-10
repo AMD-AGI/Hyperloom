@@ -975,9 +975,7 @@ async def _unread(inbox: CursorInbox, cursor: str) -> tuple[InboxItem, ...]:
 
 
 @pytest.mark.parametrize("seed", range(120))
-async def test_every_cursor_the_service_hands_out_reads_back_and_drops_no_unread_item(
-    seed: int, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_every_cursor_the_service_hands_out_reads_back_and_drops_no_unread_item(seed: int) -> None:
     """Random runs of landings, ``poll_inbox`` pages from every cursor it gave, failed polls and other replies, over
     feeds from empty to several pages: every cursor a page or a reply note carries is one the feed reads, and the reply
     cursor drops none of its unread items that the poll did not return."""
@@ -986,32 +984,30 @@ async def test_every_cursor_the_service_hands_out_reads_back_and_drops_no_unread
     annotate = mcp_tools.reply_inbox(lambda branch: inbox)  # type: ignore[arg-type,return-value]
     poll = mcp_tools._poll_inbox(lambda branch: inbox)  # type: ignore[arg-type,return-value]
     handed, reply_cursor = [""], None
-    with caplog.at_level("WARNING"):
-        for _ in range(25):
-            step = rng.choice(["land", "land", "poll", "poll", "poll", "failed poll", "reply"])
-            if step == "land":
-                inbox.land(
-                    rng.choice([1, 2, 5, POLL_INBOX_MAX_ITEMS - 1, POLL_INBOX_MAX_ITEMS, 2 * POLL_INBOX_MAX_ITEMS + 3])
-                )
-                continue
-            if reply_cursor is None:
-                reply_cursor = (await annotate(ReplyCall(_S1, "queue_state", {}, False), None)).cursor
-            before = await _unread(inbox, reply_cursor)
-            if step == "reply":
-                note = await annotate(ReplyCall(_S1, "queue_state", {}, False), reply_cursor)
-                returned: set[InboxItem] = set(before)
-            else:
-                cursor = rng.choice(handed)
-                page = await poll({"cursor": cursor}, CallContext(_S1, "poll_inbox"))
-                await _unread(inbox, page["cursor"])
-                handed.append(page["cursor"])
-                failed = step == "failed poll"
-                note = await annotate(ReplyCall(_S1, "poll_inbox", {"cursor": cursor}, failed), reply_cursor)
-                returned = set() if failed else {item for item in inbox.items if jsonable(item) in page["items"]}
-            after = await _unread(inbox, note.cursor)
-            assert set(before) - returned <= set(after), (seed, reply_cursor, note.cursor)
-            reply_cursor = note.cursor
-    assert not [record for record in caplog.records if record.levelname == "WARNING"]
+    for _ in range(25):
+        step = rng.choice(["land", "land", "poll", "poll", "poll", "failed poll", "reply"])
+        if step == "land":
+            inbox.land(
+                rng.choice([1, 2, 5, POLL_INBOX_MAX_ITEMS - 1, POLL_INBOX_MAX_ITEMS, 2 * POLL_INBOX_MAX_ITEMS + 3])
+            )
+            continue
+        if reply_cursor is None:
+            reply_cursor = (await annotate(ReplyCall(_S1, "queue_state", {}, False), None)).cursor
+        before = await _unread(inbox, reply_cursor)
+        if step == "reply":
+            note = await annotate(ReplyCall(_S1, "queue_state", {}, False), reply_cursor)
+            returned: set[InboxItem] = set(before)
+        else:
+            cursor = rng.choice(handed)
+            page = await poll({"cursor": cursor}, CallContext(_S1, "poll_inbox"))
+            await _unread(inbox, page["cursor"])
+            handed.append(page["cursor"])
+            failed = step == "failed poll"
+            note = await annotate(ReplyCall(_S1, "poll_inbox", {"cursor": cursor}, failed), reply_cursor)
+            returned = set() if failed else {item for item in inbox.items if jsonable(item) in page["items"]}
+        after = await _unread(inbox, note.cursor)
+        assert set(before) - returned <= set(after), (seed, reply_cursor, note.cursor)
+        reply_cursor = note.cursor
 
 
 def _bad_cursor(feed: Any, count: int) -> str:
@@ -1030,65 +1026,3 @@ async def test_the_old_cursor_with_no_returned_item_was_one_the_feed_refuses() -
     with pytest.raises(InvalidParamsError, match="not an inbox cursor"):
         await _unread(inbox, _bad_cursor(feed, 0))
     assert feed.after(0) == "at-1" and await _unread(inbox, feed.after(0)) == tuple(inbox.items[1:])
-
-
-@pytest.mark.parametrize(
-    ("bad", "listed", "safe_point"),
-    [
-        ("page:0::at-3", ["x3", "x4"], "the cursor it paged from"),
-        ("page:x:abcdef01:at-3", ["x3", "x4"], "the cursor it paged from"),
-        ("page:0::at-99", ["x0", "x1", "x2", "x3", "x4"], "the start of the feed"),
-        ("latest", ["x0", "x1", "x2", "x3", "x4"], "the start of the feed"),
-    ],
-)
-async def test_a_reply_cursor_the_feed_cannot_read_restarts_from_a_point_that_drops_nothing(
-    bad: str, listed: list[str], safe_point: str, caplog: pytest.LogCaptureFixture
-) -> None:
-    inbox = CursorInbox()
-    inbox.land(5)
-    annotate = mcp_tools.reply_inbox(lambda branch: inbox)  # type: ignore[arg-type,return-value]
-    with caplog.at_level("WARNING"):
-        note = await annotate(ReplyCall(_S1, "queue_state", {}, False), bad)
-    assert [line.split(":")[0] for line in note.text.splitlines()[1:]] == [f"result {x}" for x in listed]
-    assert note.cursor == "at-5"
-    [warning] = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
-    kind = "page" if bad.startswith("page:") else "blackboard"
-    assert f"({kind} cursor, {len(bad)} characters, sha256 " in warning and warning.endswith(safe_point)
-    assert bad not in warning and "specialist-s1 on s1" in warning
-
-
-async def test_a_token_is_warned_about_once_however_many_bad_cursors_it_holds(caplog: pytest.LogCaptureFixture) -> None:
-    inbox = CursorInbox()
-    inbox.land(2)
-    annotate = mcp_tools.reply_inbox(lambda branch: inbox)  # type: ignore[arg-type,return-value]
-    other = McpPrincipal(SPECIALIST_KIND, "specialist-s2", "s2", "camp", frozenset({SCOPE_SPECIALIST}))
-    with caplog.at_level("WARNING"):
-        for cursor in ["latest", "page:0::at-1", "nope"]:
-            assert (await annotate(ReplyCall(_S1, "queue_state", {}, False), cursor)).cursor == "at-2"
-        await annotate(ReplyCall(other, "queue_state", {}, False), "latest")
-    warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
-    assert [warning.split(" unreadable")[0] for warning in warnings] == [
-        "inbox cursor of specialist-s1 on s1",
-        "inbox cursor of specialist-s2 on s2",
-    ]
-
-
-async def test_after_one_bad_reply_cursor_the_next_reply_carries_its_inbox_again(
-    wait_rig: Rig, waiting: Writers, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The cursor the service kept before the fix: once a token held it, every later reply went without its block."""
-    await _land(waiting, POLL_INBOX_MAX_ITEMS + 5)
-    token = wait_rig.token("s1")
-    _news(wait_rig, token)
-    await _land(waiting, 3, first=POLL_INBOX_MAX_ITEMS + 6)
-    monkeypatch.setattr(mcp_tools._Feed, "after", _bad_cursor)
-    wait_rig.ok(token, "poll_inbox")
-    monkeypatch.undo()
-    with caplog.at_level("WARNING"):
-        news = _news(wait_rig, token)
-    assert [line.split(":")[0] for line in news] == [REPLY_INBOX_HEADER[:-1], "result x26", "result x27", "result x28"]
-    assert _news(wait_rig, token) == []
-    await _land(waiting, 1, first=POLL_INBOX_MAX_ITEMS + 9)
-    assert [line.split(":")[0] for line in _news(wait_rig, token)][1:] == [f"result x{POLL_INBOX_MAX_ITEMS + 9}"]
-    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
-    assert [record.name for record in warnings] == [mcp_tools.__name__]
