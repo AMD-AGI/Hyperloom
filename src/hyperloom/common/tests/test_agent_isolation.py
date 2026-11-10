@@ -350,6 +350,16 @@ def test_an_answer_the_caller_already_has_is_decided_as_a_fresh_probe_s_and_prob
     assert probe.asked == [], "the answer given, not a probe of the module's"
 
 
+@pytest.mark.parametrize("choose", [choose_agent_isolation, choose_sandbox_isolation, choose_test_isolation])
+def test_a_local_launch_whose_probe_gave_no_answer_runs_unconfined_for_that_launch_only(probe, choose):
+    probe.answer = NO_ANSWER
+    found = choose()
+    assert isinstance(found, NoIsolation) and found.transient is True
+    probe.answer = DENIED
+    found = choose()
+    assert isinstance(found, NoIsolation) and found.transient is False
+
+
 def test_a_sandbox_runs_under_bubblewrap_where_it_works(account, probe):
     probe.answer = ON_PATH
     assert choose_sandbox_isolation() == BwrapIsolation(ON_PATH, (f"running them as an account: {SANDBOX_ACCOUNT}",))
