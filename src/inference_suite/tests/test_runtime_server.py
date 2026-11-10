@@ -81,7 +81,7 @@ def _fast_polls(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _free_gpus(monkeypatch):
-    monkeypatch.setattr(server, "unavailable_gpus", lambda gpus: None)
+    monkeypatch.setattr(server, "await_free_gpus", lambda gpus, gate: None)
 
 
 def _free_port() -> int:
@@ -298,21 +298,19 @@ def test_a_taken_port_is_refused_before_spawning(tmp_path):
 def test_gpus_that_are_not_free_are_refused_before_spawning(tmp_path, monkeypatch, mode):
     rig = _Rig(tmp_path)
     asked: list[tuple[int, ...]] = []
-    monkeypatch.setattr(
-        server, "unavailable_gpus", lambda gpus: asked.append(gpus) or "GPU 0 (amd-smi card 0): held by pid 9 (vllm)"
-    )
+    held = Stop(FailedStep.GPUS_UNAVAILABLE, "GPU 0 (amd-smi card 0): held by pid 9 (vllm)")
+    monkeypatch.setattr(server, "await_free_gpus", lambda gpus, gate: asked.append(gpus) or held)
     config = rig.config("r1", mode)
 
     stopped = rig.lifecycle(config).acquire()
 
-    assert isinstance(stopped, Stop) and stopped.step is FailedStep.GPUS_UNAVAILABLE
-    assert stopped.detail == "GPU 0 (amd-smi card 0): held by pid 9 (vllm)"
+    assert stopped == held
     assert asked == [config.server.gpus]
     assert not rig.worker_file.exists() and not (rig.pid_dir / "server.pid").exists()
 
 
 def test_reuse_and_external_rounds_start_no_server_so_check_no_gpus(booted, monkeypatch):
-    monkeypatch.setattr(server, "unavailable_gpus", lambda gpus: pytest.fail("checked the GPUs of a found server"))
+    monkeypatch.setattr(server, "await_free_gpus", lambda gpus, gate: pytest.fail("checked the GPUs of a found server"))
     external = replace(booted.config("r-external"), lifecycle=Lifecycle(LifecycleMode.EXTERNAL))
     for config in (booted.config("r-reuse", LifecycleMode.REUSE), external):
         lifecycle = booted.lifecycle(config)
