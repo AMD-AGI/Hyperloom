@@ -28,6 +28,7 @@ from typing import Protocol
 from hyperloom.contracts.measurement import TestKind, TestRequest, TestResult, Validity
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.measure.tests.gpu_free_host import scratch_root
 from hyperloom_multibranch.contracts.blackboard.interfaces import ClaimService, RecordSearch
 from hyperloom_multibranch.contracts.blackboard.records import BuildNotice, QuarantineEvent, Withdrawal
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
@@ -288,11 +289,12 @@ class FakeToolbox(RealToolbox):
         self.config = config or FakeToolboxConfig()
         self.executor = FakeExecutor(self.config, autorun=autorun, workload=wiring.workload_kind)
         self.blackboard = blackboard if blackboard is not None else MemoryBlackboard()
-        self._scratch = None if log_path else tempfile.TemporaryDirectory(prefix="fake-toolbox-")
+        scratch = scratch_root()
+        self._scratch = None if log_path else tempfile.TemporaryDirectory(prefix="fake-toolbox-", dir=scratch)
         path = log_path or Path(self._scratch.name) / "submissions.jsonl"  # type: ignore[union-attr]
         self._rejections: list[Callable[[TestRequest], RequestRejected | None]] = []
         self._started = False
-        self._blob_scratch = tempfile.TemporaryDirectory(prefix="fake-blobs-")
+        self._blob_scratch = tempfile.TemporaryDirectory(prefix="fake-blobs-", dir=scratch)
         self.blobs = LocalBlobStore(Path(self._blob_scratch.name))
         stores = ToolboxStores(
             log=SubmissionLog(path, str(self.config.campaign_id)),
