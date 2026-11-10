@@ -35,6 +35,16 @@ def test_build_controller_command_contains_only_the_three_contract_arguments(tmp
     ]
 
 
+def test_build_controller_command_marks_an_explicit_allocation(tmp_path: Path) -> None:
+    command = controller_submit.build_controller_command(
+        handoff_dir=tmp_path / "handoff",
+        output_dir=tmp_path / "cycle",
+        budget_minutes=600,
+        explicit_allocation=True,
+    )
+    assert command[-1] == "--explicit-allocation"
+
+
 def test_timeout_result_recovers_complete_patches_without_terminal_state(tmp_path: Path) -> None:
     output = tmp_path / "cycle"
     patch = output / "result" / "patches" / "operator"

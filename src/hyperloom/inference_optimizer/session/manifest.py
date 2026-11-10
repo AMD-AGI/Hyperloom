@@ -200,6 +200,7 @@ def build_manifest(
         "workload": workload,
         "objective": _objective_summary(args),
         "max_minutes": int((getattr(args, "max_hours", 0) or 0) * 60),
+        "forge_controller_allocation_minutes": getattr(args, "forge_controller_allocation_minutes", None),
         "code_revision": _prov["code_revision"],
         "dependencies": _build_dependencies(),
         "pid": os.getpid(),

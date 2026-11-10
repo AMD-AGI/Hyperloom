@@ -395,8 +395,8 @@ def constraint_budgets_from_args(args: Any) -> dict[str, Any]:
     }
 
 
-def constraint_budget_resume_conflict(args: Any, state: Any) -> str:
-    """Why a resume cannot keep the latency and power budgets the session was graded under, or ``""``."""
+def budget_resume_conflict(args: Any, state: Any) -> str:
+    """Why a resume cannot keep the session's latency, power, or Forge controller budgets."""
     return (
         latency_budget_resume_conflict(state, getattr(args, _MAX_LATENCY_MS, None))
         or power_budget_resume_conflict(state, getattr(args, _MAX_POWER_W, None))
@@ -406,6 +406,12 @@ def constraint_budget_resume_conflict(args: Any, state: Any) -> str:
             per_gpu_w=getattr(state, "power_budget_per_gpu_w", None),
             nodes=max(int(getattr(args, _NODES, 1) or 1), int(getattr(state, _NODES, 1) or 1)),
             framework=state.framework,
+        )
+        or (
+            "--forge-controller-allocation-minutes differs from the persisted allocation"
+            if getattr(args, "forge_controller_allocation_minutes", None) is not None
+            and _forge_controller_allocation_sec(args) != state.forge_controller_allocation_sec
+            else ""
         )
     )
 
@@ -796,6 +802,12 @@ def _phase_toggle_fields(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _forge_controller_allocation_sec(args: argparse.Namespace) -> int | None:
+    """Convert the recorded optional controller grant into seconds."""
+    minutes = getattr(args, "forge_controller_allocation_minutes", None)
+    return int(minutes) * 60 if minutes is not None else None
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -841,6 +853,7 @@ def _seed_shared_state(
         **_workload_fields(args),
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
+        forge_controller_allocation_sec=_forge_controller_allocation_sec(args),
         # AgentX corpus shape: seeded from canonical constants if AgentX is on.
         agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},
         baseline_tput=0.0,
