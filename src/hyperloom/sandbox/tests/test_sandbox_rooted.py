@@ -30,6 +30,11 @@ def root(tmp_path: Path) -> Path:
     return tmp_path / "given" / "fs"
 
 
+def _open_and_close(root: Path, virtual: str, flags: int, *, make_parents: bool = False) -> None:
+    """Open ``virtual`` as :func:`open_rooted` does, for a test that expects it to fail; closed if it does not."""
+    os.close(open_rooted(root, virtual, flags, make_parents=make_parents))
+
+
 def _read(root: Path, virtual: str) -> str:
     with os.fdopen(open_rooted(root, virtual, os.O_RDONLY), "rb") as handle:
         return handle.read().decode()
@@ -81,7 +86,7 @@ def test_a_link_out_of_the_root_is_refused_as_the_last_component_of_a_write_and_
     (root / "work" / "dirlink").symlink_to(root.parent / "outside")
     for virtual in ("/work/link", "/work/dirlink/new/file.txt"):
         with pytest.raises(SandboxDenied, match=ESCAPES):
-            open_rooted(root, virtual, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, make_parents=True)
+            _open_and_close(root, virtual, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, make_parents=True)
     assert secret.read_text() == "SECRET" and sorted(os.listdir(secret.parent)) == ["secret.txt"]
 
 
@@ -91,7 +96,7 @@ def test_parents_are_made_below_the_root_and_through_a_link_in_it(root: Path) ->
         os.close(open_rooted(root, virtual, os.O_WRONLY | os.O_CREAT, make_parents=True))
     assert (root / "in" / "a" / "b" / "file.txt").is_file() and (root / "work" / "dir" / "c" / "file.txt").is_file()
     with pytest.raises(FileNotFoundError):
-        open_rooted(root, "/missing/file.txt", os.O_WRONLY | os.O_CREAT)
+        _open_and_close(root, "/missing/file.txt", os.O_WRONLY | os.O_CREAT)
 
 
 def test_a_loop_of_links_is_refused(root: Path) -> None:

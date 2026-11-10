@@ -48,6 +48,12 @@ class _Walk:
         self.stack = [os.open(root, _DIRECTORY)]
         self.links = 0
 
+    def __enter__(self) -> _Walk:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
     def close(self) -> None:
         while self.stack:
             os.close(self.stack.pop())
@@ -94,9 +100,8 @@ def open_rooted(root: Path, virtual: str, flags: int, *, make_parents: bool = Fa
             file on the way, ``IsADirectoryError`` for a directory opened to write).
     """
     pending = deque(_parts(virtual))
-    walk = _Walk(root, virtual)
     made: tuple[int, str] | None = None
-    try:
+    with _Walk(root, virtual) as walk:
         while pending:
             name = pending.popleft()
             if name == _PARENT:
@@ -104,6 +109,8 @@ def open_rooted(root: Path, virtual: str, flags: int, *, make_parents: bool = Fa
                 continue
             last = not pending
             try:
+                # 0o666 as open() and Path.write_bytes make a file: the umask decides, and an account a sandbox's
+                # processes run as must read what the app writes for them.
                 opened = os.open(name, (flags if last else _DIRECTORY) | _STEP, 0o666, dir_fd=walk.stack[-1])
             except FileNotFoundError:
                 if last or not make_parents or made == (len(walk.stack), name):
@@ -126,5 +133,3 @@ def open_rooted(root: Path, virtual: str, flags: int, *, make_parents: bool = Fa
             walk.stack.append(opened)
             made = None
         return os.open(".", flags | os.O_CLOEXEC, dir_fd=walk.stack[-1])
-    finally:
-        walk.close()

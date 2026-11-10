@@ -25,17 +25,15 @@ import pytest
 
 from hyperloom.common import agent_isolation
 from hyperloom.common.agent_isolation import (
-    BWRAP,
-    NONE,
-    REFUSED,
     TEST_ACCOUNT,
     BwrapIsolation,
     IsolationRefused,
     NoIsolation,
+    choose_test_isolation,
 )
 from hyperloom.sandbox import confined, local_sandbox
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
-from hyperloom.sandbox.confined import UNCONFINED_TESTS, local_test_isolation
+from hyperloom.sandbox.confined import UNCONFINED_TESTS
 from hyperloom.sandbox.launcher import LAUNCHER_SOURCE
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate, ProcessUsers, RunnerPlan
 from hyperloom.sandbox.socket import SandboxDenied, SandboxUnavailable
@@ -142,13 +140,15 @@ def _assert_read_only_root(pairs: list[tuple[str, ...]]) -> None:
 
 def _system_file() -> Path:
     """A regular file below ``/usr`` that no sandbox here needs: what a link in a home may resolve to."""
-    for directory in (Path("/usr/share/common-licenses"), Path("/usr/share/doc")):
-        found = (
-            sorted(p for p in directory.glob("*") if p.is_file() and not p.is_symlink()) if directory.is_dir() else []
-        )
-        if found:
-            return found[0]
-    pytest.skip("no regular file below /usr/share/common-licenses or /usr/share/doc on this host")
+    found = [
+        path
+        for directory in (Path("/usr/share/common-licenses"), Path("/usr/share/doc"))
+        if directory.is_dir()
+        for path in sorted(p for p in directory.glob("*") if p.is_file() and not p.is_symlink())
+    ]
+    if not found:
+        pytest.skip("no regular file below /usr/share/common-licenses or /usr/share/doc on this host")
+    return found[0]
 
 
 @pytest.fixture(autouse=True)
@@ -426,7 +426,9 @@ def test_a_hosted_run_where_bubblewrap_cannot_sandbox_a_test_refuses_the_provide
     named = agent_isolation.NO_LAYER_BWRAP if layer is None else f"bubblewrap at {layer}: No such file or directory"
     assert TEST_ACCOUNT in str(refused.value) and named in str(refused.value)
     assert made and not os.path.exists(made[0]), "the directory the refused provider made is removed"
-    assert local_test_isolation() == (REFUSED, refused.value.reasons)
+    with pytest.raises(IsolationRefused) as again:
+        choose_test_isolation()
+    assert again.value.reasons == refused.value.reasons, "the provider refuses as the chooser does"
 
 
 def test_a_sandbox_whose_paths_cannot_be_bound_safely_runs_as_before_locally_and_is_refused_hosted(
@@ -630,16 +632,19 @@ def test_a_runner_whose_policy_bubblewrap_must_not_launch_is_refused_and_never_r
     assert provider.pool.free_cards() == (0,), "the refused create gave its card back"
 
 
-def test_how_a_local_test_is_launched_is_named_with_why(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_how_a_local_test_is_launched_is_chosen_with_why(monkeypatch: pytest.MonkeyPatch) -> None:
     ok = BwrapProbe("/usr/bin/bwrap", (0, 13, 1), ())
     denied = BwrapProbe("/usr/bin/bwrap", (0, 11, 1), ("bwrap: setting up uid map: Permission denied",))
     monkeypatch.setattr(agent_isolation, "bwrap_probe", lambda _path: ok)
-    assert local_test_isolation() == (BWRAP, ())
+    assert isinstance(choose_test_isolation(), BwrapIsolation)
     monkeypatch.setattr(agent_isolation, "bwrap_probe", lambda _path: denied)
-    how, why = local_test_isolation()
-    assert how == NONE and why == (
+    found = choose_test_isolation()
+    why = (
         f"running them as an account: {TEST_ACCOUNT}",
         "bubblewrap (/usr/bin/bwrap, 0.11.1): bwrap: setting up uid map: Permission denied",
     )
+    assert isinstance(found, NoIsolation) and found.reasons == why
     monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process(hosted=True, layer_bwrap="/usr/bin/bwrap"))
-    assert local_test_isolation() == (REFUSED, why)
+    with pytest.raises(IsolationRefused) as refused:
+        choose_test_isolation()
+    assert refused.value.reasons == why
