@@ -56,6 +56,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from collections.abc import Callable, Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 
