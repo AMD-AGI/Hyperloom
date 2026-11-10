@@ -9,8 +9,8 @@ processes themselves report: every descriptor of a render node has an fdinfo fil
 (the rule pack's ``drm_fdinfo``). Set against the kernel's total for a card, the difference is memory some process the
 reader does not see holds.
 
-Per open DRM file the reader also keeps which of its processes hold it (:func:`clients_by_render_minor`), so a count of the
-kernel's holders of a card can be set against how many processes of the reader's own have memory on its render node.
+Per open DRM file the reader also keeps which of its processes hold it (:func:`clients_by_render_minor`), so a record of a
+crowded card can name the reader's processes with memory on its render node.
 
 A reading is either complete or refused: a process whose descriptors cannot be listed (another account's, where this one is
 not root) could hold anything, so a sum over the rest says nothing, and :class:`FdinfoUnreadable` says why.
@@ -31,7 +31,7 @@ from hyperloom.common.outside_facts import (
     DRM_VRAM_KEY,
 )
 
-__all__ = ["DrmClient", "FdinfoUnreadable", "clients_by_render_minor", "totals", "vram_by_render_minor"]
+__all__ = ["DrmClient", "FdinfoUnreadable", "clients_by_render_minor"]
 
 #: What a process that is gone while its files are read raises: it holds nothing now.
 _GONE = (FileNotFoundError, ProcessLookupError, NotADirectoryError)
@@ -68,22 +68,6 @@ def clients_by_render_minor(procfs: Path, minors: Collection[int]) -> dict[int, 
     for (minor, _), (vram, pids) in sorted(clients.items()):
         found[minor].append(DrmClient(minor, vram, tuple(sorted(pids))))
     return {minor: tuple(listed) for minor, listed in found.items()}
-
-
-def vram_by_render_minor(procfs: Path, minors: Collection[int]) -> dict[int, int]:
-    """The bytes of video memory the processes in ``procfs`` hold on each render node in ``minors``.
-
-    An open DRM file is counted once however many descriptors, of however many processes, share it.
-
-    Raises:
-        FdinfoUnreadable: When the processes cannot be listed or the descriptors of one cannot be read.
-    """
-    return totals(clients_by_render_minor(procfs, minors))
-
-
-def totals(clients: Mapping[int, Collection[DrmClient]]) -> dict[int, int]:
-    """The bytes of video memory ``clients`` hold on each render node."""
-    return {minor: sum(client.vram for client in listed) for minor, listed in clients.items()}
 
 
 def _processes(procfs: Path) -> list[Path]:
