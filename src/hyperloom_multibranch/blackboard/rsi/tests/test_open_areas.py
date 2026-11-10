@@ -9,7 +9,7 @@ import dataclasses
 import json
 
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy
+from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy, latest_exhausted
 from hyperloom_multibranch.contracts.blackboard.peers import Intent, IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import (
     BlackboardSnapshot,
@@ -205,11 +205,27 @@ def _exhausted(
     return dataclasses.replace(snapshot, branch_logs=logs)
 
 
-def test_an_op_a_stopped_branch_focused_on_it_exhausted_on_the_head_is_spent_and_says_why(
+def _stopped(snapshot: BlackboardSnapshot, branch_name: str, reason: str) -> BlackboardSnapshot:
+    nodes = tuple(
+        dataclasses.replace(node, stop_reason=reason) if node.branch == branch_name else node
+        for node in snapshot.lineage.branches
+    )
+    return dataclasses.replace(snapshot, lineage=dataclasses.replace(snapshot.lineage, branches=nodes))
+
+
+def _gave_up(snapshot: BlackboardSnapshot, branch_name: str) -> BlackboardSnapshot:
+    """``snapshot`` with ``branch_name`` stopped as the scheduler stops a give-up, quoting its latest record."""
+
+    record = latest_exhausted(item.entry for item in snapshot.branch_logs[branch_name])
+    assert record is not None
+    return _stopped(snapshot, branch_name, f"gave_up: its specialist gave up: {record.summary()}")
+
+
+def test_an_op_a_focused_branch_gave_up_on_quoting_a_done_record_on_the_head_is_spent_and_says_why(
     snapshot: BlackboardSnapshot,
 ) -> None:
     worked = _committed(_worked(snapshot, _focused("b8", ALLREDUCE, start="c0"), _focused("b9", ALLREDUCE)), "b8", 3.0)
-    exhausted = _exhausted(worked, "b9", ExhaustedWhy.NO_CEILING_ABOVE_BAR, "i1")
+    exhausted = _gave_up(_exhausted(worked, "b9", ExhaustedWhy.NO_CEILING_ABOVE_BAR, "i1"), "b9")
 
     found = open_areas(exhausted, seconds_left=4 * HOUR, first_commit_minutes=42.0)
 
@@ -223,6 +239,25 @@ def test_an_op_a_stopped_branch_focused_on_it_exhausted_on_the_head_is_spent_and
         f"- {ALLREDUCE}: no_ceiling_above_bar: every allreduce variant within 1% of the default; worth again if the "
         "batch grows past 256 (opened 2, ended without a commit 1, commits 1, best +3.0%)",
     ]
+
+
+def test_a_done_record_of_one_direction_spends_nothing_when_the_branch_stopped_without_giving_up_on_it(
+    snapshot: BlackboardSnapshot,
+) -> None:
+    exhausted = _exhausted(_worked(snapshot, _focused("b9", ALLREDUCE)), "b9", ExhaustedWhy.NO_CEILING_ABOVE_BAR, "i1")
+
+    for reason in (
+        "judge: stalled 6 tests since it opened",
+        "session_end: time_exhausted",
+        "gave_up: its specialist gave up after 3 crashes",
+        "gave_up: its specialist gave up: its sessions in a row found nothing to test",
+    ):
+        stopped = _stopped(exhausted, "b9", reason)
+        found = open_areas(stopped, seconds_left=4 * HOUR, first_commit_minutes=42.0)
+
+        assert ALLREDUCE in [item.op for item in found.ops] and ALLREDUCE not in found.spent, reason
+        (item,) = stopped_on_focus(stopped, ALLREDUCE)
+        assert item.exhausted is not None and item.gave_up_on is None, reason
 
 
 def test_records_on_other_heads_of_another_reason_or_of_branches_on_another_focus_leave_the_op_open(
@@ -249,7 +284,7 @@ def test_records_on_other_heads_of_another_reason_or_of_branches_on_another_focu
         ("b6", ExhaustedWhy.NO_CEILING_ABOVE_BAR, "i1", ""),
         ("b7", ExhaustedWhy.NO_CEILING_ABOVE_BAR, "i1", ""),
     ):
-        worked = _exhausted(worked, name, why, head, detail or "every variant within 1% of the default")
+        worked = _gave_up(_exhausted(worked, name, why, head, detail or "every variant within 1% of the default"), name)
 
     found = open_areas(worked, seconds_left=4 * HOUR, first_commit_minutes=42.0)
 
@@ -267,7 +302,7 @@ def test_an_op_exhausted_on_an_older_head_opens_again_once_the_integration_head_
 ) -> None:
     def exhausted_at(head: str) -> BlackboardSnapshot:
         worked = _worked(snapshot, _focused("b9", ALLREDUCE), head=head)
-        return _exhausted(worked, "b9", ExhaustedWhy.ALL_TESTED_OR_CLAIMED, "i1")
+        return _gave_up(_exhausted(worked, "b9", ExhaustedWhy.ALL_TESTED_OR_CLAIMED, "i1"), "b9")
 
     on_head = open_areas(exhausted_at("i1"), seconds_left=4 * HOUR, first_commit_minutes=42.0)
     moved = open_areas(exhausted_at("i2"), seconds_left=4 * HOUR, first_commit_minutes=42.0)
