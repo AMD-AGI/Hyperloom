@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, NamedTuple
 
+from hyperloom.common.perf_metric import VERDICT_REVERT
 from hyperloom_common.coerce import to_str_list
 
 from ..actions.executors._kernel_agent_tool import (
@@ -92,7 +93,7 @@ def _unmeasured_integration_failure(
     verdict = (
         _FailureVerdict(stopped.error_class, stopped.interrupted, "NEEDS_REVIEW")
         if stopped is not None
-        else _FailureVerdict(rebaseline_error_class, "re-baseline did not succeed", "REVERT")
+        else _FailureVerdict(rebaseline_error_class, "re-baseline did not succeed", VERDICT_REVERT)
     )
     return _integrate_failure(payload, apply_result, verdict, rebaseline_detail=bench_result)
 
@@ -134,6 +135,7 @@ def _integrate_request_refusal(payload: dict, *, requested_controls: bool) -> Ha
         or str(payload.get("extra_server_args") or "").strip()
         or requested_controls
         or paired_measurement
+        or payload.get("preapplied_patches")
     ):
         return None
     return {
@@ -158,7 +160,7 @@ def _unapplied_patch_failure(payload: dict, apply_result: dict) -> HandlerResult
         "status": "failed",
         "error_class": error_class,
         "error": error,
-        "decision": "REVERT",
+        "decision": VERDICT_REVERT,
         "apply_result": apply_result,
         "kernel_id": payload.get("kernel_id"),
         "patch_path": payload.get("patch_path"),
@@ -240,10 +242,22 @@ def _integrate_result(verdict: _IntegrateVerdict) -> HandlerResult:
     return result
 
 
+def subthreshold_win(result: Mapping[str, Any]) -> bool:
+    """Whether an integrate REVERT was a positive gain refused only by the P50 threshold."""
+    return (
+        str(result.get("decision", "")).upper() == VERDICT_REVERT
+        and float(result.get("gain_pct") or 0) > 0
+        and result.get("refused_by") == "p50_gain_below_threshold"
+        and not result.get("veto_reason")
+    )
+
+
 def _explain_integrate_decision(result: HandlerResult, verdict: _IntegrateVerdict) -> None:
     performance = verdict.performance
     graded = performance.graded
     source_import = verdict.source_import
+    result["refused_by"] = graded.refused_by
+    result["veto_reason"] = graded.veto_reason
     refusal = graded.veto_reason or graded.refused_by
     if refusal:
         result["decision_reason"] = refusal

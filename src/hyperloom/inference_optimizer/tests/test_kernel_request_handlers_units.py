@@ -1047,6 +1047,15 @@ class TestForgeGemmHelperCoverage:
 
     async def _fusion_input_payload(self, tmp_path, monkeypatch, *, max_minutes):
         """Run the fusion lane against a faked forge runner and return the payload it was handed."""
+        calls, _result = await self._run_fusion_lane(tmp_path, monkeypatch, max_minutes=max_minutes)
+        return calls[-1]
+
+    async def _fusion_result(self, tmp_path, monkeypatch, *, max_minutes):
+        """Run the fusion lane and return what the handler reported, run or declined."""
+        _calls, result = await self._run_fusion_lane(tmp_path, monkeypatch, max_minutes=max_minutes)
+        return result
+
+    async def _run_fusion_lane(self, tmp_path, monkeypatch, *, max_minutes):
         trace_dir = tmp_path / "trace"
         trace_dir.mkdir()
         (trace_dir / "decode.trace.json.gz").write_text("{}", encoding="utf-8")
@@ -1066,14 +1075,22 @@ class TestForgeGemmHelperCoverage:
             return {"status": "ok", "decision": "REVERT", "kept": False}
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _fake_run_forge_fusion)
-        await forge_fusion_run.run_fusion_handler({"task_id": "fusion_task"}, session_dir=tmp_path)
-        return calls[-1]
+        result = await forge_fusion_run.run_fusion_handler({"task_id": "fusion_task"}, session_dir=tmp_path)
+        return calls, result
 
     async def test_fusion_recipe_ceiling_comes_from_the_lane_share(self, tmp_path, monkeypatch):
-        """A bounded session funds the lane, so its target count is handed down."""
-        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=120)
+        """A bounded session hands down the recipes its share pays for, not the cap."""
+        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=600)
 
         assert payload["max_recipes"] == lane_budget.FUSION_MAX_TARGETS
+
+    async def test_a_session_too_short_for_one_recipe_declines_instead_of_running(self, tmp_path, monkeypatch):
+        """A share too small for one recipe leaves the fusion lane unfunded."""
+        result = await self._fusion_result(tmp_path, monkeypatch, max_minutes=20)
+
+        assert result["status"] == "skipped"
+        assert result["error_class"] == lane_budget.INSUFFICIENT_BUDGET
+        assert "decision" not in result
 
     async def test_an_unbounded_session_sends_no_recipe_ceiling(self, tmp_path, monkeypatch):
         """No share can be derived, and a zero ceiling would silence the lane."""

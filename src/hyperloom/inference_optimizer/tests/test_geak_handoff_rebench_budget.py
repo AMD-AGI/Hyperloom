@@ -99,3 +99,44 @@ def test_the_rewrite_controller_returns_with_one_measurement_left_in_the_phase(
 
     # Zero takes the no_result branch: the Controller is not started without room to integrate its patches.
     assert (soft, hard) == (max(0, hard_expected - 30), hard_expected)
+
+
+def _pending(*cycles: int) -> list[dict]:
+    return [{"kind": "env", "id": f"gemm_tune_{i}", "macro_cycle": cycle} for i, cycle in enumerate(cycles)]
+
+
+@pytest.mark.parametrize(
+    ("member_cycles", "rounds_left"),
+    [((2, 2), 2), ((2,), 1), ((1, 1), 1)],
+    ids=["bundle_due_this_cycle", "one_win_only", "earlier_cycle_wins_only"],
+)
+def test_the_rewrite_controller_leaves_the_bundle_round_when_this_cycle_already_holds_a_bundle(
+    coordinator, monkeypatch, member_cycles, rounds_left
+):
+    monkeypatch.setattr(ps, "session_remaining_seconds", lambda _state, **_kw: SESSION_LEFT)
+    state = coordinator.shared_state
+    state.macro_cycle = 2
+    state.kernel_bundle_pending = _pending(*member_cycles)
+
+    soft, hard = coordinator.phase_kernel._kernel_rewrite_controller_timeouts()
+
+    hard_expected = int(PHASE_LEFT - rounds_left * ONE_ROUND)
+    assert (soft, hard) == (hard_expected - 30, hard_expected)
+
+
+@pytest.mark.parametrize(
+    ("member_cycles", "rounds_run", "admitted"),
+    [((2, 2), 1, False), ((2, 2), 0, True), ((2,), 1, True), ((1, 1), 1, True)],
+    ids=["later_patch_with_bundle_due", "first_patch", "later_patch_one_win", "later_patch_earlier_cycle_wins"],
+)
+def test_a_later_controller_patch_round_leaves_the_bundle_round_when_a_bundle_is_due(
+    coordinator, monkeypatch, member_cycles, rounds_run, admitted
+):
+    from hyperloom.orchestrator.phases.kernel_round_budget import controller_round_stop
+
+    monkeypatch.setattr(ps, "phase_budget_remaining_seconds", lambda _state, **_kw: 1.5 * ONE_ROUND)
+    state = coordinator.shared_state
+    state.macro_cycle = 2
+    state.kernel_bundle_pending = _pending(*member_cycles)
+
+    assert (controller_round_stop(state, rounds_run) is None) is admitted

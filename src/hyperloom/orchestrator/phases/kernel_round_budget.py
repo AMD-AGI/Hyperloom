@@ -46,10 +46,10 @@ def rebench_round_sec(state: Any) -> float:
     return first_pass_sec + warm_pass_sec + _REBENCH_SPARE_OF_A_ROUND * first_pass_sec
 
 
-def round_stop(state: Any) -> StoppedByTheRun | None:
-    """How to record a measured round the KERNEL budget can no longer fit, or ``None`` while one still fits."""
+def round_stop(state: Any, *, rounds: int = 1) -> StoppedByTheRun | None:
+    """How to record a measured round the KERNEL budget can no longer fit, or ``None`` while ``rounds`` still fit."""
     remaining = _phase_state.phase_budget_remaining_seconds(state)
-    if remaining is None or remaining >= measurement_round_sec(state):
+    if remaining is None or remaining >= rounds * measurement_round_sec(state):
         return None
     return STOPPED_BY_THE_RUN[PHASE_TIME_EXHAUSTED_CLASS]
 
@@ -58,9 +58,13 @@ def controller_round_stop(state: Any, rounds_run: int) -> StoppedByTheRun | None
     """Admit the E2E round of one more Controller patch.
 
     The first round is paid for by the round the Controller's own timeout holds back; every later one has to fit what
-    is left of the phase.
+    is left of the phase, and leave the sub-threshold bundle's round when this cycle already holds a bundle.
     """
-    return None if rounds_run == 0 else round_stop(state)
+    if rounds_run == 0:
+        return None
+    from ..kernel.subthreshold_bundle import bundle_due
+
+    return round_stop(state, rounds=2 if bundle_due(state) else 1)
 
 
 async def integrate_within_phase(payload: dict[str, Any], *, state: Any, session_dir: Path) -> dict[str, Any]:

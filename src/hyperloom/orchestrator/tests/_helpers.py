@@ -49,6 +49,30 @@ def init_git_repo(
     )
 
 
+_GIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "Hyperloom Test",
+    "GIT_AUTHOR_EMAIL": "hyperloom@test.local",
+    "GIT_COMMITTER_NAME": "Hyperloom Test",
+    "GIT_COMMITTER_EMAIL": "hyperloom@test.local",
+}
+
+
+def git(repo: Path, *args: str) -> str:
+    """Run git in ``repo`` under a fixed identity; its stdout, stripped."""
+    env = {**os.environ, **_GIT_IDENTITY}
+    return subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def diff_against_head(repo: Path, relative: str, content: str) -> str:
+    """The patch that turns ``relative`` into ``content``, leaving the committed file in place."""
+    path = repo / relative
+    original = path.read_text(encoding="utf-8")
+    path.write_text(content, encoding="utf-8")
+    patch = git(repo, "diff", "--binary", "--", relative)
+    path.write_text(original, encoding="utf-8")
+    return patch + "\n"
+
+
 def git_commit_all(path: Path, message: str) -> None:
     """Stage everything under ``path`` and commit with a fixed non-interactive identity."""
     env = os.environ.copy()
