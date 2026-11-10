@@ -40,6 +40,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Protocol
 
+from hyperloom.sandbox import SandboxError
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_common.git_safety import NO_PROGRAMS
 from hyperloom_multibranch.repo.isolated_git import NO_LAZY_FETCH, blank_driver_programs, leading_options, trusting
@@ -172,14 +173,16 @@ class OnboardingSetup:
 
 @dataclass(frozen=True)
 class ReadyAgent:
-    """An agent preflight made ready: its manifest, its checkout and the process it runs in, and what its branch should
+    """An agent preflight made ready: its manifest, its checkout and the process it runs in, what its branch should
     note of how it was started (an input its Arbor lacks, :func:`fit_keys`, or a dossier that is gone,
-    :func:`dossier_notes`)."""
+    :func:`dossier_notes`), and ``source_unkept``, the spec's reason no change to the framework's source can be kept
+    when the agent was told it (Arbor, in its host rules), ``""`` when it was told none."""
 
     manifest: AgentManifest
     source_dir: Path
     process: AgentProcess
     notes: tuple[str, ...] = ()
+    source_unkept: str = ""
 
 
 class AttemptFailed(RuntimeError):
@@ -220,7 +223,7 @@ async def make_ready(source: str, spec: AgentSpec, agent_dir: Path, setup: Onboa
                 pause = min(pause * 2, GATEWAY_PAUSE_SECONDS)
                 continue
             failures.append(f"attempt {attempt}: {error}")
-        except (AttemptFailed, OSError) as error:
+        except (AttemptFailed, OSError, SandboxError) as error:
             failures.append(f"attempt {attempt}: {error}")
         if attempt == ATTEMPTS:
             raise PreflightFailed(failures)
@@ -271,7 +274,7 @@ async def _attempt(
     finally:
         if not started:
             await process.kill()
-    return ReadyAgent(manifest, checkout, process, notes)
+    return ReadyAgent(manifest, checkout, process, notes, spec.source_unkept if adapted else "")
 
 
 async def install(manifest: AgentManifest, setup: OnboardingSetup, checkout: Path, env: Mapping[str, str]) -> None:

@@ -520,8 +520,9 @@ def _operating_point(workload: Mapping[str, object]) -> dict[str, int]:
 
 def host_rules(spec: AgentSpec) -> list[str]:
     """MB's rules for ``spec``'s runs, as Arbor's ``directives`` (:data:`HOST_RULE`): the workload it holds fixed and
-    the variables it owns, how it keeps a change, and its accuracy rule. MB refuses or rejects a change that breaks
-    one, whatever Arbor measured; the dossier lists them among the benchmark's rules."""
+    the variables it owns, how it keeps a change, its accuracy rule and, when the spec says why, that no source change
+    can be kept. MB refuses or rejects a change that breaks one, whatever Arbor measured; the dossier lists them among
+    the benchmark's rules."""
 
     point = ", ".join(f"{key} {value}" for key, value in _operating_point(spec.workload).items())
     owned = ", ".join(sorted({*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}))
@@ -542,6 +543,11 @@ def host_rules(spec: AgentSpec) -> list[str]:
             f" at most {ACCURACY_THRESHOLD:g} under the root's score; a numerics change that costs more is never merged."
             f" Arbor's GSM8K reads on another scale, so Arbor holds the change to the same drop against the root it"
             f" measures itself, and to {DEFAULT_ENABLEMENT_ACCURACY_FLOOR:g} when it could not."
+        )
+    if spec.source_unkept:
+        rules.append(
+            f"{HOST_RULE}: a change to {spec.framework}'s source cannot be kept on this image: {spec.source_unkept}."
+            " Spend the work on launch flags and environment variables."
         )
     return rules
 
@@ -752,15 +758,25 @@ def refused_reasons(path: Path) -> str:
     return "; ".join(str(reason) for reason in reasons if str(reason).strip())
 
 
+def exit_reason(path: Path) -> str:
+    """Why Arbor says its run ended, as the exit file at ``path`` it writes before an exit 0 has it; else what is
+    wrong with that file."""
+
+    try:
+        document = json.loads(path.read_text(encoding=ENCODING))
+    except FileNotFoundError:
+        return "it wrote no exit reason"
+    except (OSError, ValueError) as error:
+        return f"its exit reason cannot be read: {error}"
+    reason = document.get("reason") if isinstance(document, dict) else None
+    return reason if isinstance(reason, str) and reason else f"its exit file names no reason: {document!r}"
+
+
 def mapped(session: Path) -> bool:
     """Whether the dossier pass whose session is ``session`` ended with its map set, as its exit file says; the map is
     then the session's :data:`MAP_FILE`."""
 
-    try:
-        document = json.loads((session / EXIT_FILE).read_text(encoding=ENCODING))
-    except (OSError, ValueError):
-        return False
-    return isinstance(document, dict) and document.get("reason") == MAPPED
+    return exit_reason(session / EXIT_FILE) == MAPPED
 
 
 async def split_directions(checkout: Path, map_file: Path, shares: int, out: Path) -> tuple[Path, ...]:
@@ -832,6 +848,7 @@ __all__ = [
     "bench_command",
     "carry_dossier",
     "dossier_notes",
+    "exit_reason",
     "generate_directions",
     "has_review_gate",
     "host_rules",

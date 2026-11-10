@@ -8,9 +8,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom_common.coerce import to_str_list
+from hyperloom.common.failure_signature import argparse_refusal
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT
 from hyperloom.common.env_safety import (
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -18,6 +19,7 @@ from hyperloom.common.env_safety import (
     is_allowed_variant_env_key,
 )
 from hyperloom.common.overlay import is_safe_path_entry
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 from hyperloom.inference_optimizer.grid_server_args import (
     SGLANG_MOE_RUNNER_BACKEND_RE,
     moe_runner_requires_aiter,
@@ -165,17 +167,40 @@ class VariantResult:
         }
 
 
-def apply_variant_env(envs, variant, base_extra_envs, base_unset_envs):
-    """Apply accepted environment edits before the candidate's set/unset operations."""
-    # Composed base-then-variant, so a variant unsetting a key the base sets
-    # removes it: the last layer to name a key is the one that decides it.
+class RoundError(NamedTuple):
+    """Why a grid round measured nothing, and under which class it is recorded."""
+
+    summary: str
+    error_class: str
+
+
+def argv_refusal(server_log: str | None) -> RoundError | None:
+    """The round as its server's argument parser refused it, when the server's log says it did."""
+    if not server_log:
+        return None
+    try:
+        refusal = argparse_refusal(Path(server_log).read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+    return None if refusal is None else RoundError(refusal, ARGV_INVALID)
+
+
+def apply_base_env(envs, base_extra_envs, base_unset_envs):
+    """Apply the accepted environment edits to ``envs`` and return the base launch's environment."""
     for k in to_str_list(base_unset_envs):
         if k.strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
             continue
         envs.pop(k, None)
     for k, v in (base_extra_envs or {}).items():
         envs[str(k)] = str(v)
-    base_envs = dict(envs)
+    return dict(envs)
+
+
+def apply_variant_env(envs, variant, base_extra_envs, base_unset_envs):
+    """Apply accepted environment edits before the candidate's set/unset operations."""
+    # Composed base-then-variant, so a variant unsetting a key the base sets
+    # removes it: the last layer to name a key is the one that decides it.
+    base_envs = apply_base_env(envs, base_extra_envs, base_unset_envs)
     for k in getattr(variant, "unset_envs", []) or []:
         # Unsetting a pin retargets the benchmark rather than toggling a knob.
         if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:

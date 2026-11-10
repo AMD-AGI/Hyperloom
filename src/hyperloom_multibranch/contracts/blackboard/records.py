@@ -99,8 +99,23 @@ class Claim:
 
 
 @dataclass(frozen=True)
+class RetractionRef:
+    """What a landed retraction undoes: an autonomous agent's change of its ``iteration``, kept as its keep ``keep``,
+    which its finding ``finding`` found invalid, and the commit ``retracted_commit`` that change landed in."""
+
+    iteration: int
+    keep: int
+    finding: str
+    retracted_commit: str
+
+    def __str__(self) -> str:
+        return f"{self.retracted_commit}, the agent's iteration {self.iteration} (its keep {self.keep}), found invalid by {self.finding}"
+
+
+@dataclass(frozen=True)
 class TestRecord:
-    """Everything known about one test: request, result, judgement, conclusion and commit."""
+    """Everything known about one test: request, result, judgement, conclusion and commit; ``retracts``, what a
+    retraction the gate landed undoes, ``None`` for every other test."""
 
     __test__ = False
 
@@ -114,10 +129,18 @@ class TestRecord:
     judged_at: float | None = None
     withdrawn_at: float | None = None
     withdrawal_reason: str = ""
+    retracts: RetractionRef | None = None
 
     @property
     def request_id(self) -> str:
         return self.request.request_id
+
+    @property
+    def landed_retraction(self) -> bool:
+        """Whether the test is a retraction the gate landed: a commit that undoes a change its own agent found invalid,
+        slower by construction, so no reader may count it as a gain, a worked change or progress."""
+
+        return self.retracts is not None
 
     @property
     def in_flight(self) -> bool:
@@ -605,6 +628,22 @@ class LineageView:
             pending.extend([*node.merged_from, node.parent_commit])
         return tuple(seen)
 
+    def built_on(self, commit_id: str) -> frozenset[str]:
+        """``commit_id`` and every commit built on it, through children and the merges that brought it in."""
+
+        children: dict[str, list[str]] = {}
+        for node in self.commits:
+            for source in (node.parent_commit, *node.merged_from):
+                children.setdefault(source, []).append(node.commit_id)
+        found: set[str] = set()
+        pending = [commit_id]
+        while pending:
+            current = pending.pop()
+            if current not in found:
+                found.add(current)
+                pending.extend(children.get(current, ()))
+        return frozenset(found)
+
 
 @dataclass(frozen=True)
 class MergeState:
@@ -623,10 +662,11 @@ class MergeState:
 @dataclass(frozen=True)
 class CommittedCommit:
     """A specialist commit as the integrator sees it; ``gain_pct`` is its own gain over its parent commit,
-    ``merge_attempts`` how many merge attempts it took part in, and ``first_failed_at`` when the first of them that
-    failed was recorded, ``None`` while none failed. A merge fails when it is skipped on a conflict, is not stackable,
-    or its merge test is one the candidate failed, which the integrator leaves pending; a measurement that failed, or a
-    round that superseded it, is retried on the next head and is no failure."""
+    ``merge_attempts`` how many merge attempts it took part in, ``not_stackable`` how many of them were not stackable,
+    and ``first_failed_at`` when the first of them that failed was recorded, ``None`` while none failed. A merge fails
+    when it is skipped on a conflict, is not stackable, or its merge test is one the candidate failed, which the
+    integrator leaves pending; a measurement that failed, or a round that superseded it, is retried on the next head
+    and is no failure."""
 
     commit_id: str
     branch: str
@@ -638,6 +678,7 @@ class CommittedCommit:
     merged_into: str | None = None
     last_merge: MergeState | None = None
     merge_attempts: int = 0
+    not_stackable: int = 0
     first_failed_at: float | None = None
 
 
@@ -972,6 +1013,19 @@ class BlackboardSnapshot:
         running = {node.branch for node in self.lineage.branches if node.stopped_at is None}
         return {item.id: item.holder for item in self.agent_map if item.open and item.holder in running}
 
+    def unretracted(self) -> dict[str, tuple[TestRecord, ...]]:
+        """The commits that hold a change a landed retraction undoes and not the retraction, each with those
+        retractions: the commits built on their ``retracted_commit`` and not on their own commit, whose values count a
+        change its agent found invalid."""
+
+        held: dict[str, list[TestRecord]] = {}
+        for record in self.records:
+            if record.retracts is not None:
+                undone = self.lineage.built_on(record.retracts.retracted_commit)
+                for commit_id in undone - self.lineage.built_on(record.commit_id or ""):
+                    held.setdefault(commit_id, []).append(record)
+        return {node.commit_id: tuple(held[node.commit_id]) for node in self.lineage.commits if node.commit_id in held}
+
 
 __all__ = [
     "CLAIM_TOKEN_LENGTH",
@@ -1018,6 +1072,7 @@ __all__ = [
     "QuarantineEvent",
     "RecordedValue",
     "RegressionCase",
+    "RetractionRef",
     "SearchHit",
     "SessionProfile",
     "REPLAY_TARGET",

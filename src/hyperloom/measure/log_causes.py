@@ -17,9 +17,8 @@ from __future__ import annotations
 
 import re
 
+from hyperloom.common.failure_signature import argparse_refusal
 from hyperloom.common.outside_facts import (
-    ARGPARSE_INVALID_CHOICE,
-    ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE,
     HIP_ERROR_PREFIX,
     HIP_NO_BINARY_FOR_GPU,
     HIP_NO_KERNEL_IMAGE,
@@ -34,17 +33,6 @@ from hyperloom.common.outside_facts import (
 CAUSE_CHARS = 300
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
-
-#: ``<prog>: error: <message>``, the one shape argparse prints a refused command line in, with the messages argparse
-#: itself defines (``argparse.py``).
-_ARGPARSE = re.compile(
-    r": error: (?:ambiguous option|" + ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE + r"|the following arguments are required"
-    r"|argument \S+:|expected (?:one|at most one|at least one|\d+) arguments?|"
-    + ARGPARSE_INVALID_CHOICE
-    + r"|invalid \w+ value|ignored explicit argument|one of the arguments)"
-)
-#: A compiler's ``file.c:3:1: error: ...`` shares the ``: error:`` with argparse and names a source location first.
-_COMPILER_DIAGNOSTIC = re.compile(r":\d+(?::\d+)?: error:")
 
 #: A ``400`` the server answered or the evaluation client reported: the access-log line, an ``aiohttp``/``requests``
 #: error, or the JSON body the server sent back.
@@ -63,10 +51,9 @@ _IMPORT_FAILURE = re.compile(
 )
 
 #: What a missing compiled kernel prints: an extension that references a symbol nothing defines, or a GPU binary built for
-#: another device. Nothing else a HIP call reports belongs here.
-_MISSING_KERNEL = re.compile(
-    "|".join((HIP_UNDEFINED_SYMBOL, HIP_NO_KERNEL_IMAGE, HIP_NO_BINARY_FOR_GPU, HSA_STATUS_ERROR))
-)
+#: another device. Nothing else a HIP call reports belongs here, nor a failed HSA call: the ROCr queue abort that names an
+#: ``HSA_STATUS_ERROR_*`` status is a kernel that ran and faulted.
+_MISSING_KERNEL = re.compile("|".join((HIP_UNDEFINED_SYMBOL, HIP_NO_KERNEL_IMAGE, HIP_NO_BINARY_FOR_GPU)))
 #: The exception a failed HIP call raised (``torch.AcceleratorError: HIP error: an illegal memory access was
 #: encountered``, ``RuntimeError: HIP runtime error: operation failed ...``), which states the fault in words. The
 #: ``HIP warning:`` a stream prints for the same fault is not it.
@@ -99,6 +86,9 @@ _DATASETS_BUILD_LOCK = re.compile(r"/[^/]+/[^/]+/\d+\.\d+\.\d+/[0-9a-f]{16,}_(?:
 _HIP_EXCEPTION = re.compile(r"\bHIP (?:runtime )?error: ")
 #: The name of the failed call, on its own line when the exception text was cut (``Search for `hipErrorIllegalAddress'``).
 _HIP_ERROR_TOKEN = re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]+")
+#: The ROCr runtime's report of a GPU fault in a running kernel, which kills the process before Python raises anything:
+#: ``:0:rocdevice.cpp :N: ... Callback: Queue 0x... aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: ...``.
+_HSA_STATUS_TOKEN = re.compile(HSA_STATUS_ERROR + r"[A-Z_]*")
 
 #: ``SomeError: message`` after an optional log prefix, or a bare ``SomeError`` on a line of its own.
 _EXCEPTION_WITH_MESSAGE = re.compile(r"(?<![\w.])((?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)):\s*\S")
@@ -128,7 +118,8 @@ def _last_matching(text: str, matches) -> str | None:
 
 def argparse_error(text: str) -> str | None:
     """The command-line error a server printed when it refused its own arguments (an ambiguous or unknown flag)."""
-    return _last_matching(text, lambda line: bool(_ARGPARSE.search(line)) and not _COMPILER_DIAGNOSTIC.search(line))
+    refusal = argparse_refusal(text)
+    return one_line(refusal) if refusal else None
 
 
 def bad_request(text: str) -> str | None:
@@ -166,9 +157,10 @@ def missing_hip_kernel(text: str) -> str | None:
 
 
 def hip_error(text: str) -> str | None:
-    """The line that states a HIP call failed at run time: the exception that carries the fault's words, else the line that names the failed call."""
+    """The line that states a HIP or HSA call failed at run time: the exception that carries the fault's words, else the
+    line that names the failed call or the HSA status the runtime aborted the queue with."""
     return _last_matching(text, lambda line: bool(_HIP_EXCEPTION.search(line))) or _last_matching(
-        text, lambda line: bool(_HIP_ERROR_TOKEN.search(line))
+        text, lambda line: bool(_HIP_ERROR_TOKEN.search(line) or _HSA_STATUS_TOKEN.search(line))
     )
 
 

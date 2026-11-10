@@ -39,8 +39,10 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     carry_dossier,
     dossier_notes,
     generate_directions,
+    host_rules,
     is_arbor,
     link_built,
+    exit_reason,
     mapped,
     read_launch,
     refusals,
@@ -483,6 +485,17 @@ def test_arbor_is_given_mb_s_rules_as_directives_the_dossier_copies(tmp_path: Pa
     assert "error rate stays at or under 10%" in agentx_rules[-1]
 
 
+def test_arbor_is_told_its_source_changes_cannot_be_kept_when_the_spec_says_why(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    unkept = replace(spec, source_unkept="vllm is installed from a wheel")
+
+    rules = arbor_config(unkept, tmp_path / "checkout", BRANCH_RUN)["directives"]
+
+    assert rules[:-1] == host_rules(spec)
+    assert rules[-1].startswith(arbor_adapter.HOST_RULE)
+    assert "vllm is installed from a wheel" in rules[-1] and "launch flags" in rules[-1]
+
+
 def test_arbor_s_accuracy_tolerance_is_the_drop_mb_s_rule_allows(tmp_path: Path) -> None:
     # Arbor measures the root's full GSM8K itself and holds a numerics change to it less this tolerance, on its own
     # eval's scale: MB's rule allows ACCURACY_THRESHOLD under the root, so Arbor allows the same.
@@ -641,6 +654,20 @@ async def test_an_arbor_checkout_is_made_ready_by_the_adapter_without_the_onboar
     assert all(cwd == ready.source_dir for _command, cwd, _env in sandbox.ran)
 
 
+async def test_an_arbor_given_why_no_source_change_can_be_kept_is_told_so_and_made_ready_as_told(
+    tmp_path: Path,
+) -> None:
+    spec = replace(_spec(tmp_path), source_unkept="the image's vllm names no upstream commit")
+
+    ready = await make_ready(
+        str(_arbor_repo(tmp_path)), spec, tmp_path / "agent", _setup(Sandbox([Process(None)]), None)
+    )
+
+    directives = json.loads((ready.source_dir / CONFIG_FILE).read_text())["directives"]
+    assert any(spec.source_unkept in rule for rule in directives)
+    assert ready.source_unkept == spec.source_unkept
+
+
 async def test_a_config_the_adapter_refuses_fails_the_preflight_in_one_attempt_with_every_reason(
     tmp_path: Path,
 ) -> None:
@@ -705,6 +732,25 @@ def test_a_dossier_pass_ended_mapped_only_when_its_exit_file_says_so(
         (tmp_path / "component_exit.json").write_text(json.dumps({"reason": exit_file, "detail": "m-attn, m-moe"}))
 
     assert mapped(tmp_path) is ended
+
+
+@pytest.mark.parametrize(
+    ("content", "said"),
+    [
+        (None, "it wrote no exit reason"),
+        ("{", "its exit reason cannot be read: "),
+        (json.dumps({"reason": ""}), "its exit file names no reason: {'reason': ''}"),
+        (json.dumps({"reason": "deadline"}), "deadline"),
+    ],
+)
+def test_arbor_s_exit_reason_is_its_exit_file_s_or_what_is_wrong_with_the_file(
+    tmp_path: Path, content: str | None, said: str
+) -> None:
+    path = tmp_path / "component_exit.json"
+    if content is not None:
+        path.write_text(content)
+
+    assert exit_reason(path).startswith(said)
 
 
 async def test_a_map_is_split_into_one_plan_per_share_by_arbor_s_command_line(tmp_path: Path) -> None:

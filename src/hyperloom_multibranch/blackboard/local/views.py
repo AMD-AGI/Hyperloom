@@ -228,6 +228,7 @@ def committed(state: BlackboardState, view: LineageView) -> tuple[CommittedCommi
                 merged_into=next((merge.commit_id for merge in merges if node.commit_id in merge.merged_from), None),
                 last_merge=attempts[-1] if attempts else None,
                 merge_attempts=len(attempts),
+                not_stackable=sum(item.outcome is MergeOutcome.NOT_STACKABLE for item in attempts),
                 first_failed_at=next((item.at for item in attempts if item.outcome in FAILED_MERGES), None),
             )
         )
@@ -257,16 +258,21 @@ def regression_cases_for(state: BlackboardState, view: LineageView, commit_id: s
 
 
 def judged_since_commit(records: Sequence[TestRecord], view: LineageView, branch: str, until: float = math.inf) -> int:
-    """The tests of ``branch`` judged by ``until`` and after its last commit by then, or since it opened before any.
+    """The tests of ``branch`` judged by ``until`` and after its last commit by then, or since it opened before any; a
+    retraction is no progress, so its commit is no last commit.
 
     A test counts once it was measured and judged; a withdrawn or failed measurement, or a result that did not
     re-verify, never does.
     """
 
+    retractions = {record.commit_id for record in records if record.landed_retraction}
     commits = [
         node.at
         for node in view.commits
-        if node.branch == branch and node.origin is not CommitOrigin.ROOT and node.at <= until
+        if node.branch == branch
+        and node.origin is not CommitOrigin.ROOT
+        and node.at <= until
+        and node.commit_id not in retractions
     ]
     since = max(commits, default=-math.inf)
     return sum(

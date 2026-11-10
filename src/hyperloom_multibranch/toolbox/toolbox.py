@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -61,7 +61,14 @@ from hyperloom_multibranch.toolbox.analysis import (
 )
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, check_kind
 from hyperloom_multibranch.toolbox.attachments import store_attachment
-from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
+from hyperloom_multibranch.toolbox.attempts import (
+    DEFAULT_MAX_INFRA_RETRIES,
+    INFRA_BACKOFF_SECONDS,
+    AttemptRunner,
+    Executor,
+    InfraBackoff,
+    TestJob,
+)
 from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
 from hyperloom_multibranch.toolbox.pending_builds import (
     BuildDriver,
@@ -120,14 +127,17 @@ class ToolboxStores:
 
 @dataclass(frozen=True)
 class ToolboxTuning:
-    """The queue policy, the infrastructure retries (of tests and of native builds), the claim lifetime and the clock;
-    the defaults are the real ones."""
+    """The queue policy, the infrastructure retries (of tests and of native builds) and the waits before a test's
+    (``infra_backoff_seconds``, :class:`~.attempts.InfraBackoff`), the claim lifetime, the clock and the sleep; the
+    defaults are the real ones."""
 
     policy: QueuePolicy | None = None
     max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
     claim_ttl_seconds: float = CLAIM_TTL_SECONDS
     clock: Callable[[], float] = time.time
     build_retry_seconds: float = BUILD_RETRY_SECONDS
+    infra_backoff_seconds: tuple[float, ...] = INFRA_BACKOFF_SECONDS
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
 
 class RealToolbox:
@@ -166,6 +176,9 @@ class RealToolbox:
             avoid=lambda: self._quarantine.nodes,
             on_node_failure=self._node_failed,
             max_infra_retries=tuning.max_infra_retries,
+            backoff=InfraBackoff(
+                tuning.infra_backoff_seconds, self._latest_retry_start, clock=tuning.clock, sleep=tuning.sleep
+            ),
         )
         self._ttl, self._clock = tuning.claim_ttl_seconds, tuning.clock
         self._tools, self._repo, self._kinds = tools, acceptance.repo, acceptance.supported_kinds
@@ -248,6 +261,14 @@ class RealToolbox:
             self._enqueue(entry, accepted, prepared.environment, needs)
         self._pump()
         return entry.request_id
+
+    def _latest_retry_start(self, request: TestRequest) -> float | None:
+        """When an infrastructure retry of ``request`` must start at the latest: a typical test of its kind before its
+        branch's exploration ends; ``None`` for a branch with no deadline."""
+        deadline = self._queue.policy.branch_deadline.get(request.branch_id, 0.0)
+        if not deadline:
+            return None
+        return deadline - median_test_seconds(self._log.entries(), request.kind)
 
     def _check_build_deadline(self, request: TestRequest, needs: tuple[BuildNeed, ...]) -> None:
         deadline = self._queue.policy.branch_deadline.get(request.branch_id, 0.0)
@@ -496,6 +517,12 @@ class RealToolbox:
         if self._tools is None:
             raise UnknownTestRequest(job_id)
         return self._tools.status(job_id)
+
+    def tool_result(self, job_id: str) -> Mapping[str, Any]:
+        """The tool's own result of the job ``job_id`` once it ended, its ``error_class`` included when it failed."""
+        if self._tools is None:
+            raise UnknownTestRequest(job_id)
+        return self._tools.result(job_id)
 
     def record_cold_start(self, seconds: float) -> None:
         self._queue.cold_start_seconds = seconds
