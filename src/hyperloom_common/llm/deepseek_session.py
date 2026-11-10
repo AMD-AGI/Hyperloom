@@ -40,6 +40,19 @@ Do not run git commands that change repository state. Do not commit, reset,
 checkout, stash, clean, or alter branches.
 """
 
+#: Patch rows every Hyperloom harness runtime boots with. The harness compacts a
+#: conversation once a request reaches 80% of the model's window, which is 1M
+#: tokens on every DeepSeek route. Every model step resends the whole
+#: conversation, so a long session carried about 700K tokens on each request
+#: before it compacted once; a quarter of the window keeps a request near what
+#: the Claude and Codex routes carry.
+COMPACTION_PATCH = """\
+- id: compaction-basic
+  config:
+    thresholdRatio: 0.25
+"""
+_COMPACTION_PATCH_NAME = "hyperloom-compaction.yml"
+
 #: Handshake budget. Initialization spawns a Node runtime and mounts the plugin
 #: composition, so it is slower than any later turn on the same runtime.
 _INITIALIZE_TIMEOUT_SEC = 120.0
@@ -160,6 +173,9 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
     runs and the model and effort are accepted.
     """
     workspace = str(launch.cwd)
+    launch.dsh_home.mkdir(parents=True, exist_ok=True)
+    compaction_patch = launch.dsh_home / _COMPACTION_PATCH_NAME
+    compaction_patch.write_text(COMPACTION_PATCH, encoding="utf-8")
     harness = sdk.DeepSeekHarness(
         dsh_home=str(launch.dsh_home),
         cwd=workspace,
@@ -173,6 +189,7 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
         env=dict(launch.env),
         initialize_timeout_seconds=launch.initialize_timeout_sec,
         request_timeout_seconds=launch.request_timeout_sec,
+        patches=(str(compaction_patch),),
     )
     try:
         harness.start()
@@ -398,6 +415,7 @@ class DeepSeekSession:
 
 
 __all__ = [
+    "COMPACTION_PATCH",
     "DEEPSEEK_PROVIDER_ROUTE",
     "DEEPSEEK_RUNTIME_MAPPING",
     "DeepSeekSession",
