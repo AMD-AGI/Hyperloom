@@ -38,7 +38,7 @@ _BACKEND_UNHEALTHY_STOP_SEC: float = 3600.0
 # How many turns in a row one agent may answer without an intent before the session stops.
 _NO_INTENT_STOP_TURNS: int = 50
 from ..phases import machine_state as _phase_state
-from hyperloom.inference_optimizer.session.paths import db_path_for, stop_request_path
+from hyperloom.inference_optimizer.session.paths import stop_request_path
 from hyperloom.inference_optimizer.session.session_binding import bind_session
 from ..roles.agent_role import AgentRole, default_role_registry
 from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
@@ -54,6 +54,7 @@ from ..state.round_store import RoundStore
 from ..bus.gpu_pool import SpecialistGpuPool, resolve_gpu_specialist_devices, resolve_whole_machine_devices
 from ..bus.resource_lock import SqliteLeaseBackend
 from ..state.shared_state import SharedState, effective_closing_grace_sec
+from ..state.state_file import database_target
 from .signals import SignalDrain
 from .intent_router import IntentRouter
 from hyperloom.inference_optimizer.model_config_utils import infer_model_class
@@ -225,11 +226,9 @@ class Coordinator:
         self.backends = dict(backends)
         self.reactor_turn_timeout_sec = resolve_reactor_turn_timeout_sec()
 
-        # Persistence layer
-        self._open_persistence()
-
-        # Persistent session state (state.json) — load existing for resume.
+        # Persistent session state (state.json) — load existing for resume; its operator pins decide the database's mode.
         self.shared_state = SharedState.load_or_init(self.session_dir)
+        self._open_persistence()
         # Thread live SharedState into the runner so executors get it via ctx.extra.
         self.sub.shared_state = self.shared_state
         self._init_gpu_pools()
@@ -306,11 +305,11 @@ class Coordinator:
 
     def _open_persistence(self) -> None:
         """Open the session database and the bus, lease, task, cursor and sub-agent layers over it."""
-        db_path = db_path_for(self.session_dir)
+        db_path, file_mode = database_target(self.session_dir, self.shared_state)
         # The session directory can sit on a networked filesystem where WAL's
         # shared-memory mapping corrupts the database, so the mode is resolved
         # before the file is opened.
-        self.db = SqliteConnection(db_path)
+        self.db = SqliteConnection(db_path, file_mode=file_mode)
 
         self.bus = MessageBus(self.db)
         self.locks = SqliteLeaseBackend(self.db)

@@ -19,10 +19,12 @@ from hyperloom_common.shared_storage import (
     SHARED_FILE_MODE,
     Flush,
     make_shared_dirs,
+    open_shared_append,
     parent_is_shared,
     write_shared_bytes,
 )
 
+_UTF8 = "utf-8"
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
 
 
@@ -99,6 +101,9 @@ class WriteOptions:
     options ask for. Shared or not, no link is followed on the way below a directory other
     accounts can write (:func:`~hyperloom_common.shared_storage.write_shared_bytes`). Never
     use it for a file that holds a credential or that anything executes or sources.
+    ``share_parents`` makes the parents ``make_parents`` creates follow ``make_shared_dirs``
+    as well while the file keeps its own mode: a file only its owner may read still lives in
+    a directory the group can write.
     ``fsync`` and ``fsync_dir`` raise the
     ``OSError`` of a flush that fails: a caller that asks for durability learns
     when it did not get it.
@@ -111,10 +116,13 @@ class WriteOptions:
     preserve_mode: bool = False
     group_read: bool = False
     shared: bool = False
+    share_parents: bool = False
 
 
 #: A crash-safe replace: parents created, the data and the rename flushed to disk, an existing file's mode kept.
 DURABLE = WriteOptions(make_parents=True, fsync=True, fsync_dir=True, preserve_mode=True)
+#: A replace in a tree the accounts of one group write in turn: the file ``664``, the parents it creates ``2775``.
+SHARED = WriteOptions(make_parents=True, shared=True)
 
 
 @dataclass(frozen=True)
@@ -177,7 +185,9 @@ def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions =
             flush=Flush(file=options.fsync, directory=options.fsync_dir),
         )
         return
-    if options.make_parents:
+    if options.make_parents and options.share_parents:
+        make_shared_dirs(path.parent)
+    elif options.make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     tmp = Path(tmp_str)
@@ -198,7 +208,7 @@ def atomic_write_bytes(path: str | Path, data: bytes, *, options: WriteOptions =
 
 def atomic_write_text(path: str | Path, text: str, *, options: WriteOptions = WriteOptions()) -> None:
     """Atomically write ``text`` to ``path`` as UTF-8; see :func:`atomic_write_bytes`."""
-    atomic_write_bytes(path, text.encode("utf-8"), options=options)
+    atomic_write_bytes(path, text.encode(_UTF8), options=options)
 
 
 def atomic_write_json(
@@ -227,11 +237,23 @@ def append_jsonl(
     path = Path(path)
     if make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
-    line = _json.dumps(row, ensure_ascii=fmt.ensure_ascii, sort_keys=fmt.sort_keys)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(line + "\n")
-        if fsync:
-            _fsync_handle(fh)
+    with path.open("a", encoding=_UTF8) as fh:
+        _write_line(fh, row, fsync, fmt)
+
+
+def append_shared_jsonl(path: Path, row: Any, *, fsync: bool = False, fmt: JsonLineFormat = JsonLineFormat()) -> None:
+    """:func:`append_jsonl` to a file the accounts of one group append to in turn: below shared storage a new file is
+    ``664`` and the parents it creates ``2775``, whatever the umask, elsewhere as a plain append leaves them; the file is
+    reached as :func:`~hyperloom_common.shared_storage.open_shared_append` reaches it, never through a link a member of
+    the group could have put on the way."""
+    with os.fdopen(open_shared_append(Path(path), make_parents=True), "a", encoding=_UTF8) as fh:
+        _write_line(fh, row, fsync, fmt)
+
+
+def _write_line(fh: Any, row: Any, fsync: bool, fmt: JsonLineFormat) -> None:
+    fh.write(_json.dumps(row, ensure_ascii=fmt.ensure_ascii, sort_keys=fmt.sort_keys) + "\n")
+    if fsync:
+        _fsync_handle(fh)
 
 
 def safe_mtime(path: Path) -> float:
@@ -244,6 +266,7 @@ def safe_mtime(path: Path) -> float:
 
 __all__ = [
     "DURABLE",
+    "SHARED",
     "JsonFormat",
     "JsonLineFormat",
     "WriteOptions",
@@ -251,6 +274,7 @@ __all__ = [
     "atomic_write_text",
     "atomic_write_json",
     "append_jsonl",
+    "append_shared_jsonl",
     "fsync_directory",
     "fsync_tree",
     "fsync_tree_directories",
