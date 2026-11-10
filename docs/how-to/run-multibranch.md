@@ -68,7 +68,10 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
 - **Limits:** `--max-hours` (default 2, 0 for none), `--max-gpu-hours` and `--max-llm-usd` (0 for none),
   `--max-branches` (default 4). A negative or non-finite limit is a usage error.
 - **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2),
-  `--dev-leases`, `--judge-interval-sec` (default 600, must be positive), `--measurement local|hosted`.
+  `--dev-leases`, `--judge-interval-sec` (default 600, must be positive), `--measurement local|hosted`,
+  `--[no-]make-before-break` (hosted only, default on: where the grant fits at least three tests at TP, a finished
+  test's sandbox is kept until the next test's runs, so that the cluster does not give its node to another job, and one
+  test fewer runs at once; off runs every test the grant fits).
 - **Directions:** `--specialist-prompt FILE` and `--reference NAME=DIR`, each repeatable.
 - **Third-party agents:** `--autonomous-agent SOURCE` (repeatable; a URL carrying credentials is refused),
   `--agent-directions`, `--agent-dossier-minutes`, `--agent-share-minutes`, `--agent-pack`, `--agent-launch`,
