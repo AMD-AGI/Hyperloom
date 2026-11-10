@@ -32,11 +32,13 @@ from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_poi
 from hyperloom.common.outside_facts import ENV_EVAL_LIMIT, ENV_EVAL_TASKS, ENV_EVAL_TOKENIZED_REQUESTS
 from hyperloom.common.agentx_workload import is_agentx_client_key, pin_mlperf_round_concurrency
 from hyperloom.common.visible_devices import mask_tokens
+from hyperloom.common.session_files import shared_options
 from hyperloom_common.coerce import to_str_list
+from hyperloom_common.io import atomic_write_text
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom.common.agentx_objective import AgentXObjective
 from hyperloom.common.perf_metric import (
-    AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
     INTVTY_OBJECTIVES,
@@ -157,6 +159,9 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
 # decode-only 1/ITL family, not this end-to-end one.
 GEAK_METRIC_OUTPUT = ("output", "aggregate_output_tok_s")
 GEAK_METRIC_INTVTY = (GRADED_INTVTY_P50, GRADED_INTVTY_P50)
+# The guards GEAK's bench summary records beside the P50 objective, by Hyperloom metric. GEAK fails a guard it did not
+# record on every candidate, and it records no total token throughput guard yet, so that guard is left to the rebench.
+_GEAK_GUARD_BASES = {GRADED_INTVTY: GRADED_INTVTY}
 
 
 def geak_metric_axis(
@@ -168,12 +173,10 @@ def geak_metric_axis(
 
     GEAK accepts on the single axis it is handed, so that axis has to be the
     objective. An interactivity-graded session keeps a candidate only on a gain
-    in the median ``e2e_norm_intvty_p50``, with the p90 tail and output
-    throughput as noise-band guards; searching either guard selects wins the
-    rebench reverts and passes over median wins. Total token throughput is in
-    neither: on a trace replay under a ~97% prefix cache it is ~99% input tokens
-    that were never computed, so a kernel win cannot surface on it. Every other
-    session is graded on output.
+    in the median ``e2e_norm_intvty_p50``, with the p90 tail and total token
+    throughput as noise-band guards (``hyperloom.common.agentx_objective``);
+    searching a guard selects wins the rebench reverts and passes over median
+    wins. Every other session is graded on output.
 
     A GEAK build that cannot measure ``e2e_norm_intvty_p50`` refuses it, or, predating
     that check, falls back to output and records that in ``metric_basis``;
@@ -205,26 +208,22 @@ def geak_metric_axis(
 def geak_acceptance(metric_basis: str, noise_pct: float) -> dict[str, Any] | None:
     """Hyperloom's KEEP rule on the axis it hands GEAK, so GEAK's verdict applies the same bar.
 
-    The rebench of a GEAK candidate keeps an interactivity-graded one only on a median gain of
-    at least ``AGENTX_KEEP_P50_THRESHOLD_PCT`` with the p90 tail and output throughput each
-    inside the noise band. Without the rule GEAK reports any gain past its own noise band as a
-    win, and the rebench reverts each one short of the threshold. Guards are named by GEAK
-    basis, like the objective; GEAK records the p90 tail under the curve-row name.
+    The rebench keeps an interactivity-graded GEAK candidate only on the P50 objective's bar with its guards inside
+    the noise band; without the rule GEAK reports any gain past its own band as a win the rebench then reverts.
+    Guards are named by GEAK basis, like the objective, and only those GEAK records are handed over.
 
     Args:
         metric_basis: The ``metric_basis`` handed to GEAK (see :func:`geak_metric_axis`).
-        noise_pct: The session's noise band, the one its own verdict holds both guards to.
+        noise_pct: The session's noise band, the one its own verdict holds the guards to.
 
     Returns:
         The rule, or ``None`` for any other axis, which leaves GEAK's verdict as it was.
     """
     if metric_basis != GEAK_METRIC_INTVTY[1]:
         return None
-    return {
-        "objective": metric_basis,
-        "min_gain_pct": AGENTX_KEEP_P50_THRESHOLD_PCT,
-        "guard_max_drop_pct": {GRADED_INTVTY: noise_pct, GEAK_METRIC_OUTPUT[1]: noise_pct},
-    }
+    objective = AgentXObjective.P50_INTERACTIVITY
+    guards = {_GEAK_GUARD_BASES[g.metric]: noise_pct for g in objective.guards if g.metric in _GEAK_GUARD_BASES}
+    return {"objective": metric_basis, "min_gain_pct": objective.bar_pct, "guard_max_drop_pct": guards}
 
 
 def build_agentx_workload_spec(
@@ -1453,10 +1452,8 @@ def materialize_config_with_envs(
         prepend_launch_path(envs, "PYTHONPATH", str(window.patched_copy))
     _drop_benchmark_credentials(envs)
     seal_server_argv(envs, bench.get("framework"))
-    output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / options.out_name
-    with materialized.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
+    atomic_write_text(materialized, yaml.safe_dump(cfg, sort_keys=False), options=shared_options(cfg))
     return materialized
 
 

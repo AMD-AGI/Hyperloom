@@ -210,7 +210,8 @@ _TEST_RESULT_GUIDE = (
     "of all n prompts that passed (tasks and prompts give the per-task and per-prompt outcomes); status incomplete, "
     "with a reason, means a prompt errored or never ran (for example a launch that serves too little context) and is "
     "never a pass and never blocks. root is the session root's reading (its tests' complete checks pooled, with the "
-    "score's 95% interval ci_low..ci_high); the rule gate refuses a drop of more than 3 of 64 items under ci_low. The "
+    "score's 95% interval ci_low..ci_high); the rule gate refuses a drop under ci_low of more than the check's sampling noise, "
+    "0.5 + 0.3125 * sqrt(n) items (3 of 64, 1.75 of 16). The "
     "scores are findings, not a verdict."
 )
 _KERNEL_TUNE_PARAMS_NOTE = (
@@ -614,9 +615,12 @@ class _Feed:
     end: str
 
     def after(self, count: int) -> str:
-        """The cursor that resumes after the first ``count`` of the items."""
+        """The cursor that resumes after the first ``count`` of the items. A page cursor names the last item returned
+        before it, so where none was (no item of this feed and none of an earlier page) it is the base cursor itself."""
         if count >= len(self.items):
             return self.end
+        if not count and not self.skipped:
+            return self.base
         anchor = _fingerprint(self.items[count - 1]) if count else self.anchor
         return f"{_PAGE_CURSOR}{self.skipped + count}:{anchor}:{self.base}"
 

@@ -7,12 +7,14 @@ The campaign spec maps onto the options of ``run`` (:func:`run_argv`), so a host
 of :class:`~hyperloom_multibranch.scheduling.settings.RunSettings` a command-line session is. Besides the common part
 the legacy entry validated, a multi-branch session needs ``multibranch.workload`` (``--workload``),
 ``workload.conc`` and ``workload.precision``; ``multibranch.inferencex_commit`` is ``--inferencex-commit``,
-``multibranch.max_branches`` ``--max-branches``,
+``multibranch.reference_script`` ``--reference-script``, ``multibranch.max_branches`` ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
 ``--no-make-before-break``, ``placement.measurement`` is ``--measurement``, and ``placement.max_parallel_tests`` is
 ``--max-parallel-tests``, at most what runs at once where the session measures. The fields ``run`` has no option for --
-``objective``, ``launch``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read.
+``objective``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read. A spec that
+sets ``launch.server_args`` or ``launch.extra_env`` is refused rather than run without them: a multi-branch session's
+base launch, its flags and its environment, is the shell script ``multibranch.reference_script`` names.
 
 With ``placement.measurement`` ``hosted`` (the default), every test, PRELUDE's included, runs in a measurement sandbox
 of the grant, so the application's container needs no card: ``hosted-cpu`` serves as ``hosted-gpu`` does. Dev
@@ -37,7 +39,8 @@ they run unconfined measures no spec ``local``.
 The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the run again: never once it holds
 ``final: true`` (:func:`write_final_exit`), and again when it is missing. ``session.json`` there names the session
 directory as soon as it exists (:func:`record_session`), so a start that finds it finishes that session instead of
-starting another. The two file names and their fields are the legacy entry's, ``hyperloom.hosted.entry``, which this
+starting another, once that session got through PRELUDE; one that ended before its baseline was recorded is closed,
+which ends the measurement sandboxes it left, and the spec's session starts again. The two file names and their fields are the legacy entry's, ``hyperloom.hosted.entry``, which this
 package does not import: importing it loads the legacy flow's state.
 """
 
@@ -49,6 +52,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from collections.abc import Callable, Mapping
@@ -65,11 +69,16 @@ from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR
-from hyperloom_multibranch.scheduling.launch_isolation import launch_isolation
+from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, launch_isolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, persisted_session, prelude_landed
+from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
+from hyperloom_multibranch.scheduling.resumption import ResumeRefused, require_resumable
 from hyperloom_multibranch.scheduling.settings import RunSettings
+from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
+from hyperloom_multibranch.toolbox.resume_guard import BaselineNotReusable, check_hosted_baseline_reusable
 
 # hyperloom/hosted/entry.py EXIT_FILE and SESSION_FILE
 EXIT_FILE = "exit.json"
@@ -136,10 +145,12 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
     tests at once; every value is written ``--option=value`` so that one starting with ``-`` is no option.
 
     Raises:
-        HostedRefused: When the spec lacks what a multi-branch session needs, naming each missing field.
+        HostedRefused: When the spec lacks what a multi-branch session needs, naming each missing field, or sets a
+            field the session would not read.
     """
 
     section = _multibranch_section(spec.multibranch)
+    _refuse_launch_fields(spec)
     values: dict[str, Any] = {
         "model": spec.model_path,
         "framework": spec.framework_name,
@@ -158,6 +169,7 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "osl": spec.osl,
         "ep": spec.ep,
         "inferencex-commit": _inferencex_commit(section.get("inferencex_commit")),
+        "reference-script": _reference_script(section.get("reference_script")),
         "max-hours": max_hours,
         "max-gpu-hours": spec.max_gpu_hours,
         "max-llm-usd": spec.max_llm_usd,
@@ -203,6 +215,26 @@ def _inferencex_commit(commit: object) -> str | None:
     if commit is not None and not isinstance(commit, str):
         raise HostedRefused("multibranch.inferencex_commit must be a string")
     return commit
+
+
+def _reference_script(path: object) -> str | None:
+    if path is not None and (not isinstance(path, str) or not path.strip()):
+        raise HostedRefused("multibranch.reference_script must be the path of a launch script")
+    return path
+
+
+def _refuse_launch_fields(spec: CampaignSpec) -> None:
+    given = [
+        field
+        for field, value in (("launch.server_args", spec.server_args), ("launch.extra_env", spec.extra_env))
+        if value is not None
+    ]
+    if given:
+        raise HostedRefused(
+            f"a multibranch run does not read {' or '.join(given)}: give the base launch as"
+            " multibranch.reference_script, a shell launch script whose 'export NAME=value' lines set its environment"
+            " and whose server command carries its flags"
+        )
 
 
 def _agent_sources(sources: object) -> list[str]:
@@ -431,6 +463,135 @@ def recorded_session(state_dir: Path) -> Path | None:
     return Path(json.loads(text)["session_dir"])
 
 
+@dataclass(frozen=True)
+class EarlierSession:
+    """The session an earlier start of the run began: ``finish``, which a restart finishes, when it got through
+    PRELUDE; ``left``, which a restart closes before it starts the spec's session again, when it committed its root
+    and ended before its baseline was recorded without closing, or was closed by such a restart; ``closed``, the
+    directory of one that closed on its own before its baseline was recorded, which ended the run; none of them when
+    there was none or it committed no root, and so started no test."""
+
+    finish: PersistedRun | None = None
+    left: PersistedRun | None = None
+    closed: Path | None = None
+
+
+def earlier_session(state_dir: Path) -> EarlierSession:
+    """The session ``session.json`` names, read back; raises what :func:`recorded_session` and
+    :func:`~hyperloom_multibranch.scheduling.lifecycle.persisted_run` raise. Blocks.
+
+    The host starts a run again only once its earlier start has ended, so a ``final-only`` lock that start left in the
+    session is that start's, whose pid names a process of a machine that is gone: it is removed, or the finish would be
+    refused for good. A session that is closed and started again holds no measurement this build has to read back, so
+    it may have run on another build: a restart onto a new build is how a fix reaches a run that is failing."""
+
+    previous = recorded_session(state_dir)
+    if previous is None or not SessionLayout(previous).root_recipe.is_file():
+        return EarlierSession()
+    lock = SessionLayout(previous).final_only_lock
+    if lock.is_file():
+        log.warning("removing %s, which the earlier start of this run left", lock)
+        lock.unlink(missing_ok=True)
+    if prelude_landed(previous):
+        return EarlierSession(finish=persisted_run(previous))
+    reported = reported_stop_reason(previous)
+    if reported not in (None, SessionStopReason.KILLED.value):
+        return EarlierSession(closed=previous)
+    return EarlierSession(left=persisted_session(previous))
+
+
+def hosted_resume_deadline(persisted: PersistedRun, now: float) -> float:
+    """The deadline a restart of the run resumes ``persisted`` up to, the ``finish`` of :func:`earlier_session`, with
+    ``cli.resume``: the one the run's first start set, so the session's budget counts from that start for
+    ``--max-hours`` as it does for ``--max-gpu-hours``, whose spend the session reads from its blackboard, and the time
+    it was down is not given back. That the earlier start is gone is the host's to know -- it starts a run again only
+    once its earlier start ended -- not the pids that start recorded in another container. Blocks.
+
+    Raises:
+        ResumeRefused: When :func:`~hyperloom_multibranch.scheduling.resumption.require_resumable` does, or ``now`` is
+            past that deadline; the restart finishes the session instead.
+    """
+
+    require_resumable(persisted)
+    deadline = read_manifest(persisted.layout.manifest).deadline
+    if now >= deadline:
+        raise ResumeRefused(
+            f"the session in {persisted.layout.root} used its budget, which ended {now - deadline:.0f} s ago"
+        )
+    return deadline
+
+
+def hosted_restart_leg(
+    persisted: PersistedRun, finish: Callable[..., int], resume: Callable[..., int]
+) -> Callable[..., int]:
+    """What a restart of the run runs over ``persisted``, the ``finish`` of :func:`earlier_session`: ``resume``
+    (``cli.resume``) with ``deadline`` bound to :func:`hosted_resume_deadline`'s, so its budget counts from the run's
+    first start, when the session was measured in the grant's sandboxes and its baseline still measures what a test
+    measured now would (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same
+    build, ``MEASUREMENT_EPOCH``, image, base launch and runner template cards; not the node or the account, which a
+    reschedule changes by design); else ``finish`` (``cli.final_only``), and one warning names why. Writes nothing.
+    Blocks."""
+
+    root = persisted.layout.root
+    isolation = read_manifest(persisted.layout.manifest).agent_isolation
+    if isolation is None or isolation.tests != HOSTED:
+        log.warning("hosted run: finishing %s, whose tests did not run in the grant's sandboxes", root)
+        return finish
+    try:
+        check_hosted_baseline_reusable(persisted.layout.toolbox, persisted.settings.workload.tp)
+        deadline = hosted_resume_deadline(persisted, time.time())
+    except (BaselineNotReusable, ResumeRefused) as exc:
+        log.warning("hosted run: finishing %s instead of resuming it: %s", root, exc)
+        return finish
+    log.info("hosted run: resuming %s up to the deadline its first start set", root)
+    return partial(resume, deadline=deadline)
+
+
+#: What reading back an earlier session fails with when this account cannot read what it left: a file an earlier leg of
+#: another account of the group made owner-only, or one that is not the text it wrote.
+CANNOT_READ_SESSION = (PermissionError, UnicodeDecodeError, json.JSONDecodeError)
+
+
+def close_before_starting_again(close: Callable[[], int], left: PersistedRun) -> int | None:
+    """Close ``left``, which ended before PRELUDE recorded its baseline, with ``close`` (which ends the sandboxes of the
+    tests it left) before the run starts the spec's session again: the exit code the run ends with when a stop during
+    the close ended it, else ``None``. A close that cannot read ``left`` (:data:`CANNOT_READ_SESSION`, and for a file
+    the OS refuses, one inside ``left``'s directory) leaves it as it is, one warning names the file and why, and
+    ``None`` says the run goes on with a new session in a directory of its own, as that session measured nothing a
+    restart carries on from. A file outside that directory the OS refuses is not the earlier session's to skip: it
+    raises, and ends the run as before."""
+
+    root = left.layout.root
+    log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", root)
+    try:
+        closed = close()
+    except CANNOT_READ_SESSION as exc:
+        if not _names_a_file_of(root, exc):
+            raise
+        log.warning("cannot read %s to close it, so it is left as it is and a new session starts: %s", root, _why(exc))
+        return None
+    return None if reported_stop_reason(root) == left.ended.value else closed
+
+
+def _names_a_file_of(root: Path, exc: BaseException) -> bool:
+    """Whether ``exc`` is about what the session in ``root`` left: a refused file inside ``root``, or text that is not
+    what was written (which names no file)."""
+
+    if not isinstance(exc, OSError):
+        return True
+    return exc.filename is not None and Path(os.path.abspath(os.fsdecode(exc.filename))).is_relative_to(
+        os.path.abspath(root)
+    )
+
+
+def _why(exc: BaseException) -> str:
+    """The file an error names, with its owner and mode, and the reason; else the error."""
+
+    if isinstance(exc, OSError) and exc.filename:
+        return f"{exc.filename}{ownership(Path(exc.filename))}: {exc.strerror}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 def reported_stop_reason(root: Path) -> str | None:
     """The stop reason the CLOSE of the session in ``root`` reported, ``None`` when it wrote no report."""
 
@@ -442,18 +603,24 @@ def reported_stop_reason(root: Path) -> str | None:
 
 
 __all__ = [
+    "CANNOT_READ_SESSION",
     "EXIT_FILE",
     "GRANT_MARGIN_SECONDS",
     "HOST_LAYER_ENV",
     "LAYER_BWRAP",
     "SESSION_FILE",
+    "EarlierSession",
     "GrantDeadline",
     "HostedExit",
     "HostedRefused",
     "arm_grant_stop",
     "campaign_spec",
+    "close_before_starting_again",
+    "earlier_session",
     "grant_deadline",
     "grant_tests_that_fit",
+    "hosted_restart_leg",
+    "hosted_resume_deadline",
     "hosted_storage",
     "layer_bwrap",
     "record_session",

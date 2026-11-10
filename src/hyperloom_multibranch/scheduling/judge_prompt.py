@@ -55,8 +55,8 @@ behind is no reason to stop it, as the commits it goes on making are what the in
     grace=f"{SETTLED_TESTS} of its explore tests",
     envelope="",
     default_focus="""\
-the largest op of the integration head's latest profile, or on none when that head was never
-profiled""",
+the largest ops of the integration head's latest profile in turn, the largest first, wrapping when more branches open
+than it has ops, or on none when that head was never profiled""",
     free_slot="Leaving a free slot unopened needs a reason; opening into it does not.",
     out_of_ideas="a branch out of ideas is one to stop and replace, so refill the free slots rather than stop the session",
 )
@@ -93,8 +93,8 @@ known""",
     free_slot="""\
 When the open areas list no op, leave a free slot free: give its tests to the running branches by raising their K
 where the caps allow, or to the pending forks and repairs; the scheduler then opens only the branches you name a focus
-for. Reopen an op a stopped branch was opened on only for an angle its history has not tried, and say in your
-reasoning which.""",
+for. Reopen an op a stopped branch was opened on only for an angle its history has not tried, or, for one spent by a
+give-up, when its 'worth again if' holds, and say in your reasoning which.""",
     out_of_ideas="""\
 a branch out of ideas is one to stop, its slot refilled while an open area is left, rather than stop
 the session""",
@@ -115,7 +115,8 @@ branch is briefed on {{default_focus}}. The opening batch is given no focus. A s
 was opened on, empty for none; a stopped branch keeps it, so its stopped line says how a branch on that op ended.
 free_branch_slots counts the branches you may open at this call having stopped nothing; a stop frees one more for the
 same answer, and branches beyond the slots left are not opened. {{free_slot}}
-pending lists the forks and repairs the rule gate asked for that wait for a slot, oldest first, with how long each has
+pending lists the shares a mapping branch asked for and the forks and repairs the rule gate asked for, that wait for a
+slot: shares first, then forks and repairs oldest first, with how long each has
 waited: a slot your stops free goes to them first and only the slots left open your branches. You do not admit them; stop a branch that is worth less than a pending one to let it
 start.
 {{spend}}
@@ -142,7 +143,7 @@ stays stranded the integration branch, and every branch you open from it, goes o
 before stopping such a branch, whose head holds the gain the integration head lacks.
 bottleneck_moved: the profile of the integration head taken after it moved found its largest op changed, or that op's
 share fell by more than {MB_BOTTLENECK_SHIFT_PP} percentage points: branches still speeding up the previous largest op
-have less to gain, and a branch you open now is briefed on the new profile unless you name its focus.
+have less to gain, and a branch you open now without a focus is briefed from the new profile as above.
 The integration branch's profile_running is true while that profile runs: its PROFILE test holds one of the
 integration branch's K slots, so merge tests wait for it while that K is 1; size the integration branch's K with it.
 environment_changed: the toolbox quarantined a measurement node after an infrastructure failure (gpu_ids is empty for
@@ -194,7 +195,9 @@ confirm is judged. A branch whose specialist gave up, and one stopped for a fail
 nor its repair period; a repair branch runs at most {REPAIR_BRANCH_SECONDS / 3600:g} hours whatever you decide.
 unsteered: a branch whose steered is false, which runs a third-party agent the user named, by the agent's own logic, one
 test at a time: no stop or K you give it is applied, unless its judging failed: stop it then, as any branch whose
-judging failed. Otherwise weigh the slot it holds as given.{{envelope}}
+judging failed. Otherwise weigh the slot it holds as given.
+dev_wait: a branch whose specialist waits in line for a dev sandbox, while it waits: you may lower its K, not stop it,
+since its tests judged meanwhile count toward its stall.{{envelope}}
 A branch's pending_candidates are its measured candidates that beat its head by at least the bar while their confirm
 runs, each with its gain_over_head_pct.
 A branch's queued_intents are its explore tests requested and not measured yet, queued or running, each with the

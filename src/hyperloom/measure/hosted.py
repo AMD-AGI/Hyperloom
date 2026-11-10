@@ -42,6 +42,7 @@ from hyperloom.measure.bundle import (
 )
 from hyperloom.measure.failures import (
     RUNNER_EXITED,
+    RUNNER_START_TIMEOUT,
     SANDBOX_ACQUIRE_TIMEOUT,
     Disposition,
     FailureClassification,
@@ -528,7 +529,7 @@ class HostedMeasurementBackend:
         except AcquireTimedOut as exc:  # before SandboxUnavailable, its base: no sandbox was made, so the line is safe
             return self._create_failed(call, number, SANDBOX_ACQUIRE_TIMEOUT, str(exc))
         except SandboxUnavailable as exc:
-            return _infra(call, HOSTED_RUNNER_UNAVAILABLE_RC, "runner_start_timeout", str(exc))
+            return _infra(call, HOSTED_RUNNER_UNAVAILABLE_RC, RUNNER_START_TIMEOUT, str(exc))
         except SandboxGone as exc:
             return self._create_failed(call, number, RUNNER_LOST, f"the sandbox ended during creation: {exc}")
         except SandboxCreateFailed as exc:

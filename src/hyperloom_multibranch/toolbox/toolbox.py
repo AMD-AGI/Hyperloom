@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -22,6 +22,7 @@ from typing import Any, Literal
 from hyperloom.contracts.measurement import (
     AttachmentRef,
     FailureClass,
+    Purpose,
     TestKind,
     TestRequest,
     TestResult,
@@ -61,7 +62,14 @@ from hyperloom_multibranch.toolbox.analysis import (
 )
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, check_kind
 from hyperloom_multibranch.toolbox.attachments import store_attachment
-from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
+from hyperloom_multibranch.toolbox.attempts import (
+    DEFAULT_MAX_INFRA_RETRIES,
+    INFRA_BACKOFF_SECONDS,
+    AttemptRunner,
+    Executor,
+    InfraBackoff,
+    TestJob,
+)
 from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
 from hyperloom_multibranch.toolbox.pending_builds import (
     BuildDriver,
@@ -76,6 +84,7 @@ from hyperloom_multibranch.toolbox.quarantine import Quarantine
 from hyperloom_multibranch.toolbox.long_context import with_root_reading
 from hyperloom_multibranch.toolbox.short_prompt_pool import ShortPromptPool, pooled_result
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
+from hyperloom_multibranch.toolbox.resume_guard import MeasuredOn
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
 from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest
 from hyperloom_multibranch.toolbox.tools.op_shares import PROFILE_REQUEST_PARAM
@@ -120,14 +129,17 @@ class ToolboxStores:
 
 @dataclass(frozen=True)
 class ToolboxTuning:
-    """The queue policy, the infrastructure retries (of tests and of native builds), the claim lifetime and the clock;
-    the defaults are the real ones."""
+    """The queue policy, the infrastructure retries (of tests and of native builds) and the waits before a test's
+    (``infra_backoff_seconds``, :class:`~.attempts.InfraBackoff`), the claim lifetime, the clock and the sleep; the
+    defaults are the real ones."""
 
     policy: QueuePolicy | None = None
     max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
     claim_ttl_seconds: float = CLAIM_TTL_SECONDS
     clock: Callable[[], float] = time.time
     build_retry_seconds: float = BUILD_RETRY_SECONDS
+    infra_backoff_seconds: tuple[float, ...] = INFRA_BACKOFF_SECONDS
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
 
 class RealToolbox:
@@ -140,6 +152,9 @@ class RealToolbox:
     trace_root: Path | None = None
     #: The session's blob store (``put``/``get``) that ``put_attachment`` writes to; ``None``: attachments unsupported.
     blobs: Any = None
+    #: Where the tests run, recorded when the first baseline test is accepted so a resume can tell whether the baseline
+    #: still holds (:mod:`~hyperloom_multibranch.toolbox.resume_guard`); ``None``: nothing is recorded.
+    measured_on: MeasuredOn | None = None
 
     def __init__(
         self,
@@ -166,6 +181,9 @@ class RealToolbox:
             avoid=lambda: self._quarantine.nodes,
             on_node_failure=self._node_failed,
             max_infra_retries=tuning.max_infra_retries,
+            backoff=InfraBackoff(
+                tuning.infra_backoff_seconds, self._latest_retry_start, clock=tuning.clock, sleep=tuning.sleep
+            ),
         )
         self._ttl, self._clock = tuning.claim_ttl_seconds, tuning.clock
         self._tools, self._repo, self._kinds = tools, acceptance.repo, acceptance.supported_kinds
@@ -231,6 +249,8 @@ class RealToolbox:
             needs = self._builds.plan(request, prepared.environment)
             if needs:
                 self._check_build_deadline(request, needs)
+            if request.purpose is Purpose.BASELINE:
+                await self._record_measured_on()
             priority = self._queue.policy.priority_of(request)
             sequence = self._log.next_sequence(request.branch_id)
             accepted = request.accepted(self._log.request_id(request.branch_id, sequence))
@@ -248,6 +268,25 @@ class RealToolbox:
             self._enqueue(entry, accepted, prepared.environment, needs)
         self._pump()
         return entry.request_id
+
+    async def _record_measured_on(self) -> None:
+        """Record what the session's baseline is measured on, once, before its first test is accepted. A record that
+        cannot be written is said at WARNING and the test goes on: a resume then finds no record and refuses."""
+
+        if self.measured_on is None:
+            return
+        try:
+            await asyncio.to_thread(self.measured_on.record)
+        except (OSError, ValueError, RuntimeError) as exc:
+            logger.warning("what the baseline is measured on cannot be recorded, so a resume will refuse: %s", exc)
+
+    def _latest_retry_start(self, request: TestRequest) -> float | None:
+        """When an infrastructure retry of ``request`` must start at the latest: a typical test of its kind before its
+        branch's exploration ends; ``None`` for a branch with no deadline."""
+        deadline = self._queue.policy.branch_deadline.get(request.branch_id, 0.0)
+        if not deadline:
+            return None
+        return deadline - median_test_seconds(self._log.entries(), request.kind)
 
     def _check_build_deadline(self, request: TestRequest, needs: tuple[BuildNeed, ...]) -> None:
         deadline = self._queue.policy.branch_deadline.get(request.branch_id, 0.0)

@@ -38,7 +38,7 @@ from hyperloom_multibranch.specialist.dev_sandbox import (
 )
 from hyperloom_multibranch.specialist.framework_guard import FrameworkGuard, GuardedPackage
 from hyperloom_multibranch.specialist.judging import NOTICE
-from hyperloom_multibranch.specialist.prompts import role_prompt
+from hyperloom_multibranch.specialist.prompts import RoleWorkload, role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
 from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.worktree import SourceBase
@@ -49,7 +49,7 @@ from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
 B1, B2 = "s1", "s2"
 MINUTE = 60.0
 LIMITS = DevLimits(read_poll_s=0.01)
-WORKLOAD = "qwen3-8b on sglang, TP 1, ISL 1024, OSL 1024, concurrency 64"
+WORKLOAD = RoleWorkload("qwen3-8b on sglang, TP 1, ISL 1024, OSL 1024, concurrency 64")
 
 
 class _Clock:
@@ -267,6 +267,19 @@ async def test_a_stopped_branch_leaves_the_line(rig):
     assert "1st in line" in await _refused(built.server.call("dev_sandbox_lease", branch=B3), "cap_reached")
     await built.server.call("dev_sandbox_release")
     await built.server.call("dev_sandbox_lease", branch=B3)
+
+
+async def test_the_branches_waiting_are_those_in_line_until_granted_or_stopped(rig):
+    built = rig.build(cap=1)
+    await built.server.call("dev_sandbox_lease")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B3), "cap_reached")
+    assert built.leases.waiting() == {B2, B3}
+    await built.leases.reclaim(B3, "its branch stopped")
+    await built.server.call("dev_sandbox_release")
+    assert built.leases.waiting() == {B2}
+    await built.server.call("dev_sandbox_lease", branch=B2)
+    assert built.leases.waiting() == frozenset()
 
 
 async def test_a_branch_the_toolbox_has_no_cards_for_is_put_in_line(rig):
@@ -946,7 +959,7 @@ async def session_rig(tmp_path):
         env={},
         runner=_CrashingRunner(),
         tokens=_Tokens(),
-        processes=SimpleNamespace(adopt=lambda *args, **kwargs: None),
+        processes=SimpleNamespace(adopt=lambda *args, **kwargs: None, forget=lambda pid: None),
         repo=built.repo,
         dev_leases=held,
     )

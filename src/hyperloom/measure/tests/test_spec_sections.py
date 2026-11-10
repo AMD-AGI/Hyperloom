@@ -12,6 +12,8 @@ from dataclasses import replace
 import pytest
 import yaml
 
+from hyperloom.common.agentx_early_stop import EarlyStopMode
+from hyperloom.measure.checkpoint import CheckpointPlan
 from hyperloom.measure.hosted_spec import SpecRefused, build_spec
 from hyperloom.measure.socket import SessionFacts
 from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
@@ -136,6 +138,13 @@ def test_a_sheet_carries_the_silence_timeout_and_the_deadline_it_was_given(tmp_p
     procedure = _procedure(tmp_path, silence_timeout_sec=30)
 
     assert (procedure.timeout_sec, procedure.silence_timeout_sec, procedure.deadline_unix) == (90.0, 30.0, 1234.0)
+
+
+def test_the_sheet_holds_the_measured_round_to_the_checkpoint_it_was_given_and_to_none_otherwise(tmp_path):
+    plan = CheckpointPlan(50.0, EarlyStopMode.ENFORCE)
+
+    assert _procedure(tmp_path, checkpoint=plan).checkpoint == plan
+    assert _procedure(tmp_path).checkpoint is None
 
 
 def _build(tmp_path, point):

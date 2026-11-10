@@ -7,9 +7,9 @@ multi-branch (MB) runs as a component when a session is given `--autonomous-agen
 | | |
 | --- | --- |
 | Source | `AMD-AGI/Arbor` (internal) |
-| Tag | `v0.9.3` |
-| Commit | `e3a4bd1` |
-| Files | 338 |
+| Tag | `v0.9.6` |
+| Commit | `1c6eef1` |
+| Files | 347 |
 | Licence | Apache-2.0, [`LICENSE`](LICENSE) (`REUSE.toml` at the repository root says so per file) |
 
 ## What it holds
@@ -26,13 +26,17 @@ The engine and what its agents read:
 - `packs/serving` (the template MB names by default), `packs/agentx`, `packs/_shared`, `packs/parallel-dossier` and
   the `evolve-asm` packs;
 - `docs/`, the operator and host documentation; `evals/`, the session tracer the skills' hooks call; `scripts/pack/`;
-  `configs/serving-template.json`.
+  `configs/serving-template.json`;
+- from `v0.9.5`, `docs/cli.md` (every command's parameters) and `docs/schema/arbor-cli-payload.schema.json` (the JSON
+  Schema of a command's `--payload`), both generated from the commands' parsers by `python3 -m arbor schema --write`.
+  The copy's parsers give the same two files, so the scrub changes no parameter's help text.
 
 ## What was left out or changed
 
 - **Left out:** Arbor's tests (they run upstream at the tag), its campaign results, its workload-specific packs,
   configs and dossiers, and its cluster launchers. Code or documents that name one of them keep the name; the file is
   not here.
+  - **Arbor's own term guard** (`arbor/oss_guard.py`, which only its tests run) is left out with the tests.
   - **Skills for developing Arbor** (`.claude/skills/arbor-dev`, the `develop` mode) are left out: a campaign never
     loads them, and this copy is not edited here. The two skill docs say so where they would describe them.
   - **Knowledge search** (`arbor/knowledge/` and its `knowledge` skill family) is left out: its registry names a source
@@ -68,26 +72,26 @@ The engine and what its agents read:
 - **Replaced by placeholders:** the names of internal clusters, hosts, paths, accounts, people, personal GitHub
   accounts and repositories, and of workloads or chips that are not public.
   - **The placeholders:** `Cluster A`, `Cluster B`, `<node>`, `<login node>`, `<partition>`, `<account>`, `/data/...`,
-    `/shared/...`, `/path/to/arbor-share` (the collectors' share), `<fork>`, `<colleague>`, `Model M`, `Model W` and
-    the like.
-  - **Renamed identifiers:** an identifier that carried such a name was renamed the same way everywhere in this copy
-    (for example `CAMPAIGN_CONFIG` for a launcher variable), so the copy is consistent with itself.
+    `/shared/...`, `<fork>`, `<colleague>`, `Model M`, `Model W` and the like.
+  - **Renamed identifiers:** an identifier that carried such a name was renamed the same way everywhere in this copy,
+    so the copy is consistent with itself.
   - **GitHub owners:** a GitHub owner is named only when it is an organisation; the vendoring tool refuses a copy that
     names any other.
-- **No internal tools:**
-  - **An internal profiler** that the AgentX pack ran is gone with its validator. Where Arbor's text named it, this copy
-    says "profile" and names the `profiler` skill.
-  - **Its environment variables** in `arbor/profiling/vllm_driver.py` are `ARBOR_PROFILE_*` here.
-  - **An internal scheduler's job-id variable** is not read.
-- **Our packs, launchers and campaign ids are not named:**
+- **No internal tools:** an internal scheduler's job-id variable is not read.
+- **Our packs and campaign ids are not named:**
   - **The pack-drafting skill** lists only the parents this copy carries.
-  - **The parallel mode's launcher defaults** are generic: `scripts/parallel/lane.sbatch` and
-    `scripts/parallel/ab.sbatch`.
   - **The collector's project examples** are model names.
+- **Gone from Arbor's own tree since `v0.9.4`,** so no longer changed here:
+  - **The internal profiler:** the AgentX pack profiles with rocprofv3, and `arbor/profiling/vllm_driver.py` reads
+    `ARBOR_PROFILE_*`.
+  - **Site values in the engine:** the parallel mode has no launcher defaults (a run config names `cluster.lane_script`
+    and `cluster.ab_script`, which take `CAMPAIGN_CONFIG` and `CAMPAIGN_ARBOR`), and the collectors have no share root
+    (a site sets `ARBOR_SHARE_ROOT`). Both are a site's settings (below).
+  - **The permission bypass** in the project settings (below).
 - **Defects by their class:** two AMD software defects that Arbor's text tells as found in its runs are described by
   their kind only.
-- **The project settings ship without the permission bypass** (`.claude/settings.json`). MB starts its agents with its
-  own permission mode. The `evolve-asm` orchestrators still pass one to the agent SDK, since they run their agents
+- **The project settings have no permission bypass** (`.claude/settings.json`; Arbor's own since `v0.9.4`). MB starts
+  its agents with its own permission mode. The `evolve-asm` orchestrators still pass one to the agent SDK, since they run their agents
   unattended; MB does not run them.
 - **No internal references:** Arbor's code and docs cite the board topic, comment or ticket where a decision was made.
   This copy keeps the decision and drops the citation.
@@ -142,6 +146,16 @@ names this tree.
 Its `install.sh` pins TraceLens for a standalone Arbor. Under MB, Arbor uses the TraceLens this repository's own
 install pins.
 
+**A site's settings** (from `v0.9.4`): when it is imported, Arbor reads `~/.arbor/settings.env`, or the file
+`ARBOR_SETTINGS` names, and sets each `ARBOR_*` value there that the environment does not set already; other keys are
+ignored. A site's own collector projects go in the file `ARBOR_PROJECTS` names. A machine without the file runs as
+before. Under MB, no user's file is read:
+- **Every Arbor command MB runs** has `ARBOR_SETTINGS=/dev/null` (`specialist/arbor_adapter.py`): the sessions, through
+  `ARBOR_PYTHON`, and the directions commands (`generate`, `split`), through `_directions`. So a local, unconfined run
+  does not pick up the running user's values (a roll, a review gate, an agent backend). An empty value would not turn
+  the file off.
+- **Hosted,** each branch also has its own home, and its confined environment carries no `ARBOR_*` value.
+
 ## How it is updated
 
 Never edit it here: a change is made in Arbor and the copy is taken again, whole, from a new tag, by the Arbor
@@ -153,8 +167,10 @@ refuses a tag the patch no longer fits, so a re-vendor keeps it.
 - **Up to `v0.9.2`, the patch removed:** internal board, job and plan references, operator decision logs, measured
   performance figures and the history of internal runs.
 - **From `v0.9.3`, Arbor's own tree carries that cleanup.** The patch carries what this repository's public-repository
-  rule needs beyond it: part 9, the internal profiler and scheduler, our packs' names, the two defects, the settings,
-  and the remaining stories and figures of internal runs.
+  rule needs beyond it: part 9, the internal scheduler, our packs' names, the two defects, and the remaining stories
+  and figures of internal runs.
+- **From `v0.9.4`,** the internal profiler, the site values and the permission bypass are gone from Arbor's own tree
+  too, and the patch no longer carries them.
 
 The tool also refuses a copy that still has any of these:
 - a job id, a dated operator log, an internal plan or a measured step time;

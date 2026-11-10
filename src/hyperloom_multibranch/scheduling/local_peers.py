@@ -56,7 +56,7 @@ from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import BranchLogStore, CommitQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
-from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
+from hyperloom_multibranch.contracts.toolbox import SpecialistTokens, WorkloadKind
 from hyperloom_multibranch.blackboard import BriefTriggers, LocalBlackboard
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
@@ -413,6 +413,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         regression,
         isolation,
         built.dossier_pass,
+        leases,
     )
 
 
@@ -425,6 +426,7 @@ def _toolbox(
 
     from hyperloom.measure.compile import EnvironmentCompiler
     from hyperloom.measure.hosted_spec import SpecContext
+    from hyperloom_multibranch.toolbox.agentx_checkpoint import CheckpointReferences
     from hyperloom_multibranch.toolbox.planner import HostedPlanner
     from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
@@ -438,12 +440,14 @@ def _toolbox(
         blob_root=str(setup.blobs.root),
     )
     planner = HostedPlanner(compiler, canonical, layout.toolbox / POINTS_DIR)
-    return host.backend.toolbox(
-        setup,
-        LocalBlackboard(layout.blackboard, Writer(Role.TOOLBOX, TOOLBOX_WRITER)),
-        AcceptanceSetup(repo, planner, image.digest, workload_kind=workload.kind, explore_accuracy=False),
-        spec,
+    blackboard = LocalBlackboard(layout.blackboard, Writer(Role.TOOLBOX, TOOLBOX_WRITER))
+    checkpoint = None
+    if workload.kind is WorkloadKind.AGENTX:
+        checkpoint = CheckpointReferences(setup.agentx_early_stop, workload.agentx_objective, blackboard)
+    acceptance = AcceptanceSetup(
+        repo, planner, image.digest, workload_kind=workload.kind, explore_accuracy=False, checkpoint=checkpoint
     )
+    return host.backend.toolbox(setup, blackboard, acceptance, spec)
 
 
 def _specialist_briefs(setup: PeerSetup, repo: GitExperimentRepo) -> SessionBriefs:
@@ -628,7 +632,9 @@ def _specialist_role(workload: Workload) -> str:
 
     shape = workload.inferencex
     requests = (
-        f"AgentX trace replay graded on {workload.metric}" if shape is None else f"ISL {shape.isl}, OSL {shape.osl}"
+        f"AgentX trace replay graded on {workload.agentx_objective.title} ({workload.metric})"
+        if shape is None
+        else f"ISL {shape.isl}, OSL {shape.osl}"
     )
     return (
         f"{workload.model_basename} on {workload.framework}, {workload.precision}, TP {workload.tp}, "
@@ -656,14 +662,16 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         from hyperloom_multibranch.specialist.agent_session import SPECIALIST_LOST_AFTER_S, AgentSetup
         from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
         from hyperloom_multibranch.specialist.model_sessions import model_sessions
-        from hyperloom_multibranch.specialist.prompts import role_prompt
+        from hyperloom_multibranch.specialist.prompts import RoleWorkload, role_prompt
         from hyperloom_multibranch.specialist.worktree import SourceBase
 
         layout, workload = wiring.setup.layout, wiring.setup.workload
         agent = AgentSetup(
             command=command,
             role=role_prompt(
-                _specialist_role(workload),
+                RoleWorkload(
+                    _specialist_role(workload), workload.agentx_objective if workload.inferencex is None else None
+                ),
                 references=wiring.setup.references,
                 base=wiring.base,
                 dev_leases=wiring.dev_leases.limits.cap if wiring.dev_leases else 0,
@@ -756,10 +764,10 @@ def _sessions_over_source(
     open_sessions: Callable[..., ModelSessions], source: Path, framework: str, native: tuple[str, ...]
 ) -> ModelSessions:
     """The sessions ``open_sessions`` opens over a source base laid out at ``source`` from ``framework``, aiter and the
-    ``native`` components, or without aiter when the base refuses it: not installed in the image, or installed from a
-    wheel, whose version names only an abbreviated commit. :func:`peers_on` checked the framework, and the toolbox's
-    build preflight the native checkouts, so a refusal is aiter's. The native components come last: one may lie
-    inside the framework's tree."""
+    ``native`` components, or without aiter when the base refuses it: not installed in the image, or installed with an
+    upstream commit :func:`~hyperloom_multibranch.specialist.worktree.installed_upstream` cannot resolve.
+    :func:`peers_on` checked the framework, and the toolbox's build preflight the native checkouts, so a refusal is
+    aiter's. The native components come last: one may lie inside the framework's tree."""
 
     from hyperloom.measure.compile import UnsupportedComponentError
 

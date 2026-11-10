@@ -4,7 +4,7 @@ From a laptop dry run to a first campaign on a GPU node.
 
 ## What you need
 
-- **Linux** (or WSL) and **Python 3.11 or newer**: the harness uses POSIX calls.
+- **Linux** (or WSL) and **Python 3.10 or newer**: the harness uses POSIX calls. (3.10 is what serving images ship.)
 - **Python packages:** `pyyaml` (every command) and `claude-agent-sdk` (to run agents; it brings
   its own Claude CLI). Arbor has no requirements file yet:
 

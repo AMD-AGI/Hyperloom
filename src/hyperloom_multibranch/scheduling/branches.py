@@ -62,7 +62,11 @@ from hyperloom_multibranch.scheduling.roster import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
+    from hyperloom_multibranch.scheduling.agent_map import SharedMap
+    from hyperloom_multibranch.scheduling.agent_plans import MapDealer
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 logger = logging.getLogger(__name__)
@@ -143,6 +147,26 @@ class BranchControl:
         self._reserved = context.reserved
         self._specialists: set[str] = set()
         self._deadlines: dict[str, float] = {}
+        self._map: SharedMap | None = None
+        self._dealer: MapDealer | None = None
+
+    async def record_map(self, shared: SharedMap, dealer: MapDealer) -> None:
+        """Keep ``shared`` on the blackboard as the session's map, whose shares the agent branches open on; each share
+        names its directions' holder once a branch opens on it. ``dealer`` holds a share or order no longer once the
+        branch on it fails to start."""
+
+        self._map = shared
+        self._dealer = dealer
+        await self._blackboard.write_agent_map(shared.directions)
+
+    async def record_deal(self, report: Path, order: Path | None) -> None:
+        """Fold a reporting worker's ``report`` and the ``order`` Arbor's master dealt for its slot (``None`` for none)
+        into the session's map on the blackboard (:meth:`SharedMap.folded`); the branch the order opens on is named
+        its directions' holder when it starts. Nothing without a map."""
+
+        if self._map is not None:
+            self._map = self._map.folded(report, order)
+            await self._blackboard.write_agent_map(self._map.directions)
 
     async def integration_head(self) -> str:
         return await self._repo.head(INTEGRATION_BRANCH)
@@ -227,15 +251,17 @@ class BranchControl:
         specialist, or a share's agent, by ``deadline`` (clock seconds); a branch stopped meanwhile stays stopped."""
 
         entry = self._roster.entry(admitted.branch)
+        share = admitted.share
+        launch = Launch(repair=admitted.repair) if share is None else Launch(agent=share.agent, plan=share.plan)
         if entry.stop is not None:
+            self._unhold(launch.plan)
             return
         start_commit = await settled(self._admitted_start(entry, admitted.parent_commit))
         if isinstance(start_commit, BaseException):
             await self._fail_start(entry, failure_text(start_commit))
+            self._unhold(launch.plan)
             return
         started = self._roster.started(entry.branch, start_commit)
-        share = admitted.share
-        launch = Launch(repair=admitted.repair) if share is None else Launch(agent=share.agent, plan=share.plan)
         await self._open(started, start_commit, deadline, launch)
 
     async def void_admitted(self, branch: str, reason: str) -> None:
@@ -260,6 +286,7 @@ class BranchControl:
         if isinstance(started, BaseException):
             logger.error("the specialist of %s did not start", entry.branch, exc_info=started)
             await self._fail_start(entry, failure_text(started))
+            self._unhold(launch.plan)
             return entry
         detail: dict[str, object] = {"start_commit": start_commit, "k": entry.k, "from_branch": entry.from_branch}
         if launch.focus is not None:
@@ -271,6 +298,12 @@ class BranchControl:
         kind = DECISION_KINDS.get(entry.origin, DecisionKind.OPEN)
         self._decisions.record(Decision(kind, f"{entry.origin.value} branch started", entry.branch, detail))
         return entry
+
+    def _unhold(self, plan: str) -> None:
+        """Hold the share or order ``plan`` no longer, as no branch runs it, so the master deals its directions again."""
+
+        if plan and self._dealer is not None:
+            self._dealer.release(plan)
 
     async def _fail_start(self, entry: BranchEntry, reason: str) -> None:
         stop = BranchStop(StopCause.START_FAILED, reason, self._clock.now())
@@ -409,6 +442,9 @@ class BranchControl:
 
         if launch.focus is not None:
             self._briefs.for_branch(entry.branch, launch.focus.text)
+        if launch.plan and self._map is not None and launch.plan in self._map.shares.values():
+            self._map = self._map.dealt(launch.plan, entry.branch)
+            await self._blackboard.write_agent_map(self._map.directions)
         if entry.origin.cut_by_scheduler:
             reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
             repairs = launch.repair.judgement.request_ids[0] if launch.repair is not None else ""

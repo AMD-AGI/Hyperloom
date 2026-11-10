@@ -108,6 +108,34 @@ With the checked step, a sandbox that does not find the entry, finds one that do
 fails its start with `runner_start_failed`. An entry built before entries had `source.tar` is refused where it is built:
 the build fails with `CacheConflict`.
 
+## The session's base launch
+
+A hosted multi-branch session resolves its base launch as `hyperloom-multibranch run` does: from InferenceX
+(`multibranch.inferencex_commit` pins the commit), then the framework's cookbook, then the default table. When none of
+them gives a launch that starts on the cluster's hardware, give the launch yourself as `multibranch.reference_script`,
+the path of a shell launch script on the app host (for example on the storage `USER_DATA_PATH` is on), which the
+session freezes as its base as `--reference-script` does. It wins over every recipe source. Its literal `export
+NAME=value` lines are the server's environment, and its server command line carries the flags; the command's TP and EP
+must be the spec's `hardware.tp` and `hardware.ep`, and an export or a flag set from a shell variable is refused.
+
+```shell
+# /mnt/shared/hyperloom/launch/dsv4-flash-mi355x.sh
+export AITER_BF16_FP8_MOE_BOUND=0
+export SGLANG_USE_AITER=1
+python3 -m sglang.launch_server --model-path /mnt/shared/models/DeepSeek-V4-Flash --tp 8 --ep-size 8 \
+    --trust-remote-code --mem-fraction-static 0.8
+```
+
+```json
+"framework": {"name": "sglang", "image": "<image>"},
+"hardware": {"gpu_type": "mi355x", "tp": 8, "ep": 8},
+"multibranch": {"workload": "inferencex", "reference_script": "/mnt/shared/hyperloom/launch/dsv4-flash-mi355x.sh"}
+```
+
+A multi-branch spec does not take `launch.server_args` or `launch.extra_env`, which only flow `single` reads: a spec
+that sets either ends the run (exit code 2), naming `multibranch.reference_script`, instead of running without them. A
+script that cannot serve as the base ends the run the same way, naming why.
+
 ## Dev sandbox template
 
 Only a session that lends dev sandboxes (`multibranch.dev_leases`, `--dev-leases`) or runs autonomous agents

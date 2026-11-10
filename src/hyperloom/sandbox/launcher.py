@@ -6,9 +6,12 @@
 Every top-level process of a sandbox runs under a launcher. The launcher marks
 itself a child subreaper (``PR_SET_CHILD_SUBREAPER``), so a descendant that
 detaches (double fork, ``setsid``, an emptied environment) and loses its parent
-is re-parented to the launcher, never to init. The launcher outlives its command
-until the sandbox's reaper kills it, so the reaper can always enumerate every
-process the sandbox ever started by walking from the launcher.
+is re-parented to the launcher, never to init. The launcher reaps each child as
+it ends, the orphans while the command still runs as well as after, so a command
+that runs for hours leaves no zombie behind. It outlives its command while any
+process the command started runs, so the reaper can always enumerate every
+process the sandbox ever started by walking from the launcher. Once it has no
+child left it exits: only a descendant can become its child, and it has none.
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ __all__ = ["LAUNCHER_SOURCE", "StatusPipe", "launcher_argv", "runs_launcher"]
 #: Self-contained (standard library only) so it runs under any python3 and
 #: under another account.
 LAUNCHER_SOURCE = r"""
-import ctypes, os, signal, sys, time
+import ctypes, os, signal, sys
 status_fd = int(sys.argv[1])
 argv = sys.argv[2:]
 try:
@@ -39,21 +42,22 @@ if child == 0:
         os.execvp(argv[0], argv)
     except OSError:
         os._exit(127)
-_, raw = os.waitpid(child, 0)
-code = os.waitstatus_to_exitcode(raw)
-try:
-    os.write(status_fd, ("%d\n" % code).encode())
-    os.close(status_fd)
-except OSError:
-    pass
-null = os.open(os.devnull, os.O_RDWR)
-for fd in (0, 1, 2):
-    os.dup2(null, fd)  # let the readers of the command's output see EOF
 while True:
     try:
-        os.wait()  # reap re-parented orphans as they exit
+        # The command, or an orphan re-parented here while the command still runs: reap each as it ends.
+        pid, raw = os.wait()
     except ChildProcessError:
-        time.sleep(0.2)
+        break
+    if pid != child:
+        continue
+    try:
+        os.write(status_fd, ("%d\n" % os.waitstatus_to_exitcode(raw)).encode())
+        os.close(status_fd)
+    except OSError:
+        pass
+    null = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(null, fd)  # let the readers of the command's output see EOF
 """
 
 

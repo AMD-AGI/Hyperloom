@@ -635,7 +635,7 @@ async def _grid(run: _Run, point: int, name: str, **launch: Any) -> VariantResul
             output_root=Path(call.output_dir),
             recipe=GridRecipe(base_yaml, base=LaunchLayer(extra_envs=envs)),
             launch=GridLaunch(call.result_dir, call.serving_lease, **launch),
-            stop=GridStop(session_deadline_sec=call.session_deadline_sec),
+            stop=GridStop(call.session_deadline_sec, checkpoint=call.checkpoint and call.checkpoint.on(name == _TEST)),
         )
         ended = time.time()
     _stamp_round(run, point, _round_shape(run, point, name, launch, results[0]), (started, ended))

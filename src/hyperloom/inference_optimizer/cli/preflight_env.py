@@ -201,7 +201,15 @@ def _load_missing_env_vars(file_vars: dict[str, str]) -> int:
 
 
 def _read_dotenv_text(env_file: Path) -> str:
-    return env_file.read_text(encoding="utf-8", errors="replace")
+    return _shell_lines(env_file.read_bytes().decode("utf-8", errors="replace"))
+
+
+def _shell_lines(text: str) -> str:
+    """``text`` with its lines split as load_dotenv_no_clobber in assets/runtime_env.sh splits them: at a newline alone,
+    with one carriage return before it dropped. A carriage return anywhere else stays in its line, so a comment line
+    that holds one is still one comment, as the shell reads it; universal newlines would make an assignment of what
+    follows it."""
+    return "\n".join(line.removesuffix("\r") for line in text.split("\n"))
 
 
 def _load_dotenv_fallback() -> dict[str, Any]:

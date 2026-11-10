@@ -79,9 +79,11 @@ class ClusterCfg:
     account: str = ""
     time_limit: str = "04:00:00"
     log_dir: str = ""
-    lane_script: str = "scripts/parallel/lane.sbatch"
+    # The site's launchers, named by the run config: a lane's campaign, and the A/B. No default: the engine names
+    # no site's scripts. A run that reaches one without it stops, saying which key to set.
+    lane_script: str = ""
     profile_script: str = "scripts/parallel/profile_round.sbatch"
-    ab_script: str = "scripts/parallel/ab.sbatch"
+    ab_script: str = ""
     dossier_script: str = "scripts/parallel/dossier_round.sh"
     host: str = ""                       # ssh to a login node when the controller runs elsewhere
 

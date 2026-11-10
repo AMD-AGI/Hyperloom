@@ -1,6 +1,6 @@
 """The share: where collectors put campaign data for everyone to read.
 
-Layout under the share root (default ``DEFAULT_ROOT``, on a pod behind an ssh gateway)::
+Layout under the share root (``ARBOR_SHARE_ROOT``, on a pod behind an ssh gateway)::
 
     projects/<project>/<user>/<campaign>/realtime/          status.json, meta.json
     projects/<project>/<user>/<campaign>/knowledge/<type>/  summary, outcomes, findings,
@@ -20,7 +20,8 @@ collectors only write below projects/.
 
 Settings, each with an environment fallback:
     ARBOR_SHARE_HOST      ssh destination, an alias from ~/.ssh/config (default arbor-share)
-    ARBOR_SHARE_ROOT      the share root on that host (default ``DEFAULT_ROOT``)
+    ARBOR_SHARE_ROOT      the share root on that host; no default: a site sets it, in the environment or in
+                          ~/.arbor/settings.env. Without one, the collectors write locally and push nothing
     ARBOR_SHARE_SSH_OPTS  extra options for both ssh and sftp; use -F and -o forms
                           (-o Port=2222), since ssh and sftp spell -p differently
 """
@@ -36,7 +37,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_HOST = "arbor-share"
-DEFAULT_ROOT = "/path/to/arbor-share"
 BASE_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 
 
@@ -47,7 +47,7 @@ def _env_opts() -> list[str]:
 @dataclass
 class Share:
     host: str = field(default_factory=lambda: os.environ.get("ARBOR_SHARE_HOST") or DEFAULT_HOST)
-    root: str = field(default_factory=lambda: os.environ.get("ARBOR_SHARE_ROOT") or DEFAULT_ROOT)
+    root: str = field(default_factory=lambda: os.environ.get("ARBOR_SHARE_ROOT") or "")
     opts: list[str] = field(default_factory=_env_opts)
     timeout: float = 180.0
 
@@ -97,6 +97,10 @@ class Share:
                 out["fix"] = fix
             return ok
 
+        if not step("root", bool(self.root), self.root or "no share root set",
+                    "set ARBOR_SHARE_ROOT, in the environment or in ~/.arbor/settings.env, to the share's root on "
+                    f"{self.host}; until then the collectors write locally and push nothing"):
+            return out
         projects = shlex.quote(self.projects)
         rc, so, se = self.ssh(f"echo __ARBOR_SHARE__; test -d {projects} && test -w {projects} "
                               f"&& echo WRITABLE")

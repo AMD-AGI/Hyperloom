@@ -11,6 +11,7 @@ The temp repo is local, so its commits run here (``@host``): no docker needed.
 from __future__ import annotations
 
 import json
+import os
 import random
 import subprocess
 import tempfile
@@ -55,14 +56,24 @@ def _mock_has_changes(_container: str, workspace_dir: str) -> bool:
     return bool(r.stdout.strip())
 
 
-def main(argv: list[str]) -> int:
+def parser():
+    """``arbor run --dry-run``'s parser, built without parsing (arbor/cli/payload.py makes its argv and schema)."""
     import argparse
     parser = argparse.ArgumentParser(prog="arbor dry-run")
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--max-iters", type=int, default=10)
-    parser.add_argument("--cooldown", type=int, default=1)
-    parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args(argv)
+    parser.add_argument("--config", required=True, help="Campaign config JSON")
+    parser.add_argument("--max-iters", type=int, default=10, help="iterations on synthetic numbers")
+    parser.add_argument("--cooldown", type=int, default=1, help="Seconds between iterations")
+    parser.add_argument("--seed", type=int, default=42, help="the synthetic numbers' random seed")
+    parser.add_argument("--opt-objective", default=None, metavar="TEXT",
+                        help="the metric to optimize in place of the pack's, as `arbor run --opt-objective` takes it")
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = parser().parse_args(argv)
+    if args.opt_objective:
+        from arbor import objective
+        os.environ[objective.ENV] = args.opt_objective
 
     rng = random.Random(args.seed)
     config_path = str(Path(args.config).resolve())

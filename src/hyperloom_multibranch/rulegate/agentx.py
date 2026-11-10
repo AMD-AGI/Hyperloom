@@ -1,22 +1,28 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The AgentX rule: the optimizer's bar on the session's objective, P50 interactivity unless the session names total
-token throughput, and its two guards, retested only when they block a gain."""
+"""The AgentX rule: a bar on the session's objective, P50 interactivity unless the session names total token
+throughput, and the objective's two guards, retested only when they block a gain."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import Enum
 
+from hyperloom.common.agentx_objective import (
+    BELOW_THRESHOLD,
+    P50_BELOW_THRESHOLD,
+    TOTAL_BELOW_THRESHOLD,
+    AgentXObjective,
+    Guard,
+)
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
-    AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_DURATION,
     GRADED_ERROR_RATE,
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
+    GRADED_INTVTY_P50_CHECKPOINT,
     GRADED_OUTPUT,
     GRADED_REQUESTS_TOTAL,
     GRADED_UNSERVED_REQUESTS,
@@ -25,49 +31,29 @@ from hyperloom.common.perf_metric import (
     holds_within_band,
     incomparability_reason,
 )
+from hyperloom.contracts.measurement import AgentxCheckpointRuling
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok
 from hyperloom_multibranch.rulegate.readings import GRADED_SHORT_REQUESTS
 
+#: The refusal of a candidate the AgentX checkpoint stopped: its ``gain_pct`` is the checkpoint's, over the first
+#: half hour only, and it records no value, so nothing that averages full measurements reads it as one.
+CHECKPOINT_TRAILED = "checkpoint_trailed"
 
-class AgentXObjective(str, Enum):
-    """The axis an AgentX session is graded on: the round metric its bar reads (:attr:`metric`) and the refusal that
-    says a candidate did not clear it (:attr:`below_threshold`). Both guards and the error-rate bar hold under either."""
-
-    P50_INTERACTIVITY = "p50_interactivity"
-    TOTAL_TOKEN_THROUGHPUT = "total_token_throughput"
-
-    @property
-    def metric(self) -> str:
-        return _METRICS[self]
-
-    @property
-    def below_threshold(self) -> str:
-        return _BELOW_THRESHOLD[self]
-
-
-P50_BELOW_THRESHOLD = "p50_gain_below_threshold"
-TOTAL_BELOW_THRESHOLD = "total_throughput_gain_below_threshold"
-_METRICS = {
-    AgentXObjective.P50_INTERACTIVITY: GRADED_INTVTY_P50,
-    AgentXObjective.TOTAL_TOKEN_THROUGHPUT: TOTAL_TOKEN_THROUGHPUT,
-}
-_BELOW_THRESHOLD = {
-    AgentXObjective.P50_INTERACTIVITY: P50_BELOW_THRESHOLD,
-    AgentXObjective.TOTAL_TOKEN_THROUGHPUT: TOTAL_BELOW_THRESHOLD,
-}
-#: The refusals that say only that a candidate did not clear its objective's bar, under any objective.
-BELOW_THRESHOLD = frozenset(_BELOW_THRESHOLD.values())
 # Failing more requests than the parent is a defect of the candidate a repair can look at; the other reasons
 # ``incomparability_reason`` gives mean the pair did not measure the same work. Only unserved requests count: a short
 # answer is the client's quality call, recorded for the specialist and never a refusal.
 _EXTRA_FAILED_REQUESTS = "extra_failed_requests"
-_GUARDS = (("p90_regressed", GRADED_INTVTY), ("output_regressed", GRADED_OUTPUT))
-#: The refusals that say only that the candidate is slower than its parent: the objective's bar and the two speed guards.
-SPEED_GATES = frozenset({*BELOW_THRESHOLD, *(name for name, _ in _GUARDS)})
-#: Every objective's metric is among them, so a judgement records the value its session is graded on.
+#: The refusals that say only that the candidate is slower than its parent: any objective's bar and guards.
+SPEED_GATES = frozenset(
+    {*BELOW_THRESHOLD, *(guard.refusal for objective in AgentXObjective for guard in objective.guards)}
+)
+#: Every axis any objective's bar or guards read is among them, so a judgement records what its session is graded on.
+#: The checkpoint median is read by no bar or guard: a committed candidate records it as the reference its children's
+#: AgentX checkpoint compares against.
 _RECORDED_AXES = (
     GRADED_INTVTY_P50,
+    GRADED_INTVTY_P50_CHECKPOINT,
     TOTAL_TOKEN_THROUGHPUT,
     GRADED_INTVTY,
     GRADED_OUTPUT,
@@ -92,8 +78,7 @@ class _Reading:
 
     @property
     def cleared(self) -> bool:
-        # The single-lineage flow's fixed P50 bar, held the same under either objective.
-        return self.gain >= AGENTX_KEEP_P50_THRESHOLD_PCT
+        return self.gain >= self.objective.bar_pct
 
     @property
     def blocked(self) -> bool:
@@ -111,7 +96,8 @@ def _read(candidate: Mapping[str, float], parent: Mapping[str, float], objective
     gain = gain_pct(value, parent_value)
     if gain is None:
         raise ValueError(f"cannot compare a {metric} of {value!r} against a parent {metric} of {parent_value!r}")
-    defects = [name for name, key in _GUARDS if not _guard_holds(candidate, parent, key)]
+    band = objective.guard_band_pct
+    defects = [guard.refusal for guard in objective.guards if not _guard_holds(candidate, parent, guard.metric, band)]
     incomparable = incomparability_reason(candidate, parent)
     if incomparable == _EXTRA_FAILED_REQUESTS:
         incomparable = ""
@@ -120,9 +106,9 @@ def _read(candidate: Mapping[str, float], parent: Mapping[str, float], objective
     return _Reading(objective, gain, tuple(defects), incomparable, agentx_accuracy_ok(candidate.get(GRADED_ERROR_RATE)))
 
 
-def _guard_holds(candidate: Mapping[str, float], parent: Mapping[str, float], key: str) -> bool:
+def _guard_holds(candidate: Mapping[str, float], parent: Mapping[str, float], key: str, band_pct: float) -> bool:
     """A side that did not report the guard's axis breaks it: ``holds_within_band`` reads it as 0.0, which holds."""
-    return key in candidate and key in parent and holds_within_band(candidate, parent, key)
+    return key in candidate and key in parent and holds_within_band(candidate, parent, key, noise_pct=band_pct)
 
 
 def _more_unserved(candidate: Mapping[str, float], parent: Mapping[str, float]) -> bool:
@@ -150,7 +136,7 @@ def compare(
     reading = _read(candidate, parent, objective)
     if reading.blocked:
         verdict = Verdict.NEEDS_CONFIRM
-    elif reading.incomparable or reading.defects or reading.gain <= -AGENTX_KEEP_P50_THRESHOLD_PCT:
+    elif reading.incomparable or reading.defects or reading.gain <= -objective.bar_pct:
         verdict = Verdict.REGRESSED
     elif reading.cleared:
         verdict = Verdict.IMPROVED
@@ -159,12 +145,30 @@ def compare(
     return Judgement(
         verdict,
         reading.gain,
-        AGENTX_KEEP_P50_THRESHOLD_PCT,
+        objective.bar_pct,
         (request_id,),
         _recorded(candidate),
         AccuracyVerdict.measured(reading.accuracy_ok),
         reading.refused_by,
     )
+
+
+def trailed(ruling: AgentxCheckpointRuling, request_id: str, objective: AgentXObjective) -> Judgement:
+    """The judgement of a candidate the checkpoint stopped for trailing its parent: regressed, never retested."""
+    return Judgement(
+        Verdict.REGRESSED,
+        ruling.gain_pct,
+        objective.bar_pct,
+        (request_id,),
+        {},
+        AccuracyVerdict.NOT_MEASURED,
+        (CHECKPOINT_TRAILED,),
+    )
+
+
+def partial_window(judgement: Judgement) -> bool:
+    """Whether ``judgement``'s gain covers the checkpoint's window only, not a full measurement."""
+    return CHECKPOINT_TRAILED in judgement.refused_by
 
 
 def confirm(
@@ -187,7 +191,7 @@ def confirm(
     return Judgement(
         Verdict.BLOCKED if reading.blocked else Verdict.INCONCLUSIVE,
         (first.gain_pct + reading.gain) / 2.0,
-        AGENTX_KEEP_P50_THRESHOLD_PCT,
+        objective.bar_pct,
         (*first.request_ids, request_id),
         recorded,
         AccuracyVerdict.measured(first.accuracy is not AccuracyVerdict.FAILED and reading.accuracy_ok),
@@ -197,10 +201,14 @@ def confirm(
 
 __all__ = [
     "BELOW_THRESHOLD",
+    "CHECKPOINT_TRAILED",
     "P50_BELOW_THRESHOLD",
     "SPEED_GATES",
     "TOTAL_BELOW_THRESHOLD",
     "AgentXObjective",
+    "Guard",
     "compare",
     "confirm",
+    "partial_window",
+    "trailed",
 ]

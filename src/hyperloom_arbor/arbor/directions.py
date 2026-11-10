@@ -780,7 +780,8 @@ def activate(campaign, state) -> bool:
 
 
 def advance(campaign, state, root) -> str | None:
-    """Move the map on before an iteration. "stop" when the campaign stops for the operator.
+    """Move the map on before an iteration. "stop" when the campaign stops for the operator; "round_end" when the
+    round's A/B runs first; "revisit" when every direction is closed and the iteration is a revisit (arbor/revisit.py).
 
     Never raises: a map that cannot be read or moved is reported and skipped,
     and the campaign goes on as it did before map rounds.
@@ -839,6 +840,11 @@ def advance(campaign, state, root) -> str | None:
                                   "no round-end A/B pending; the dossier update round begins")
 
         if doc["phase"] == "active" and exhausted(doc):
+            # A revisit the master armed (arbor/revisit.py) runs first: the round closes after it.
+            from arbor import revisit
+            if revisit.hold(root, nxt):
+                save(root, doc)
+                return "revisit"
             keeps, ran, stop = _close_round(doc, state)
             if stop:
                 return _stop(campaign, state, root, doc, stop)
@@ -1332,6 +1338,12 @@ def render(doc: dict, state=None, campaign=None) -> str:
     if phase != "active":
         return ""
     dirs = doc.get("directions") or []
+    if exhausted(doc):
+        # Only a revisit holds a closed map in its round (arbor/revisit.py): its brief leads the prompt.
+        return (f"## The map — round {k}: every direction is closed\n\n"
+                "This iteration is a revisit: measure the change the brief above names, as it is. Do not reopen "
+                "or add a direction; the round closes when the revisits are done, and the dossier update round "
+                "begins.\n" + rej)
     n_closed = sum(1 for d in dirs if d.get("status") in CLOSED)
     ordered = sorted(dirs, key=lambda d: (d.get("status") in CLOSED, d.get("kind") != "increment",
                                           d.get("rank") if isinstance(d.get("rank"), int) else 999))
@@ -1393,6 +1405,13 @@ def waiver_block(doc: dict | None) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    # generate and split take their parameters as a payload too (arbor/cli/payload.py): action, then its keys.
+    if any(a == "--payload" or a.startswith("--payload=") for a in argv):
+        from arbor.cli import payload
+        expanded = payload.run_expanded(["directions", *argv], "python3 -m arbor.directions")
+        if isinstance(expanded, int):
+            return expanded
+        argv = expanded[1:]
     if argv and argv[0] == "split":
         return _split_main(argv[1:])
     if argv and argv[0] == "generate":
@@ -1595,16 +1614,21 @@ def load_map(path) -> tuple[list[dict], list[str]]:
     return out, errors
 
 
-def _split_main(argv: list[str]) -> int:
+def split_parser():
+    """``python3 -m arbor.directions split``'s parser, built without parsing (arbor/cli/payload.py)."""
     import argparse
-    from arbor import component
     ap = argparse.ArgumentParser(prog="python3 -m arbor.directions split",
                                  description="One map's open directions in N disjoint shares, "
                                              "one component.plan each.")
     ap.add_argument("map", help="directions.json, a JSON list, or a DIRECTIONS line or list ('-': stdin)")
     ap.add_argument("--shares", type=int, required=True, help="how many Arbors")
     ap.add_argument("--out", help="write DIR/share-K.json; without it, JSON on stdout")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def _split_main(argv: list[str]) -> int:
+    from arbor import component
+    args = split_parser().parse_args(argv)
     dirs, errors = load_map(args.map)
     for e in errors:
         print(f"REJECTED {e}", file=sys.stderr)

@@ -20,21 +20,115 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A hosted multi-branch run takes its base launch as a reference script.**
+  `multibranch.reference_script` in a hosted run's campaign spec names a shell
+  launch script that the session freezes as its base, as `--reference-script`
+  does for `hyperloom-multibranch run`: its `export NAME=value` lines are the
+  server's environment, so a model whose recipe base cannot start on the
+  hardware without an extra setting can run hosted. A multi-branch spec that
+  sets `launch.server_args` or `launch.extra_env` is now refused with exit
+  code 2, naming `multibranch.reference_script`. Before, the hosted run had no
+  way to take a launch script, and it ran without those two fields, silently.
+- **A GEAK or Forge reproduction of the measured launch keeps settings whose
+  names contain `TOKEN`.** The GEAK handoff's `baseline_env_spec`, the Forge
+  handoff's serving context and the reference launch script now carry launch
+  settings such as `SGLANG_SIMULATE_ACC_TOKEN_MODE`,
+  `SGLANG_USE_AITER_FP8_PER_TOKEN` and `MAX_NUM_BATCHED_TOKENS`, and GEAK or a
+  reference script may unset one. Before, any name containing `TOKEN` was taken
+  for a credential: the reproduction ran without the setting the original
+  launch had, so its baseline was not the measured configuration, and a GEAK
+  result unsetting one was rejected. Credentials (`HF_TOKEN`,
+  `AWS_SECRET_ACCESS_KEY`) are still never written into these artifacts.
+- **An Arbor agent on an AgentX session keeps by MB's rule and no longer
+  reads the round's numbers itself.** MB writes `component.bench_read`, so
+  Arbor's harness reads the session's objective and its guards (P50 or P90
+  interactivity, total token throughput) and the output throughput from each
+  run's `report.json` by path, averages them over replays, and books as
+  NOT_MEASURED a run whose report lacks one, or whose round did not complete,
+  stopped at the failed-request threshold, or ran in fast mode
+  (`bench_read.require`). `opt_objective` is now the structured form: the
+  objective, MB's 2% bar and each guard's noise band (`HYPERLOOM_PERF_NOISE_PCT`,
+  5% by default), and Arbor reverts a change that breaks a guard. Before, the
+  bench agent read the numbers at the paths the directives named, a partial
+  round's numbers could be kept, and Arbor kept on its pack's bar and second
+  axis. Any AgentX session now needs Arbor `29c72f9`, and one measured by MB's
+  round `1c6eef1` (`v0.9.6`, the vendored copy), or later; an older pin is
+  refused at preflight naming the commit. A P50 session on an Arbor without
+  `arbor/objective.py` is refused too, where it ran on its pack's metric.
+- **Each round records its power in one `power.json`, with energy and J per token.**
+  An InferenceSuite round (and a GEAK replay) now writes `power.json` in place
+  of `gpu_power.json` and `gpu_samples.csv`: every card's sysfs power,
+  temperatures, clocks, voltage, busy and memory each second from the start of
+  the round to its end; each card's energy accumulator at every phase mark;
+  every `amd-smi metric` field every 10 s and at every mark; caps, performance
+  level and DPM tables at both ends; and the node's NPM power and the CPU's
+  RAPL or `amd_energy` counters where the node has them (`null` with a reason
+  where it does not). The measured window's energy is computed as InferenceX
+  does: `total_gpu_energy_j`, p75/p90 power, `joules_per_input_token`,
+  `joules_per_output_token`, `joules_per_total_token`,
+  `joules_per_successful_query`, and `power_valid` with InferenceX's reasons. The
+  window now opens at the instant the phase mark carries; on an AgentX round it
+  opened up to one sample interval late. `report.json` gains a `power` section,
+  and a round's measurement gains `gpu_energy_j`, `gpu_power_p75_w`,
+  `gpu_power_p90_w`, the four `joules_per_*` figures and `power_valid` (0/1),
+  which MB rounds publish. `gpu_power_avg_w` and `gpu_power_by_gpu_w` are now
+  the window's energy over its duration and are `null` when `power_valid` is 0,
+  so the power budget refuses such a round as unmeasured. A card `amd-smi`
+  reads as `N/A` is measured from sysfs. With configured cards, only those are
+  asked whether they hold a model; another server on the node's other cards
+  does not invalidate the round. `HYPERLOOM_GPU_POWER_INTERVAL_S` defaults to
+  1 s; above 1.5 s it is refused and the round samples nothing. AgentX counts
+  gain `input_tokens` and `output_tokens`; a report written before reads them,
+  and its `power` section, as `null`.
+- **MB records the AgentX checkpoint's ruling on its explores.** In a
+  `hyperloom-multibranch` AgentX session graded on `p50_interactivity`, each
+  explore test is now held to the single-lineage 1800 s checkpoint against its
+  parent commit's median. By default (`HYPERLOOM_AGENTX_EARLY_STOP=shadow` for
+  MB) nothing is stopped: the result carries the ruling and `MB-report.md` gets
+  an "AgentX checkpoint" section with how many explores it would have stopped
+  and how those ended, to decide on `enforce`. With `enforce` a trailing explore
+  is stopped, not retried, and judged REGRESSED with the refusal
+  `checkpoint_trailed`. Committed candidates now record
+  `e2e_norm_intvty_p50_1800s`, the reference of their children. The mode is read
+  once at session start and kept in `MB-manifest.json`. Confirm, integration,
+  FINAL, baseline, correctness-fix and retraction tests, and sessions on
+  `total_token_throughput`, are not judged. Before, an MB explore that trailed
+  its parent ran its full 75-90 min with no early signal.
+- **MB's AgentX bar drops to 2% and its guards follow the objective.**
+  A `hyperloom-multibranch` AgentX session keeps a change on a 2% gain on its
+  objective, not 3%. Under `p50_interactivity` the guards are P90 interactivity
+  and total token throughput (new refusal `total_regressed`); under
+  `total_token_throughput` they are P90 and P50 interactivity (`p50_regressed`).
+  Output throughput no longer guards either, so `output_regressed` is no longer
+  given; it is still recorded. Arbor's directives state the session's bar and
+  guards. A resumed session judges by the new rule. Before, a real 2-3% gain
+  was refused, and a gain was held back when the replayed window's
+  output-length mix lowered output throughput.
+- **Single-lineage AgentX keeps on MB's rule.** `hyperloom optimize` on an
+  AgentX replay now keeps a change on a 2% P50 interactivity gain, not 3%, with
+  P90 interactivity and total token throughput inside the noise band
+  (`HYPERLOOM_PERF_NOISE_PCT`). An output-throughput drop alone no longer
+  refuses: `output_regressed` is no longer given, `total_regressed` is new, and
+  a correctness fix's guard refusal names `total_throughput` instead of
+  `output_throughput`. The GEAK handoff's `workload_spec.acceptance` carries
+  `min_gain_pct` 2 and the P90 guard only, since GEAK records no total-throughput
+  guard. The 1800 s checkpoint's 2% early stop is unchanged. A resumed session
+  judges by the new rule. Before, a real 2-3% median gain was reverted, and a
+  gain was reverted when the window's output-length mix lowered output
+  throughput.
 - **An MB AgentX session can be graded on total token throughput.**
   `hyperloom-multibranch run --workload agentx --agentx-objective
   total_token_throughput` keeps a change on the round's `total_token_throughput`
   instead of `e2e_norm_intvty_p50`; the default, `p50_interactivity`, leaves
-  existing sessions as they were. The 3% bar, the P90 and output-throughput
-  guards, the retest and the error-rate threshold are unchanged. The objective is
+  existing sessions as they were. The retest and the error-rate threshold are
+  the same under either objective. The objective is
   recorded in the manifest and kept on resume; FINAL, the dashboard and
   `MB-report.md` name it, and the bar's refusal reads
   `total_throughput_gain_below_threshold`. Its Recipe KB record carries
   `total_throughput_gain_pct`, not `interactivity_gain_pct`, and does not
   replace an interactivity champion. Each Arbor is given the objective as its
   config's `opt_objective` and optimizes it instead of its pack's metric; an
-  Arbor that cannot (before `9c455df` for P50, `df9b55a` for total token
-  throughput) is refused at preflight, except an older
-  one in a P50 session, which runs on its pack's metric as before.
+  Arbor that cannot is refused at preflight.
   `--agentx-objective` with
   `--workload inferencex` exits 2. Before, an operator had to patch the source
   to grade on total throughput.

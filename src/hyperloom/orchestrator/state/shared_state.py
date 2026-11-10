@@ -12,6 +12,7 @@ import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -20,10 +21,8 @@ from hyperloom_common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
 from hyperloom_common.io import atomic_write_json
+from hyperloom.common.agentx_objective import AgentXObjective
 from hyperloom.common.perf_metric import (
-    AGENTX_KEEP_P50_THRESHOLD_PCT,
-    GRADED_INTVTY,
-    GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     GradedComparison,
     GradingAnchor,
@@ -36,6 +35,7 @@ from hyperloom.common.perf_metric import (
     output_tput_of,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
+    snapshot_axis,
     total_tput_of,
 )
 from hyperloom_common.timeutil import now_iso
@@ -48,6 +48,7 @@ from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harne
 from .kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
 from .failure_evidence import tail_excerpt
 from .retest_view import write_retest_view
+from .state_file import write_state
 from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.budget import _BudgetStateMixin
 from ._shared_state.enablement_round import EnablementRound
@@ -116,13 +117,13 @@ def resolve_graded_comparison(
     anchor: GradingAnchor = GradingAnchor(),
 ) -> "GradedComparison":
     """Resolve what a KEEP decision grades: candidate and reference, on one axis, plus the verdict on that pair."""
-    # AgentX KEEPs on median interactivity clearing its threshold with the slow tail and output throughput both
-    # inside the noise band; anything short of all three is REVERT. A pair that cannot supply the axes degrades
-    # together and ``degrade_reason`` says why -- promotion lanes read ``comparable`` and fail closed rather than
-    # KEEPing on the diagnostic output figure. ``keep_threshold_pct`` applies to the output axis only.
-    # ``anchor`` defaults to the session anchor; explore passes its own because variants stack
-    # within a round. Objective and band come from ``resolved_grading``, so both are what the session was seeded
-    # with rather than whatever the calling process's environment holds.
+    # AgentX KEEPs on the P50 interactivity objective clearing its bar with each of its guards inside the noise band;
+    # anything short of all of them is REVERT. A pair that cannot supply the axes degrades together and
+    # ``degrade_reason`` says why -- promotion lanes read ``comparable`` and fail closed rather than KEEPing on the
+    # diagnostic output figure. ``keep_threshold_pct`` applies to the output axis only. ``anchor`` defaults to the
+    # session anchor; explore passes its own because variants stack within a round. Objective and band come from
+    # ``resolved_grading``, so both are what the session was seeded with rather than whatever the calling process's
+    # environment holds.
     on_intvty, noise_pct = resolved_grading(state)
     # The session's constraints (latency, power) veto a candidate the gain gates would KEEP, on whichever axis graded
     # it. A candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
@@ -137,21 +138,21 @@ def resolve_graded_comparison(
             ref_perf, reason = resolve_grading_anchor_perf(state)
         cand_perf = perf_snapshot_from_mapping(measurement)
         if all((ref_perf, cand_perf)):
-            gain = gain_pct_or_zero(axis_of(cand_perf, GRADED_INTVTY_P50), axis_of(ref_perf, GRADED_INTVTY_P50))
-            # The output guard reads the raw aggregate: the chip count divides both sides of the ratio, so the band
-            # holds identically per GPU.
+            objective = AgentXObjective.P50_INTERACTIVITY
+            gain = gain_pct_or_zero(axis_of(cand_perf, objective.metric), axis_of(ref_perf, objective.metric))
+            # The chip count divides both sides of each throughput ratio, so the band holds identically per GPU.
+            holds = partial(holds_within_band, cand_perf, ref_perf, noise_pct=noise_pct)
             gates = (
-                ("p50_gain_below_threshold", gain >= AGENTX_KEEP_P50_THRESHOLD_PCT),
-                ("p90_regressed", holds_within_band(cand_perf, ref_perf, GRADED_INTVTY, noise_pct=noise_pct)),
-                ("output_regressed", holds_within_band(cand_perf, ref_perf, GRADED_OUTPUT, noise_pct=noise_pct)),
+                (objective.below_threshold, gain >= objective.bar_pct),
+                *((guard.refusal, holds(snapshot_axis(guard.metric))) for guard in objective.guards),
                 (incomparability_reason(cand_perf, ref_perf), False),
             )
             refused = [gate for gate, held in gates if gate and not held]
             sla_veto = "" if refused else constraint_veto_reason(measurement, state)
             return GradedComparison(
-                objective=GRADED_INTVTY_P50,
-                candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
-                reference=axis_of(ref_perf, GRADED_INTVTY_P50),
+                objective=objective.metric,
+                candidate=axis_of(cand_perf, objective.metric),
+                reference=axis_of(ref_perf, objective.metric),
                 verdict=VERDICT_REVERT if any((refused, sla_veto)) else VERDICT_KEEP,
                 tput_candidate=total_tput_of(cand_perf),
                 tput_reference=total_tput_of(ref_perf),
@@ -1096,8 +1097,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
         self.charge_elapsed()
         # Backfill scriptable/diffusion (xDiT) ``e2el_mean_ms`` from ``tput`` so current_best has the latency metric.
         self._backfill_scriptable_latency()
-        path = self.state_path(session_dir)
-        atomic_write_json(path, self.to_dict())
+        write_state(self.state_path(session_dir), self.to_dict())
         write_retest_view(session_dir, self)
         # Author-time breakdown capture: snapshot state-owned sections into the recorder spool right after persisting.
         self._session_dir = Path(session_dir)

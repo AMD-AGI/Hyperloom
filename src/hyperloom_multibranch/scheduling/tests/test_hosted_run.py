@@ -57,18 +57,24 @@ ACCOUNT = RunAs(user="hl-specialist", uid=1500, gid=1500, groups=(1500,), home="
 DENIED = "bwrap: setting up uid map: Permission denied"
 
 
-def _spec(measurement: str, image: str = f"registry.example/vllm@{DIGEST}") -> CampaignSpec:
+def _spec(
+    measurement: str,
+    image: str = f"registry.example/vllm@{DIGEST}",
+    hardware: dict[str, int] | None = None,
+    **sections: dict[str, object],
+) -> CampaignSpec:
     return parse_campaign(
         {
             "schema": "hyperloom.campaign-spec/v1",
             "flow": "multibranch",
             "model": {"path": "/models/Llama-3-8B"},
             "framework": {"name": "vllm", "image": image},
-            "hardware": {"gpu_type": "mi355x", "tp": 1},
+            "hardware": {"gpu_type": "mi355x", "tp": 1, **(hardware or {})},
             "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
             "budget": {"max_hours": 1},
             "placement": {"profile": "hosted-gpu", "measurement": measurement},
             "multibranch": {"workload": "inferencex"},
+            **sections,
         }
     )
 
@@ -139,6 +145,46 @@ def test_the_host_reads_a_final_ending_and_the_session_a_restart_finishes(tmp_pa
 @pytest.mark.parametrize("measurement", ["local", "hosted"])
 def test_the_run_command_line_says_where_the_spec_measures(measurement: str) -> None:
     assert f"--measurement={measurement}" in run_argv(_spec(measurement), 1.0, 8)
+
+
+def test_an_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names() -> None:
+    argv = run_argv(_spec("hosted", hardware={"tp": 8, "ep": 8}), 1.0, 1)
+
+    assert {"--workload=inferencex", "--tp=8", "--ep=8"} <= set(argv)
+
+
+def test_a_spec_gives_its_base_launch_as_the_reference_script_of_run() -> None:
+    spec = _spec("hosted", multibranch={"workload": "inferencex", "reference_script": "/data/launch.sh"})
+
+    assert "--reference-script=/data/launch.sh" in run_argv(spec, 1.0, 1)
+    assert not any(arg.startswith("--reference-script") for arg in run_argv(_spec("hosted"), 1.0, 1))
+
+
+@pytest.mark.parametrize("path", [7, ["/data/launch.sh"], "", "  "])
+def test_a_reference_script_that_is_no_path_is_refused_naming_the_field(path: object) -> None:
+    spec = _spec("hosted", multibranch={"workload": "inferencex", "reference_script": path})
+
+    with pytest.raises(HostedRefused, match="multibranch.reference_script must be the path of a launch script"):
+        run_argv(spec, 1.0, 1)
+
+
+@pytest.mark.parametrize(
+    ("launch", "named"),
+    [
+        ({"server_args": "--mem-fraction-static 0.8"}, "does not read launch.server_args:"),
+        ({"extra_env": {"AITER_BF16_FP8_MOE_BOUND": "0"}}, "does not read launch.extra_env:"),
+        ({"server_args": "--enforce-eager", "extra_env": {}}, "does not read launch.server_args or launch.extra_env:"),
+    ],
+    ids=["server-args", "extra-env", "both"],
+)
+def test_a_spec_whose_launch_a_multibranch_run_would_not_read_is_refused_pointing_at_the_reference_script(
+    launch: dict[str, object], named: str
+) -> None:
+    spec = _spec("hosted", launch=launch, multibranch={"workload": "inferencex", "reference_script": "/data/l.sh"})
+
+    with pytest.raises(HostedRefused, match=named) as refused:
+        run_argv(spec, 1.0, 1)
+    assert "give the base launch as multibranch.reference_script" in str(refused.value)
 
 
 @pytest.mark.parametrize(

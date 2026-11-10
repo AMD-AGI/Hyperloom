@@ -33,6 +33,7 @@ from hyperloom.common.outside_facts import (
     ENV_RUN_EVAL,
     ENV_TP,
 )
+from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 import json
@@ -483,12 +484,40 @@ def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, obje
     }
 
 
+def _is_env_field(key: object) -> bool:
+    """Whether a document field named ``key`` holds environment variables (``env``, ``extra_envs``, ``launch_env``)."""
+    name = str(key).lower()
+    return name in ("environment", "environ") or name.rstrip("s").endswith("env")
+
+
+def holds_credentials(value: object, *, in_env: bool = False) -> bool:
+    """Whether a JSON-shaped ``value`` carries a credential: a string :func:`redact_secret_values` would change, with a
+    URL that has userinfo (``https://user:token@host``) or with a ``--flag`` named like one, or a value under a
+    credential-shaped name in an environment mapping (a field named ``env``, ``extra_envs``, ...: any other key is a
+    field of the document, and ``authored`` is not a secret)."""
+    if isinstance(value, str):
+        flags = (token.partition("=")[0] for token in value.split() if token.startswith("-"))
+        return (
+            redact_secret_values(value) != value
+            or CREDENTIALED_URL_RE.search(value) is not None
+            or any(is_credential_name(flag) for flag in flags)
+        )
+    if isinstance(value, Mapping):
+        return any(
+            (in_env and is_credential_name(key) and bool(item)) or holds_credentials(item, in_env=_is_env_field(key))
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(holds_credentials(item, in_env=in_env) for item in value)
+    return False
+
+
 def is_allowed_external_env_key(key: object) -> bool:
     """True when an env export from an untrusted external source is safe to carry."""
     upper = str(key or "").strip().upper()
     if not valid_env_key(upper) or upper in BLOCKED_EXTERNAL_ENV_NAMES:
         return False
-    return not is_secret_shaped_env_name(upper)
+    return not is_credential_name(upper)
 
 
 def is_allowed_variant_env_key(key: object) -> bool:
@@ -511,8 +540,11 @@ def valid_env_key(key: object) -> bool:
 
 def is_allowed_dotenv_key(key: object) -> bool:
     name = str(key or "").strip()
+    # Held to ASCII before folding: str.upper() turns a long s into S, and the name is written back as given.
+    if not valid_env_key(name):
+        return False
     upper = name.upper()
-    if not valid_env_key(upper) or upper in BLOCKED_UNTRUSTED_ENV_NAMES:
+    if upper in BLOCKED_UNTRUSTED_ENV_NAMES:
         return False
     return upper in DOTENV_EXACT_ALLOWLIST or any(upper.startswith(prefix) for prefix in DOTENV_PREFIX_ALLOWLIST)
 
@@ -520,14 +552,14 @@ def is_allowed_dotenv_key(key: object) -> bool:
 def is_allowed_not_private_dotenv_key(key: object) -> bool:
     """True when a ``.env`` another account can write may lend ``key``, with one of the values
     DOTENV_NOT_PRIVATE_LENT_VALUES gives it (is_lent_not_private_dotenv_assignment)."""
-    upper = str(key or "").strip().upper()
-    return is_allowed_dotenv_key(upper) and upper in DOTENV_NOT_PRIVATE_LENT_VALUES
+    name = str(key or "").strip()
+    return is_allowed_dotenv_key(name) and name.upper() in DOTENV_NOT_PRIVATE_LENT_VALUES
 
 
 def is_lent_not_private_dotenv_assignment(key: object, value: object) -> bool:
     """True when a ``.env`` another account can write lends ``key=value``: the name and that value are both listed."""
-    upper = str(key or "").strip().upper()
-    return is_allowed_not_private_dotenv_key(upper) and str(value) in DOTENV_NOT_PRIVATE_LENT_VALUES[upper]
+    name = str(key or "").strip()
+    return is_allowed_not_private_dotenv_key(name) and str(value) in DOTENV_NOT_PRIVATE_LENT_VALUES[name.upper()]
 
 
 def is_allowed_kernel_agent_env_key(key: object) -> bool:
@@ -940,6 +972,7 @@ __all__ = [
     "credential_arg_indices",
     "env_file_list_elements",
     "filter_untrusted_env_mapping",
+    "holds_credentials",
     "is_allowed_dotenv_key",
     "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",

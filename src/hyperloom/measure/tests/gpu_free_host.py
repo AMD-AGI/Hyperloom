@@ -14,8 +14,9 @@ prepends them to ``PATH`` inside the test, which runs after this fixture, so the
 
 The runner also reads who holds its cards from the kernel's list (:mod:`hyperloom.sandbox.card_occupancy`), and the
 card guard enforces by default: on a GPU host whose cards other work holds, every test that waits for a runner's
-signed result would get ``foreign_process_on_card`` instead. A conftest can point the test process at an idle machine
-of its own, but a runner is another process and reads the host's list. A test therefore starts its runner through
+signed result would get ``foreign_process_on_card`` instead, and a card pool or a lease built in the test process would
+find no free card. A conftest imports :func:`idle_card_list` as well to point the test process at an idle machine of
+its own, but a runner is another process and reads the host's list. A test therefore starts its runner through
 :data:`IDLE_CARDS_PYTHON` (or :func:`idle_cards_python`, for a template that names an interpreter): this module, run as
 ``python -m hyperloom.measure.tests.gpu_free_host -m <module> <args>``, points the kernel's list and ``/proc`` at an
 idle machine in a temporary directory and then runs ``<module>`` as ``python -m`` would.
@@ -44,12 +45,25 @@ _MODULE = "hyperloom.measure.tests.gpu_free_host"
 #: The interpreter a test starts a runner module with, ``(*IDLE_CARDS_PYTHON, "-m", module, *args)``, so that the runner
 #: reads an idle machine of its own instead of the host's cards.
 IDLE_CARDS_PYTHON = (sys.executable, "-m", _MODULE)
+#: A directory of the test's own, below pytest's base temporary directory, where the test's helpers that are not
+#: fixtures (the idle machine of a runner it starts, a fake toolbox's scratch) make their temporary directories instead
+#: of the host's: a runner the test kills, or a test run that is killed, never removes them.
+TEST_SCRATCH_ENV = "HYPERLOOM_TEST_SCRATCH"
+
+
+def scratch_root() -> str | None:
+    """The directory :data:`TEST_SCRATCH_ENV` names, ``None`` (the host's temporary directory) when it names none."""
+    return os.environ.get(TEST_SCRATCH_ENV) or None
 
 
 @pytest.fixture(autouse=True)
 def machine_without_readable_gpus(
-    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv(TEST_SCRATCH_ENV, str(tmp_path_factory.mktemp("scratch")))
     if getattr(request.module, USES_REAL_GPUS_FLAG, False):
         return
     shadow = tmp_path / "gpu-tools-shadow"
@@ -61,6 +75,17 @@ def machine_without_readable_gpus(
     monkeypatch.setenv("PATH", f"{shadow}{os.pathsep}{os.environ.get('PATH', '')}")
     for name in _DEVICE_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def idle_card_list(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The kernel's list and ``/proc`` this process reads are those of an idle machine of the test's own (a test that
+    lists holders injects its own reader on top); a module with ``USES_REAL_GPUS = True`` reads the host's."""
+    if getattr(request.module, USES_REAL_GPUS_FLAG, False):
+        return
+    machine = KernelTree(tmp_path / "idle-machine")
+    monkeypatch.setattr(card_occupancy, "KFD_PATH", machine.kfd)
+    monkeypatch.setattr(card_occupancy, "PROC_PATH", machine.procfs)
 
 
 def idle_cards_python(directory: Path) -> str:
@@ -77,7 +102,7 @@ def _run_on_idle_cards(argv: list[str]) -> None:
     if len(argv) < 2 or argv[0] != "-m":
         raise SystemExit(f"usage: python -m {_MODULE} -m <module> [args...]")
     module, args = argv[1], argv[2:]
-    with tempfile.TemporaryDirectory(prefix="hl-idle-machine-") as root:
+    with tempfile.TemporaryDirectory(prefix="hl-idle-machine-", dir=scratch_root()) as root:
         machine = KernelTree(Path(root))
         card_occupancy.KFD_PATH, card_occupancy.PROC_PATH = machine.kfd, machine.procfs
         sys.argv = [module, *args]

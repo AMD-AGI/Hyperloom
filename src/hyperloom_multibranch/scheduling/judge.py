@@ -18,7 +18,8 @@ repair branch for its protected period, unless its specialist gave up or its jud
 candidate waiting for its confirm, unless its judging failed. In a session that plays a scheduling playbook, the judge
 reads :data:`~hyperloom_multibranch.scheduling.judge_prompt.PLAYBOOK_JUDGE_PROMPT`, where the stall evidence is the one
 stop rule for a stall, and the playbook's safety envelope refuses the stop, though not a lower K, of a branch with a
-stranded lead and of one drawn for probation (:func:`envelope_holds`). The scheduler finds the held branches again as it applies the decision, since a
+stranded lead and of one drawn for probation (:func:`envelope_holds`). A branch in line for a dev sandbox is held the
+same way while it waits (:func:`dev_wait_holds`), so the time it waits does not stop it for a stall. The scheduler finds the held branches again as it applies the decision, since a
 candidate can start waiting while the judge answers, and :func:`hold_decision` refuses their orders and names them in
 the decision.
 """
@@ -87,7 +88,7 @@ class HoldReason(str, Enum):
     judge may not raise either. In a session that plays a playbook its safety envelope holds two more
     (:func:`envelope_holds`), named as :func:`~hyperloom_multibranch.blackboard.rsi.frontier.envelope_hold` names them: a
     probation draw and a stranded lead, whose stop the judge may not order but whose K it may lower
-    (:data:`ENVELOPE_HOLDS`)."""
+    (:data:`ENVELOPE_HOLDS`). A branch in line for a dev sandbox is held so too while it waits (:func:`dev_wait_holds`)."""
 
     GRACE = "grace"
     REPAIR = "repair"
@@ -95,10 +96,13 @@ class HoldReason(str, Enum):
     UNSTEERED = "unsteered"
     STRANDED = STRANDED_HOLD
     PROBATION = PROBATION_HOLD
+    DEV_WAIT = "dev_wait"
 
 
 #: The holds of the safety envelope: a stop of such a branch is refused, a lower K is not.
 ENVELOPE_HOLDS = frozenset({HoldReason.STRANDED, HoldReason.PROBATION})
+#: The holds that refuse a branch's stop but not a lower K.
+_STOP_ONLY_HOLDS = ENVELOPE_HOLDS | {HoldReason.DEV_WAIT}
 
 
 @dataclass(frozen=True)
@@ -106,8 +110,9 @@ class JudgeView:
     """What the judge sees; ``opening`` is true only for the call that sizes the opening batch, which opens at least
     one branch unless a specialist branch is open already.
 
-    ``free_slots`` is the roster's own count of branches that may still be opened; ``pending`` are the forks and
-    repairs the fork desk queued for a slot, oldest first; ``history`` is the blackboard's
+    ``free_slots`` is the roster's own count of branches that may still be opened; ``pending`` are the shares, forks
+    and repairs the fork desk queued for a slot: shares first, then forks and repairs oldest first; ``history`` is
+    the blackboard's
     digest of similar archived sessions, empty when the archive holds none. ``widening`` says whether a branch
     opened now would still pay off. ``similar_to`` maps a branch to the running branches whose own change is much the
     same as its own; a branch similar to none is not in it. ``events`` are the events detected since the last call,
@@ -128,7 +133,8 @@ class JudgeView:
     ``building`` to the native builds not ready yet that its tests in flight wait for; a branch with none is not in
     either. ``focus`` maps a branch to the focus its ``OPEN`` lineage names; a branch opened on none is not in it.
     ``open_areas`` says where a new branch could open and ``playbook`` is the scheduling playbook the session
-    plays, as the RSI renders them; both are empty for a session that reads no archive.
+    plays, as the RSI renders them; both are empty for a session that reads no archive. ``agent_map`` is Arbor's map
+    as :func:`~hyperloom_multibranch.scheduling.agent_map.render_map` gives it, empty for a session with none.
     """
 
     now: float
@@ -162,6 +168,7 @@ class JudgeView:
     focus: Mapping[str, str]
     open_areas: str = ""
     playbook: str = ""
+    agent_map: str = ""
 
 
 @dataclass(frozen=True)
@@ -280,6 +287,18 @@ def envelope_holds(
         if hold:
             held[row.branch] = HoldReason(hold)
     return held
+
+
+def dev_wait_holds(waiting: Iterable[str], specialists: Mapping[str, SpecialistStatus]) -> dict[str, HoldReason]:
+    """The running specialist branches ``waiting`` in line for a dev sandbox, whose stop the judge may not order while
+    they wait but whose K it may lower. A branch whose specialist gave up, or was stopped for a failed judging, waits
+    for nothing."""
+
+    return {
+        branch: HoldReason.DEV_WAIT
+        for branch in waiting
+        if (state := specialists.get(branch)) is not None and not (state.gave_up or state.judge_failed)
+    }
 
 
 @dataclass(frozen=True)
@@ -461,7 +480,7 @@ def render_prompt(view: JudgeView) -> str:
         _KEY_BRANCHES: [_branch_row(entry, progress.get(entry.branch), view) for entry in view.roster],
     }
     history = f"How similar past sessions went:\n{view.history}\n\n" if view.history else ""
-    sections = "".join(f"{text}\n\n" for text in (view.open_areas, view.playbook) if text)
+    sections = "".join(f"{text}\n\n" for text in (view.open_areas, view.agent_map, view.playbook) if text)
     return f"Session state:\n{json.dumps(state, indent=2, sort_keys=True)}\n\n{history}{sections}{REPLY_FORMAT}"
 
 
@@ -580,14 +599,14 @@ def hold_decision(
     decision: JudgeDecision, held: Mapping[str, HoldReason], roster: Iterable[BranchEntry]
 ) -> JudgeDecision:
     """``decision`` without the stops and the lower K orders of the ``held`` branches, the K of a branch the safety
-    envelope holds excepted (:data:`ENVELOPE_HOLDS`), and without any K order for a branch the judge does not steer,
+    stop-only holds excepted (:data:`_STOP_ONLY_HOLDS`), and without any K order for a branch the judge does not steer,
     held or not, each named in ``held`` once; ``roster`` gives the K a branch runs at now and its origin. Applying it
     twice changes nothing more."""
 
     entries = tuple(roster)
     running_k = {entry.branch: entry.k for entry in entries}
     unsteered = {entry.branch for entry in entries if not entry.origin.steered_by_judge}
-    narrowed = {branch for branch, reason in held.items() if reason not in ENVELOPE_HOLDS}
+    narrowed = {branch for branch, reason in held.items() if reason not in _STOP_ONLY_HOLDS}
     refused_stops = [order for order in decision.stop if order.branch in held]
     refused_ks = [
         order
@@ -644,6 +663,7 @@ __all__ = [
     "QueuedIntent",
     "StopOrder",
     "cap_decision",
+    "dev_wait_holds",
     "envelope_holds",
     "parse_decision",
     "held_branches",

@@ -433,6 +433,10 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
     from arbor.execute import turns
     tag = turns.new_tag(label)
     tagged = "env" in getattr(ClaudeAgentOptions, "__dataclass_fields__", {})
+    # Standalone, what the turn starts inside the container through `docker exec` carries no tag: the container's
+    # processes are listed now, and what is new when the turn ends is stopped there.
+    box = turns.CONTAINER if label not in turns.KEPT else None
+    before = await asyncio.to_thread(turns.container_procs, box) if box else None
     options = ClaudeAgentOptions(
         cwd=cwd,
         allowed_tools=allowed_tools,
@@ -503,6 +507,12 @@ async def _run_claude_once(prompt: str, cwd: str, allowed_tools: list[str],
                 print(f"[arbor] {label}: stopped {len(stopped)} process(es) the turn left running: {stopped[:8]}"
                       + (f"; still running after SIGTERM: {running[:8]}" if running else ""),
                       file=sys.stderr, flush=True)
+        if before is not None:
+            stopped, running = await asyncio.to_thread(turns.end_container_turn, before, box, label)
+            if stopped:
+                print(f"[arbor] {label}: stopped {len(stopped)} process(es) the turn left running in {box}: "
+                      f"{stopped[:8]}" + (f"; still running after SIGTERM: {running[:8]}" if running else ""),
+                      file=sys.stderr, flush=True)
 
     if not text_parts and sdk_errors:
         # A turn with no word of the agent's that ended on the CLI's error alone is a start
@@ -539,7 +549,7 @@ def _run_phase(coro, phase: str, config: dict):
     t0 = time.monotonic()
     try:
         return asyncio.run(asyncio.wait_for(coro, timeout))
-    except TimeoutError:   # asyncio.TimeoutError is TimeoutError from Python 3.11
+    except (TimeoutError, asyncio.TimeoutError):   # one class from Python 3.11; two on 3.10, which images ship
         if time.monotonic() - t0 < timeout * 0.99:
             raise          # the agent's own, not the phase's
         raise component.PhaseTimeout(phase, timeout) from None
@@ -559,9 +569,9 @@ def _write_aborted(session_dir_p: Path, msg: str) -> None:
 
 def _not_measured(state, session_dir_p: Path, iteration: int, change: str, reason: str,
                   claim_class: str = "B", findings: list | None = None) -> dict:
-    """Book the iteration NOT MEASURED, as the gate's INVALID path does: tree preserved,
-    counters unchanged, ABORTED.md after too many in a row."""
-    print(f"[arbor] NOT MEASURED — {reason}. Tree preserved, counters unchanged.",
+    """Book the iteration NOT MEASURED, as the gate's INVALID path does: counters
+    unchanged (the driver restores the kept tree), ABORTED.md after too many in a row."""
+    print(f"[arbor] NOT MEASURED — {reason}. Counters unchanged; the kept tree is restored.",
           file=sys.stderr, flush=True)
     state.record_invalid(iteration=iteration, change=change, tier=state.tier, reason=reason,
                          claim_class=claim_class, findings=findings or [])
@@ -583,19 +593,27 @@ def _parse_critic_decision(output: str) -> tuple[str, str]:
     parseable is treated as UPHOLD: the gate already applied every mechanical
     rule, so a silent critic must not be able to discard a legitimate result.
     Older prompts emitted ``KEEP``; accept it as a synonym for UPHOLD.
+
+    Markdown around a line is not part of it: ``**DECISION: REVERT**``, ``**DECISION:** REVERT``,
+    `` `DECISION: REVERT` `` and ``> DECISION: REVERT`` are each a REVERT. Matching the bare line
+    alone once read a bold REVERT as no verdict at all, and the gate's KEEP stood against the
+    critic. The last verdict wins. A critic that gives none still upholds the gate, and its reason
+    says that no verdict was found rather than that there was no objection.
     """
-    decision = "UPHOLD"
-    reason = "critic produced no objection"
-    for line in output.strip().splitlines():
-        line = line.strip()
-        m = re.match(r'DECISION:\s*(UPHOLD|KEEP|REVERT|RECHECK)', line, re.IGNORECASE)
+    decision = None
+    reason = None
+    for raw_line in output.strip().splitlines():
+        line = raw_line.strip().strip(_MARKDOWN_DECORATION)
+        m = re.match(r'DECISION\s*[*_`]*\s*:\s*[*_`]*\s*(UPHOLD|KEEP|REVERT|RECHECK)\b', line, re.IGNORECASE)
         if m:
             raw = m.group(1).upper()
             decision = "UPHOLD" if raw in ("UPHOLD", "KEEP") else raw
-        m = re.match(r'REASON:\s*(.*)', line, re.IGNORECASE)
+        m = re.match(r'REASON\s*[*_`]*\s*:\s*[*_`]*\s*(.*)', line, re.IGNORECASE)
         if m:
-            reason = m.group(1).strip()
-    return decision, reason
+            reason = m.group(1).strip().rstrip(_MARKDOWN_DECORATION) or reason
+    if decision is None:
+        return "UPHOLD", reason or "critic gave no DECISION line — gate verdict stands"
+    return decision, reason or "critic gave no reason"
 
 
 _MARKDOWN_DECORATION = "*_`>#- \t"
@@ -695,10 +713,13 @@ def _check_switches(state, config: dict, container: str, workspace: str, session
     settings = pair[1] if pair else knobs.settings(config, None)
     launch_env = {k: str(v) for k, v in (config.get("server_env") or {}).items()}
 
-    def existed(name: str) -> bool:
-        r = run_in(container, ["git", "grep", "-q", "-F", "-e", name, "HEAD~1", "--"],
-                   workdir=workspace, capture_output=True, text=True)
-        return r.returncode != 1   # only "not found" proves it new
+    # The tree before the change, and the other editable packages (AITER reads its own variables).
+    existed = _switches.existed_in(run_in, container, workspace,
+                                   [p.get("path") for p in (config.get("editable_packages") or [])])
+    on_by_default = _switches.declared_default_on(agent_output) & _switches.env_reads(git_diff)
+    if on_by_default:
+        print(f"[arbor] S4: {', '.join(sorted(on_by_default))} declared DEFAULT_ON: unset runs the "
+              f"new path, which the arm served", file=sys.stderr, flush=True)
 
     def jit_files(cfg: dict) -> set[str]:
         roots = _switches.jit_roots({**_live_env(cfg), **found})
@@ -883,6 +904,12 @@ def _finalize_iteration(
         git_diff = git(container, workspace, "diff", "HEAD~1", "HEAD")
     except RuntimeError:
         git_diff = "(could not read diff)"
+    # The same iteration's commits in the other editable trees (AITER), each path under its tree's
+    # name: a change confined to one would otherwise look empty to the critic and to S4.
+    from arbor.execute import trees as _trees
+    trees_diff = _trees.diff(container, iter_dir)
+    if trees_diff:
+        git_diff = f"{git_diff}\n{trees_diff}" if git_diff.strip() else trees_diff
 
     # ── Out-of-tree artifacts (evaluators, knowledge notes) ─────────────────
     # Written to the pack dir on shared storage, so invisible to git_diff.
@@ -953,6 +980,40 @@ def _finalize_iteration(
     if arm:
         state.iteration_notes["arm_check"] = armcheck.brief(arm)
 
+    # ── A stability fix's evidence (arbor/measure/stability.py) ─────────────
+    # The server log's tail once the bench is done, kept for every served
+    # iteration so a later fix can cite its failure; read for a FIX-STABILITY
+    # candidate with the iterations it cites.
+    from arbor.measure import stability as _stability
+    from arbor.execute.workspace import HOST as _HOST
+    if served and container and container != _HOST:
+        try:
+            _stability.capture(_server_log_tail(campaign.config, container, _stability.LOG_LINES), iter_dir)
+        except Exception as e:  # noqa: BLE001 - evidence, never a verdict
+            print(f"[arbor] server log not kept for the stability check: {e}", file=sys.stderr, flush=True)
+    stability = None
+    if resolve(claim_class).name == "FIX-STABILITY":
+        measurement = campaign.pack.objective.get("measurement", {})
+        stability = _stability.check(session_dir_p, state.lessons, iteration, agent_output, measurement,
+                                     state.best_metric, campaign.pack.objective.get("direction", "max"))
+        state.iteration_notes["stability"] = stability
+        before = stability.get("before")
+        print(f"[arbor] FIX-STABILITY: " + (f"iter-{before['iteration']}'s failure on record ({before['evidence'][0]})"
+                                            if before else f"no failure on record ({stability['why']})")
+              + (f"; its own run shows one ({stability['own'][0]})" if stability.get("own") else ""),
+              file=sys.stderr, flush=True)
+
+    # ── A host's guards (arbor/measure/guards.py) ───────────────────────────
+    # Checked against the kept tree's readings; the row carries what held, broke or went unchecked.
+    from arbor.measure import guards as _guards
+    measurement_block = campaign.pack.objective.get("measurement", {})
+    guard_check = (_guards.check(measurement_block, bench_output, state.guard_ref)
+                   if bench_output.get("status") == "ok" else None)
+    if guard_check:
+        state.iteration_notes["guards"] = guard_check
+        print("[arbor] Guards: " + "; ".join(
+            f"{kind} {', '.join(lines)}" for kind, lines in guard_check.items() if lines), file=sys.stderr, flush=True)
+
     def decide(acc: dict | None):
         return run_gate(
             campaign.pack.objective, state.best_metric,
@@ -962,6 +1023,8 @@ def _finalize_iteration(
             arm=arm if arm_mode == "enforce" else None,
             bundle=claimed_bundle,
             accuracy=acc,
+            stability=stability,
+            guards=guard_check,
         )
 
     # ── Accuracy (arbor/measure/accuracy.py) ────────────────────────────────
@@ -1007,8 +1070,8 @@ def _finalize_iteration(
     # the harness failed, so no evidence about the change exists. The tree
     # stands, the counters do not move, and the next iteration retries.
     if decision == "INVALID":
-        print(f"[arbor] NOT MEASURED — tree preserved, counters unchanged, "
-              f"iteration will be retried", file=sys.stderr, flush=True)
+        print(f"[arbor] NOT MEASURED — counters unchanged; the kept tree is restored "
+              f"and the change noted for a revisit", file=sys.stderr, flush=True)
         state.record_invalid(
             iteration=iteration, change=change, tier=state.tier,
             reason=reason, claim_class=claim_class, findings=finding_ids,
@@ -1205,6 +1268,8 @@ def _finalize_iteration(
         # resets the escalation counter — a change kept for clearing the noise
         # band, or kept as a frontier trade, is retained but is not a claimed
         # advance.
+        # The kept tree's readings of a host's guards (arbor/measure/guards.py), for the next candidate.
+        state.guard_ref = {**state.guard_ref, **_guards.reading(measurement_block, bench_output)}
         state.record_keep(
             iteration=iteration, metric=metric_value,
             change=change, tier=state.tier,
@@ -1216,6 +1281,8 @@ def _finalize_iteration(
     elif decision == "PROBE":
         # The tree is NOT reverted. A probe's deliverable — a new evaluator, an
         # instrument, a ledger entry — is exactly what we want to keep.
+        if bench_output.get("status") == "ok":
+            state.guard_ref = {**state.guard_ref, **_guards.reading(measurement_block, bench_output)}
         state.record_probe(
             iteration=iteration, change=change, tier=state.tier,
             findings=finding_ids, reason=reason, metric=metric_value,
@@ -1234,7 +1301,7 @@ def _finalize_iteration(
         )
         state.save(session_dir_p / "session.json")
         if gate.revert_tree:
-            _safe_revert(container, workspace)
+            _safe_revert(container, workspace, campaign.config)
 
     state.save(session_dir_p / "session.json")
 
@@ -1431,20 +1498,29 @@ def _probe_is_readonly(paths: list[str]) -> bool:
     )
 
 
-def _aiter_table_problems(container: str, workspace: str) -> list[str]:
+def _aiter_table_problems(container: str, workspace: str, session_dir=None, iter_dir=None) -> list[str]:
     """What is wrong with the tuned AITER tables the last commit serves (:mod:`arbor.measure.aiter_tables`), checked
-    only when the commit touched ``arbor/config.json`` or a CSV; ``[]`` otherwise, or when nothing can be read."""
+    only when the iteration touched ``arbor/config.json`` or a CSV, in the workspace or in an editable tree it
+    committed (a table edited in place in AITER's tree); ``[]`` otherwise, or when nothing can be read. The editable
+    trees' baselines (``<session>/trees.json``) say which tables are AITER's own."""
+    from arbor.execute import trees as _trees
     from arbor.execute.workspace import git as _git
     from arbor.measure import aiter_tables
     try:
         changed = _git(container, workspace, "diff", "--name-only", "HEAD~1", "HEAD").split()
+        for tree, sha in (_trees.committed(iter_dir) if iter_dir else {}).items():
+            try:
+                changed += _trees._git(container, tree, "diff", "--name-only", f"{sha}~1", sha).split()
+            except RuntimeError:
+                continue
         if not any(p == "arbor/config.json" or p.endswith(".csv") for p in changed):
             return []
         config = json.loads(_git(container, workspace, "show", "HEAD:arbor/config.json"))
     except (RuntimeError, ValueError):
         return []
     env = config.get("server_env") if isinstance(config, dict) else None
-    return aiter_tables.problems(container, env if isinstance(env, dict) else {}, workdir=workspace)
+    bases = _trees.baselines(session_dir) if session_dir else {}
+    return aiter_tables.problems(container, env if isinstance(env, dict) else {}, workdir=workspace, bases=bases)
 
 
 #: Memory a card may hold with our server stopped: above it, another process holds the card.
@@ -1901,8 +1977,15 @@ def _server_log_tail(config: dict, container: str, lines: int = 20) -> str:
     return r.stdout
 
 
-def _safe_revert(container: str, workspace: str) -> None:
+def _safe_revert(container: str, workspace: str, config: dict | None = None) -> None:
+    """Revert the iteration: the workspace's commit, and the same iteration's commits in the other editable trees
+    (arbor/execute/trees.py), found by the commit's subject."""
+    from arbor.execute import trees as _trees
     from arbor.execute.workspace import git, revert as _revert
+    try:
+        subject = git(container, workspace, "log", "-1", "--format=%s")
+    except RuntimeError:
+        subject = ""
     try:
         git(container, workspace, "checkout", "--", ".")
         git(container, workspace, "clean", "-fd")
@@ -1912,17 +1995,25 @@ def _safe_revert(container: str, workspace: str) -> None:
         _revert(container, workspace)
     except RuntimeError as e:
         print(f"[arbor] revert failed: {e}", file=sys.stderr, flush=True)
+    others = _trees.paths(config or {})
+    if others and subject.startswith("iter-"):
+        reverted = _trees.revert(container, others, subject)
+        if reverted:
+            print(f"[arbor] reverted in {', '.join(reverted)} too", file=sys.stderr, flush=True)
 
 
-def _mean_script(bench_output_path: str, metric_key: str, secondary_key: str | None = None) -> str:
+def _mean_script(bench_output_path: str, metric_key: str, secondary_key: str | None = None,
+                 extra: tuple[str, ...] = ()) -> str:
     """The fixed block that books the MEAN of the replays' ``<BENCH_OUTPUT>.run*`` files.
 
     Run as given, never by the agent's own arithmetic: asking a model to average
-    numbers it just read is an avoidable way to get a wrong bar.
+    numbers it just read is an avoidable way to get a wrong bar. ``extra``: more keys to
+    average (what ``component.bench_read`` reads, the guards among them).
     """
     keys = [metric_key, "p90_interactivity", "p50_interactivity"]
-    if secondary_key and secondary_key not in keys:
-        keys.append(secondary_key)
+    for k in (secondary_key, *extra):
+        if k and k not in keys:
+            keys.append(k)
     keys_src = ",".join(f"'{k}'" for k in keys)
     return (
         f"   python3 - <<'AGG'\n"
@@ -1957,11 +2048,76 @@ def _mean_script(bench_output_path: str, metric_key: str, secondary_key: str | N
 SECONDARY_FROM_LATENCY = {
     "p90_interactivity": "1000 / the p90 time per output token (TPOT) in ms",
     "p50_interactivity": "1000 / the median TPOT in ms",
+    # An AgentX host's axis, as InferenceX's harness publishes it (request_metrics.latency.e2e_norm_intvty).
+    "e2e_norm_intvty_p50": ("1 / the median over requests of (end-to-end latency in s / output tokens); "
+                            "its `e2e_norm_intvty` p50 when the client publishes that"),
+    "e2e_norm_intvty_p90": ("1 / the p90 over requests of (end-to-end latency in s / output tokens); "
+                            "its `e2e_norm_intvty` p90 when the client publishes that"),
 }
 
 
+# component.bench_read's fixed block: the metrics from the host client's report, by dotted path, into a bench output
+# file; a report that does not read, a path that is not a number there, or a ``require`` path that is not its value (a
+# round the client did not complete keeps its numbers) writes a failed one (NOT_MEASURED). The objective's metric must
+# be among the keys.
+_READ_BLOCK = r"""   python3 - <<'READ'
+import json
+from pathlib import Path
+out, dest = Path(__OUT__), __DEST__
+name, keys, need = __FILE__, __KEYS__, __NEED__
+require = json.loads(__REQUIRE__)
+
+def fail(why):
+    json.dump({"status": "failed", "error": "bench_read: " + why}, open(dest, "w"))
+    print("[bench_read] NOT MEASURED:", why)
+
+def at(doc, path):
+    for part in path.split("."):
+        doc = doc.get(part) if isinstance(doc, dict) else None
+    return doc
+
+missing = [k for k in need if k not in keys]
+try:
+    doc = None if missing else json.loads((out / name).read_text())
+except (OSError, ValueError) as exc:
+    doc, why = None, f"{name} under {out} did not read: {exc}"
+unmet = [] if doc is None else [(p, want, at(doc, p)) for p, want in require.items()
+                                if at(doc, p) != want or isinstance(at(doc, p), bool) != isinstance(want, bool)]
+if missing:
+    fail(f"no path for {', '.join(missing)}")
+elif unmet:
+    fail("; ".join(f"{p} is {json.dumps(got)}, not {json.dumps(want)}" for p, want, got in unmet))
+elif doc is not None:
+    rec, bad = {"status": "ok", "source": "bench_command"}, None
+    for key, path in keys.items():
+        v = doc
+        for part in path.split("."):
+            v = v.get(part) if isinstance(v, dict) else None
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            bad = f"{path} is not a number in {out / name}"
+            break
+        rec[key] = v
+    if bad:
+        fail(bad)
+    else:
+        json.dump(rec, open(dest, "w"))
+        print("[bench_read]", rec)
+else:
+    fail(why)
+READ
+"""
+
+
+def _read_block(out_dir, dest: str, read: dict, need: list[str]) -> str:
+    return (_READ_BLOCK.replace("__OUT__", json.dumps(str(out_dir))).replace("__DEST__", json.dumps(dest))
+            .replace("__FILE__", json.dumps(read["file"])).replace("__KEYS__", json.dumps(read["keys"]))
+            .replace("__NEED__", json.dumps(need))
+            .replace("__REQUIRE__", json.dumps(json.dumps(read.get("require") or {}))))
+
+
 def _host_bench_steps(command: str, port, iter_dir, bench_output_path: str,
-                      metric_key: str, repeats: int, secondary_key: str | None = None) -> str:
+                      metric_key: str, repeats: int, secondary_key: str | None = None,
+                      read: dict | None = None) -> str:
     """The bench agent's step 1 in component mode when the host gives its bench command.
 
     The host's client, with ``{port}`` and ``{out}`` filled and nothing else changed,
@@ -1972,11 +2128,31 @@ def _host_bench_steps(command: str, port, iter_dir, bench_output_path: str,
     The pack's second metric (``secondary_key``) is recorded beside it when the client
     gives it: without it the gate is one-axis, blind to a gain bought with the other
     axis (one host's run recorded `secondary: None` on every KEEP).
+
+    With ``read`` (``component.bench_read``) nothing is read by the agent: after each replay
+    it runs a fixed block that takes every key from the report by its path.
     """
     base = Path(iter_dir) / "host_bench"
     outs = [base] if repeats <= 1 else [base / f"run{i}" for i in range(1, repeats + 1)]
     for d in outs:
         d.mkdir(parents=True, exist_ok=True)
+    if read:
+        rule = (f"   Use it, exactly as given here, for every measurement this iteration. Change nothing in it,\n"
+                f"   and do not run the pack's bench script: the host ranks what you keep with this client.\n")
+        steps = []
+        for i, d in enumerate(outs, 1):
+            dest = bench_output_path if repeats <= 1 else f"{bench_output_path}.run{i}"
+            steps.append(f"   ```bash\n   {component.fill_bench(command, port, d)}\n"
+                         + _read_block(d, dest, read, [metric_key]) + "   ```\n")
+        tail = "" if repeats <= 1 else (
+            f"   Then aggregate. Run this EXACTLY:\n   ```bash\n"
+            + _mean_script(bench_output_path, metric_key, secondary_key, tuple(read["keys"]))
+            + f"   ```\n   REPORT THE MEAN that block wrote, not any individual replay.\n")
+        return (f"1. Run the host's bench command{f' {repeats} times' if repeats > 1 else ''}, each replay followed\n"
+                f"   by the block that reads its report (`{read['file']}`). Run each block EXACTLY as given:\n"
+                f"   the harness reads the metrics, not you. A block that says NOT MEASURED has written so;\n"
+                f"   report it as it is, and do not read the numbers yourself.\n"
+                + rule + "".join(steps) + tail + "\n")
     if secondary_key:
         record = ("python3 -c 'import json, sys; d = {\"status\": \"ok\", \"" + metric_key
                   + "\": float(sys.argv[1]), \"source\": \"bench_command\"}; d.update({\""
@@ -1998,13 +2174,17 @@ def _host_bench_steps(command: str, port, iter_dir, bench_output_path: str,
             f"   script: the host ranks what you keep with this client, and a number from any\n"
             f"   other client is not comparable to its gate.\n")
     runs = "".join(f"   {component.fill_bench(command, port, d)}\n" for d in outs)
+    # A first metric the client gives as a latency (an objective asked as "P50 interactivity", arbor/objective.py).
+    how_first = SECONDARY_FROM_LATENCY.get(metric_key)
+    reports = "the value the host's client reports for it" + (
+        f",\n   or {how_first} when it reports that instead" if how_first else "")
     if repeats <= 1:
         return (
             f"1. Run the host's bench command:\n"
             f"   ```bash\n{runs}   ```\n"
             + rule +
-            f"   It writes its results under `{outs[0]}`. Read `{metric_key}` from them (the value\n"
-            f"   the host's client reports for it) and record it, with this command as it is:\n"
+            f"   It writes its results under `{outs[0]}`. Read `{metric_key}` from them ({reports})\n"
+            f"   and record it, with this command as it is:\n"
             f"   ```bash\n"
             f"   {record} <value> {bench_output_path}{sec_arg}\n"
             f"   ```\n"
@@ -2015,7 +2195,7 @@ def _host_bench_steps(command: str, port, iter_dir, bench_output_path: str,
         f"   ```bash\n{runs}   ```\n"
         + rule +
         f"   Each replay writes its results under its own directory (`{outs[0]}`, ...). After\n"
-        f"   replay i, read its `{metric_key}` (the value the host's client reports for it) and\n"
+        f"   replay i, read its `{metric_key}` ({reports}) and\n"
         f"   record it, with this command as it is:\n"
         f"   ```bash\n"
         f"   {record} <value> {bench_output_path}.run<i>{sec_arg}\n"
@@ -2057,6 +2237,12 @@ def run_iteration(
 
     iter_dir = session_dir_p / f"iter_{iteration}"
     iter_dir.mkdir(parents=True, exist_ok=True)
+
+    # Standalone in a container: what a turn starts there is stopped when it ends (arbor/execute/turns.py).
+    from arbor.execute import turns as _turns
+    from arbor.execute.workspace import HOST as _HOST
+    _turns.CONTAINER = (container if container and container != _HOST and not component.is_component(config)
+                        else None)
 
     # Anchors the out-of-tree artifact scan: anything the agent writes into the
     # pack's eval/ or knowledge/ dirs from here on belongs to this iteration.
@@ -2166,6 +2352,17 @@ def run_iteration(
               file=sys.stderr, flush=True)
     print(f"[arbor] Running agent...", file=sys.stderr, flush=True)
     prompt = _build_agent_prompt(program, campaign, state, iteration)
+    # A revisit (arbor/revisit.py): a NOT MEASURED change goes back into the trees, and the turn measures it as it is.
+    if container and workspace:
+        from arbor import revisit as _revisit
+        try:
+            again = _revisit.apply(container, config, session_dir_p, iteration)
+        except Exception as e:  # noqa: BLE001 - the entry is closed; the next pass arms another or ends the round
+            print(f"[arbor] revisit skipped: {e}", file=sys.stderr, flush=True)
+            return {"iteration": iteration, "decision": "SKIPPED", "metric": None, "change": f"revisit: {e}"}
+        if again:
+            print(f"[arbor] revisit: {again.splitlines()[2][:200]}", file=sys.stderr, flush=True)
+            prompt, program = f"{again}\n{prompt}", f"{again}\n{program}"
     plugins = lifecycle.plugin_paths(campaign, arbor_root, session_dir_p)
 
     def _agent_turn(text: str, skills: list[str] | None, label: str) -> str:
@@ -2219,7 +2416,7 @@ def run_iteration(
         reason = f"agent did not run: {e}"
         print(f"[arbor] Agent error: {e}", file=sys.stderr, flush=True)
         print(f"[arbor] NOT MEASURED — the agent never ran, so there is no "
-              f"evidence about any change. Tree preserved, counters unchanged.",
+              f"evidence about any change. Counters unchanged; the kept tree is restored.",
               file=sys.stderr, flush=True)
         state.record_invalid(
             iteration=iteration, change=f"iteration {iteration} ({reason})",
@@ -2263,7 +2460,11 @@ def run_iteration(
     print(f"[arbor] Claim class: {claim_class} — {change}", file=sys.stderr, flush=True)
 
     # ── Step 3: Harness commits ─────────────────────────────────────────────
-    if not has_changes(container, workspace):
+    # The other editable trees (AITER) count too: a change confined to one is a change
+    # (arbor/execute/trees.py), committed and reverted with the workspace's.
+    from arbor.execute import trees as _trees
+    trees_changed = _trees.changed(container, config)
+    if not has_changes(container, workspace) and not trees_changed:
         # A pure-scan PROBE legitimately changes no files — "I read the upstream
         # branches and there is nothing new" is a result the pack explicitly
         # asks for. It still has to produce a ledger record to count.
@@ -2289,6 +2490,11 @@ def run_iteration(
 
     sha = commit(container, workspace, f"iter-{iteration}: {change}")
     print(f"[arbor] Committed: {sha[:12]} — {change}", file=sys.stderr, flush=True)
+    if trees_changed:
+        iter_dir.mkdir(parents=True, exist_ok=True)
+        done = _trees.commit(container, trees_changed, f"iter-{iteration}: {change}", iter_dir)
+        print(f"[arbor] Committed in {', '.join(f'{t} {s[:12]}' for t, s in done.items())}",
+              file=sys.stderr, flush=True)
 
     # ── Step 3a: the weights' precision is the campaign's ───────────────────
     # A hard rule, before any GPU time: a change that sets another weight precision is another model's entry.
@@ -2299,7 +2505,7 @@ def run_iteration(
     # that touches them on import.
     weight_changes = _weight_precision_changes(container, workspace)
     golden = [] if weight_changes else _golden_changes(config, container, workspace)
-    table_problems = [] if weight_changes or golden else _aiter_table_problems(container, workspace)
+    table_problems = [] if weight_changes or golden else _aiter_table_problems(container, workspace, session_dir_p, iter_dir)
     if weight_changes or golden or table_problems:
         if weight_changes:
             reason = ("changes the model's weight precision, which no change may do: "
@@ -2317,7 +2523,7 @@ def run_iteration(
             reason=reason, claim_class=claim_class, findings=findings,
         )
         state.save(session_dir_p / "session.json")
-        _safe_revert(container, workspace)
+        _safe_revert(container, workspace, config)
         return {"iteration": iteration, "decision": "REVERT", "metric": 0.0, "change": change,
                 "claim_class": claim_class, "reason": reason}
 
@@ -2471,7 +2677,7 @@ def run_iteration(
             reason=f"server failed: {reason}",
         )
         state.save(session_dir_p / "session.json")
-        _safe_revert(container, workspace)
+        _safe_revert(container, workspace, config)
         return {"iteration": iteration, "decision": "REVERT", "metric": 0.0, "change": change}
 
     # Final health check
@@ -2491,7 +2697,7 @@ def run_iteration(
             reason=reason,
         )
         state.save(session_dir_p / "session.json")
-        _safe_revert(container, workspace)
+        _safe_revert(container, workspace, config)
         return {"iteration": iteration, "decision": "REVERT", "metric": 0.0, "change": change}
 
     print(f"[arbor] Server healthy.", file=sys.stderr, flush=True)
@@ -2626,7 +2832,8 @@ def run_iteration(
         bench_line = "Bench: the host's own command (step 1), not the pack's bench script\n"
         run_block = _host_bench_steps(
             host_bench, port, iter_dir, bench_output_path, metric_key, bench_repeats,
-            campaign.pack.objective.get("measurement", {}).get("secondary_metric"))
+            campaign.pack.objective.get("measurement", {}).get("secondary_metric"),
+            read=component.bench_read(config))
     bench_prompt = (
         f"Run the bench and report the metric. The server is healthy on port {port}.\n\n"
         + head + bench_line +
@@ -2638,7 +2845,10 @@ def run_iteration(
         + f"2. Watch progress — every 60s read bench logs:\n"
         f"   ```bash\n"
         f"   sleep 60 && {watch}\n"
-        f"   ```\n\n"
+        f"   ```\n"
+        f"   **One sleep+check per tool call, never a loop (`while`, `for`, `until`) in one bash call:**\n"
+        f"   this turn runs headless, and a shell loop asks for an approval no one can give, so it is\n"
+        f"   refused and the turn is lost.\n\n"
         f"3. If the server crashes during the bench (ServerDisconnectedError, SIGQUIT, OOM in log):\n"
         f"   - Fix the root cause (reduce a memory-heavy flag, adjust config)\n"
         + restart +
@@ -2693,8 +2903,21 @@ def run_iteration(
             bench_output = {"status": "failed", "error": "invalid JSON in bench_output.json"}
     elif _bench_failure(bench_agent_output) is not None:   # a verdict line, after any METRIC
         bench_output = {"status": "failed", "error": _bench_failure(bench_agent_output)}
-    elif reported_metric is not None:
+    elif reported_metric is not None and (host_bench or config.get("bench_metric_from_agent")):
+        # The host's bench command, whose record the agent writes anyway, or a pack whose bench
+        # writes no file (`bench_metric_from_agent`): the agent's number, marked as such.
         bench_output = {"status": "ok", metric_key: reported_metric, "source": "agent_reported"}
+    elif reported_metric is not None:
+        # The pack's bench script writes the file; without it, the agent's number would skip every
+        # check the file carries (the pack's own failure guard, duration_seconds, the secondary
+        # metric), so it is not booked. The usual cause is a session_mount that is not the
+        # container's path of the session's parent directory.
+        mount = "" if comp else (f" (session_mount {session_mount!r} must be the container's path of "
+                                 f"{Path(campaign.session_root).parent})")
+        bench_output = {"status": "failed", "error": (
+            f"no bench_output.json at {bench_output_file}; the bench was told to write "
+            f"{bench_output_path}{mount}. The agent reported METRIC {reported_metric}, which is not "
+            f"booked without the file")}
     else:
         bench_output = {"status": "failed", "error": "bench_output.json not found and no metric reported"}
 

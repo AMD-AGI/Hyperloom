@@ -211,7 +211,7 @@ a worker's account (`worker-summary`) stays in its own session.
 
 `python3 -m arbor --version` prints the release line and the checkout. `python3 -m arbor version --json` gives what a
 caller checks before relying on a checkout:
-- its commands (`master` and `worker` from `cli` 2; `run --split workers` and `master --deal` from `cli` 3);
+- its commands (`master` and `worker` from `cli` 2; `run --split workers` and `master --deal` from `cli` 3; `--opt-objective` and the config's `opt_objective` from `cli` 4, described under `objective`);
 - each interface's version: `cli`, `pack`, `component` and `roles`;
 - the component block's keys, and the exit record's reasons (`ordered` and `reported` from `component` 2,
   `retraction_conflict` from `component` 3);

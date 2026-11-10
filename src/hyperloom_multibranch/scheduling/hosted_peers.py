@@ -182,6 +182,7 @@ class PinnedToolboxInputs:
 
         given = hosted_toolbox_inputs(self.host, session_dir=layout.toolbox, tp=tp)
         given["run_id"] = self.host.run_id or layout.session_id
+        given["session_id"] = layout.session_id
         sha = str(given["source_sha"])
         source = runner_source(layout.runner_source, str(self.host.source_repo), sha)
         with tempfile.TemporaryDirectory(prefix="hyperloom-runner-source-") as private:

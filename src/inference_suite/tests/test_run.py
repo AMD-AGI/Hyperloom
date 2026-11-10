@@ -9,10 +9,10 @@ server starts, a reuse round on the server a boot round left, and the CLI's ``ru
 
 from __future__ import annotations
 
-import csv
 import functools
 import hashlib
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -25,7 +25,9 @@ import pytest
 import yaml
 
 from hyperloom_common import gpu_telemetry
-from hyperloom_common.tests.test_gpu_telemetry import _row
+from hyperloom_common.gpu_telemetry import RecorderSources
+from hyperloom_common.power_sources import SysfsNode
+from hyperloom_common.tests.test_gpu_telemetry import _AmdSmi, _sysfs
 from inference_suite import cli, parser_check, run
 from inference_suite.contracts import (
     AgentxWorkload,
@@ -59,9 +61,11 @@ from inference_suite.load.scriptable import scriptable_base
 from inference_suite.parser_check import FlagRefusal, RefusedFlag
 from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
 from inference_suite.recipe.image_version import NO_RECIPE_IMAGE, recipe_image_facts
+from inference_suite.runtime import gpus as runtime_gpus
 from inference_suite.runtime import server as runtime_server
 from inference_suite.runtime import watch
 from inference_suite.runtime.phases import Phase
+from inference_suite.runtime.watch import Stop
 from inference_suite.staging import AGENTX_PYTHON, GSM8K_TASK, StagingReport
 from inference_suite.tests.test_base_launch_contract import _base
 from inference_suite.tests.test_config_contract import _AGENTX, _MLPERF, _SHA, _config, _eval
@@ -199,17 +203,7 @@ _FIXED = FixedWorkload(
 def _fast(monkeypatch):
     monkeypatch.setattr(watch, "POLL_SEC", 0.05)
     monkeypatch.setattr(runtime_server, "POLL_SEC", 0.05)
-    monkeypatch.setattr(gpu_telemetry, "_read_node_power", lambda: None)
     monkeypatch.setattr(gpu_telemetry, "MIN_INTERVAL_SEC", 0.01)
-
-
-class _AmdSmi:
-    """Answers every sample with eight loaded cards; a ``--violation`` read finds no counters."""
-
-    def __call__(self, *metrics: str) -> object:
-        if "--violation" in metrics:
-            return {}
-        return {"gpu_data": [_row(gpu, 700.0, 200_000.0) for gpu in range(8)]}
 
 
 class _Rig:
@@ -264,7 +258,10 @@ class _Rig:
         monkeypatch.setattr(run, "probe_install", self._probe)
         monkeypatch.setattr(parser_check, "check", self._check)
         monkeypatch.setattr(run, "_lm_eval_version", lambda: "0.4.9")
-        monkeypatch.setattr(run, "GpuPowerRecorder", functools.partial(gpu_telemetry.GpuPowerRecorder, query=_AmdSmi()))
+        sources = RecorderSources(
+            _AmdSmi(cards=8), SysfsNode(_sysfs(tmp_path / "sys", cards=8, serving=tuple(range(8))))
+        )
+        monkeypatch.setattr(run, "PowerRecorder", functools.partial(gpu_telemetry.PowerRecorder, sources=sources))
         planned = EvalPlan.invocation
         monkeypatch.setattr(
             EvalPlan,
@@ -276,7 +273,11 @@ class _Rig:
         self.staging = StagingReport(_SHA, dict(PINNED_TOOLS), ())
         monkeypatch.setattr(run.staging, "verify", lambda *_args: self.staging)
         self.busy_gpus: str | None = None
-        monkeypatch.setattr(runtime_server, "unavailable_gpus", lambda gpus: self.busy_gpus)
+        monkeypatch.setattr(
+            runtime_server,
+            "await_free_gpus",
+            lambda gpus, gate: None if self.busy_gpus is None else Stop(FailedStep.GPUS_UNAVAILABLE, self.busy_gpus),
+        )
 
     def _probe(self, python, framework, env, *, cwd):
         assert env["HF_TOKEN"] == _SECRET
@@ -368,7 +369,7 @@ def test_the_server_runs_in_the_interpreter_the_round_probed_and_launch_json_rec
     assert result.report.launch_digest == launch.digest()
 
 
-def test_gpu_samples_cover_the_measured_window_alone(rig):
+def test_power_json_bounds_each_phase_by_its_mark_and_the_report_carries_its_energy(rig):
     result = run.run_round(rig.config("r1", eval=_eval(limit=None)))
 
     layout = result.layout
@@ -383,13 +384,30 @@ def test_gpu_samples_cover_the_measured_window_alone(rig):
         Phase.EVAL_END.value,
         Phase.TEARDOWN.value,
     ]
-    with layout.gpu_samples.open() as samples:
-        stamps = [float(row["unix"]) for row in csv.DictReader(samples)]
-    assert stamps
-    assert all(marks[Phase.MEASURED.value] - 0.01 <= unix <= marks[Phase.FINISHED.value] + 0.01 for unix in stamps)
+    document = json.loads(layout.power.read_text())
+    assert document["final"] is True
+    assert [mark["phase"] for mark in document["phase_marks"]] == [
+        "boot", "ready", "warmup", "measured", "finished", "eval", "finished", "teardown",
+    ]  # fmt: skip
+    window = document["energy"]["window"]
+    assert window["start_unix"] == pytest.approx(marks[Phase.MEASURED.value], abs=0.002)
+    assert window["end_unix"] == pytest.approx(marks[Phase.FINISHED.value], abs=0.002)
+    assert {"boot", "warmup", "measured", "eval", "teardown"} <= set(document["phases"])
+    assert document["scope"]["gpus_configured"] == list(range(8))
+
+    power = result.report.power
+    assert power is not None and power.file == "power.json"
+    assert power.energy_gpus == tuple(range(8))
+    assert power.power_valid == document["energy"]["power_valid"]
+    assert power.metrics["total_gpu_energy_j"] == document["energy"]["total_gpu_energy_j"]
+    fixed = result.report.fixed.values
+    assert document["energy"]["counts"] == {
+        "successful_queries": fixed["completed_requests"],
+        "input_tokens": fixed["total_input_tokens"],
+        "output_tokens": fixed["total_output_tokens"],
+    }
     blocks = result.report.gpu_monitor
-    assert [block.gpu for block in blocks] == list(range(8)) and all(block.sample_count for block in blocks)
-    assert json.loads(layout.gpu_power.read_text())["samples"] == len(stamps) // 8
+    assert [block.gpu for block in blocks] == list(range(8))
 
 
 def test_kv_samples_cover_the_ready_server_and_carry_their_phase(rig):
@@ -618,6 +636,22 @@ def test_a_round_whose_gpus_another_process_holds_is_refused_before_its_server_s
     assert report.run_status is RunStatus.FAILED and report.failed_step is FailedStep.GPUS_UNAVAILABLE
     assert report.failure_detail == "GPU 3: held by pid 4242 (python3)"
     assert result.layout.launch.exists() and not result.layout.server_log.exists() and not rig.calls.exists()
+
+
+def test_a_round_whose_amd_smi_fails_silently_records_the_refusal(rig, monkeypatch):
+    bin_dir = rig.tmp / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "amd-smi").write_text("#!/bin/sh\nexit 1\n")
+    (bin_dir / "amd-smi").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setattr(runtime_server, "await_free_gpus", runtime_gpus.await_free_gpus)
+
+    report = run.run_round(rig.config("r1")).report
+
+    assert report.run_status is RunStatus.FAILED and report.failed_step is FailedStep.GPUS_UNAVAILABLE
+    assert report.failure_detail is not None and report.failure_detail.endswith(
+        "amd-smi list --json exited 1 and printed nothing"
+    )
 
 
 def test_the_refusal_says_whether_the_host_holds_a_redacted_value(rig, monkeypatch):

@@ -26,11 +26,13 @@ from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
+from hyperloom.common.agentx_early_stop import EarlyStopMode
 from hyperloom_multibranch.scheduling.settings import AGENT_PORT, SHARE_MINUTES, Workload
 
 if TYPE_CHECKING:
     from hyperloom.hosted.mcp_server import McpServer
     from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
+    from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
     from hyperloom_multibranch.specialist.dossier_pass import DossierPass
     from hyperloom_multibranch.specialist.map_session import MapCalls
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
@@ -48,7 +50,7 @@ class Peers:
     regression set the integrator asks for before a merge and FINAL for every candidate. ``isolation`` is how the
     specialists, agent and dev sandboxes and tests these peers launch are isolated, which the session's manifest and
     report record. ``dossier_pass`` runs the dossier pass of a session that stops after its map; a session that
-    runs no agent has none.
+    runs no agent has none. ``dev_leases`` are the session's dev sandboxes, ``None`` when it lends none.
     """
 
     lifecycle: SpecialistLifecycle
@@ -62,6 +64,7 @@ class Peers:
     regression: RegressionCheck
     isolation: LaunchIsolation
     dossier_pass: DossierPass | None = None
+    dev_leases: DevLeases | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,7 @@ class PeerSetup:
     refused. ``inferencex_commit`` is the commit a fresh session's base launch reads InferenceX at (``""`` for the
     head of its ``main``). ``make_before_break`` is the session's ``RunSettings.make_before_break``: whether a hosted
     toolbox keeps a finished test's sandbox until the next test's runs (``HostedOptions.make_before_break``).
+    ``agentx_early_stop`` is the session's AgentX checkpoint mode (``RunSettings``).
     """
 
     layout: SessionLayout
@@ -109,6 +113,7 @@ class PeerSetup:
     agent_maps: MapCalls | None = None
     agent_share_minutes: float = SHARE_MINUTES
     inferencex_commit: str = ""
+    agentx_early_stop: EarlyStopMode = EarlyStopMode.SHADOW
     make_before_break: bool = True
 
 

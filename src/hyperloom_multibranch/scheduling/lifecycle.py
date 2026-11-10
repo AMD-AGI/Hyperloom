@@ -22,7 +22,10 @@ closing the toolbox within its own short bound and killing every registered proc
 A session that ended before FINAL, killed with its machine before CLOSE included, is read back by :func:`persisted_run`
 and taken up again by :meth:`Session.finish`, which runs FINAL and CLOSE alone on a budget that is already spent,
 carrying the stop reason that session ended with: the roster and the branches are the ones that session persisted,
-and only its report, dashboard and breakdown are written again.
+and only its report, dashboard and breakdown are written again. One that ended before PRELUDE recorded its baseline
+(:func:`prelude_landed`) has no candidate: the finish withdraws its unfinished tests and CLOSE reports why nothing was
+chosen. One that recorded it can be continued instead, without PRELUDE, by :meth:`Session.resume`
+(:mod:`~hyperloom_multibranch.scheduling.resumption`).
 """
 
 from __future__ import annotations
@@ -41,12 +44,14 @@ from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
-from hyperloom_multibranch.contracts.fork import ShareRequest
+from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ShareRequest
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
-from hyperloom_multibranch.contracts.blackboard.records import ManifestFingerprint, SessionProfile
-from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
+from hyperloom_multibranch.contracts.blackboard.interfaces import NotRecorded, UsageSink
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, LineageEvent, ManifestFingerprint
+from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
+from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import (
@@ -64,8 +69,10 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
 )
 from hyperloom_multibranch.blackboard.rsi.session import FRONTIER_LOG, archived_history
 from hyperloom_multibranch.rulegate.critic import FixReviewer
+from hyperloom_multibranch.scheduling.agent_map import SharedMap
 from hyperloom_multibranch.scheduling.agent_plans import (
     AGENT_SOURCES_UNREAD,
+    DEALT,
     DOSSIER_ENDED,
     DOSSIER_SKIPPED,
     DOSSIER_STARTED,
@@ -73,20 +80,25 @@ from hyperloom_multibranch.scheduling.agent_plans import (
     MADE_BY_PASS,
     MADE_BY_SHARES,
     MAP_KEPT,
+    NO_DEAL,
+    NOTHING_TO_DEAL,
     ROOT_SHARES_READ,
     SHARES_TOO_LATE,
+    MapDealer,
     agent_plans,
     arbor_agents,
     generated_map,
     keep_map,
+    map_dealer,
 )
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.checkpoint_tally import CheckpointScope
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_before_final
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
-from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
+from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog, downtime_until
 from hyperloom_multibranch.scheduling.events import IntegrationProfiler, SessionEvents
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering, integration_row
 from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
@@ -145,7 +157,8 @@ from hyperloom_multibranch.scheduling.stops import (
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.widening import Widening
 from hyperloom_multibranch.specialist.agent_onboarding import ROOT_PROFILE_SOURCE, AttemptFailed
-from hyperloom_multibranch.specialist.arbor_adapter import REVIEW_HOST, REVIEW_OFF, SplitFailed
+from hyperloom_multibranch.specialist.arbor_adapter import REVIEW_HOST, REVIEW_OFF
+from hyperloom_multibranch.specialist.arbor_map import SplitFailed
 from hyperloom_multibranch.specialist.map_session import MapCalls
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 
@@ -190,6 +203,10 @@ COMPLETED_REASONS = frozenset(
 )
 CUT_SHORT = "CLOSE was cut short after a stop signal"
 NO_CARDS_LEFT = "the toolbox has fewer usable cards than one test needs, so FINAL could not run"
+#: Why FINAL over a session that ended before its baseline was recorded chose nothing.
+NO_BASELINE = "no candidate: the session ended before PRELUDE recorded its baseline, so FINAL had nothing to validate"
+#: The blackboard writer name a restart reads the baseline as.
+RESTART_READER = "restart"
 #: Why a session that was to stop after its map kept none.
 NO_ARBOR_TO_MAP = "no map: no agent named is an Arbor whose directions could be mapped"
 NO_MAP = "no map: the dossier pass set none and none could be generated from the root's shares"
@@ -263,6 +280,7 @@ class Session:
         self._desk = desk
         self._prelude: PreludeResult | None = None
         self._map_shares: tuple[RootShares | None] | None = None
+        self._dealer: MapDealer | None = None
         self._explore_end = math.inf
         peers = peer_factory(self._peer_setup(desk, services))
         context = SchedulerContext(
@@ -288,6 +306,7 @@ class Session:
         self._repo = peers.repo
         self._recipe_kb = services.recipe_kb
         self._lifecycle = peers.lifecycle
+        self._dev_leases = peers.dev_leases
         self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo, peers.briefs)
         self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
         self._integrator = self._build_integrator(peers.repo, checks, services)
@@ -335,9 +354,10 @@ class Session:
             settings.agent_dossier,
             # The session's review stands in for each Arbor's own; without one, nobody's does.
             REVIEW_HOST if settings.review_gate else REVIEW_OFF,
-            MapCalls(self._map_start, self._map_split) if settings.agents else None,
+            MapCalls(self._map_start, self._map_split, self._deal) if settings.agents else None,
             settings.agent_share_minutes,
             settings.inferencex_commit,
+            settings.agentx_early_stop,
             make_before_break=settings.make_before_break,
         )
 
@@ -425,19 +445,48 @@ class Session:
         make it so.
 
         The candidates are read before anything else happens, so a session FINAL cannot run over is refused without a
-        stop or a report being written. The budget is already spent, which is the state the normal path is in when
+        stop or a report being written. A session that ended before PRELUDE recorded its baseline has no candidate:
+        its unfinished tests are withdrawn and CLOSE reports :data:`NO_BASELINE` (:meth:`_no_final`). The budget is already spent, which is the state the normal path is in when
         FINAL overruns the deadline: FINAL is unbounded and CLOSE gets one CLOSE grace from its end. The report says
         how that session's agents were isolated, as its manifest recorded.
         """
 
-        candidates = await self._final_candidates()
+        landed = await recorded_baseline(self._blackboard) is not None
+        candidates = await self._final_candidates() if landed else None
         self._agent_isolation = read_manifest(self._layout.manifest).agent_isolation
         total = budget_seconds(self._settings.max_hours)
         budget = SessionBudget(self._clock.now() - total, total)
         self._in_final = True
         hard_stop = HardStop(budget, self._clock)
         ending = SessionOutcome(ended, None, None, "")
-        return await self._run_and_close(self._final_phases(candidates, ended), ending, budget, hard_stop)
+        work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended)
+        return await self._run_and_close(work, ending, budget, hard_stop)
+
+    async def resume(self, ended: SessionStopReason, deadline: float) -> SessionOutcome:
+        """Continue the session an earlier run left here, which ended for ``ended`` before FINAL, with EXPLORE, FINAL
+        and CLOSE and no PRELUDE (:meth:`Prelude.landed`), up to ``deadline``, which the manifest keeps: the caller
+        decides whether the time the session was down is given back
+        (:func:`~hyperloom_multibranch.scheduling.resumption.deadline_after_downtime`) or not, so that its budget counts
+        from the original start (:func:`~hyperloom_multibranch.scheduling.hosted_run.hosted_resume_deadline`). That run's tests are withdrawn and its
+        open branches stopped, the roster and the integration branch open again, and EXPLORE opens new branches on the
+        integration head."""
+
+        budget = self._resumed_budget(ended, deadline)
+        self._processes.record_scheduler()
+        self._image_check = await asyncio.to_thread(run_image_check)
+        hard_stop = HardStop(budget, self._clock)
+        aborted = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
+        return await self._run_and_close(self._resumed_phases(budget, ended), aborted, budget, hard_stop)
+
+    def _resumed_budget(self, ended: SessionStopReason, deadline: float) -> SessionBudget:
+        """The session's budget up to ``deadline``, written to the manifest and recorded as a ``resume`` phase with the
+        time the session was down."""
+
+        manifest = read_manifest(self._layout.manifest)
+        downtime = downtime_until(self._layout.decisions, self._clock.now())
+        replace(manifest, deadline=deadline).write(self._layout.manifest)
+        self._phase("resume", ended=ended.value, downtime_seconds=downtime, deadline=deadline)
+        return SessionBudget(manifest.started_at, deadline - manifest.started_at)
 
     async def _run_and_close(
         self, work: Awaitable[SessionOutcome], ending: SessionOutcome, budget: SessionBudget, hard_stop: HardStop
@@ -542,6 +591,22 @@ class Session:
         if self._settings.stop_after_map:
             # Its stop is the review point: the map is kept and reviewed offline, so the session does not pause.
             return await self._stop_after_map(prelude)
+        return await self._explore_and_final(prelude, budget)
+
+    async def _resumed_phases(self, budget: SessionBudget, ended: SessionStopReason) -> SessionOutcome:
+        await self._take_up(ended)
+        await self._stopper.end_exploration(ended)
+        if self._roster.reopen():
+            reopen = LineageEvent(LineageKind.REOPEN, INTEGRATION_BRANCH, reason=f"resumed after {ended.value}")
+            await self._blackboard.record_lineage(reopen)
+        await self._branches.push_quota()
+        prelude = await self._prelude.landed()
+        self._briefs.references = await asyncio.to_thread(self._reference_leads, prelude.profile)
+        await self._adopt_playbook()
+        await self._record_versions()
+        return await self._explore_and_final(prelude, budget)
+
+    async def _explore_and_final(self, prelude: PreludeResult, budget: SessionBudget) -> SessionOutcome:
         self._prelude = prelude
         try:
             opening = await self._agent_branches(prelude)
@@ -556,7 +621,6 @@ class Session:
             prelude.start_commit,
             explore_end,
             budget.deadline,
-            budget.total_seconds,
             explore_gpu_seconds(self._settings.max_gpu_hours),
             self._settings.max_llm_usd or math.inf,
             self._settings.user_directions,
@@ -606,7 +670,7 @@ class Session:
             if settings.agent_directions and settings.review_gate and await self._arbors():
                 dossier = Path(settings.agent_dossier) if settings.agent_dossier else None
                 await self._review(Path(settings.agent_directions), dossier, MADE_BY_USER)
-            return AgentBranches(settings.agents, await agent_plans(settings.agents, settings.agent_directions, work))
+            return AgentBranches(settings.agents, await self._split(settings.agents, settings.agent_directions))
         arbors = await self._arbors()
         if not arbors or (len(arbors) < GENERATED_FOR and not settings.review_gate):
             return AgentBranches(settings.agents, await agent_plans(settings.agents, "", work))
@@ -666,15 +730,79 @@ class Session:
                 return f"the map was rejected at its review ({exc}); no share branch opens"
             if late := await self._too_late(branch, map_for, "after the review"):
                 return late
-        work = self._layout.agent_plans
-        given = () if shares is None else (shares.shares, shares.source)
-        plans = await agent_plans(map_for, map_file, work, *given)
+        plans = await self._split(map_for, map_file, shares)
         answers = []
         for agent, plan in zip(map_for, plans):
-            admission = await self._desk.admit_share(ShareRequest(branch, start_commit, agent, plan))
+            admission = await self._admit_share(ShareRequest(branch, start_commit, agent, plan))
             answers.append(f"{admission.branch or admission.reason} ({admission.status.value})")
         split = "split" if any(plans) else "not split, each Arbor maps its own"
         return f"{len(map_for)} share branches asked, the map {split}: {', '.join(answers)}"
+
+    async def _split(self, agents: tuple[str, ...], map_file: str, shares: RootShares | None = None) -> tuple[str, ...]:
+        """Each of ``agents``' share of ``map_file``, as :func:`agent_plans` splits it, or a map it generates from the
+        root's ``shares``; the map it split is kept to deal from, and on the blackboard (:mod:`agent_map`) for the open
+        areas, the briefs, the menu and the judge to read."""
+
+        work = self._layout.agent_plans
+        given = () if shares is None else (shares.shares, shares.source)
+        plans = await agent_plans(agents, map_file, work, *given)
+        self._dealer = map_dealer(map_file, plans, work)
+        if self._dealer is not None:
+            await self._branches.record_map(SharedMap.read(self._dealer.map_file, plans), self._dealer)
+        return plans
+
+    async def _deal(self, branch: str, agent: str, plan: str, report: Path) -> str:
+        """Fold the ``report`` of the Arbor ``agent`` whose branch ``branch`` handed its share ``plan`` back into the
+        session's map, and ask the fork desk for a share branch, cut at the integration head, on the next order its
+        master deals; the branch takes the slot ``branch`` frees once it stops. None when no map was split, too little
+        time is left for an Arbor iteration, Arbor cannot deal or nothing is left to deal: the slot then goes to the
+        judge's refill. The report is folded in whether or not an order is dealt. Each deal is a ``SHARE`` decision of
+        ``branch``; what was done, for its notice."""
+
+        detail: dict[str, object] = {"agent": agent, "plan": plan, "report": str(report)}
+        dealer = self._dealer
+        if dealer is None:
+            return self._no_deal(branch, detail, "no map was split for this session's Arbors")
+        dealer.hand_back(plan, report)
+        order = None
+        why = await self._too_late(branch, (agent,), "at the deal")
+        arbors = {} if why else await self._arbors()
+        if arbors:
+            try:
+                order = await dealer.deal(arbors[min(arbors)])
+            except SplitFailed as exc:
+                why = f"Arbor cannot deal: {exc}"
+        await self._branches.record_deal(report, order)
+        why = why or ("" if arbors else "no Arbor source to deal with")
+        if why:
+            return self._no_deal(branch, detail, why)
+        return await self._deal_to(branch, agent, order, detail)
+
+    def _no_deal(self, branch: str, detail: dict[str, object], why: str) -> str:
+        self._decisions.record(Decision(DecisionKind.SHARE, NO_DEAL, branch, {**detail, "why": why}))
+        return f"no order is dealt: {why}"
+
+    async def _deal_to(self, branch: str, agent: str, order: Path | None, detail: dict[str, object]) -> str:
+        """Ask the fork desk for a share branch of the Arbor ``agent`` on ``order``, cut at the integration head, in
+        the slot ``branch`` frees; none for no order. An order whose branch the desk rejects is no longer held."""
+
+        if order is None:
+            self._decisions.record(Decision(DecisionKind.SHARE, NOTHING_TO_DEAL, branch, detail))
+            return "nothing is left to deal; the slot goes to the judge's refill"
+        head = await self._repo.head(INTEGRATION_BRANCH)
+        admission = await self._admit_share(ShareRequest(branch, head, agent, str(order)))
+        dealt = {**detail, "order": str(order), "branch": admission.branch, "status": admission.status.value}
+        self._decisions.record(Decision(DecisionKind.SHARE, DEALT, branch, dealt))
+        return f"the next order {order.name} is dealt to {admission.branch or admission.reason}"
+
+    async def _admit_share(self, request: ShareRequest) -> ForkAdmission:
+        """Ask the fork desk for the share branch ``request`` names; a share or an order whose branch it rejects is no
+        longer held, so the master deals its directions again."""
+
+        admission = await self._desk.admit_share(request)
+        if admission.status is AdmissionStatus.REJECTED and self._dealer is not None:
+            self._dealer.release(request.plan)
+        return admission
 
     async def _too_late(self, branch: str, map_for: tuple[str, ...], step: str) -> str:
         """Why the shares of ``map_for`` do not open when each would now run less than ``--agent-share-minutes``
@@ -777,10 +905,9 @@ class Session:
         return SessionOutcome(SessionStopReason.MAPPED, None, None, "")
 
     async def _root_shares(self, prelude: PreludeResult) -> RootShares | None:
-        """The root's shares, waited for (its op shares, else its kernel shares), recorded as a ``PRELUDE`` decision;
-        ``None`` when it has none."""
+        """The root's op shares, waited for, recorded as a ``PRELUDE`` decision; ``None`` when it has none."""
 
-        sources = ShareSources(self._blackboard, self._toolbox, self._clock, self._layout.toolbox)
+        sources = ShareSources(self._blackboard, self._toolbox, self._clock)
         read = await root_shares(sources, prelude.root_commit, prelude.root_profile_job)
         self._decisions.record(Decision(DecisionKind.PRELUDE, ROOT_SHARES_READ, INTEGRATION_BRANCH, read.detail))
         return read.shares
@@ -823,10 +950,24 @@ class Session:
         belong to branches that are over: they are withdrawn, and the quota then admits FINAL's validation alone.
         """
 
-        await self._toolbox.start()
-        await self._toolbox.withdraw_all(ended.value)
+        await self._take_up(ended)
         await self._toolbox.set_policy(final_quota(self._settings.caps))
         return await self._final(candidates, ended)
+
+    async def _no_final(self, ended: SessionStopReason) -> SessionOutcome:
+        """No FINAL over a session that recorded no baseline: the toolbox takes the dead session's unfinished tests up
+        again from its submit log, which re-attaches a measurement still running, and withdraws them, so CLOSE ends
+        their sandboxes instead of leaving them to hold the grant's slots until they time out."""
+
+        await self._take_up(ended)
+        self._decisions.record(Decision(DecisionKind.FINAL, NO_BASELINE, detail={"chosen": None}))
+        return SessionOutcome(ended, None, None, NO_BASELINE)
+
+    async def _take_up(self, ended: SessionStopReason) -> None:
+        """Start the toolbox, which takes up an earlier run's unfinished tests from its log, and withdraw them."""
+
+        await self._toolbox.start()
+        await self._toolbox.withdraw_all(ended.value)
 
     async def _final(self, candidates: FinalCandidates, reason: SessionStopReason) -> SessionOutcome:
         self._in_final = True
@@ -882,6 +1023,7 @@ class Session:
             self._events,
             self._lifecycle,
             self._toolbox,
+            self._dev_leases,
             self._play,
             self._layout.manifest,
         )
@@ -890,7 +1032,13 @@ class Session:
     def _closer(self) -> Closer:
         dashboard = self._dashboard(self._scoring())
         sources = ExportSources(
-            self._blackboard, self._repo, self._blobs, dashboard, self._image_check, self._briefs.warm
+            self._blackboard,
+            self._repo,
+            self._blobs,
+            dashboard,
+            self._image_check,
+            self._briefs.warm,
+            _checkpoint_scope(self._settings),
         )
         services = ExportServices(self._recipe_kb, self._author, self._curator)
         closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, services)
@@ -1023,10 +1171,53 @@ class PersistedRun:
     ended: SessionStopReason
 
 
+async def recorded_baseline(blackboard: LocalBlackboard) -> BaselineRecord | None:
+    """The baseline the rule gate wrote on ``blackboard``, ``None`` while it has written none."""
+
+    try:
+        return await blackboard.baseline()
+    except NotRecorded:
+        return None
+
+
+def prelude_landed(root: Path) -> bool:
+    """Whether the session in ``root`` got through PRELUDE far enough for FINAL to validate it: it committed its root
+    and the rule gate wrote its baseline. A session that did not measured nothing a later start could carry on from.
+    Creates nothing. Blocks, and runs an event loop of its own."""
+
+    layout = SessionLayout(root)
+    if not layout.root_recipe.is_file():
+        return False
+    reader = LocalBlackboard(layout.blackboard, Writer(Role.OBSERVER, RESTART_READER))
+    return asyncio.run(recorded_baseline(reader)) is not None
+
+
+def _checkpoint_scope(settings: RunSettings) -> CheckpointScope | None:
+    """The AgentX checkpoint the session ran under; an InferenceX session has none."""
+    workload = settings.workload
+    if workload.kind is not WorkloadKind.AGENTX:
+        return None
+    return CheckpointScope(settings.agentx_early_stop, workload.agentx_objective)
+
+
 def persisted_run(root: Path) -> PersistedRun:
     """The session in ``root``, read back from what :meth:`Session._write_manifest` and CLOSE left there, or from what
     a session that was killed left without a CLOSE; raises ValueError naming what keeps FINAL from running over it.
-    Creates nothing. Blocks."""
+    Only the build it ran on may read back what it measured. Creates nothing. Blocks."""
+
+    persisted = persisted_session(root)
+    ran_on, here = read_manifest(persisted.layout.manifest).code_version, code_version()
+    if ran_on != here:
+        raise ValueError(
+            f"the session in {root} ran on {ran_on} and this build is {here}; FINAL and CLOSE read back what that "
+            "build persisted, so run them from it"
+        )
+    return persisted
+
+
+def persisted_session(root: Path) -> PersistedRun:
+    """:func:`persisted_run` on any build: for a session that recorded no baseline, which a restart only closes, so
+    nothing it measured is read back."""
 
     if not root.is_dir():
         raise ValueError(f"{root} is not a directory")
@@ -1035,12 +1226,6 @@ def persisted_run(root: Path) -> PersistedRun:
         manifest = read_manifest(layout.manifest)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"{root} is no multi-branch session that ran: {exc}") from exc
-    ran_on, here = manifest.code_version, code_version()
-    if ran_on != here:
-        raise ValueError(
-            f"the session in {root} ran on {ran_on} and this build is {here}; FINAL and CLOSE read back what that "
-            "build persisted, so run them from it"
-        )
     if not layout.root_recipe.is_file():
         raise ValueError(f"the session in {root} committed no root, so FINAL has nothing to validate")
     return PersistedRun(layout, manifest.settings, ended_before_final(layout))
@@ -1050,11 +1235,16 @@ __all__ = [
     "COMPLETED_REASONS",
     "JUDGE_PROMPT_KEY",
     "LESSONS_KEY",
+    "NO_BASELINE",
     "NO_CARDS_LEFT",
+    "RESTART_READER",
     "PersistedRun",
     "Session",
     "SessionHost",
     "SessionOutcome",
     "SessionServices",
     "persisted_run",
+    "persisted_session",
+    "prelude_landed",
+    "recorded_baseline",
 ]

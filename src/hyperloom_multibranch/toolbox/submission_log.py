@@ -6,7 +6,7 @@
 An append-only JSON-lines file, flushed and fsynced per entry. A request is logged before the blackboard hears of it,
 its outcome is logged before the blackboard is written, and the entry is settled once the blackboard holds it, so after a
 crash every accepted request is in exactly one of three states: waiting to run, measured and waiting to be written, or
-settled. Ids are UUID v5 of the campaign id and ``branch/sequence``; the sequence is per branch and is never reused
+settled. Ids are UUID v5 of the campaign id and ``branch/sequence``, or ``scope/branch/sequence`` when the log is given a scope; the sequence is per branch and is never reused
 (a submit that failed after it was logged still used its number), so a restart hands out the numbers it would have.
 A torn last line, the trace of a crash mid-write, is cut off the file when it is read back, so the next entry starts
 a line of its own.
@@ -23,6 +23,8 @@ from pathlib import Path
 
 from hyperloom_common.shared_storage import open_shared_append, open_shared_existing
 
+#: Where a toolbox keeps its submit log, below its session directory.
+SUBMISSIONS_FILE = "toolbox/submissions.jsonl"
 ACCEPTED = "accepted"
 OUTCOME = "outcome"
 SETTLED = "settled"
@@ -79,23 +81,39 @@ def complete_lines(path: Path) -> list[str]:
     return data[:end].decode(_UTF8).splitlines()
 
 
+def logged_entries(path: Path) -> list[LogEntry]:
+    """The entries of the submit log at ``path`` as a restart replays them, in the order they were queued, read without
+    writing anything: a torn last line is skipped and left on the file for the next writer to cut off."""
+
+    with os.fdopen(open_shared_existing(path, os.O_RDONLY), "rb") as handle:  # never through a link at its name
+        data = handle.read()
+    log = SubmissionLog(path, "", _replay=False)
+    log._replay_lines(data[: data.rfind(b"\n") + 1].decode(_UTF8).splitlines())
+    return log.entries()
+
+
 @dataclass
 class SubmissionLog:
     path: Path
     campaign_id: str
+    #: Set, it keeps the ids apart from those of another log of the campaign: a hosted run's sessions share its run id.
+    scope: str = ""
     _entries: dict[str, LogEntry] = field(default_factory=dict)
     _sequences: dict[str, int] = field(default_factory=dict)
+    #: Off for a reader (:func:`logged_entries`) that replays lines it read itself and writes nothing.
+    _replay: bool = field(default=True, repr=False)
 
     def __post_init__(self) -> None:
-        if self.path.exists():
-            self._replay()
+        if self._replay and self.path.exists():
+            self._replay_lines(complete_lines(self.path))
 
     def request_id(self, branch: str, sequence: int) -> str:
         try:
             namespace = uuid.UUID(self.campaign_id)
         except ValueError:
             namespace = uuid.uuid5(uuid.NAMESPACE_URL, f"hyperloom-campaign:{self.campaign_id}")
-        return str(uuid.uuid5(namespace, f"{branch}/{sequence}"))
+        name = f"{self.scope}/{branch}/{sequence}" if self.scope else f"{branch}/{sequence}"
+        return str(uuid.uuid5(namespace, name))
 
     def next_sequence(self, branch: str) -> int:
         """Reserve the next number of ``branch``; a number is used the moment it is handed out."""
@@ -141,8 +159,8 @@ class SubmissionLog:
     def _append(self, record: Mapping[str, object]) -> None:
         append_line(self.path, record)
 
-    def _replay(self) -> None:
-        for number, line in enumerate(complete_lines(self.path), start=1):
+    def _replay_lines(self, lines: list[str]) -> None:
+        for number, line in enumerate(lines, start=1):
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:

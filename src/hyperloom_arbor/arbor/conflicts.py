@@ -490,24 +490,29 @@ def summary_lines(session_dir) -> list[str]:
 
 # ── the command ────────────────────────────────────────────────────────────────
 
-def main(argv: list[str] | None = None) -> int:
+def parser() -> argparse.ArgumentParser:
+    """The command's parser, built without parsing (arbor/cli/payload.py makes its argv and schema)."""
     parser = argparse.ArgumentParser(prog="python3 -m arbor conflicts",
                                      description="Decide a session's skill conflicts (arbor/conflicts.py).")
-    parser.add_argument("--session", required=True, type=Path)
+    parser.add_argument("--session", required=True, type=Path, help="the campaign's session directory")
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("show", help="list the conflicts and their decisions")
     pick = sub.add_parser("pick", help="keep one side, drop the other, for this session")
-    pick.add_argument("id")
-    pick.add_argument("skill")
+    pick.add_argument("id", help="the conflict's id, as show lists it")
+    pick.add_argument("skill", help="the skill to keep")
     merge = sub.add_parser("merge", help="let an agent merge both into one skill, for this session")
-    merge.add_argument("id")
+    merge.add_argument("id", help="the conflict's id, as show lists it")
     merge.add_argument("--keep", help="the skill whose name, modes and chapter the merge keeps (the first loaded)")
     for each in (pick, merge):
-        each.add_argument("--note", default="")
-        each.add_argument("--by")
+        each.add_argument("--note", default="", help="why, for the record")
+        each.add_argument("--by", help="who decides (default: the login name)")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent,
                         help="the Arbor checkout (default: this one)")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
     if args.action == "show":
         recs = records(args.session)
         if not recs:

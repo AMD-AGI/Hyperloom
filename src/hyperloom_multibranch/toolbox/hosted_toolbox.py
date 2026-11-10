@@ -16,6 +16,7 @@ import this package) can pass them as keyword arguments.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -32,16 +33,19 @@ from hyperloom.measure.sandboxes import (
     DEFAULT_HANDOVER_TIMEOUT_SEC,
     DEFAULT_MAX_PARALLEL_TESTS,
     MEASUREMENT_ROLE,
+    RUN_ID_KEY,
     Handover,
 )
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy
-from hyperloom.sandbox.socket import Role, SandboxProvider
+from hyperloom.sandbox.node import node_name
+from hyperloom.sandbox.socket import Role, SandboxError, SandboxProvider
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
-from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
+from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, INFRA_BACKOFF_SECONDS
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
+from hyperloom_multibranch.toolbox.merge_smoke import merge_smoke_from
 from hyperloom_multibranch.toolbox.hosted_leases import (
     HANDOVER_MIN_TESTS,
     DevSession,
@@ -60,6 +64,7 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
     with_short_prompts,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.resume_guard import MeasuredOn
 from hyperloom_multibranch.toolbox.native_builds import native_builds, with_native_plan
 from hyperloom_multibranch.toolbox.long_context import environment_long_context
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, environment_short_prompts
@@ -92,6 +97,8 @@ _MANIFEST_DIGEST = re.compile(r"[0-9a-f]{64}")
 _GRANT_KEYS = ("max_sandboxes", "max_gpus", "gpu_hours", "max_runtime_sec")
 _REQUIRED_TEXT = ("run_id", "api_url", "sandbox_url", "measurement_key")
 
+log = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class HostedToolboxInputs:
@@ -119,6 +126,8 @@ class HostedToolboxInputs:
             characters, as the cache builder reported it. Given, it is passed on every ``measurement`` create
             (``HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256``) and the runner's bootstrap accepts only that manifest; without
             it the manifest vouches only for the entry it sits in.
+        session_id: The session's id when ``run_id`` is the run's, which a restart of the run that starts its session
+            again shares: it keeps the new session's request ids, and so its sandboxes, apart from the closed one's.
         sandbox_workspace: The workspace every sandbox is created in (``HYPERLOOM_SANDBOX_WORKSPACE``), sent on each
             create as ``agent-sandbox.io/workspace``. A SaFE key used directly needs it when its user is in more than
             one workspace, and a ``system-admin`` key always does; a Claw grant's key names its own, so a Claw host
@@ -142,6 +151,7 @@ class HostedToolboxInputs:
     grant_limits: Mapping[str, float] | None = None
     runner_cache_manifest_sha256: str | None = None
     sandbox_workspace: str | None = None
+    session_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in _REQUIRED_TEXT:
@@ -200,7 +210,9 @@ class HostedOptions:
     ``policy`` is the quota and priority policy; its ``global_concurrency`` is lowered to what the grant runs at once
     when higher. ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted.
     ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the infrastructure retries per test before it
-    ends as ``measurement_failed`` and ``poll_interval_sec`` how often the backend polls a runner sandbox for its result.
+    ends as ``measurement_failed``, ``infra_backoff_seconds`` the wait before each
+    one after a failure that is not the node's (:class:`~.attempts.InfraBackoff`) and ``poll_interval_sec`` how often
+    the backend polls a runner sandbox for its result.
     ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None`` is the hosted set, TraceLens: it reads the
     traces a profile test lands below ``session_dir``. ``kernel_tune`` leases a card of a local pool and the roofline
     profiles on host cards, and the hosted toolbox has neither. ``retry`` is how the service client repeats a control-plane
@@ -234,6 +246,7 @@ class HostedOptions:
     archive: ResultArchive | None = None
     timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC
     max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
+    infra_backoff_seconds: tuple[float, ...] = INFRA_BACKOFF_SECONDS
     poll_interval_sec: float = 5.0
     tools: Sequence[AsyncTool] | None = None
     retry: RetryPolicy = RetryPolicy()
@@ -246,12 +259,17 @@ class HostedOptions:
 class HostedToolbox(LeasedToolbox):
     """A :class:`RealToolbox` that also owns its hosted backend and sandbox provider; ``close`` releases them.
 
-    ``leases`` is ``None`` when the session has no grant limits or no ``dev`` key.
+    ``leases`` is ``None`` when the session has no grant limits or no ``dev`` key. ``run_id`` is the run's id, which every
+    sandbox of the run carries whichever process, container or account of the run created it.
     """
 
     backend: HostedMeasurementBackend
     provider: SandboxProvider
     leases: HostedBranchLeases | None
+    run_id: str
+    #: The ``measurement`` sandboxes of the run that were running when :meth:`start` began, so an earlier process's:
+    #: ended by the first :meth:`withdraw_all`.
+    _earlier: tuple[str, ...] = ()
 
     async def lease_branch_sandbox(
         self,
@@ -288,13 +306,44 @@ class HostedToolbox(LeasedToolbox):
 
     async def start(self) -> None:
         """End the lease sandboxes and the measurement sandboxes no unfinished test names that an earlier process of
-        this run left behind, then start as :class:`LeasedToolbox` does, which closes the leases' records
-        ``toolbox_lost`` and re-attaches the unfinished tests."""
+        this run left behind, note the ``measurement`` sandboxes it left that unfinished tests name, then start as
+        :class:`LeasedToolbox` does, which closes the leases' records ``toolbox_lost`` and recovers the earlier
+        process's unfinished tests."""
 
         if self.leases is not None:
             await asyncio.to_thread(self.leases.end_leftovers)
         await asyncio.to_thread(self.backend.end_leftovers)
+        self._earlier = await asyncio.to_thread(self._running_measurements)
         await super().start()
+
+    async def withdraw_all(self, reason: str = "session stopped") -> tuple[str, ...]:
+        """Withdraw every test as :class:`RealToolbox` does, then, the first time, end the ``measurement`` sandboxes an
+        earlier process of the run left running (noted by :meth:`start`).
+
+        A recovered test ends its sandbox only once its attempt re-attached to it, and a test withdrawn before that, or
+        still queued behind the grant's slots, never does; nor does a sandbox the service made for a create that process
+        did not live to journal. A later leg of the run, in another container and maybe as another account, takes the
+        session over by withdrawing what it recovered: without this those sandboxes would measure on for nobody,
+        holding the grant's slots and cards until their own timeout. Every test they ran is withdrawn by now."""
+
+        withdrawn = await super().withdraw_all(reason)
+        earlier, self._earlier = self._earlier, ()
+        if earlier:
+            await asyncio.to_thread(self._end_measurements, earlier)
+        return withdrawn
+
+    def _running_measurements(self) -> tuple[str, ...]:
+        try:
+            found = self.provider.find({RUN_ID_KEY: self.run_id}, role=MEASUREMENT_ROLE)
+        except SandboxError:
+            log.exception("the measurement sandboxes an earlier process of the run left could not be listed")
+            return ()
+        return tuple(info.sandbox_id for info in found)
+
+    def _end_measurements(self, sandbox_ids: Sequence[str]) -> None:
+        for sandbox_id in sandbox_ids:
+            self.backend.pool.discard(sandbox_id)  # one already gone is fine, one unreachable is logged
+        log.info("ended %d measurement sandbox(es) an earlier process of the run left", len(sandbox_ids))
 
     async def close(self) -> None:
         """End the tests' bookkeeping, then the lease sandboxes and the measurement sandboxes of this run."""
@@ -538,18 +587,29 @@ def build_hosted_toolbox(
     )
     backend = started_backend(provider, config)
     executor = HostedExecutor(
-        backend, directory, timeout_sec=options.timeout_sec, workload_kind=acceptance.workload_kind
+        backend,
+        directory,
+        timeout_sec=options.timeout_sec,
+        workload_kind=acceptance.workload_kind,
+        smoke=merge_smoke_from(os.environ),
     )
     toolbox = HostedToolbox(
-        session_stores(blackboard, directory, inputs.run_id, native.driver if native else None),
+        session_stores(
+            blackboard, directory, inputs.run_id, native.driver if native else None, inputs.session_id or ""
+        ),
         executor,
         acceptance,
         tools=session_tools(options.tools if options.tools is not None else (tracelens_tool(),), blackboard, directory),
         tuning=ToolboxTuning(
-            policy=capped_policy(options.policy, parallel), max_infra_retries=options.max_infra_retries
+            policy=capped_policy(options.policy, parallel),
+            max_infra_retries=options.max_infra_retries,
+            infra_backoff_seconds=options.infra_backoff_seconds,
         ),
     )
     toolbox.backend, toolbox.provider, toolbox.trace_root, toolbox.blobs = backend, provider, directory, spec.blobs
+    toolbox.run_id = inputs.run_id
+    # The runner template's cards, not the app's node: a restart reschedules the app, and its tests run in the grant.
+    toolbox.measured_on = MeasuredOn(directory, node_name(), spec.image_digest, inputs.tp)
     if leases is not None:
         if handover is not None:
             leases.keep_room_for_handover(backend.pool.make_room)

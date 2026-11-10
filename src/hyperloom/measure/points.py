@@ -25,6 +25,8 @@ import yaml
 
 from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
+from hyperloom.common.session_files import shared_options
+from hyperloom_common.io import atomic_write_text
 from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_EP,
@@ -40,6 +42,7 @@ from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeError
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.compile import CompiledEnvironment, EnvironmentCompiler
 from hyperloom.measure.eval_context import check_eval_context
+from hyperloom.measure.checkpoint import CheckpointPlan
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.surface import (
@@ -112,7 +115,7 @@ def _render(canonical: CanonicalMeasurement, out_dir: Path, name: str, **overrid
     if inferencex:
         config["benchmark"]["inferencex_path"] = inferencex
     if concurrency is not None or inferencex:
-        path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
+        atomic_write_text(path, yaml.safe_dump(config, sort_keys=False), options=shared_options(config))
     return config
 
 
@@ -345,12 +348,14 @@ def generate_profile_point(
 @dataclass(frozen=True)
 class AcceptedMeasurement:
     """What acceptance produces for a test request: its environment and the points it runs, and the short-prompt
-    consistency check and the long-context check the toolbox decided the test runs (``None`` for none)."""
+    consistency check, the long-context check and the AgentX checkpoint the toolbox decided the test runs (``None`` for
+    none)."""
 
     environment: CompiledEnvironment
     points: tuple[Path, ...]
     short_prompts: ShortPromptPlan | None = None
     long_context: LongContextPlan | None = None
+    checkpoint: CheckpointPlan | None = None
 
 
 def accept_measurement(

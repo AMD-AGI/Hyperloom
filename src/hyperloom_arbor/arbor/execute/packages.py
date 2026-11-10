@@ -31,6 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from arbor.execute import trees
 from arbor.execute.workspace import HOST, run_in
 
 MANIFEST = "landed_packages.json"
@@ -55,11 +56,8 @@ def _sh(container: str, cmd: str) -> str:
     return p.stdout
 
 
-def editable(config: dict) -> list[dict]:
-    """The config's editable packages other than the workspace (which landed.patch carries)."""
-    ws = str(config.get("workspace_root") or "").rstrip("/")
-    return [p for p in config.get("editable_packages") or []
-            if p.get("name") and p.get("path") and str(p["path"]).rstrip("/") != ws]
+#: The config's editable packages other than the workspace; defined in arbor/execute/trees.py, which this module imports.
+editable = trees.editable
 
 
 def image_sums(container: str):
@@ -96,6 +94,15 @@ def capture(container: str, config: dict, session: str | Path, pristine=None) ->
     for p in pkgs:
         name, path = p["name"], str(p["path"])
         img, cur = pristine(path), _sums(_sh(container, f"cd {shlex.quote(path)} && {PY_SUMS}"))
+        # Beside the .py files: every file the tree changed since its baseline (arbor/execute/trees.py), a tuned
+        # table or a config among them, which the .py comparison alone never saw.
+        base = trees.baselines(session).get(path.rstrip("/"))
+        if base:
+            listed = _sh(container, f"cd {shlex.quote(path)} && git diff --name-only --diff-filter=AMR {base} HEAD")
+            more = [f"./{f}" for f in listed.splitlines() if f.strip() and f"./{f}" not in cur]
+            if more:
+                cur.update(_sums(_sh(container, f"cd {shlex.quote(path)} && sha256sum -- "
+                                                + " ".join(shlex.quote(f) for f in more))))
         files = sorted(f for f in cur if img.get(f) != cur[f])
         if files:
             out = tmp / name

@@ -20,6 +20,7 @@ import asyncio
 import functools
 import hashlib
 import json
+import logging
 import math
 import re
 import subprocess
@@ -53,6 +54,7 @@ from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, RoundUnrea
 from hyperloom.measure.failures import Disposition, classify_test_failure
 from hyperloom.measure.archive import ArchiveError
 from hyperloom.measure.boot_watch import boot_seconds
+from hyperloom.measure.checkpoint import read_ruling
 from hyperloom.measure.bundle import RecordedBundle, ResultRejected
 from hyperloom.measure.hosted import HostedMeasurementBackend, Reverified
 from hyperloom.measure.hosted_log import FAILURE_DETAIL_CHARS, STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, Record
@@ -91,6 +93,7 @@ from hyperloom_multibranch.toolbox.reverify import (
     first_warning_difference,
 )
 from hyperloom_multibranch.toolbox import long_context
+from hyperloom_multibranch.toolbox.merge_smoke import MERGE_SMOKE, SMOKE_NOT_RUN, MergeSmoke, SmokeNotRun
 from hyperloom_multibranch.toolbox.short_prompts import consistency_of, rederive
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits, runtime_findings
 
@@ -100,6 +103,8 @@ __all__ = [
     "OUTPUTS_DIR",
     "TEST_SILENCE_TIMEOUT_SEC",
 ]
+
+log = logging.getLogger(__name__)
 
 DEFAULT_TEST_TIMEOUT_SEC = 3600
 #: How long a round may go without server-log growth or benchmark output once the server is ready before it is reaped
@@ -149,6 +154,8 @@ class HostedExecutor:
         timeout_sec: The timeout of one attempt.
         workload_kind: The campaign's workload; an AgentX baseline served with the prefix cache off does not end
             ``succeeded``.
+        smoke: The merge smoke every test with patches passes before its first sandbox is asked for
+            (:mod:`~hyperloom_multibranch.toolbox.merge_smoke`); ``None`` for none.
     """
 
     def __init__(
@@ -158,12 +165,16 @@ class HostedExecutor:
         *,
         timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC,
         workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
+        smoke: MergeSmoke | None = None,
     ) -> None:
         self._backend = backend
         self._session = Path(session_dir)
         self._timeout = timeout_sec
         self._clock: Callable[[], float] = time.time
         self._workload = workload_kind
+        self._smoke = smoke
+        #: The requests whose smoke passed: a retry in a fresh sandbox does not ask again.
+        self._smoked: set[str] = set()
 
     async def run(self, job: TestJob) -> TestResult:
         request = job.request
@@ -173,6 +184,9 @@ class HostedExecutor:
             raise MeasurementRefused(
                 f"the hosted executor needs the accepted measurement, got {type(accepted).__name__}"
             )
+        smoked = await self._merge_smoke(request_id, accepted)
+        if smoked is not None:
+            return smoked
         call = self._call(job, accepted, self._output_dir(request_id))
         started = self._clock()
         try:
@@ -180,10 +194,46 @@ class HostedExecutor:
         except subprocess.TimeoutExpired as expired:
             return self._timed_out(request_id, started, expired)
         result = self._result(request, accepted, call, outcome, _Span(started, self._clock()))
+        result = _with_checkpoint(result, call)
         result = await self._with_table_hits(result, accepted, call)
         result = await self._with_short_prompts(result, accepted, call)
         result = await self._with_long_context(result, accepted, call)
         return await self._with_request_classes(result, request, outcome, call)
+
+    async def _merge_smoke(self, request_id: str, accepted: AcceptedMeasurement) -> TestResult | None:
+        """The attempt's result when the merge smoke ends it before a sandbox is asked for, else ``None``.
+
+        A candidate whose patched Python does not compile or import fails as the candidate's (``merge_smoke``); a smoke
+        that could not run is an infrastructure failure (``smoke_not_run``), never held against the candidate.
+        """
+        smoke = self._smoke
+        if smoke is None or request_id in self._smoked:
+            return None
+        started = self._clock()
+        try:
+            error = await asyncio.to_thread(smoke.check, accepted.environment, accepted.points)
+        except SmokeNotRun as exc:
+            log.warning("test %s: the merge smoke could not run: %s", request_id, exc)
+            return TestResult(
+                request_id=request_id,
+                validity=Validity.MEASUREMENT_FAILED,
+                failure_class=FailureClass.INFRA,
+                failure_reason=f"{SMOKE_NOT_RUN}: {exc}",
+                started_at=started,
+                finished_at=self._clock(),
+            )
+        if error is not None:
+            log.info("test %s: the merge smoke failed, no sandbox is asked for: %s", request_id, error)
+            return TestResult(
+                request_id=request_id,
+                validity=Validity.CANDIDATE_FAILED,
+                failure_class=FailureClass.CANDIDATE,
+                failure_reason=f"{MERGE_SMOKE}: {error}",
+                started_at=started,
+                finished_at=self._clock(),
+            )
+        self._smoked.add(request_id)
+        return None
 
     @functools.cached_property
     def _session_facts(self) -> SessionFacts:
@@ -217,6 +267,7 @@ class HostedExecutor:
                 or _unlike_classes(result, derived, landed)
                 or _unlike_consistency(result, landed)
                 or _unlike_long_context(result, landed)
+                or _unlike_checkpoint(result, landed)
             )
 
     async def reverify(self, result: TestResult) -> None:
@@ -271,6 +322,7 @@ class HostedExecutor:
             attachments=request.attachments if request.kind is TestKind.REPRO else (),
             short_prompts=accepted.short_prompts,
             long_context=accepted.long_context,
+            checkpoint=accepted.checkpoint,
             session_facts=self._session_facts,
         )
 
@@ -478,6 +530,32 @@ def _unlike_classes(result: TestResult, derived: Reverified, landed: Path) -> st
         return None
     concurrencies = tuple(_concurrency_in(text) for text in derived.point_yaml)
     return first_request_classes_difference(result, read_round_classes(derived.rounds, landed, concurrencies))
+
+
+def _unlike_checkpoint(result: TestResult, landed: Path) -> str | None:
+    """Why the AgentX checkpoint ruling ``result`` records is not the one the verified bundle holds.
+
+    A record that holds none is not checked: it makes no claim.
+    """
+    recorded = result.agentx_checkpoint
+    if recorded is None:
+        return None
+    held = read_ruling(landed)
+    return None if held == recorded else f"agentx_checkpoint: recorded {recorded}, the bundle holds {held}"
+
+
+def _with_checkpoint(result: TestResult, call: TestCall) -> TestResult:
+    """``result`` with the ruling the AgentX checkpoint made on its measured round; a test that carried no checkpoint has
+    none, and one whose window never closed is logged, so the CLOSE report's count of unjudged tests can be traced."""
+    if call.checkpoint is None:
+        return result
+    try:
+        ruling = read_ruling(Path(call.output_dir))
+    except (OSError, ValueError) as exc:
+        raise MeasurementRefused(f"the AgentX checkpoint's ruling cannot be read: {exc}") from exc
+    if ruling is None:
+        log.warning("agentx_checkpoint: %s ran under the checkpoint and it ruled on none", result.request_id)
+    return replace(result, agentx_checkpoint=ruling)
 
 
 def _unlike_consistency(result: TestResult, landed: Path) -> str | None:

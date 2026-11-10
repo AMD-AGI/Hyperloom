@@ -812,7 +812,9 @@ def test_a_launcher_that_outlives_its_wait_is_collected_by_its_popen_alone(make,
             identity = proctree.proc_identity(proc.pid)
             assert identity is not None
             launchers.append((proc.pid, identity[1]))
-        _immortal(monkeypatch, procs[0].pid)  # its wait times out, as while the kernel still tears it down
+        # Its wait times out, as while the kernel still tears it down; stopped, it cannot end once its tree has.
+        os.kill(procs[0].pid, signal.SIGSTOP)
+        _immortal(monkeypatch, procs[0].pid)
         named.append(kill_launchers(procs, **kw))
         return named[-1]
 
@@ -968,7 +970,9 @@ def test_withheld_cards_of_a_launcher_that_outlived_its_wait_come_back_through_i
 
     def _kill_launchers(procs, **kw) -> reaper.Leftovers:
         popens.extend(procs)
-        _immortal(monkeypatch, procs[0].pid)  # it outlives its wait and the sweep, as while the kernel tears it down
+        # It outlives its wait and the sweep, as while the kernel tears it down; stopped, it cannot end once its tree has.
+        os.kill(procs[0].pid, signal.SIGSTOP)
+        _immortal(monkeypatch, procs[0].pid)
         return kill_launchers(procs, **kw)
 
     def _reap_exited_children(processes) -> int:
@@ -1067,6 +1071,17 @@ def test_close_kills_every_sandbox_and_removes_the_base_dir() -> None:
     provider.close()
     assert all(b.ended for b in boxes)
     assert not base.exists()
+
+
+def test_no_launcher_outlives_the_close_of_its_provider() -> None:
+    provider = LocalSandboxProvider([LocalTemplate("dev", "dev")])
+    sb = _create(provider, "dev", "dev")
+    sb.run("sleep 300", background=True)
+    assert sb.run("true").exit_code == 0
+    launchers = [proc.pid for proc in sb._procs]
+    assert len(launchers) == 2
+    provider.close()
+    _assert_all_gone(launchers)
 
 
 def test_a_second_kill_waits_for_the_first_to_finish(make) -> None:

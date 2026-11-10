@@ -3,7 +3,9 @@
 #
 # Arbor injects: PORT, MODEL_PATH, MODEL_NAME, CONCURRENCY, NUM_PROMPTS, BENCH_OUTPUT
 # Campaign config server_env provides: FRAMEWORK, MODEL_PREFIX, PRECISION, SPEC_DECODING,
-#   TP, EP_SIZE, DP_ATTENTION, KV_OFFLOADING, DURATION, IMAGE, RUNNER_TYPE, etc.
+#   TP, EP_SIZE, DCP_SIZE, PP_SIZE, PCP_SIZE, DP_ATTENTION, KV_OFFLOADING, DURATION, IMAGE, RUNNER_TYPE, etc.
+#   The parallelism sizes are the arm's, as CI sets them: InferenceX's aggregation divides by them per GPU.
+# AGENTX_TOKENIZER (optional): where aiperf loads the tokenizer, when MODEL_PATH is not a directory here.
 #
 # Server is already running — this script only runs the aiperf trace replay.
 
@@ -20,9 +22,18 @@ INFMAX_CONTAINER_WORKSPACE="${INFMAX_CONTAINER_WORKSPACE:-/workspace/InferenceX}
 source "$INFMAX_CONTAINER_WORKSPACE/benchmarks/benchmark_lib.sh"
 
 # ---- Map Arbor env vars to InferenceX conventions ----
-# MODEL must be the full local path so aiperf can load the tokenizer.
+# MODEL is where aiperf loads the tokenizer: AGENTX_TOKENIZER when set; else MODEL_PATH when it is a directory
+# here; else MODEL_NAME, a repo id the Hugging Face cache resolves. A path that is not a directory here (the
+# server's own path, under a host whose bench runs elsewhere) fails Hugging Face's repo-id check (HFValidationError).
 # SERVED_MODEL_NAME is the wire name the server registered (used for --model in requests).
-export MODEL="${MODEL_PATH}"
+if [ -n "${AGENTX_TOKENIZER:-}" ]; then
+    export MODEL="$AGENTX_TOKENIZER"
+elif [ -d "$MODEL_PATH" ]; then
+    export MODEL="$MODEL_PATH"
+else
+    export MODEL="$MODEL_NAME"
+    echo "[bench_agentx] MODEL_PATH $MODEL_PATH is not a directory here: the tokenizer comes from $MODEL_NAME" >&2
+fi
 export SERVED_MODEL_NAME="${MODEL_NAME}"
 export MODEL_PREFIX="${MODEL_PREFIX:?campaign config must set MODEL_PREFIX}"
 export FRAMEWORK="${FRAMEWORK:?campaign config must set FRAMEWORK}"
@@ -37,9 +48,9 @@ export KV_OFFLOAD_BACKEND_METADATA="${KV_OFFLOAD_BACKEND_METADATA:-}"
 export TOTAL_CPU_DRAM_GB="${TOTAL_CPU_DRAM_GB:-0}"
 export SPEC_DECODING="${SPEC_DECODING:-none}"
 export IS_MULTINODE="false"
-export PP_SIZE=1
-export DCP_SIZE=1
-export PCP_SIZE=1
+export PP_SIZE="${PP_SIZE:-1}"
+export DCP_SIZE="${DCP_SIZE:-1}"
+export PCP_SIZE="${PCP_SIZE:-1}"
 export DISAGG="false"
 
 # Fast mode for profiling runs
@@ -107,6 +118,8 @@ output_throughput = per_gpu.get("output_tput_tps", 0.0)
 total_throughput  = per_gpu.get("total_tput_tps",  0.0)
 
 result = {
+    # The pack's objective: the dashboard's tput/GPU, (input + output tokens) / span / GPUs.
+    "total_throughput":            total_throughput,
     "output_throughput":           output_throughput,
     "total_throughput_per_gpu":    total_throughput,
     "conc":                        agg.get("conc", 0),
@@ -121,6 +134,14 @@ result = {
     "agg_json_path":               agg_path,
     "status": "ok",
 }
+# An AgentX host's axis, as the harness publishes it: each request's OSL / E2EL, its p50 and p90 (tok/s per user),
+# read as is and never recomputed, as the host reads it. For a campaign whose objective is one of them
+# (arbor/objective.py). An aggregate without the block (an older InferenceX) leaves them out.
+norm = req.get("latency", {}).get("e2e_norm_intvty", {})
+for pct in ("p50", "p90"):
+    value = norm.get(pct)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+        result[f"e2e_norm_intvty_{pct}"] = value
 
 with open(out_path, "w") as f:
     json.dump(result, f, indent=2)

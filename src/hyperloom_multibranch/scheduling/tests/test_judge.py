@@ -51,6 +51,7 @@ from hyperloom_multibranch.scheduling.judge import (
     QueuedIntent,
     StopOrder,
     cap_decision,
+    dev_wait_holds,
     envelope_holds,
     held_branches,
     hold_decision,
@@ -212,8 +213,20 @@ def test_the_safety_envelope_holds_a_branch_on_probation_or_with_a_stranded_lead
     }
 
 
-@pytest.mark.parametrize("hold", sorted(ENVELOPE_HOLDS))
-def test_a_branch_the_envelope_holds_keeps_its_stop_refused_while_its_k_is_the_judges_to_lower(
+def test_a_running_branch_in_line_for_a_dev_sandbox_is_held_unless_its_specialist_gave_up_or_failed_judging() -> None:
+    running = SpecialistStatus(running=True, crashes=0, lost=0, gave_up=False, judge_failed=False)
+    specialists = {
+        "b01": running,
+        "b02": replace(running, gave_up=True),
+        "b03": replace(running, judge_failed=True),
+        "b04": running,
+    }
+
+    assert dev_wait_holds({"b01", "b02", "b03", "b05"}, specialists) == {"b01": HoldReason.DEV_WAIT}
+
+
+@pytest.mark.parametrize("hold", [*sorted(ENVELOPE_HOLDS), HoldReason.DEV_WAIT])
+def test_a_branch_the_envelope_or_its_dev_wait_holds_keeps_its_stop_refused_while_its_k_is_the_judges_to_lower(
     hold: HoldReason,
 ) -> None:
     roster = (_entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION), _entry("b01", k=2), _entry("b02", k=2))
@@ -236,6 +249,17 @@ def test_the_prompt_shows_the_open_areas_and_the_playbook_before_the_reply_forma
     assert prompt.index("Scheduling playbook h0:") < prompt.index("Reply with")
     assert "Scheduling playbook" not in bare and "Open areas" not in bare
     assert (system_prompt(played), system_prompt(_view())) == (PLAYBOOK_JUDGE_PROMPT, JUDGE_SYSTEM_PROMPT)
+
+
+def test_the_prompt_shows_arbor_s_map_after_the_open_areas_only_when_the_session_has_one() -> None:
+    areas = "Open areas for a new branch, from the profile of c1:\n- gemm_a8w8 (gemm): 10.0% of GPU time"
+    held = "Arbor's map: the directions ...\n- m-gemm (held by b02): Dense GEMMs"
+    prompt = render_prompt(replace(_view(), open_areas=areas, agent_map=held, playbook=H0.render()))
+
+    assert (
+        prompt.index(areas) < prompt.index(held) < prompt.index("Scheduling playbook h0:") < prompt.index("Reply with")
+    )
+    assert "Arbor's map" not in render_prompt(replace(_view(), open_areas=areas))
 
 
 def test_a_playbook_session_s_prompt_makes_its_stall_evidence_the_one_stop_rule_for_a_stall() -> None:
@@ -329,6 +353,12 @@ def test_the_prompt_says_a_free_slot_may_be_opened_without_a_stop() -> None:
 
     assert "free_branch_slots counts the branches you may open at this call having stopped nothing" in prose
     assert "Leaving a free slot unopened needs a reason; opening into it does not." in prose
+
+
+def test_the_prompt_says_unfocused_branches_spread_over_the_largest_ops_in_turn() -> None:
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+
+    assert "briefed on the largest ops of the integration head's latest profile in turn" in prose
 
 
 def test_a_playbook_session_s_prompt_leaves_a_free_slot_free_while_no_open_area_is_left() -> None:

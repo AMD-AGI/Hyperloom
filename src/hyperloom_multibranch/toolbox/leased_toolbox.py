@@ -29,7 +29,7 @@ from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup, ServedLongContext
 from hyperloom_multibranch.toolbox.short_prompt_pool import POOL_FILE, ShortPromptPool
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup
-from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
+from hyperloom_multibranch.toolbox.submission_log import SUBMISSIONS_FILE, SubmissionLog
 from hyperloom_multibranch.toolbox.tools import AsyncTool, ToolJobs
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores
 
@@ -46,7 +46,7 @@ __all__ = [
 ]
 
 #: Where a session's verified bundles, submit log and tool results are, below its directory; every toolbox uses the same.
-_ARCHIVE, _SUBMISSIONS, _TOOL_RESULTS = "archive", "toolbox/submissions.jsonl", "tool-results"
+_ARCHIVE, _TOOL_RESULTS = "archive", "tool-results"
 
 
 class LeaseBook(Protocol):
@@ -206,13 +206,14 @@ def session_archive(archive: ResultArchive | None, directory: Path) -> ResultArc
 
 
 def session_stores(
-    blackboard: LocalBlackboard, directory: Path, run_id: str, builds: BuildDriver | None = None
+    blackboard: LocalBlackboard, directory: Path, run_id: str, builds: BuildDriver | None = None, scope: str = ""
 ) -> ToolboxStores:
     """The submit log and the short-prompt pool below the session directory and the blackboard as every port the toolbox
     writes to; ``builds`` drives the native build store when the host configured one (without it no test waits for a
-    build)."""
+    build). ``scope``, the session's id where ``run_id`` is a run's that may hold more than one session, keeps the
+    request ids, and so the idempotency keys of their sandboxes, of one session apart from another's."""
     return ToolboxStores(
-        log=SubmissionLog(directory / _SUBMISSIONS, run_id),
+        log=SubmissionLog(directory / SUBMISSIONS_FILE, run_id, scope),
         short_prompt_pool=ShortPromptPool(directory / POOL_FILE),
         sink=blackboard,  # type: ignore[arg-type]
         health=blackboard,  # type: ignore[arg-type]

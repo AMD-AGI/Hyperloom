@@ -26,9 +26,10 @@ commits fail to merge, whether a profile of the integration head runs, the GPU h
 time any lease holds) and the LLM dollars the specialists and the scheduler itself spent so far, and what is known
 of each running branch's specialist (given up, stopped because its judging failed, its heartbeat lost again and
 again), which explore tests each branch has queued and which native builds its tests wait for, and decides
-what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed,
-and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background
-task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
+what to stop. No judge round starts once less of EXPLORE is left than a branch needs to start, since nothing it
+decided could take effect; a judge call that has not answered by the EXPLORE deadline counts as failed, and a
+branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background task
+of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
 integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and no merge
 test competes with FINAL's measurements; a profile of the integration head still running is cancelled before that,
 taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used the GPU
@@ -46,6 +47,7 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle, SpecialistStatus
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, ConflictingWrite
@@ -56,6 +58,7 @@ from hyperloom_multibranch.blackboard.rsi.open_areas import OpenAreas
 from hyperloom_multibranch.blackboard.rsi.playbook import PlaybookPlay
 from hyperloom_multibranch.blackboard.rsi.session import judge_history, judge_open_areas
 from hyperloom_multibranch.blackboard.rsi.stranded import stranded_leads
+from hyperloom_multibranch.scheduling.agent_map import render_map
 from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BatchStart, BranchControl, BranchFocus
 from hyperloom_multibranch.scheduling.build_waits import waiting_builds
@@ -72,6 +75,7 @@ from hyperloom_multibranch.scheduling.judge import (
     Judge,
     JudgeDecision,
     JudgeView,
+    dev_wait_holds,
     envelope_holds,
     held_branches,
     hold_decision,
@@ -91,6 +95,9 @@ from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.scheduling.widening import Widening, refill_focus
+
+if TYPE_CHECKING:
+    from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +131,7 @@ def gave_up_reason(status: SpecialistStatus) -> str:
 
 @dataclass(frozen=True)
 class ExploreWindow:
-    """The commit every gain is measured against, the commit the first branches start from, the clock times EXPLORE and the budget end at, the session's whole budget, the GPU seconds the session's tests and
+    """The commit every gain is measured against, the commit the first branches start from, the clock times EXPLORE and the budget end at, the GPU seconds the session's tests and
     leases may use before EXPLORE ends and the dollars the session's recorded LLM calls may cost (``math.inf`` for no
     limit, for either), the directions the user wrote, one user branch each, the agents the user named, one agent branch each, and in the same
     order each agent's share of the session's directions (:func:`~.agent_plans.agent_plans`; ``""`` for none), and
@@ -138,7 +145,6 @@ class ExploreWindow:
     start_commit: str
     explore_end: float
     session_deadline: float
-    budget_seconds: float
     explore_gpu_seconds: float
     max_llm_usd: float
     user_directions: tuple[str, ...]
@@ -153,8 +159,9 @@ class Steering:
     the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
     later judge call, the signals of whether a branch opened now would still pay off, which running branches made
     much the same change, the events that have the judge asked at once, the specialist lifecycle, which reports
-    each running branch's specialist, the toolbox the native builds each branch's tests wait for are read from, and
-    the scheduling playbook the session plays, ``None`` for a session that plays none, with the session's manifest a
+    each running branch's specialist, the toolbox the native builds each branch's tests wait for are read from, the
+    session's dev sandboxes, whose line holds a waiting branch (``None`` when it lends none), and the scheduling
+    playbook the session plays, ``None`` for a session that plays none, with the session's manifest a
     fallback from it is recorded in."""
 
     judge: Judge
@@ -166,6 +173,7 @@ class Steering:
     events: SessionEvents
     specialists: SpecialistLifecycle
     toolbox: Toolbox
+    dev_leases: DevLeases | None
     play: PlaybookPlay | None
     manifest: Path
 
@@ -211,6 +219,7 @@ class Explorer:
         self._events = steering.events
         self._specialists = steering.specialists
         self._toolbox = steering.toolbox
+        self._dev_leases = steering.dev_leases
         self._play = steering.play
         self._manifest = steering.manifest
         self._scored: tuple[BranchProgress, ...] = ()
@@ -282,7 +291,7 @@ class Explorer:
             freed = await self._start_admitted(window.explore_end) or overrun or given_up
             if await self._events.detect() or freed:
                 next_judge = now
-            if now >= next_judge:
+            if now >= next_judge and window.explore_end - now >= SPECIALIST_START_SECONDS:
                 next_judge = now + self._interval
                 decision = await self._ask(window, opening=False)
                 if decision is not None and await self._apply(decision, await self._refill(window)):
@@ -387,6 +396,7 @@ class Explorer:
             focus={node.branch: node.focus for node in snapshot.lineage.branches if node.focus},
         )
         view = self._with_playbook(view, snapshot)
+        view = replace(view, agent_map=render_map(snapshot))
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)
         except asyncio.TimeoutError:
@@ -426,13 +436,14 @@ class Explorer:
     ) -> dict[str, HoldReason]:
         """The held branches (:func:`held_branches`), under the grace of the playbook the session plays
         (:func:`session_grace`), with those its safety envelope keeps, read off the frontier ``scored`` rows of the
-        round, where a hold of their own does not come first. A session that plays no playbook has the grace it always
+        round, and those in line for a dev sandbox, each where a hold before it does not come first. A session that plays no playbook has the grace it always
         had, and no envelope, as its rows carry no stall evidence."""
 
         snapshot = await self._blackboard.snapshot()
         rules = HoldRules(self._clock.now(), session_grace(self._play))
         held = held_branches(self._roster.entries(), snapshot.progress, snapshot.records, specialists, rules)
-        return {**envelope_holds(scored, specialists), **held}
+        waiting = self._dev_leases.waiting() if self._dev_leases is not None else ()
+        return {**dev_wait_holds(waiting, specialists), **envelope_holds(scored, specialists), **held}
 
     async def _record_probations(self, snapshot: BlackboardSnapshot, scored: Iterable[BranchProgress]) -> None:
         """Record each branch the round's stall evidence holds on probation under the stop rule the scoring read, the
