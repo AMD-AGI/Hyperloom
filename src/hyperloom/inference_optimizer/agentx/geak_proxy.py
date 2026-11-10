@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.inference_optimizer.agentx.report import server_launch_environment
 
 _PROXY_OWNED_OPTIONS = frozenset(
     {
@@ -79,15 +80,8 @@ def seed_native_geak_proxy(
     if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
         raise ValueError("Native AgentX GEAK server launch argv is missing")
     flags = _tunable_flags(argv, str(handoff.get("framework") or ""))
-    runtime = dict(evidence.get("runtime_environment") or {})
+    runtime, cleared = server_launch_environment(evidence)
     explicit_env = evidence.get("effective_env") or {}
-    cleared: set[str] = set()
-    for name, value in explicit_env.items():
-        if value is None:
-            runtime.pop(name, None)
-            cleared.add(name)
-        else:
-            runtime[name] = value
     if Path(argv[0]).is_absolute():
         executable_dir = str(Path(argv[0]).parent)
         runtime["PATH"] = ":".join(part for part in (executable_dir, runtime.get("PATH", "")) if part)

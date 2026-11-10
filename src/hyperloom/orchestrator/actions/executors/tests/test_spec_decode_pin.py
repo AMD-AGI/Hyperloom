@@ -17,7 +17,11 @@ from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, _build_variant_yaml, run_grid
 from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack, apply_compatibility_filter
 from hyperloom.orchestrator.actions.executors._launch_evidence import persist_launch_evidence
-from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer, materialize_benchmark_config
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    BenchmarkTarget,
+    LaunchLayer,
+    materialize_benchmark_config,
+)
 from hyperloom.orchestrator.actions.executors._spec_decode_pin import (
     SPECULATIVE_DECODING_PINNED,
     SpeculativeDecodingPinnedError,
@@ -366,6 +370,30 @@ def test_admission_and_the_launch_state_one_rule():
     )
 
 
+def test_a_round_admits_against_the_environment_its_base_launches_with():
+    """A name the accepted stack unsets is not part of the base a proposal is judged against."""
+    from hyperloom.orchestrator.actions.executors.explore import _ExploreRound
+
+    rnd = _ExploreRound.__new__(_ExploreRound)
+    rnd.grid = [GridVariant("drop_simulated_acceptance", unset_envs=["SGLANG_SIMULATE_ACC_LEN"])]
+    rnd.params = {}
+    rnd.ss = None
+    rnd.framework = "sglang"
+    rnd.target = BenchmarkTarget(model_path="", gpu_type="mi355x")
+    rnd.yaml_envs = dict(SGLANG_SYNTHETIC_ENV)
+    rnd.envs = {}
+    rnd.unset_envs = ["SGLANG_SIMULATE_ACC_LEN"]
+    rnd.base_args = SGLANG_EAGLE
+    rnd.base_remove_args = []
+    rnd.inherited_args = ""
+    rnd.args_mode = "append"
+    rnd.skipped = []
+    rnd._drop_leading_noops = lambda: None
+    rnd._shape_runnable()
+    assert [gv.name for gv in rnd.runnable] == ["drop_simulated_acceptance"]
+    assert rnd.skipped == []
+
+
 def _base_yaml(tmp_path: Path, framework: str, args: str, envs: dict[str, str]) -> Path:
     args_env = {"vllm": "EXTRA_VLLM_ARGS", "sglang": "EXTRA_SGLANG_ARGS"}[framework]
     path = tmp_path / "base.yaml"
@@ -466,7 +494,10 @@ async def test_run_grid_records_the_refusal_without_launching(tmp_path, monkeypa
 
 
 def _native_recipe(
-    tmp_path: Path, recipe_args: list[str] | None = None, recipe_envs: dict[str, str | None] | None = None
+    tmp_path: Path,
+    recipe_args: list[str] | None = None,
+    recipe_envs: dict[str, str | None] | None = None,
+    runtime_env: dict[str, str] | None = None,
 ) -> Path:
     """A native recipe as a verified session leaves it: the resolved workload and the launch receipt beside it.
 
@@ -500,6 +531,7 @@ def _native_recipe(
                         "base_argv": argv,
                         "effective_argv": argv,
                         "effective_env": dict(recipe_envs or {}),
+                        "runtime_environment": dict(runtime_env or {}),
                     },
                     "recipe": {"tp": 1, "ep": 1, "conc": 8},
                 }
@@ -550,6 +582,34 @@ def test_a_variable_the_recipe_cleared_is_not_a_setting_it_pinned(tmp_path):
     config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, {"SGLANG_SIMULATE_ACC_LEN": None})
     launch = _build_native(tmp_path, config, GridVariant("v", extra_server_args="--speculative-num-draft-tokens 6"))
     assert launch["append_args"] == ["--speculative-num-draft-tokens", "6"]
+
+
+# InferenceX injects the recipe's golden acceptance length at launch: Magpie's receipt has it only in the
+# environment the server ran with, not in the recipe-owned ``effective_env``.
+_LAUNCHER_RAN_ENV = {
+    "PATH": "/usr/bin",
+    "SGLANG_SIMULATE_ACC_LEN": "3.61",
+    "SGLANG_SIMULATE_ACC_METHOD": "match-expected",
+}
+
+
+def test_a_candidate_echoing_the_simulated_acceptance_the_launcher_injected_is_admitted(tmp_path):
+    """AMD-AGI/Hyperloom#2432: GEAK echoes the baseline's runtime environment back; neither draft nor acceptance moved."""
+    config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, {}, _LAUNCHER_RAN_ENV)
+    launch = _build_native(tmp_path, config, GridVariant("geak_revalidate", extra_envs=dict(_LAUNCHER_RAN_ENV)))
+    assert launch["env"]["SGLANG_SIMULATE_ACC_LEN"] == "3.61"
+
+
+def test_a_candidate_moving_the_acceptance_the_launcher_injected_is_still_refused(tmp_path):
+    config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, {}, _LAUNCHER_RAN_ENV)
+    with pytest.raises(SpeculativeDecodingPinnedError, match=SPECULATIVE_DECODING_PINNED):
+        _build_native(tmp_path, config, GridVariant("v", extra_envs={"SGLANG_SIMULATE_ACC_LEN": "4.2"}))
+
+
+def test_a_real_draft_base_still_refuses_a_candidate_that_simulates_acceptance(tmp_path):
+    config = _native_recipe(tmp_path, DSPARK_RECIPE_ARGS, {}, {"PATH": "/usr/bin"})
+    with pytest.raises(SpeculativeDecodingPinnedError, match=SPECULATIVE_DECODING_PINNED):
+        _build_native(tmp_path, config, GridVariant("v", extra_envs={"SGLANG_SIMULATE_ACC_LEN": "3.61"}))
 
 
 def test_building_a_native_variant_pins_the_draft_the_accepted_stack_carries(tmp_path):

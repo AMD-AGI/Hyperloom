@@ -71,6 +71,7 @@ from ._proposal_identity import (
 )
 from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP, _default_grid_for_framework
+from ._grid_base import apply_base_env
 from ._agentx_checkpoint import round_checkpoint
 from ._subprocess_kill import AGENTX_EARLY_STOP_ERROR_CLASS
 from .benchmark_result import double_run_requested
@@ -911,9 +912,8 @@ class _ExploreRound:
                 stack_fingerprint=getattr(self.ss, "stack_fingerprint_meta", None),
             ),
             base_server_args=self._composed_args(self.base_args, self.base_remove_args),
-            # The recipe's environment under the accepted edits: the same layering the run launches with, so a
-            # TP spelled only there is the TP a draft is judged against.
-            base_envs={**self.yaml_envs, **self.envs},
+            # The recipe's environment under the accepted edits, layered as the launch layers it.
+            base_envs=apply_base_env(dict(self.yaml_envs), self.envs, self.unset_envs),
         )
         # Operator-supplied --skip-variants patterns.
         runnable, skipped = apply_user_skip_list(runnable, skip_spec=resolve_skip_spec(self.params))

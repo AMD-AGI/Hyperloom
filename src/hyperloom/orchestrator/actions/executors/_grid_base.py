@@ -185,17 +185,22 @@ def argv_refusal(server_log: str | None) -> RoundError | None:
     return None if refusal is None else RoundError(refusal, ARGV_INVALID)
 
 
-def apply_variant_env(envs, variant, base_extra_envs, base_unset_envs):
-    """Apply accepted environment edits before the candidate's set/unset operations."""
-    # Composed base-then-variant, so a variant unsetting a key the base sets
-    # removes it: the last layer to name a key is the one that decides it.
+def apply_base_env(envs, base_extra_envs, base_unset_envs):
+    """Apply the accepted environment edits to ``envs`` and return the base launch's environment."""
     for k in to_str_list(base_unset_envs):
         if k.strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
             continue
         envs.pop(k, None)
     for k, v in (base_extra_envs or {}).items():
         envs[str(k)] = str(v)
-    base_envs = dict(envs)
+    return dict(envs)
+
+
+def apply_variant_env(envs, variant, base_extra_envs, base_unset_envs):
+    """Apply accepted environment edits before the candidate's set/unset operations."""
+    # Composed base-then-variant, so a variant unsetting a key the base sets
+    # removes it: the last layer to name a key is the one that decides it.
+    base_envs = apply_base_env(envs, base_extra_envs, base_unset_envs)
     for k in getattr(variant, "unset_envs", []) or []:
         # Unsetting a pin retargets the benchmark rather than toggling a knob.
         if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
