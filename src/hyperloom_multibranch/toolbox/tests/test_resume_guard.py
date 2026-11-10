@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import FailureClass, Purpose, Validity
+from hyperloom.contracts.measurement import FailureClass, Purpose, RoundValue, Validity
 from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR, IMAGE_REF_VAR
 from hyperloom.measure.tests.bundle_factory import base_launch
@@ -343,3 +343,58 @@ async def test_a_measured_result_is_read_as_its_validity_says(tmp_path: Path) ->
     assert entry.outcome is not None and entry.outcome["result"]["validity"] == Validity.SUCCEEDED.value
 
     assert infra_ended_keeps(tmp_path) == []
+
+
+async def test_a_keep_infra_ended_after_it_measured_a_round_is_not_read_back(tmp_path: Path) -> None:
+    """A keep whose test measured a round before the infrastructure ended it measured something: it is no keep to
+    submit again, though its result is ``measurement_failed`` like one that measured nothing."""
+
+    def after_a_round(job):  # type: ignore[no-untyped-def]
+        result = failed(job, FailureClass.INFRA, reason="node lost")
+        return dataclasses.replace(result, rounds=(RoundValue("measure", 64, {"output_tps": 1000.0}),))
+
+    infra = lambda job: failed(job, FailureClass.INFRA, reason="node lost")  # noqa: E731
+    rig = build(tmp_path, executor=_script({"--measured": after_a_round, "--nothing": infra}))
+    measured = await rig.toolbox.submit_test(req("b1", server_args="--measured"))
+    nothing = await rig.toolbox.submit_test(req("b1", server_args="--nothing"))
+    await rig.toolbox.drain()
+    entry = rig.toolbox._log.get(measured)
+    assert entry is not None and entry.outcome is not None
+    assert entry.outcome["result"]["validity"] == Validity.MEASUREMENT_FAILED.value
+    assert entry.outcome["result"]["rounds"], "the logged result carries the measured round"
+
+    assert [keep.request_id for keep in infra_ended_keeps(tmp_path)] == [nothing]
+
+
+async def test_a_keep_submitted_again_whose_submit_failed_is_judged_by_the_test_that_ran(tmp_path: Path) -> None:
+    """A resubmission the toolbox logged and then aborted ran nothing, so the keep is judged by the test before it."""
+
+    class FailsOnce:
+        def __init__(self, inner: object) -> None:
+            self.inner, self.fail = inner, False
+
+        async def write_request(self, request):  # type: ignore[no-untyped-def]
+            if self.fail:
+                self.fail = False
+                raise OSError("blackboard unreachable")
+            return await self.inner.write_request(request)  # type: ignore[attr-defined]
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.inner, name)
+
+    sinks: list[FailsOnce] = []
+
+    def wrap(blackboard: object) -> FailsOnce:
+        sinks.append(FailsOnce(blackboard))
+        return sinks[-1]
+
+    infra = lambda job: failed(job, FailureClass.INFRA, reason="node lost")  # noqa: E731
+    rig = build(tmp_path, executor=_script({"--a": infra}), wrap_sink=wrap)
+    first = await rig.toolbox.submit_test(req("b1", server_args="--a"))
+    await rig.toolbox.drain()
+    sinks[0].fail = True
+    with pytest.raises(OSError, match="blackboard unreachable"):
+        await rig.toolbox.submit_test(req("b1", server_args="--a"))
+    assert any(entry.aborted for entry in rig.toolbox._log.entries()), "the resubmission was logged and aborted"
+
+    assert [keep.request_id for keep in infra_ended_keeps(tmp_path)] == [first]
