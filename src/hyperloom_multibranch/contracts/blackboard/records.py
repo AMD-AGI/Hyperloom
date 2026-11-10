@@ -646,10 +646,11 @@ class MergeState:
 @dataclass(frozen=True)
 class CommittedCommit:
     """A specialist commit as the integrator sees it; ``gain_pct`` is its own gain over its parent commit,
-    ``merge_attempts`` how many merge attempts it took part in, and ``first_failed_at`` when the first of them that
-    failed was recorded, ``None`` while none failed. A merge fails when it is skipped on a conflict, is not stackable,
-    or its merge test is one the candidate failed, which the integrator leaves pending; a measurement that failed, or a
-    round that superseded it, is retried on the next head and is no failure."""
+    ``merge_attempts`` how many merge attempts it took part in, ``not_stackable`` how many of them were not stackable,
+    and ``first_failed_at`` when the first of them that failed was recorded, ``None`` while none failed. A merge fails
+    when it is skipped on a conflict, is not stackable, or its merge test is one the candidate failed, which the
+    integrator leaves pending; a measurement that failed, or a round that superseded it, is retried on the next head
+    and is no failure."""
 
     commit_id: str
     branch: str
@@ -661,6 +662,7 @@ class CommittedCommit:
     merged_into: str | None = None
     last_merge: MergeState | None = None
     merge_attempts: int = 0
+    not_stackable: int = 0
     first_failed_at: float | None = None
 
 
