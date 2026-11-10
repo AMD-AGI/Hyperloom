@@ -123,7 +123,7 @@ class AgentXRule(Rule):
 
     accuracy_round = False
     speed_gates = agentx.SPEED_GATES
-    # Magpie's AgentX recipe runs no benchmark script MB's server lifecycle can wrap, so both checks end incomplete.
+    # An AgentX test holds no server for them (BenchmarkPoint.holds_accuracy_checks), so both checks end incomplete.
     runs_consistency_checks = False
     baseline_tests = 1
     min_baselines = 1

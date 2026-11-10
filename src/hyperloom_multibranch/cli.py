@@ -40,7 +40,7 @@ as of any other limit, is a usage error.
 ``--agent-pack NAME`` names the pack those Arbors run instead of Arbor's
 serving template; a name that is not one directory, or one given with no agent, is a usage error, and a pack the Arbor
 checkout lacks is refused when the branch starts. ``--agent-launch FILE`` gives those Arbors the launch an AgentX
-recipe's adds to, which Magpie resolves from InferenceX and MB does not carry yet; a file the adapter cannot use, or one
+recipe's adds to, as resolved from InferenceX, which MB does not carry yet; a file the adapter cannot use, or one
 given with no agent, is a usage error. Each ``--specialist-prompt`` file holds a direction the user wrote
 for one specialist: its branch opens at PRELUDE's
 root ahead of the opening batch, counted within ``--max-branches``, its specialist sees the text in every launch
@@ -60,11 +60,13 @@ anything is created, so a missing one fails the command without leaving a sessio
 PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is configured by ``KB_STORE_URL`` and
 ``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI archive ``HYPERLOOM_RSI_ARCHIVE``
 names must be set and a writable directory (no path is assumed: each deployment names its own shared folder); a
-session measured in hosted sandboxes also needs ``HYPERLOOM_RUNNER_CACHE``, this host's directory of the runner cache; the measurement pins must be readable, the image the session runs on named by both
-``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` included; the framework's package must be
-installed in the image; and the agent CLI the specialists run must be installed. A canonical measurement that cannot
-be taken, one naming a launcher the InferenceX checkout lacks and Magpie cannot supply included, fails the command the
-same way once the session directory exists. Before PRELUDE the session checks the rule pack's facts about outside
+session's runners read the inference_suite staging from ``HYPERLOOM_RUNNER_CACHE``, this host's directory of the runner
+cache, which a session measured in hosted sandboxes must set and one on this machine's cards takes as ``/runner-cache``
+when unset; the image the session runs on must be named by both
+``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``; the application's inference_suite tool cache
+must hold a staging of the InferenceX client that verifies; the framework's package must be installed in the image;
+and the agent CLI the specialists run must be installed. A canonical measurement that cannot be taken fails the command
+the same way once the session directory exists. Before PRELUDE the session checks the rule pack's facts about outside
 projects against this environment as ``HYPERLOOM_IMAGE_CHECK`` says: ``warn`` (the default) logs a failing fact,
 ``strict`` fails the command the same way before any phase runs, ``off`` checks nothing, and any other value is a usage
 error. The manifest records the check's summary and CLOSE writes the whole report to ``MB-reports/image_check.json``.
@@ -196,9 +198,7 @@ LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
 log = logging.getLogger(__name__)
-#: The GPU types a session runs on: those Magpie has a benchmark script of their own for, and mi350x, which runs
-#: mi355x's (the same gfx950 die) through ``gpu_runner_type``, as the toolbox's environment sets ``GPU_TYPE``.
-#: ``hyperloom optimize`` also runs mi308x and mi325x on mi300x's script; a session does not accept them yet.
+#: The GPU types a session runs on; the toolbox's environment exports the board itself as ``GPU_TYPE``.
 MAGPIE_RUNNER_GPU_TYPES = ("mi300x", "mi350x", "mi355x")
 #: The options an inferencex workload requires and an agentx one refuses.
 SEQUENCE_LENGTHS = ("isl", "osl")
@@ -477,7 +477,7 @@ def _add_arbor_start_options(run: argparse.ArgumentParser) -> None:
         default=None,
         metavar=FILE_METAVAR,
         help=(
-            "The launch an AgentX recipe's adds to, as Magpie resolves it from InferenceX, for an Arbor"
+            "The launch an AgentX recipe's adds to, as resolved from InferenceX, for an Arbor"
             " --autonomous-agent: a JSON object of server_flags, server_env, model_name and client"
             " (examples/multibranch-arbor-launch)."
         ),
