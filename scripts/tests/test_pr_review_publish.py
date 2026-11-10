@@ -334,3 +334,16 @@ def test_a_review_that_left_no_comments_txt_gets_no_verdict(tmp_path: Path) -> N
 
     assert run.returncode == 1
     assert "left no comments.txt" in run.note
+    assert f"## PR #{_PR} -- fix: change mod" in run.comments[0]
+
+
+def test_a_card_naming_an_internal_reference_gets_no_verdict_and_stays_out_of_the_note(tmp_path: Path) -> None:
+    session = "MB-20261109T102718Z-0123abcd"
+    card = _card().replace("What it does: changes mod.", f"What it does: changes mod, as {session} showed.")
+
+    run = _publish(tmp_path, card)
+
+    assert run.returncode == 1
+    assert "the card names an internal reference" in run.note
+    assert not run.reviewed
+    assert all(session not in body for body in run.comments)

@@ -9,7 +9,8 @@
 # run recorded in skill.txt; and still describes the open PR head:
 #   Blocking issues: N     -> request-changes review (blocks the merge)
 #   Blocking issues: none  -> dismiss this bot's CHANGES_REQUESTED reviews, then an LGTM comment
-# Anything else posts a note (with the card, if any) and exits 1. The bot never approves, whatever the risk.
+# Anything else posts a note and exits 1: with the card, if any, unless the card names an internal reference
+# (rules.md X9), which then stays out of the PR conversation. The bot never approves, whatever the risk.
 #
 # env: REPO, PR, REVIEWED_SHA, CARD, RUN_URL, REVIEW_RESULT (result of the review job)
 
@@ -20,7 +21,7 @@ SKILL_DIR="$(dirname "${BASH_SOURCE[0]}")/../../.claude/skills/review-pr"
 
 note() {
   local body="Automated review: no verdict applied -- $1. Comment \`/review\` to retry. Run: ${RUN_URL}"
-  if [ -s "$CARD" ]; then
+  if [ -s "$CARD" ] && bash "$SKILL_DIR/internal-refs.sh" "$CARD" > /dev/null; then
     body="${body}"$'\n\n'"$(cat "$CARD")"
   fi
   gh pr comment "$PR" --repo "$REPO" --body "$body" || echo "pr-review-publish: posting the note failed" >&2
