@@ -71,6 +71,32 @@ def test_head_that_is_down_is_still_restarted(monkeypatch):
     assert ("ray", "start") in seen
 
 
+def test_new_head_that_answers_slowly_after_ray_start_is_accepted(monkeypatch):
+    """No head answers before ``ray start`` (exit 1); once started it answers ``ray status`` only after 6 s."""
+    seen: list[tuple[str, ...]] = []
+    started = False
+
+    def _run(cmd, **kwargs):
+        nonlocal started
+        seen.append(tuple(cmd[:2]))
+        if cmd[:2] == ["ray", "start"]:
+            started = True
+        if cmd[:2] == ["ray", "status"]:
+            if not started:
+                return _Completed(1)
+            if SLOW_HEAD_LATENCY_SEC > kwargs["timeout"]:
+                raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+        return _Completed(0)
+
+    monkeypatch.setattr(ray_runtime.subprocess, "run", _run)
+    monkeypatch.delenv("HYPERLOOM_RAY_STATUS_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("HYPERLOOM_RAY_READY_TIMEOUT_SEC", raising=False)
+
+    ray_runtime.ensure_ray_cluster()
+
+    assert seen.count(("ray", "start")) == 1
+
+
 def test_new_head_is_waited_for_until_it_answers(monkeypatch):
     answers = iter([ray_runtime.RayProbe.DOWN, ray_runtime.RayProbe.UNKNOWN, ray_runtime.RayProbe.UP])
     monkeypatch.setattr(ray_runtime, "ray_probe", lambda timeout=None: next(answers))
