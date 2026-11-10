@@ -315,11 +315,12 @@ class StallBar:
 
 
 def _last_mergeable_commit(snapshot: BlackboardSnapshot, branch: str) -> tuple[str, float]:
-    """The branch's last commit that did not fail to merge, and when it was made; ``("", -inf)`` before any."""
+    """The branch's last commit that did not fail to merge and is no retraction, which is no progress, and when it was
+    made; ``("", -inf)`` before any."""
 
     failed = {
         item.commit_id for item in snapshot.committed if item.first_failed_at is not None and item.merged_into is None
-    }
+    } | {record.commit_id for record in snapshot.records if record.landed_retraction}
     made = [
         node
         for node in snapshot.lineage.commits
