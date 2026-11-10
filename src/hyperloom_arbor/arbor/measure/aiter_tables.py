@@ -12,7 +12,13 @@ table lacks them (``gfx`` from ``cu_num``; ``xbf16``, ``run_1stage``, ``ksplit``
 Only the tables a change brings are checked. AITER's own per-model tables (``configs/model_configs/``) lack ``_tag``
 too, and a change that keeps them in its ``AITER_CONFIG_*`` list, beside its own, was refused for them. A table is
 AITER's own when it lies in AITER's package and is unchanged: its digest is the one in the installed wheel's
-``RECORD``, or, for a git checkout of AITER, it is tracked and clean. Anything else is the change's, and checked.
+``RECORD``, or, for a git checkout of AITER, it is tracked and unchanged since the change's base. Anything else is the
+change's, and checked.
+
+The base of a git checkout is the campaign's baseline of that tree (``<session>/trees.json``, arbor/execute/trees.py),
+not its HEAD: the harness commits AITER's tree with every iteration, so a table the iteration edited is tracked and
+clean at HEAD by the time it is checked, and was skipped. A tree without a baseline (no editable package, or under a
+host) is compared with its HEAD, which no iteration commits.
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ FILLED = frozenset({"gfx", "xbf16", "run_1stage", "ksplit"})
 _PROBE = r"""
 import base64, hashlib, json, os, subprocess, sys
 asked = json.loads(sys.argv[1])
+bases = {os.path.realpath(k): v for k, v in (json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}).items()}
 try:
     import aiter
     pkg = os.path.realpath(os.path.dirname(aiter.__file__))
@@ -82,8 +89,10 @@ def stock(path):
         if top.returncode != 0:
             return False
         top = top.stdout.strip()
-        return (git("-C", top, "ls-files", "--error-unmatch", real).returncode == 0
-                and git("-C", top, "diff", "--quiet", "HEAD", "--", real).returncode == 0)
+        base = bases.get(os.path.realpath(top)) or "HEAD"
+        rel = os.path.relpath(real, os.path.realpath(top)).replace(os.sep, "/")
+        return (git("-C", top, "cat-file", "-e", f"{base}:{rel}").returncode == 0
+                and git("-C", top, "diff", "--quiet", base, "--", real).returncode == 0)
     except Exception:
         return False
 out = {"shipped": {}, "tables": {}, "stock": []}
@@ -95,17 +104,18 @@ print(json.dumps(out))
 """
 
 
-def problems(container: str, server_env: dict, workdir: str | None = None) -> list[str]:
+def problems(container: str, server_env: dict, workdir: str | None = None, bases: dict | None = None) -> list[str]:
     """What is wrong with the tuned tables ``server_env`` points AITER at, read where the server runs: each table
     that lacks a column of AITER's shipped table for its variable, or cannot be read. ``[]`` when nothing is wrong,
-    or nothing can be checked (no override, or no AITER to compare with)."""
+    or nothing can be checked (no override, or no AITER to compare with). ``bases``: each git tree's baseline commit
+    (``trees.baselines``), what its tables are compared with."""
     asked = {var: (SHIPPED[var], [p for p in str(value).split(":") if p.strip()])
              for var, value in (server_env or {}).items() if var in SHIPPED and str(value).strip()}
     if not asked:
         return []
     try:
-        r = run_in(container, ["python3", "-c", _PROBE, json.dumps(asked)], workdir=workdir, capture_output=True, text=True,
-                   timeout=120)
+        r = run_in(container, ["python3", "-c", _PROBE, json.dumps(asked), json.dumps(bases or {})], workdir=workdir,
+                   capture_output=True, text=True, timeout=120)
         found = json.loads((r.stdout or "").strip().splitlines()[-1])
     except Exception:
         return []

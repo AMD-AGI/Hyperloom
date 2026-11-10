@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from hyperloom.common.agentx_workload import is_mlperf_backend
+from hyperloom.common.env_safety import BLOCKED_EXTERNAL_ENV_NAMES, is_credential_name
 from hyperloom.common.launch_credentials import credentials_in_the_clear, redact_credential_env
 from hyperloom.common.model_paths import hf_repo_id
 from hyperloom.common.perf_metric import is_agentx_mode
@@ -167,15 +168,28 @@ def _run_at_base_topology(args: argparse.Namespace, base: BaseLaunch) -> None:
     os.environ["TP"], os.environ["EP"] = str(base.topology.tp), str(base.topology.ep)
 
 
-def _without_credentials(base: BaseLaunch) -> BaseLaunch:
+def _refused_env(base: BaseLaunch) -> list[str]:
+    """The env names of ``base`` no launch may take from a source: a loader, a path, a traffic route or a workload key.
+    A credential among them is frozen as its sha256 and filled by the runner, so it is not one."""
+    layers = {**base.env, **(base.golden_al.env if base.golden_al is not None else {})}
+    return [f"env {name}" for name in layers if name in BLOCKED_EXTERNAL_ENV_NAMES and not is_credential_name(name)]
+
+
+def _frozen_form(base: BaseLaunch) -> BaseLaunch:
     """``base`` with its credential-named env frozen as sha256s; raises :class:`BaseLaunchUnresolved` for a credential
-    it holds anywhere else."""
+    it holds anywhere else, or an env no launch may take from a source, which every server of the session would run."""
     redacted = redact_credential_env(base)
     found = credentials_in_the_clear(redacted)
     if found:
         raise BaseLaunchUnresolved(
             f"the base launch holds a credential in {', '.join(found)}; pass it through the environment instead, "
             "which is frozen as its sha256 and read from the runner host's variable of the same name"
+        )
+    refused = _refused_env(redacted)
+    if refused:
+        raise BaseLaunchUnresolved(
+            f"the base launch sets {', '.join(refused)}, which the session or the runner owns or no launch may take "
+            "from a source; drop it from the launch"
         )
     return redacted
 
@@ -200,8 +214,9 @@ def resolve_server_base(launch: SessionLaunch) -> BaseLaunch:
 
     Raises:
         BaseLaunchUnresolved: The launch file cannot serve as the base, the query is malformed, the InferenceX commit
-            is refused, or no source and no default serves the session (an AgentX session, or one under a pinned
-            InferenceX, has no default).
+            is refused, no source and no default serves the session (an AgentX session, or one under a pinned
+            InferenceX, has no default), or the base holds a credential outside its env or an env no launch may take
+            from a source.
     """
     try:
         query = launch.query()
@@ -212,9 +227,7 @@ def resolve_server_base(launch: SessionLaunch) -> BaseLaunch:
         raise BaseLaunchUnresolved(f"the base launch could not be resolved: {exc}") from exc
     if isinstance(found, Miss):
         raise BaseLaunchUnresolved("no source serves this session's base launch:\n  " + "\n  ".join(found.reasons()))
-    return _without_credentials(
-        dataclasses.replace(found, model=dataclasses.replace(found.model, path=launch.model_path))
-    )
+    return _frozen_form(dataclasses.replace(found, model=dataclasses.replace(found.model, path=launch.model_path)))
 
 
 def resolve_base_launch(

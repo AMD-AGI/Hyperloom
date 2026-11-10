@@ -320,13 +320,28 @@ def mirror(tmp_path, source) -> Path:
     return real
 
 
+def _named_through_a_link_then_up(tmp_path: Path, source: Path, mirror: Path) -> tuple[Path, Path]:
+    """``a/link/../hyperloom.git`` with ``a/link`` -> ``mirror``'s directory's ``inner``: physically ``mirror``, while
+    dropping ``link/..`` as text gives ``a/hyperloom.git``, which is made a repository too (the decoy, returned)."""
+    inner = mirror.parent / "inner"
+    inner.mkdir()
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "link").symlink_to(inner)
+    decoy = tmp_path / "a" / "hyperloom.git"
+    subprocess.run(["git", "clone", "-q", "--mirror", str(source), str(decoy)], check=True)
+    return tmp_path / "a" / "link" / ".." / "hyperloom.git", decoy
+
+
 @pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
 @pytest.mark.parametrize("scheme", ["", "file://"], ids=["path", "file-url"])
-def test_a_local_source_is_trusted_for_its_fetch_alone_by_its_exact_resolved_path(tmp_path, source, mirror, scheme):
+@pytest.mark.parametrize("up", [False, True], ids=["through-a-link", "up-after-a-link"])
+def test_a_local_source_is_trusted_for_its_fetch_alone_by_its_exact_resolved_path(tmp_path, source, mirror, scheme, up):
     path, record = _recording_path(tmp_path)
     local_tmp = tmp_path / "local-tmp"
     local_tmp.mkdir()
-    named = tmp_path / "mirrors" / "link" / "hyperloom.git"
+    named, decoy = tmp_path / "mirrors" / "link" / "hyperloom.git", None
+    if up:
+        named, decoy = _named_through_a_link_then_up(tmp_path, source, mirror)
     code, stderr, _, calls = _framework_run(
         tmp_path,
         source,
@@ -342,6 +357,7 @@ def test_a_local_source_is_trusted_for_its_fetch_alone_by_its_exact_resolved_pat
     fetch = sorted(record.glob("*.args"))[0]
     assert fetch.read_text().splitlines()[0] == f"{scheme}{resolved}", "the fetch names the path it trusts"
     assert _safe_directories(fetch.with_suffix(".config")) == [resolved, f"{resolved}/.git"]
+    assert decoy is None or str(decoy) not in fetch.read_text(), "the directory a textual '..' names is not fetched"
     assert not (record / "outside-a-fetch").exists(), "no other git command runs with the trust"
     assert not list(local_tmp.iterdir()), "the trust is removed once the wheel is built"
 

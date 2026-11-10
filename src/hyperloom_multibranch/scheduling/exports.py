@@ -57,6 +57,7 @@ from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.integrator import ConflictLoss
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
+from hyperloom_multibranch.scheduling.checkpoint_tally import CheckpointScope, CheckpointTally, checkpoint_tally
 from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_close_knowledge
 
@@ -132,7 +133,8 @@ def _merge_statistics(merge_log: Sequence[Mapping[str, Any]]) -> dict[str, objec
 @dataclass(frozen=True)
 class CloseExports:
     """What CLOSE handed on: the Recipe KB write-back, the knowledge steps, the proposed change to the scheduling
-    playbook, the breakdown file, the dashboard files, and the curation of the RSI lesson pool."""
+    playbook, the breakdown file, the dashboard files, the curation of the RSI lesson pool, and what the AgentX
+    checkpoint did (``None`` in an InferenceX session)."""
 
     kb_write_back: RemoteWriteResult
     knowledge: KnowledgeClose
@@ -140,6 +142,7 @@ class CloseExports:
     breakdown: Path
     dashboard: DashboardFiles
     curation: CloseStep
+    checkpoint: CheckpointTally | None = None
 
     def knowledge_steps(self) -> dict[str, CloseStep]:
         """The knowledge steps, the playbook's step and the curation: the steps the CLOSE report lists."""
@@ -166,8 +169,9 @@ class CloseAuthoring:
 class ExportSources:
     """What CLOSE exports from: the scheduler's blackboard handle, the repository and the blob store that hold the
     chosen commit's recipe and its files, the session's dashboard, the image check it ran before its first phase,
-    ``None`` for a FINAL and CLOSE over a session that ended before FINAL, which run none, and PRELUDE's warm-start
-    leads, none for a session that stopped before them."""
+    ``None`` for a FINAL and CLOSE over a session that ended before FINAL, which run none, PRELUDE's warm-start
+    leads, none for a session that stopped before them, and an AgentX session's checkpoint (``None`` in an InferenceX
+    session)."""
 
     blackboard: Blackboard
     repo: ExperimentRepo
@@ -175,6 +179,7 @@ class ExportSources:
     dashboard: SessionDashboard
     image_check: ImageCheckReport | None
     warm_leads: tuple[WarmLead, ...]
+    checkpoint: CheckpointScope | None = None
 
 
 @dataclass(frozen=True)
@@ -213,6 +218,7 @@ class SessionExports:
         self._dashboard = sources.dashboard
         self._image_check = sources.image_check
         self._warm_leads = sources.warm_leads
+        self._checkpoint = sources.checkpoint
         self._metric = metric
         self._budget_seconds = budget_seconds
 
@@ -258,7 +264,8 @@ class SessionExports:
         )
         breakdown = write_breakdown(self._layout.reports, document)
         dashboard = await self._dashboard.write(queue)
-        return CloseExports(kb_write_back, knowledge, playbook, breakdown, dashboard, curation)
+        checkpoint = None if self._checkpoint is None else checkpoint_tally(snapshot, self._checkpoint)
+        return CloseExports(kb_write_back, knowledge, playbook, breakdown, dashboard, curation, checkpoint)
 
     async def _ask_author(self, system: str, user: str) -> str:
         return (await self._author.completion(system, user)).text

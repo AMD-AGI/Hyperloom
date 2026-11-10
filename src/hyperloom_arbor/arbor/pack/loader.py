@@ -17,7 +17,8 @@ from arbor import component
 
 VALID_OBJECTIVE_KINDS = {"maximize_perf", "find_witness"}
 VALID_WORKLOAD_KINDS = {"serving", "kernel", "repro", "document"}
-ALLOWED_PACK_DIRS = {"knowledge", "validator", "eval"}
+# tools/: helper scripts the pack's `tools:` names (the agentx pack's KV-trace tools); not pinned, not served.
+ALLOWED_PACK_DIRS = {"knowledge", "validator", "eval", "tools"}
 
 # A pack's results/ is refused unless the user opts in (`arbor run --allow-pack-results`):
 # some contributed packs keep their results there.
@@ -82,6 +83,8 @@ class Campaign:
     # (a host owns them: arbor/component.py, docs/component-mode.md). Read once here;
     # the driver records it in session.json and refuses a config that changes it.
     mode: str = "standalone"
+    # Why the asked objective (arbor/objective.py) could not be read; the start refuses it. "" otherwise.
+    objective_error: str = ""
 
 
 def load_pack(pack_dir: str | Path) -> Pack:
@@ -134,6 +137,16 @@ def load_campaign(config_path: str | Path, arbor_root: str | Path) -> Campaign:
     arbor_root = Path(arbor_root)
     config = json.loads(config_path.read_text())
     pack = load_pack(arbor_root / "packs" / config["pack"])
+    # --opt-objective, or the config's opt_objective (arbor/objective.py): another metric in place of the pack's, for
+    # every load, so the program, the bench, the gate and the bars agree. One Arbor cannot read is refused at the start.
+    from arbor import objective as _objective
+    objective_error = ""
+    text = _objective.asked(config)
+    if text:
+        try:
+            pack.objective = _objective.apply(pack.objective, text)
+        except ValueError as exc:
+            objective_error = str(exc)
     return Campaign(
         pack=pack,
         config=config,
@@ -142,6 +155,7 @@ def load_campaign(config_path: str | Path, arbor_root: str | Path) -> Campaign:
         space=config.get("space", {}),
         session_root=Path(os.path.expandvars(os.path.expanduser(config.get("session_root", "")))),
         mode=component.mode_of(config),
+        objective_error=objective_error,
     )
 
 
@@ -302,5 +316,7 @@ def validate_campaign(campaign: Campaign, allow_results: bool = False) -> list[s
     # The mode and its component block (arbor/component.py). The driver refuses to
     # start on these, and on a component config's other refusals, with exit 2.
     errors.extend(component.config_errors(campaign.config))
+    if campaign.objective_error:
+        errors.append(campaign.objective_error)
 
     return errors

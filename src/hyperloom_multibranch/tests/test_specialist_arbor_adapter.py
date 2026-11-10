@@ -832,6 +832,23 @@ def test_arbor_s_own_start_check_passes_a_branch_served_a_record_on_the_base_and
     ]
 
 
+def test_a_golden_layer_s_token_mode_is_served_to_arbor_as_the_root_runs_it(tmp_path: Path) -> None:
+    simulated = {
+        "SGLANG_SIMULATE_ACC_LEN": "3.48",
+        "SGLANG_SIMULATE_ACC_METHOD": "match-expected",
+        "SGLANG_SIMULATE_ACC_TOKEN_MODE": "real-draft-token",
+    }
+    base = base_record()
+    base = base_record(golden_al=replace(base.golden_al, env=simulated))
+    record = write_record(tmp_path / "record" / "base_launch.json", base)
+    spec = replace(_spec(tmp_path, launch=str(record)), server_args="", envs={})
+
+    config = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)
+
+    assert read_launch(record).server_env == {**base.env, **simulated}
+    assert _arbor_start_check(config) == []
+
+
 def test_a_base_launch_record_that_cannot_be_used_is_refused_with_why(tmp_path: Path) -> None:
     tampered = write_record(tmp_path / "tampered.json", args=["--max-num-seqs", "64"])
     scriptable = base_record(

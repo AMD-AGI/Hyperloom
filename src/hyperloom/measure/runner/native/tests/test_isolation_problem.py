@@ -305,17 +305,13 @@ def test_a_real_bubblewrap_gives_a_sandbox_a_network_of_its_own() -> None:
     assert _OWN_NETWORK_PROBLEM(BwrapIsolation(usable_bwrap())) is None
 
 
-def test_a_build_given_no_isolation_on_a_host_that_has_one_says_so(
-    root_with_setpriv: None, id_maps, tmp_path: Path
-) -> None:
+def test_a_build_given_a_hosts_refusal_names_its_reasons(root_with_setpriv: None, id_maps, tmp_path: Path) -> None:
     id_maps(HOST_MAP)
 
     with pytest.raises(BuildInfraError) as refused:
-        IsolatedBuilds(_Planner(), None, None, {})(object())(tmp_path)
+        IsolatedBuilds(_Planner(), None, Unisolated("no tier answered"), {})(object())(tmp_path)
 
-    assert str(refused.value) == (
-        "this host cannot isolate a native build: the build runner was given no isolation; nothing was compiled"
-    )
+    assert str(refused.value) == "this host cannot isolate a native build: no tier answered; nothing was compiled"
 
 
 _ISOLATION_IN_NAMESPACE = """

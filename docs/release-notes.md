@@ -45,6 +45,20 @@ it.
   1 s; above 1.5 s it is refused and the round samples nothing. AgentX counts
   gain `input_tokens` and `output_tokens`; a report written before reads them,
   and its `power` section, as `null`.
+- **MB records the AgentX checkpoint's ruling on its explores.** In a
+  `hyperloom-multibranch` AgentX session graded on `p50_interactivity`, each
+  explore test is now held to the single-lineage 1800 s checkpoint against its
+  parent commit's median. By default (`HYPERLOOM_AGENTX_EARLY_STOP=shadow` for
+  MB) nothing is stopped: the result carries the ruling and `MB-report.md` gets
+  an "AgentX checkpoint" section with how many explores it would have stopped
+  and how those ended, to decide on `enforce`. With `enforce` a trailing explore
+  is stopped, not retried, and judged REGRESSED with the refusal
+  `checkpoint_trailed`. Committed candidates now record
+  `e2e_norm_intvty_p50_1800s`, the reference of their children. The mode is read
+  once at session start and kept in `MB-manifest.json`. Confirm, integration,
+  FINAL, baseline, correctness-fix and retraction tests, and sessions on
+  `total_token_throughput`, are not judged. Before, an MB explore that trailed
+  its parent ran its full 75-90 min with no early signal.
 - **MB's AgentX bar drops to 2% and its guards follow the objective.**
   A `hyperloom-multibranch` AgentX session keeps a change on a 2% gain on its
   objective, not 3%. Under `p50_interactivity` the guards are P90 interactivity

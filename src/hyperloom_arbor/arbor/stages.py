@@ -78,7 +78,7 @@ _STAGE_HEAD = re.compile(r"(?m)^[ \t>*_`#-]*STAGE[*_`]*[ \t]*:[*_`]*")
 
 # Intents from the most lenient to the strictest (arbor/measure/intents.py): a
 # stage is declared by its own intent or a stricter one.
-_RANK = {"LEARN": 0, "FIX-CORRECTNESS": 1, "FIX": 2, "WIN": 3}
+_RANK = {"LEARN": 0, "FIX-CORRECTNESS": 1, "FIX-STABILITY": 1, "FIX": 2, "WIN": 3}
 
 
 @dataclass(frozen=True)
