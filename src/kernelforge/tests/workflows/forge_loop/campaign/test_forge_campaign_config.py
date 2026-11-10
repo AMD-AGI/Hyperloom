@@ -564,6 +564,36 @@ def test_the_search_strategy_is_snapshotted_and_a_campaign_recorded_without_it_i
         CampaignConfig.from_dict(payload)
 
 
+def test_the_relay_mode_is_snapshotted_and_a_campaign_recorded_without_it_hands_off(tmp_path, monkeypatch):
+    payload = _campaign_payload(tmp_path, monkeypatch)
+
+    assert payload["relay_mode"] == "handoff"
+    del payload["relay_mode"]
+    assert CampaignConfig.from_dict(payload).relay_mode == "handoff"
+    payload.update(search_strategy="tree", relay_mode="split")
+    assert CampaignConfig.from_dict(payload).relay_mode == "split"
+    payload["search_strategy"] = "linear"
+    with pytest.raises(ValueError, match="tree search strategy"):
+        CampaignConfig.from_dict(payload)
+
+
+def test_a_fresh_campaign_splits_its_relay_only_for_a_tree_search(tmp_path, monkeypatch):
+    workspace, kernel, _helper, driver = _git_workspace(tmp_path)
+    monkeypatch.setenv("GPU_TARGET", "gfx950")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
+
+    with pytest.raises(ValueError, match="tree search strategy"):
+        create_campaign_config(
+            str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), relay_mode="split")
+        )
+    config = create_campaign_config(
+        str(workspace),
+        CampaignInputs(kernel=str(kernel), driver=str(driver), search_strategy="tree", relay_mode="split"),
+    )
+
+    assert config.relay_mode == "split"
+
+
 def test_a_fresh_campaign_records_the_strategy_it_was_asked_for(tmp_path, monkeypatch):
     workspace, kernel, _helper, driver = _git_workspace(tmp_path)
     monkeypatch.setenv("GPU_TARGET", "gfx950")

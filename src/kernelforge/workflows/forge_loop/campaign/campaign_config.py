@@ -52,8 +52,17 @@ class SearchStrategy(str, Enum):
     TREE = "tree"
 
 
+class RelayMode(str, Enum):
+    """How a campaign's model relay uses its Agent profiles."""
+
+    # One profile at a time, handed to another at a search blockage.
+    HANDOFF = "handoff"
+    # Every profile at once: each tree round's slots are split across the profiles that can run.
+    SPLIT = "split"
+
+
 # Fields a campaign written before they existed may lack, and the value such a campaign ran with.
-_FIELDS_OLDER_CAMPAIGNS_LACK = {"search_strategy": SearchStrategy.LINEAR.value}
+_FIELDS_OLDER_CAMPAIGNS_LACK = {"search_strategy": SearchStrategy.LINEAR.value, "relay_mode": RelayMode.HANDOFF.value}
 
 
 @dataclass(frozen=True)
@@ -89,6 +98,7 @@ class CampaignConfig:
     commit_new_paths: list[str] = field(default_factory=list)
     agent_relay: AgentRelayPolicy | None = None
     search_strategy: str = SearchStrategy.LINEAR.value
+    relay_mode: str = RelayMode.HANDOFF.value
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -136,6 +146,7 @@ class CampaignConfig:
                 AgentRelayPolicy.from_dict(payload["agent_relay"]) if payload["agent_relay"] is not None else None
             ),
             search_strategy=SearchStrategy(payload["search_strategy"]).value,
+            relay_mode=RelayMode(payload["relay_mode"]).value,
         )
         _validate_campaign(config)
         return config
@@ -159,6 +170,12 @@ def _validate_campaign(config: CampaignConfig) -> None:
         raise ValueError("campaign pristine implementation signature is missing or invalid")
     if hash_implementation_identity(config.implementation_identity) != config.implementation_signature:
         raise ValueError("campaign pristine implementation identity does not match its signature")
+    _require_relay_mode_fits(config.search_strategy, config.relay_mode)
+
+
+def _require_relay_mode_fits(search_strategy: str, relay_mode: str) -> None:
+    if RelayMode(relay_mode) is RelayMode.SPLIT and SearchStrategy(search_strategy) is not SearchStrategy.TREE:
+        raise ValueError("a campaign whose relay mode is split needs the tree search strategy")
 
 
 def derive_campaign_implementation_contract(
@@ -478,6 +495,7 @@ class CampaignInputs:
     # The Agent profiles a blockage may relay between, fixed when the campaign is created.
     agent_relay: AgentRelayPolicy | None = None
     search_strategy: str = SearchStrategy.LINEAR.value
+    relay_mode: str = RelayMode.HANDOFF.value
 
 
 def _normalized_sources(workspace: Path, kernel: str, source_files: str) -> list[str]:
@@ -547,6 +565,7 @@ def create_campaign_config(
     base_commit: str | None = None,
 ) -> CampaignConfig:
     """Resolve and normalize all immutable inputs for a fresh campaign."""
+    _require_relay_mode_fits(inputs.search_strategy, inputs.relay_mode)
     workspace = Path(workspace_dir).resolve()
     kernel_path = _relative_file(workspace, inputs.kernel, "kernel")
     driver_path = _driver_reference(workspace, inputs.driver)
@@ -606,6 +625,7 @@ def create_campaign_config(
         commit_new_paths=normalize_commit_new_paths(list(inputs.commit_new_paths)),
         agent_relay=inputs.agent_relay,
         search_strategy=SearchStrategy(inputs.search_strategy).value,
+        relay_mode=RelayMode(inputs.relay_mode).value,
     )
 
 

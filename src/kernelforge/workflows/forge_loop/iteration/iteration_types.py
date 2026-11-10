@@ -118,6 +118,9 @@ class IterationConfig:
     lanes: int = 1
     # Whether a stalled search may spend an iteration measuring two archived rejected gains applied together.
     merge_stacking: bool = True
+    # Whether each tree round's slots are split across the Agent profiles that can run, rather than all running on the
+    # active one (``--relay-mode split``).
+    split_relay: bool = False
     # Ranks the driver self-launches (via torchrun) for a collective task. >1 switches profiling to the per-rank
     # backend, because wrapping the outer process would only profile the launcher, which runs no kernel.
     nproc_per_node: int = 1

@@ -71,6 +71,8 @@ class LoopShape:
     commit_new_paths: tuple[str, ...]
     # None when the invocation did not say: a fresh campaign then searches linearly, a resumed one as it always has.
     search_strategy: str | None = None
+    # None when the invocation did not say: a fresh campaign then relays by handoff, a resumed one as it always has.
+    relay_mode: str | None = None
 
 
 @dataclass(frozen=True)

@@ -236,8 +236,11 @@ The tree is `forge_experiments/search_tree.json`, saved as each node is
 added; each round's selection is `forge_experiments/tree_selection/iter_NNN.md`,
 and its plans, diffs, measurements and each slot's Implementer record are under
 `forge_experiments/tree_rounds/iter_NNN/`, each merge's under `merge_KK/`
-there. A tree campaign has no Supervisor and does not run the linear loop's
-merge stacking of archived candidates. A round in which a lane or a merge
+there. Under `--relay-mode split` (see *Model relay* below) every slot is
+planned and implemented on its own profile, and a start whose slots run on
+several profiles is planned once per profile, its records under
+`start_<commit>_<profile>/`. A tree campaign has no Supervisor and does not run
+the linear loop's merge stacking of archived candidates. A round in which a lane or a merge
 session leaves the device held measures nothing after it, publishes nothing,
 and is recorded as `REVERT_CONTENDED`. A tree campaign refuses a workspace with
 untracked, unignored files a worktree would not see. On `--resume`, the slots
@@ -389,6 +392,18 @@ switch replaces the complete search actor (orchestration, specialists, Plan
 Critic and Implementer) at the next clean iteration boundary and forces the next
 round to diversify. With both `claude` and `codex` available, the search
 therefore alternates between them at every blockage until a KEEP.
+
+A tree campaign created with `--relay-mode split` runs every available profile
+in every round instead. The round's slot positions take the profiles that pass
+the startup check in turn, starting one profile further along each round, so
+with `claude` and `codex` each plans and implements half of the expansions. The
+selector, on the active profile, is told which profile each slot position runs
+on before it answers; the round's merge sessions run on the active profile too.
+Every node and attempt records the profile it ran on, and the selector's facts
+show it. No blockage hands the search over. A profile whose session ran out of
+API retries, or whose planning failed on infrastructure, is checked again at
+the next round boundary, and while it is unavailable its slots go to the
+profiles that remain.
 
 A session starts on the profile a resumed campaign was running, else the
 primary, else the `--agent-fallback-provider` member, else any available member.

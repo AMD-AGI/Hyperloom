@@ -77,6 +77,8 @@ class TreeNode:
     # for a node no partition lane produced.
     approach: str = ""
     focus_cases: tuple[str, ...] = ()
+    # The Agent profile whose session wrote the node; empty for the root, a mechanical merge, and a session without one.
+    agent_profile_id: str = ""
 
     @property
     def score(self) -> float:
@@ -118,6 +120,8 @@ class Slot:
     hint: str = ""
     gains: str = ""
     status: SlotStatus = SlotStatus.PLANNED
+    # The Agent profile the slot is planned and implemented on; empty when the session has none.
+    agent_profile_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,8 @@ class Attempt:
     reason: str
     # Why the slot came to nothing without being measured: never planned, lost, or a copy of an existing node.
     detail: str = ""
+    # The Agent profile the slot ran on.
+    agent_profile_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -365,6 +371,7 @@ def lost_attempt(iteration: int, slot: Slot, reason: str) -> Attempt:
         archive_path="",
         reason=slot.reason,
         detail=reason,
+        agent_profile_id=slot.agent_profile_id,
     )
 
 

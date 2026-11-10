@@ -14,6 +14,7 @@ from kernelforge.utils.process_reaping import ReapReport
 from kernelforge.workflows.forge_loop.iteration.fanout import LaneResult
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
 from kernelforge.workflows.forge_loop.policy.round_budget import FIRST_ROUND_MEASUREMENT_SEC
+from kernelforge.workflows.forge_loop.tree.admission import SessionAgent
 from kernelforge.workflows.forge_loop.tree.merge import MergeRound
 from kernelforge.workflows.forge_loop.tree.model import DirectionProposal, NodeSource, SearchTree, TreeNode
 from kernelforge.tests.workflows.forge_loop.tree._tree_repo import _Host, _commit, _git, _node, _repo, _source
@@ -44,8 +45,12 @@ def _admitted(*nodes: TreeNode, kept: tuple[TreeNode, ...] = ()) -> list[tuple[T
     ]
 
 
+# The profile a round's merge sessions run on.
+_MERGER = SessionAgent(factory=None, profile_id="claude")
+
+
 def _merge(host: _Host, tree: SearchTree, admitted, *, iteration: int = 1) -> MergeRound:
-    return asyncio.run(host._merge_round(tree, iteration, admitted, agent_factory=None))
+    return asyncio.run(host._merge_round(tree, iteration, admitted, _MERGER))
 
 
 def _record(host: _Host, index: int = 1, iteration: int = 1) -> dict:
@@ -69,6 +74,8 @@ def test_a_change_that_applies_is_merged_as_it_is(tmp_path):
     assert host.prompts == [] and host.measured == [_source({"SMALL": 4, "LARGE": 5})]
     assert (merged.parent, merged.direction, merged.provenance) == (small.commit, small.direction, (large.commit,))
     assert merged.source is NodeSource.COMPOSE and host._tree_store.load().node(merged.commit) is not None
+    # No model wrote a mechanical merge.
+    assert merged.agent_profile_id == ""
     assert (_record(host)["method"], _record(host)["node"]) == ("mechanical", merged.commit)
     assert merges.failures == ()
 
@@ -92,6 +99,7 @@ def test_a_change_that_does_not_apply_is_merged_by_a_session_told_which_node_run
     ((merged, _result),) = merges.nodes
     assert host.measured == [_source({"SMALL": 4, "LARGE": 5})] and merged.provenance == (large.commit,)
     assert _record(host)["method"] == "session"
+    assert host.session_profiles == ["claude"] and merged.agent_profile_id == "claude"
 
 
 def test_a_merge_that_reproduces_a_node_is_not_measured(tmp_path):

@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hyperloom_common.io import DURABLE, atomic_write_text
+from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.workflows.forge_loop.iteration.fanout import LanePlan, LaneResult, run_lanes
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
 from kernelforge.workflows.forge_loop.iteration.lane_runtime import _lane_prompt
@@ -27,6 +28,7 @@ from kernelforge.workflows.forge_loop.tree.model import (
     TreeNode,
 )
 from kernelforge.workflows.forge_loop.tree.planning import SlotPlan
+from kernelforge.workflows.forge_loop.tree.profiles import SlotActors
 from kernelforge.workflows.forge_loop.tree.refs import node_holding_tree, pin_node, point_direction_branch
 
 _PLAN_SUMMARY_CHARS = 240
@@ -42,6 +44,23 @@ class SlotOutcome:
 
 
 @dataclass(frozen=True)
+class SessionAgent:
+    """What builds one Implementer session, and the Agent profile it runs on; empty when the session has none."""
+
+    factory: Callable
+    profile_id: str = ""
+
+
+@dataclass(frozen=True)
+class LaneSession:
+    """One Implementer session of a round: its lane, what it is asked, and the agent that runs it."""
+
+    lane: LanePlan
+    prompt: str
+    agent: SessionAgent
+
+
+@dataclass(frozen=True)
 class StagedCandidate:
     """A candidate staged in the worktree of the node it was made on, the plan it came from, and where its records go."""
 
@@ -49,6 +68,8 @@ class StagedCandidate:
     start: str
     plan: str
     records: Path
+    # The Agent profile whose session wrote the candidate; empty when the framework did.
+    producer: str = ""
 
 
 @dataclass(frozen=True)
@@ -103,45 +124,50 @@ class TreeAdmissionMixin:
     """Sessions, measurement and node admission for one tree round.
 
     The host supplies ``ic``, ``run_one_iteration``, ``_canonical_site``, ``_lane_rejection``, ``_workspace_path``,
-    ``_request_lesson``, ``_start_worktrees``, ``_tree_store``, ``_experiments`` and ``device_hazard``.
+    ``_request_lesson``, ``_check_profile_again``, ``_start_worktrees``, ``_tree_store``, ``_experiments`` and
+    ``device_hazard``.
     """
 
     async def _run_slot_lanes(
-        self, tree: SearchTree, iteration: int, plans: Sequence[SlotPlan], agent_factory
+        self, tree: SearchTree, iteration: int, plans: Sequence[SlotPlan], actors: SlotActors
     ) -> dict[int, LaneResult]:
-        """Run one lane per planned slot, each copied from its start's worktree; their results by slot index."""
+        """Run one lane per planned slot on its own profile, copied from its start's worktree; results by slot."""
         sessions = [
-            (
+            LaneSession(
                 LanePlan(
                     lane_id=str(plan.slot.index),
                     plan=plan.text,
                     source_dir=str(self._start_worktrees.ensure(plan.slot.start)),
                 ),
                 slot_prompt(plan, tree.require_node(plan.slot.start)),
+                SessionAgent(actors.of(plan.slot).agent_factory, plan.slot.agent_profile_id),
             )
             for plan in plans
         ]
-        results = await self._run_sessions(iteration, sessions, agent_factory)
+        results = await self._run_sessions(iteration, sessions)
         return {int(lane_id): result for lane_id, result in results.items()}
 
-    async def _run_sessions(
-        self, iteration: int, sessions: Sequence[tuple[LanePlan, str]], agent_factory
-    ) -> dict[str, LaneResult]:
+    async def _run_sessions(self, iteration: int, sessions: Sequence[LaneSession]) -> dict[str, LaneResult]:
         """Run one Implementer session per lane, each asked its prompt on a copy of its lane's checkout."""
         kernel_relative = self._workspace_path(self.ic.kernel_file)
-        prompts = {lane.lane_id: prompt for lane, prompt in sessions}
+        by_lane = {session.lane.lane_id: session for session in sessions}
 
         async def _session(lane: LanePlan, lane_dir: Path, serialized_driver: Path) -> SummaryOutcome:
+            session = by_lane[lane.lane_id]
             # The record turn resumes this session now: the round deletes the lane's copy as soon as it returns.
             sink: dict = {}
-            call = agent_factory(str(lane_dir), str(serialized_driver))
-            prompt = _lane_prompt(prompts[lane.lane_id], serialized_driver=serialized_driver)
+            call = session.agent.factory(str(lane_dir), str(serialized_driver))
+            prompt = _lane_prompt(session.prompt, serialized_driver=serialized_driver)
             await call(str(lane_dir / kernel_relative), prompt, session_sink=sink)
-            return await self._request_lesson(iteration, sink.get("end_reason", ""), sink.get("summarize"))
+            end_reason = sink.get("end_reason", "")
+            if end_reason == EXHAUSTED_END_REASON:
+                # The profile's line stopped answering: the next round's boundary checks it before it gets slots again.
+                self._check_profile_again(session.agent.profile_id)
+            return await self._request_lesson(iteration, end_reason, sink.get("summarize"))
 
         results = await run_lanes(
             workspace_dir=self.ic.workspace_dir,
-            lanes=[lane for lane, _ in sessions],
+            lanes=[session.lane for session in sessions],
             session=_session,
             parent_dir=str(Path(self.ic.workspace_dir).resolve().parent),
             driver=self._workspace_path(self.ic.driver_script),
@@ -244,6 +270,7 @@ class TreeAdmissionMixin:
             _node_of(result, _Placement(commit, slot.start, direction_id, provenance), slot=slot, plan=plan.title),
             approach=plan.approach,
             focus_cases=plan.focus_cases,
+            agent_profile_id=slot.agent_profile_id,
         )
         self._add_node(tree, node)
         return node
@@ -257,7 +284,7 @@ class TreeAdmissionMixin:
         commit = self._start_worktrees.commit(staged.worktree, message)
         pin_node(self.ic.workspace_dir, commit)
         placement = _Placement(commit, base.commit, base.direction, (source.commit,))
-        node = _node_of(result, placement, slot=None, plan=staged.plan)
+        node = replace(_node_of(result, placement, slot=None, plan=staged.plan), agent_profile_id=staged.producer)
         self._add_node(tree, node)
         return node
 
@@ -315,6 +342,7 @@ class TreeAdmissionMixin:
             node=node,
             archive_path=str(self._slot_dir(iteration, slot)),
             reason=slot.reason,
+            agent_profile_id=slot.agent_profile_id,
         )
 
     def _unmeasured(self, iteration: int, slot: Slot, outcome: AttemptOutcome, reason: str) -> SlotOutcome:
@@ -399,7 +427,9 @@ def _measurement_record(result: IterationResult) -> dict:
 
 
 __all__ = [
+    "LaneSession",
     "MeasuredCandidate",
+    "SessionAgent",
     "SlotOutcome",
     "StagedCandidate",
     "TreeAdmissionMixin",

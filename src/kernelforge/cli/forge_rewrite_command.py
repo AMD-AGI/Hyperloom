@@ -13,6 +13,7 @@ import click
 from kernelforge.cli.option_groups import option_group
 from kernelforge.cli.options import (
     LANE_COUNTS,
+    RELAY_MODES,
     SEARCH_STRATEGIES,
     _gpu_options,
     _roofline_ceiling_option,
@@ -21,7 +22,13 @@ from kernelforge.cli.options import (
 from kernelforge.config import CeilingSwitch, Config, GpuOptions, KnowledgeConfig
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.workflows.flydsl_rewrite.optimize import OptimizeOptions
-from kernelforge.workflows.forge_loop.api import ForgeLoopUsageError, SearchStrategy, require_lanes_for
+from kernelforge.workflows.forge_loop.api import (
+    ForgeLoopUsageError,
+    RelayMode,
+    SearchStrategy,
+    require_lanes_for,
+    require_relay_mode_for,
+)
 from kernelforge.workflows.flydsl_rewrite.request import ApplybackSwitch, RewriteBudget, RewriteWorkspace
 
 
@@ -127,12 +134,14 @@ class RewriteRequest:
     result_json: str | None
 
 
-def _require_nested_lanes(optimize: OptimizeOptions) -> None:
-    """Refuse a nested tree search on one lane before PORT spends its share of the budget."""
-    if optimize.search_strategy is None or optimize.lanes is None:
-        return
+def _require_nested_loop_shape(optimize: OptimizeOptions) -> None:
+    """Refuse a nested loop shape the fresh nested campaign would refuse, before PORT spends its share of the budget."""
+    strategy = SearchStrategy(optimize.search_strategy or SearchStrategy.LINEAR.value)
     try:
-        require_lanes_for(SearchStrategy(optimize.search_strategy), optimize.lanes)
+        if optimize.search_strategy is not None and optimize.lanes is not None:
+            require_lanes_for(strategy, optimize.lanes)
+        if optimize.relay_mode is not None:
+            require_relay_mode_for(strategy, RelayMode(optimize.relay_mode))
     except ForgeLoopUsageError as error:
         raise click.UsageError(str(error)) from error
 
@@ -351,6 +360,12 @@ def _rewrite_config(request: RewriteRequest) -> Config:
             type=SEARCH_STRATEGIES,
             help="OPTIMIZE: the nested forge-loop's --search-strategy. Omitted, it searches linearly.",
         ),
+        click.option(
+            "--relay-mode",
+            default=None,
+            type=RELAY_MODES,
+            help="OPTIMIZE: the nested forge-loop's --relay-mode. Omitted, it relays by handoff.",
+        ),
     ),
     _roofline_ceiling_option(
         "OPTIMIZE: passed to the nested forge-loop unchanged. 'off' (default) "
@@ -366,7 +381,7 @@ def forge_rewrite(request: RewriteRequest):
     import os
     import re as _re
 
-    _require_nested_lanes(request.optimize)
+    _require_nested_loop_shape(request.optimize)
     config = _rewrite_config(request)
 
     description = request.description
