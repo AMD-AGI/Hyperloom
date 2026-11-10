@@ -356,7 +356,8 @@ def enable_profile(config_path: Path) -> None:
     torch_profiler["enabled"] = True
     torch_profiler.setdefault("num_steps", 256)
     torch_profiler.setdefault("num_profiles", 1)
-    torch_profiler.setdefault("start_seconds", 300)
+    # The replay's opening burst runs past 300 s; a capture started there missed the steady-state batch mix.
+    torch_profiler.setdefault("start_seconds", 900)
     torch_profiler.setdefault("interval_seconds", 900)
     torch_profiler.setdefault("detailed_annotations", patch.annotations)
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)

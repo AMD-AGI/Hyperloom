@@ -53,6 +53,8 @@ def test_vllm_log_reports_each_rule_once_per_subject(tmp_path):
     ]
     assert _statuses(report) == {
         "capability_disabled": "not_detected",
+        "device.queue_exception": "not_detected",
+        "device.memory_fault": "not_detected",
         "engine_adjusted": "not_detected",
         "runtime.traceback": "not_detected",
     }
@@ -209,6 +211,8 @@ def test_atom_skips_rules_it_cannot_observe(tmp_path):
     assert _statuses(report) == {
         "feature_disabled": "not_detected",
         "capability_disabled": "not_detected",
+        "device.queue_exception": "not_detected",
+        "device.memory_fault": "not_detected",
         "aiter.tuned_miss": "not_detected",
         "runtime.traceback": "not_detected",
     }
@@ -220,6 +224,8 @@ def test_missing_log_marks_every_rule_unknown(tmp_path):
     assert [(f["rule_id"], f["status"], f["reason"]) for f in report["findings"]] == [
         ("feature_disabled", "unknown", "no_server_log"),
         ("capability_disabled", "unknown", "no_server_log"),
+        ("device.queue_exception", "unknown", "no_server_log"),
+        ("device.memory_fault", "unknown", "no_server_log"),
         ("aiter.tuned_miss", "unknown", "no_server_log"),
         ("runtime.traceback", "unknown", "no_server_log"),
     ]
@@ -258,7 +264,7 @@ def test_render_lists_detected_then_clear_then_unknown(tmp_path):
         "list []or set use_inductor_graph_partition to True to enabl",
         "- detected [correctness] vllm.unknown_env VLLM_MOE_N_SPLIT_SCHEDULE x1: (APIServer pid=11) WARNING "
         "10-09 12:00:00 [interface.py:1461] Unknown vLLM environment variable detected: VLLM_MOE_N_SPLIT_SCHEDULE",
-        "- not_detected: capability_disabled, engine_adjusted, runtime.traceback",
+        "- not_detected: capability_disabled, device.queue_exception, device.memory_fault, engine_adjusted, runtime.traceback",
     ]
 
 
@@ -279,6 +285,8 @@ def test_render_lists_unknown_reason(tmp_path):
         "runtime findings for (no server log) [custom]",
         "- unknown: feature_disabled (no_server_log)",
         "- unknown: capability_disabled (no_server_log)",
+        "- unknown: device.queue_exception (no_server_log)",
+        "- unknown: device.memory_fault (no_server_log)",
         "- unknown: aiter.tuned_miss (no_server_log)",
         "- unknown: runtime.traceback (no_server_log)",
     ]
@@ -303,7 +311,7 @@ def test_baseline_writes_runtime_findings(tmp_path):
     out = render_runtime_findings(result)
     assert out.splitlines()[1:] == [
         "- detected [correctness] vllm.unknown_env VLLM_FOO x1: Unknown vLLM environment variable detected: VLLM_FOO",
-        "- not_detected: feature_disabled, capability_disabled, engine_adjusted, aiter.tuned_miss, runtime.traceback",
+        "- not_detected: feature_disabled, capability_disabled, device.queue_exception, device.memory_fault, engine_adjusted, aiter.tuned_miss, runtime.traceback",
     ]
 
 

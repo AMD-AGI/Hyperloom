@@ -399,6 +399,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # Baseline AgentX perf snapshot: the slow-tail e2e_norm_intvty_p90 objective plus total_throughput and the
     # reported axes the summary renders.
     baseline_perf: dict[str, Any] = field(default_factory=dict)
+    baseline_workspace: str = ""  # Run directory of the anchor's axes; its per-request exports back the interval.
     baseline_accuracy: float = 0.0
     baseline_failure_streak: int = 0
     # The live leg's share of ``baseline_failure_streak``; ``begin_leg`` and every reset of the streak zero it.

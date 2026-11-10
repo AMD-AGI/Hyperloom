@@ -111,10 +111,13 @@ def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
     raise RuntimeError(f"unique_runs_dir: {base} still taken after {_MAX_RUNS_DIR_ATTEMPTS} suffixes")
 
 
+_PATCHES: str = "patches"
+
+
 def patches_dir(session_dir: Path, kernel_id: str) -> Path:
     """``<sd>/patches/<kernel_id>/`` — KEEP-promoted on-disk changes: the original source backup + applied patch (REVERT restores from backup)."""
     kid = _validate_id_component(kernel_id, field="patches_dir.kernel_id")
-    return Path(session_dir) / "patches" / kid
+    return Path(session_dir) / _PATCHES / kid
 
 
 _KERNEL_PATCH_BACKUPS: str = "backup"
@@ -127,13 +130,18 @@ def kernel_patch_backup_root(session_dir: Path, kernel_id: str) -> Path:
 
 def kernel_patch_backup_roots(session_dir: Path) -> list[Path]:
     """Every :func:`kernel_patch_backup_root` in the session."""
-    return sorted((Path(session_dir) / "patches").glob(f"*/{_KERNEL_PATCH_BACKUPS}"))
+    return sorted((Path(session_dir) / _PATCHES).glob(f"*/{_KERNEL_PATCH_BACKUPS}"))
 
 
 # Session-breakdown record fragments (recorder write-side spool).
 def breakdown_parts_dir(session_dir: Path) -> Path:
     """``<sd>/runtime/breakdown/parts/`` — per-producer breakdown record fragments."""
     return Path(session_dir) / "runtime" / "breakdown" / "parts"
+
+
+def jit_cache_dir(session_dir: Path) -> Path:
+    """``<sd>/runtime/jit-cache/`` — session-scoped JIT / code-object caches shared by every run."""
+    return Path(session_dir) / "runtime" / "jit-cache"
 
 
 # Reports / logs

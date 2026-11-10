@@ -152,8 +152,11 @@ def _lever_row(entry: dict[str, Any], default_on: bool) -> dict[str, Any]:
     }
 
 
+# The gap ``severity`` vocabulary, named here because this is where its order lives.
+GAP_SEVERITY_HIGH: str = "high"
+
 # Gap ``severity`` by urgency; an unknown severity ranks below ``low``.
-GAP_SEVERITY_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
+GAP_SEVERITY_RANK: dict[str, int] = {GAP_SEVERITY_HIGH: 3, "medium": 2, "low": 1}
 
 
 def gap_actionability_key(gap: dict[str, Any]) -> tuple[int, int, str]:
