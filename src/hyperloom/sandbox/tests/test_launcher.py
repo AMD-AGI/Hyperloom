@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -72,4 +73,51 @@ def test_a_launcher_holds_an_orphan_its_command_left_until_it_ends_then_ends(tmp
             os.kill(orphan, signal.SIGKILL)
         if proc.poll() is None:
             proc.kill()
+            proc.wait()
+
+
+#: How many tests the long-running command below stands for, each leaving an orphan behind.
+_SESSION_TESTS = 5
+
+
+def _zombies_under(pid: int) -> list[int]:
+    zombies = []
+    for descendant, _ in proctree.descendants(pid):
+        try:
+            stat = Path(f"/proc/{descendant}/stat").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if stat.rsplit(")", 1)[-1].split()[0] == "Z":
+            zombies.append(descendant)
+    return zombies
+
+
+def test_a_launcher_reaps_each_orphan_while_its_command_still_runs(tmp_path: Path) -> None:
+    orphans_file = tmp_path / "orphans"
+    command_file = tmp_path / "command.pid"
+    # A session: each test runs a process whose child outlives it, then exits; the session itself goes on.
+    script = (
+        f'for i in $(seq {_SESSION_TESTS}); do sh -c "sleep 0.2 & echo \\$! >> {orphans_file}"; done; '
+        f"echo $$ > {command_file}; exec sleep 300"
+    )
+    proc, status = _launch(["sh", "-c", script], tmp_path)
+    try:
+        deadline = time.monotonic() + _ENDS_WITHIN_SEC
+        orphans: list[int] = []
+        while time.monotonic() < deadline:
+            if command_file.exists() and command_file.read_text().strip():
+                orphans = [int(line) for line in orphans_file.read_text().split()]
+                if not any(Path(f"/proc/{orphan}").exists() for orphan in orphans):
+                    break
+            time.sleep(0.05)
+        assert len(orphans) == _SESSION_TESTS
+        assert _zombies_under(proc.pid) == [], "every orphan that ended was reaped while the command still runs"
+        assert not any(Path(f"/proc/{orphan}").exists() for orphan in orphans)
+        assert proc.poll() is None, "the launcher holds its command, which still runs"
+        os.kill(int(command_file.read_text()), signal.SIGTERM)
+        assert status.wait_exit(proc, _ENDS_WITHIN_SEC) == -signal.SIGTERM
+        assert proc.wait(timeout=_ENDS_WITHIN_SEC) == 0
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
