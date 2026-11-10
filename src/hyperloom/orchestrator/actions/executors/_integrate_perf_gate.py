@@ -27,6 +27,7 @@ from ...state.failure_evidence import FAILURE_ATTRIBUTION_ENVIRONMENT, classify_
 from ...state.shared_state import SharedState, resolve_anchor_with_drift, resolve_graded_comparison
 from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import accuracy_keep_block, eval_probe_summary
+from .benchmark_run.accuracy import accuracy_round_due
 from ._enablement_config import DEFAULT_SWITCH_OFF_PARITY_BAND_PCT
 from ._git import _git_head_sha
 from ._integrate_attempt import IntegrateAttempt
@@ -76,7 +77,10 @@ class PerfGateMixin:
         if unrated is not None:
             return unrated
 
-        verdict = _weigh_gate(attempt, params, bench_result, gate_evidence, _GateBasis(base_tput, keep_threshold_pct))
+        throughput = _grade_throughput(shared_state, bench_result, _GateBasis(base_tput, keep_threshold_pct))
+        if throughput.cleared and accuracy_round_due(shared_state):
+            await self._run_patch_accuracy_round(attempt, params, bench_result, gate_evidence)
+        verdict = _weigh_gate(attempt, params, bench_result, gate_evidence, throughput)
         measured = verdict.measured
 
         switch_manifest: list[dict[str, Any]] = list(attempt.switch_manifest)
@@ -497,6 +501,30 @@ class _GateBasis:
 
 
 @dataclass(frozen=True)
+class _ThroughputGrade:
+    """How the bench's throughput graded against the base, before its accuracy is weighed."""
+
+    basis: _GateBasis
+    graded: GradedComparison
+    delta_pct: float | None
+
+    @property
+    def cleared(self) -> bool:
+        """Whether the graded comparison kept the bench."""
+        return self.graded.comparable and self.graded.verdict == VERDICT_KEEP
+
+
+def _grade_throughput(shared_state: SharedState, bench_result: dict[str, Any], basis: _GateBasis) -> _ThroughputGrade:
+    graded = resolve_graded_comparison(
+        shared_state,
+        bench_result,
+        keep_threshold_pct=basis.keep_threshold_pct,
+        anchor=GradingAnchor(tput=basis.base_tput),
+    )
+    return _ThroughputGrade(basis, graded, _graded_delta_pct(graded))
+
+
+@dataclass(frozen=True)
 class _GateVerdict:
     """The measurement the KEEP gate weighed, its verdict, and the accuracy and correctness-fix findings behind it."""
 
@@ -516,21 +544,23 @@ def _weigh_gate(
     params: dict[str, Any],
     bench_result: dict[str, Any],
     gate_evidence: dict[str, Any],
-    basis: _GateBasis,
+    throughput: _ThroughputGrade,
 ) -> _GateVerdict:
-    """Grade the bench against the base and weigh the accuracy gate and any correctness-fix claim."""
+    """Weigh the graded throughput, the accuracy gate and any correctness-fix claim."""
     shared_state = attempt.shared_state
-    base_tput, keep_threshold_pct = basis.base_tput, basis.keep_threshold_pct
-    graded = resolve_graded_comparison(
-        shared_state, bench_result, keep_threshold_pct=keep_threshold_pct, anchor=GradingAnchor(tput=base_tput)
-    )
-    delta_pct = _graded_delta_pct(graded)
+    base_tput, keep_threshold_pct = throughput.basis.base_tput, throughput.basis.keep_threshold_pct
+    graded, delta_pct = throughput.graded, throughput.delta_pct
 
     accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
     acc_block, acc_reason = _accuracy_block(params, accuracy_pass, attempt.specialist_task_id)
-    acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
+    # Only a score taken under the baseline's eval definition draws a verdict, and only it compares with the baseline.
+    acc_delta_pct = (
+        None
+        if accuracy_pass is None
+        else _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
+    )
 
-    perf_kept = graded.comparable and graded.verdict == VERDICT_KEEP
+    perf_kept = throughput.cleared
     gate_pass = perf_kept and not acc_block
     fix_finding = first_text(_done_field(attempt.done_payload, "resolves_finding"))
     fix_refusals: list[str] = []
@@ -580,7 +610,7 @@ def _unrated_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) ->
     stopped = stopped_by_the_run_class(bench_class)
     if stopped is not None:
         fields: dict[str, Any] = {"error_class": stopped.error_class, "error": stopped.interrupted}
-    elif _environment_unmeasured(bench_result):
+    elif _environment_unmeasured(bench_result, framework_changed=attempt.changes_framework):
         fields = {
             "error_class": BENCH_UNMEASURED_CLASS,
             "bench_error_class": bench_class,
@@ -601,13 +631,15 @@ def _unrated_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) ->
     }
 
 
-def _environment_unmeasured(bench_result: dict[str, Any]) -> bool:
+def _environment_unmeasured(bench_result: dict[str, Any], *, framework_changed: bool) -> bool:
     """Whether the bench produced no throughput and its error is evidence of an environment fault."""
     tput = bench_result.get("output_throughput")
     if isinstance(tput, (int, float)) and tput > 0:
         return False
     attribution = classify_failure_attribution(
-        error_class=bench_result.get("error_class"), error_excerpt=bench_result.get("error")
+        error_class=bench_result.get("error_class"),
+        framework_changed=framework_changed,
+        error_excerpt=bench_result.get("error"),
     )
     return attribution == FAILURE_ATTRIBUTION_ENVIRONMENT
 

@@ -26,7 +26,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from hyperloom.measure import fsafe
 from hyperloom.measure.docs import DocumentError, parse_json_object
-from hyperloom.measure.manifest import RESERVED_NAMES, RESULT_SCHEMA, ManifestFile, ResultManifest, manifest_sha256
+from hyperloom.measure.manifest import RESERVED_NAMES, ManifestFile, ResultManifest, manifest_sha256
 from hyperloom.measure.signing import SigningError, public_key_fingerprint, verify
 
 MANIFEST_NAME, SIGNATURE_NAME = RESERVED_NAMES
@@ -111,6 +111,8 @@ class BundleExpectation:
     ``sandbox_id`` is the sandbox the bundle was read from: a bundle signed by the right key but made in another
     sandbox is a replay and is refused. ``spec_sha256`` is the hash of the exact bytes written to ``/in/spec.json``;
     ``None`` skips that comparison and is for a caller that only holds the fingerprint (a record book entry).
+    ``result_schema`` is the result schema the sheet is answered with (:func:`~hyperloom.measure.manifest.result_schema_for`):
+    a manifest of another version is refused even when its signature holds.
     ``rule_pack_digest`` is the digest of the rule pack the session reads: the runner must state that it read a pack
     with that digest, or what it measured followed facts the session did not record; ``None`` skips the comparison.
     """
@@ -120,6 +122,7 @@ class BundleExpectation:
     spec_fingerprint: str
     spec_sha256: str | None
     sandbox_id: str
+    result_schema: str
     rule_pack_digest: str | None = None
 
 
@@ -148,7 +151,7 @@ def verify_bundle(
             root_fd, SIGNATURE_NAME, MAX_SIGNATURE_BYTES, RejectReason.SIGNATURE_MISSING, RejectReason.BAD_SIGNATURE
         )
         fingerprint = _check_signature(manifest_raw, signature, expected.public_key_pem)
-        manifest, document = _parse_manifest(manifest_raw)
+        manifest, document = _parse_manifest(manifest_raw, expected.result_schema)
         _check_identity(manifest, fingerprint, expected)
         if max_total_bytes is not None and manifest.total_size() > max_total_bytes:
             # The sum is not shown: sizes thousands of digits long can add up to more digits than str() converts.
@@ -226,11 +229,12 @@ def _check_signature(manifest_raw: bytes, signature: bytes, public_key_pem: str)
     return fingerprint
 
 
-def _parse_manifest(manifest_raw: bytes) -> tuple[ResultManifest, dict[str, Any]]:
+def _parse_manifest(manifest_raw: bytes, result_schema: str) -> tuple[ResultManifest, dict[str, Any]]:
     try:
         document = parse_json_object(manifest_raw, what="manifest")
-        if document.get("schema") != RESULT_SCHEMA:
-            raise ResultRejected(RejectReason.SCHEMA_MISMATCH, f"expected {RESULT_SCHEMA}")
+        if document.get("schema") != result_schema:
+            detail = f"the sheet is answered by {result_schema}, the manifest is {document.get('schema')!r}"
+            raise ResultRejected(RejectReason.SCHEMA_MISMATCH, detail)
         return ResultManifest.from_document(document), document
     except DocumentError as exc:
         raise ResultRejected(RejectReason.MANIFEST_INVALID, str(exc)) from None

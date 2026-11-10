@@ -13,7 +13,17 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.measure.farm import FarmError, build_farm, place_farm, prepend_pythonpath, verify_farm
+from hyperloom.common.benchmark_config import BenchmarkPointError
+from hyperloom.measure.farm import (
+    FarmError,
+    build_farm,
+    launch_environment,
+    place_farm,
+    prepend_pythonpath,
+    server_environment,
+    server_python,
+    verify_farm,
+)
 from hyperloom.measure.spec import EnvEntry, EnvRoot
 
 INSTALLED = Path(yaml.__file__).parent
@@ -137,3 +147,42 @@ def test_a_farm_that_rebuilds_no_aiter_carries_no_meta_directory_and_adds_no_var
     assert farm.aiter_meta is None
     assert dict(envs) == {"TP": 1, "PYTHONPATH": str(farm.site)}
     assert yaml.safe_load(point.read_text())["benchmark"]["envs"] == dict(envs)
+
+
+_AGENTX_POINT = {
+    "benchmark": {
+        "envs": {"A": "benchmark"},
+        "agentx": {"enabled": True, "launch_overrides": {"env": {"A": "launch"}, "executable": "/venv/python"}},
+    }
+}
+
+
+def test_an_agentx_server_reads_its_launch_not_the_benchmark_envs() -> None:
+    assert dict(server_environment(_AGENTX_POINT)) == {"A": "launch"}
+    assert server_python(_AGENTX_POINT, default="python3") == "/venv/python"
+    assert dict(server_environment({"benchmark": {"envs": {"A": "benchmark"}}})) == {"A": "benchmark"}
+
+
+def test_the_server_environment_is_read_only_and_launch_environment_writes_the_point() -> None:
+    config = {"benchmark": {"envs": {"A": "1"}}}
+
+    with pytest.raises(TypeError):
+        server_environment(config)["B"] = "2"  # type: ignore[index]
+    launch_environment(config)["B"] = "2"
+
+    assert config["benchmark"]["envs"] == {"A": "1", "B": "2"}
+
+
+@pytest.mark.parametrize("agentx", [True, "yes"])
+def test_launch_environment_writes_the_launch_of_an_agentx_point_switched_on_by_a_word(agentx: object) -> None:
+    config = {"benchmark": {"envs": {"A": "benchmark"}, "agentx": agentx}}
+
+    launch_environment(config)["B"] = "2"
+
+    assert dict(server_environment(config)) == {"B": "2"}
+    assert config["benchmark"]["envs"] == {"A": "benchmark"}
+
+
+def test_a_point_without_a_benchmark_block_is_refused() -> None:
+    with pytest.raises(BenchmarkPointError):
+        server_environment({})

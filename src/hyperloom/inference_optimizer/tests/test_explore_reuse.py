@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.orchestrator.actions.executors.explore_prefilter import _prefilter as prefilter
 from hyperloom.orchestrator.actions.executors.explore_prefilter import _reuse as reuse
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
@@ -84,6 +85,27 @@ def test_overlay_content_not_its_path_is_the_identity(tmp_path):
     assert reuse.measurement_key(_identity([str(a)])) == reuse.measurement_key(_identity([str(b)]))
     (b / "kernel.py").write_text("x = 2\n")
     assert reuse.measurement_key(_identity([str(a)])) != reuse.measurement_key(_identity([str(b)]))
+
+
+def test_the_benchmark_identity_is_the_point_without_where_it_writes():
+    point = BenchmarkPoint.from_document(
+        {
+            "benchmark": {
+                "framework": "SGLang",
+                "model": "/models/m",
+                "precision": "fp8",
+                "runner_type": "mi355x",
+                "envs": {"CONC": 8, "RESULT_DIR": "/elsewhere", "WARMUP_CACHE": "/out/round/cache"},
+            }
+        }
+    )
+
+    assert reuse.benchmark_identity(point, volatile_roots=["/out"]) == {
+        "framework": "sglang",
+        "model": "/models/m",
+        "precision": "fp8",
+        "envs": {"CONC": "8"},
+    }
 
 
 def test_a_stored_revert_is_found_and_ages_out(store):

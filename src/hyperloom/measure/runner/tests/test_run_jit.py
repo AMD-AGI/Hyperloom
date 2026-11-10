@@ -147,7 +147,6 @@ class Rig:
         self.host_tmp = tmp_path / "host-tmp"
         self.host_tmp.mkdir()
         monkeypatch.setattr(tempfile, "tempdir", str(self.host_tmp))
-        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
         monkeypatch.setattr(runner_jit, "locate_package", self._locate)
         monkeypatch.setattr(own_jit, "locate_package", self._locate)
         monkeypatch.setattr(farm_module, "locate_package", self._locate)

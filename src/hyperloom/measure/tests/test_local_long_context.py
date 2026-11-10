@@ -25,10 +25,10 @@ from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR
 from hyperloom.measure.long_context.tests.support import PROMPTS, FakeServer, staged_plan
 from hyperloom.measure.phases import LONG_CONTEXT, SHORT_PROMPTS
 from hyperloom.measure.short_prompts.tests.support import staged_plan as short_plan
-from hyperloom.measure.tests.test_local_backend import _call, _point
+from hyperloom.measure.tests.test_local_backend import _agentx_point, _call, _point
 from hyperloom.measure.tests.test_local_short_prompts import _CheckGrid as _ShortGrid
 from hyperloom.measure.tests.test_local_short_prompts import _Servers as _ShortServers
-from hyperloom.measure.tests.test_local_short_prompts import cache, magpie_backend  # noqa: F401 - fixtures
+from hyperloom.measure.tests.test_local_short_prompts import cache  # noqa: F401 - fixtures
 
 SKIPPED = "long_context_check skipped: test failed"
 CONTEXT_FLAG_ENV = framework_registry.FRAMEWORKS["sglang"].extra_args_env
@@ -70,7 +70,7 @@ def test_a_planned_test_asks_its_own_server_after_its_measured_round_and_boots_n
     outcome = _run(tmp_path, cache)
 
     assert [kwargs["grid"][0].name for kwargs in grid.calls] == ["test"], "no second boot"
-    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "Magpie leaves the server up for the check"
+    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "the round leaves the server up for the check"
     assert (grid.servers.started, grid.servers.teardowns) == (["test"], 1), "one server, torn down after the check"
     found = read_outputs(tmp_path / "out")
     assert [e.status for e in found.prompts] == [PROMPT_OK] * PROMPTS and found.served_context == 4096
@@ -160,6 +160,29 @@ def test_a_framework_that_cannot_hold_a_server_up_leaves_the_prompts_unrun_with_
     assert "the test's server was not held up for the check" in found.stopped
     assert {e.status for e in found.prompts} == {PROMPT_NOT_RUN}
     assert len(grid.calls) == 1 and grid.servers.started == [] and outcome.returncode == 0
+
+
+def test_an_agentx_test_records_both_checks_not_held_and_sends_its_server_no_prompt(monkeypatch, tmp_path, cache):
+    grid = _grid(monkeypatch, tmp_path)
+    point = _agentx_point(tmp_path, monkeypatch)
+    call = _call(
+        tmp_path,
+        point,
+        long_context=staged_plan(cache),
+        short_prompts=short_plan(cache),
+        result_dir=str(tmp_path / "out" / "results"),
+    )
+
+    outcome = LocalMeasurementBackend().run_test(call)
+
+    found = read_outputs(tmp_path / "out")
+    assert "the test's server was not held up for the check" in found.stopped
+    assert {e.status for e in found.prompts} == {PROMPT_NOT_RUN}
+    assert [kwargs["grid"][0].name for kwargs in grid.calls] == ["test"]
+    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is True, "no check keeps the server up"
+    assert grid.servers.asked == [0] and grid.servers.flushes == 0
+    names = [p.name for p in outcome.phases]
+    assert LONG_CONTEXT not in names and SHORT_PROMPTS not in names and outcome.returncode == 0
 
 
 def test_a_call_naming_a_set_that_is_not_staged_is_refused_before_any_server_starts(monkeypatch, tmp_path, cache):

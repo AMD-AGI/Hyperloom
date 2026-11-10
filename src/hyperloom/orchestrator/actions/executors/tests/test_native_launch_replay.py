@@ -6,6 +6,7 @@
 from copy import deepcopy
 import os
 import shlex
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -28,8 +29,11 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     LaunchLayer,
     BenchmarkTarget,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import load_benchmark
 from hyperloom.orchestrator.state.shared_state import SharedState, stack_base_params
+
+
+def load_benchmark(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]
 
 
 _MODEL = "Qwen/Qwen3-0.6B"
@@ -85,7 +89,7 @@ def native_session(tmp_path, monkeypatch):
         state = SharedState(
             framework="sglang",
             benchmark_mode="agentx",
-            agentx_backend="magpie",
+            agentx_backend="inferencex",
             baseline_config_path=str(baseline),
             baseline_tput=100,
             baseline_perf={
@@ -136,17 +140,19 @@ def _stub_gpu(monkeypatch, session, *, effective):
                 duration_seconds=3600,
                 completed_requests=100,
                 request_error_rate=0,
-                benchmark_backend="magpie_agentx",
-                benchmark_valid=True,
+                valid_measurement=True,
                 diagnostic_only=False,
                 workload_identity="fixed-workload",
                 launch_evidence=evidence,
                 launch_evidence_path=evidence_path,
+                workspace=str(config.parent / "benchmark_native"),
             )
         ]
 
     monkeypatch.setattr(explore, "run_grid", run_grid)
     monkeypatch.setattr(_integrate_bench, "run_grid", run_grid)
+    # One cold decision round per explore, so each captured launch is one candidate's.
+    monkeypatch.setattr(explore, "resolve_lifecycle_params", lambda _path: {"eligible": False})
     return observed
 
 
@@ -202,18 +208,6 @@ async def test_env_only_keep_replays_unrelated_recipe_and_operator_options(nativ
 
 
 @pytest.mark.asyncio
-async def test_explore_ablation_removes_recipe_and_appended_copies(native_session, tmp_path, monkeypatch):
-    session = native_session(appended=f"{_OPTION} 512")
-    observed = _stub_gpu(monkeypatch, session, effective=_PREFIX + ["--enable-hierarchical-cache"])
-    result = await _explore(session, tmp_path, name="ablate-both", candidate={"remove_args": [_OPTION]})
-    assert len(result["winners"]) == 1, result
-    assert len(observed) == 1
-    launch = observed[0]
-    assert _OPTION not in launch["append_args"]
-    assert _OPTION in launch["remove_args"] or launch["replace_args"]
-
-
-@pytest.mark.asyncio
 async def test_accepted_appended_only_ablation_survives_integrate_patch(native_session, tmp_path, monkeypatch):
     session = native_session(appended="--disable-cuda-graph", recipe=_PREFIX)
     observed = _stub_gpu(monkeypatch, session, effective=_PREFIX)
@@ -250,7 +244,7 @@ async def test_accepted_appended_only_ablation_survives_integrate_patch(native_s
 
 
 @pytest.mark.parametrize("option", ["--unrecognized-server-option", "--model-path", "--port"])
-def test_unknown_and_protected_removals_reach_magpie_validation(native_session, tmp_path, option):
+def test_unknown_and_protected_removals_reach_the_launch_validation(native_session, tmp_path, option):
     session = native_session(recipe=_PREFIX + ["--port", "30000"])
     intermediate = prepare_grid_benchmark_config(session.config, tmp_path / "explore")
     variant = _grid_runner._build_variant_yaml(
@@ -322,7 +316,7 @@ _PROTECTED = ("--model-path", "--tp", "--tensor-parallel-size", "--port", "--hos
 async def test_a_native_replace_removal_keep_persists_only_what_hyperloom_appends(
     native_session, tmp_path, monkeypatch, replayed
 ):
-    """Magpie refuses a protected option in append_args, so a KEEP must persist the overlay, not Magpie's argv."""
+    """A protected option is refused in append_args, so a KEEP must persist the overlay, not the round's argv."""
     from hyperloom.orchestrator.loop._integrate_promotion import _integrate_keep_variant
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 

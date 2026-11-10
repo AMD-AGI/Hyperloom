@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from hyperloom_common.coerce import to_mapping
-from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+from inference_suite.argv import tokenize_server_args_preserving_json
 
 from ..actions.executors import controls_of, normalize_proposal
 
@@ -18,14 +18,14 @@ log = logging.getLogger(__name__)
 
 
 def _transportable_server_args(args: Any) -> tuple[str, str]:
-    """A lever's ``extra_args`` as the argv string Magpie transports, or ``""`` and why it cannot be."""
+    """A lever's ``extra_args`` as the argv string ``EXTRA_*_ARGS`` transports, or ``""`` and why it cannot be."""
     tokens = [str(a) for a in args if str(a).strip()] if isinstance(args, (list, tuple)) else []
     if any(ch.isspace() for token in tokens for ch in token):
         return "", "has a whitespace-bearing argv token"
     parsed_args = tokenize_server_args_preserving_json(args if isinstance(args, str) else " ".join(tokens))
     if parsed_args is None:
         if isinstance(args, str):
-            return "", "has server args unsupported by Magpie's unquoted argv transport"
+            return "", "has server args unsupported by the unquoted EXTRA_*_ARGS transport"
         return "", "has unparsable server args"
     return parsed_args[0], ""
 
@@ -33,7 +33,7 @@ def _transportable_server_args(args: Any) -> tuple[str, str]:
 def config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
     """The name, server args, env overrides and removal controls one lever proposal carries.
 
-    Args Magpie cannot transport are dropped, and the removal controls with them: they may be coupled to those args.
+    Args ``EXTRA_*_ARGS`` cannot transport are dropped, and the removal controls with them: they may be coupled to those args.
     """
     extra_envs = {str(k).strip(): str(v) for k, v in to_mapping(entry.get("extra_envs")).items() if str(k).strip()}
     extra_server_args, fault = _transportable_server_args(entry.get("extra_args"))

@@ -114,9 +114,10 @@ hosted = [
 # runner installs ``requirements/runner.lock``, this list compiled with hashes, and never resolves this list itself.
 # The framework stack (torch, triton, sglang, aiter) is the framework image's and must not be listed here.
 #
-# ``lm_eval[api]`` is the accuracy pass's client: 0.4.13, the release that the ref ``inference_optimizer/cli/preflight.py``
-# pins (``_LM_EVAL_PINNED_REF``). It comes from PyPI, not as that ref's GitHub archive, because GitHub does not keep an
-# archive's checksum stable and a hash lock must not depend on one. ``tenacity`` is what its ``api`` models import.
+# ``lm_eval[api]`` is the accuracy pass's client: 0.4.13 (``ddd6722``), the first release whose API model reports a
+# refused connection instead of masking it with ``UnboundLocalError`` (EleutherAI/lm-evaluation-harness#3293). It comes
+# from PyPI because GitHub does not keep an archive's checksum stable and a hash lock must not depend on one.
+# ``tenacity`` is what its ``api`` models import.
 runner = [
     "PyYAML>=6.0",
     "cryptography>=42",
@@ -286,6 +287,8 @@ hyperloom = [
     "hosted/*.sh",
     "orchestrator/prompts/*.md",
     "orchestrator/prompts/references/*.md",
+    # JSON Schemas of the hosted-measurement contracts (measurement spec and result manifest).
+    "contracts/*.schema.json",
     # The reference rule pack a session reads when HYPERLOOM_RULE_PACK names no other; importing outside_facts fails without it.
     "common/outside_facts/packs/*.yaml",
 ]
@@ -298,8 +301,6 @@ hyperloom = [
     "assets/*.py",
     "assets/*.example",
     "assets/configs/*.yaml",
-    "assets/agentx/*.sh",
-    "assets/agentx/*.py",
     # Workload template for the InferaSim projection EXPLORE pre-filters with.
     "assets/inferasim/*.yaml",
     # Host-side evidence probe, injected into the benchmark process via a
@@ -331,11 +332,6 @@ hyperloom = [
 # read at runtime by classify_patchability(), so it must ship.
 "hyperloom.orchestrator.trace_analysis" = [
     "vendor_operator_playbooks.json",
-]
-# ``agentx/deploy.py`` copies these into InferenceX ``benchmarks/`` at runtime
-# and raises FileNotFoundError when they are absent from the install.
-"hyperloom.inference_optimizer.assets.agentx" = [
-    "*.sh",
 ]
 # Breakdown skill assets; the only SKILL.md under src/ that did not ship.
 "hyperloom.inference_optimizer.breakdown" = [
@@ -462,8 +458,6 @@ omit = [
     "OOB/auth_proxy.py",
     "OOB/backends/*",
     # Local-host metrics probes (rocm-smi / nvidia-smi / ps / df / ray status).
-    # InferenceX shell-script patcher (fcntl locking + benchmark_lib.sh rewrite).
-    "src/hyperloom/orchestrator/actions/executors/_inferencex_patcher.py",
     # lm-eval model class, imported only inside the eval process; CI does not install lm-eval.
     "src/inference_suite/eval/model.py",
     # TraceLens server patcher (git apply / patch --fuzz subprocess pipeline).
@@ -765,7 +759,6 @@ ignorelist = ["aiter"]
 "src/kernelforge/workflows/forge_loop/campaign/experiment.py" = ["DTZ005"]
 "src/kernelforge/workflows/forge_loop/campaign/schema.py" = ["DTZ005"]
 "src/kernelforge/agent_backends/usage_ledger.py" = ["DTZ005"]
-"src/hyperloom/orchestrator/actions/executors/bypass_report.py" = ["DTZ005"]
 "src/hyperloom/orchestrator/actions/executors/benchmark_run/bringup.py" = ["DTZ001"]
 "src/hyperloom/orchestrator/rehearsal/scenario.py" = ["DTZ001"]
 # These call the root logger directly; a root-level call configures logging on

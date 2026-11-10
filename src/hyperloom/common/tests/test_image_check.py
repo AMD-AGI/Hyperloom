@@ -216,8 +216,8 @@ def test_a_source_check_on_a_file_reads_it_under_the_directory_a_variable_names(
     path = PathSpec("INFERENCEX_PATH", (".gitmodules",))
 
     assert _status(_spec(CheckKind.SOURCE_CONTAINS, path=path, text=("utils/aiperf",)), image)[0] is Status.PASS
-    status, detail = _status(_spec(CheckKind.SOURCE_CONTAINS, path=path, text=("utils/magpie",)), image)
-    assert (status, detail) == (Status.FAIL, "/ix/.gitmodules does not hold ['utils/magpie']")
+    status, detail = _status(_spec(CheckKind.SOURCE_CONTAINS, path=path, text=("utils/absent",)), image)
+    assert (status, detail) == (Status.FAIL, "/ix/.gitmodules does not hold ['utils/absent']")
     missing = _spec(CheckKind.SOURCE_CONTAINS, path=PathSpec("INFERENCEX_PATH", ("absent",)), text=("x",))
     assert _status(missing, image) == (Status.FAIL, "there is no such source file")
 
@@ -437,7 +437,6 @@ def _reference_image(tmp_path: Path, merge_line: str) -> HostImage:
     )
     header = "gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernelName\n"
     _write(tmp_path / "sgl-workspace" / "aiter" / "aiter" / "configs" / "bf16_tuned_gemm.csv", header)
-    _write(tmp_path / "ix" / ".gitmodules", '[submodule "utils/aiperf"]\n  path = utils/aiperf\n')
     helps = _Helps(
         {
             ("sglang.launch_server", "--help"): _ok(_LISTING),
@@ -447,7 +446,7 @@ def _reference_image(tmp_path: Path, merge_line: str) -> HostImage:
             ),
         }
     )
-    return _image(tmp_path, helps, INFERENCEX_PATH="/ix")
+    return _image(tmp_path, helps)
 
 
 def _by_fact(report: image_check.ImageCheckReport) -> dict[str, Status]:
@@ -464,7 +463,7 @@ def test_the_reference_pack_over_an_image_that_holds_every_fact_it_can_confirm(t
         name for name, entry in pack.entries.items() if entry.image_checks
     ]
     assert all(held[name] is Status.UNVERIFIABLE for name, entry in pack.entries.items() if not entry.image_checks)
-    assert report.counts() == {"pass": 12, "fail": 0, "unverifiable": 33}
+    assert report.counts() == {"pass": 11, "fail": 0, "unverifiable": 32}
     assert report.pack == {"version": pack.version, "digest": pack.digest}
 
 
@@ -483,8 +482,8 @@ def test_an_aiter_that_no_longer_holds_the_merge_directory_literal_fails_that_fa
     assert report.summary() == {
         "mode": "warn",
         "pack_digest": report.pack["digest"],
-        "pass": 11,
-        "unverifiable": 33,
+        "pass": 10,
+        "unverifiable": 32,
         "fail": ["aiter_merged_view"],
     }
 
@@ -495,12 +494,12 @@ def test_the_report_is_json_for_close_and_lines_for_people_and_is_written_whole(
 
     document = json.loads(json.dumps(report.to_json()))
     assert document["mode"] == "warn"
-    assert document["counts"] == {"pass": 11, "fail": 1, "unverifiable": 33}
+    assert document["counts"] == {"pass": 10, "fail": 1, "unverifiable": 32}
     assert document["environment"]["python_version"].count(".") == 2
     assert document["environment"]["packages"]["vllm"] == {"installed": True, "version": None}
     assert {fact["fact"] for fact in document["facts"]} == set(pack.entries)
     lines = report.markdown_lines()
-    assert lines[0].startswith(f"Image check (warn) of rule pack {pack.version}: 11 pass, 1 fail, 33 unverifiable")
+    assert lines[0].startswith(f"Image check (warn) of rule pack {pack.version}: 10 pass, 1 fail, 32 unverifiable")
     assert lines[1] == "- FAIL aiter_merged_view (aiter)"
     assert lines[-1].startswith("- Unverifiable here: python_import_errors, ")
     target = tmp_path / "attached" / "image_check.json"
@@ -611,7 +610,7 @@ def test_the_command_line_prints_the_report_and_exits_one_when_a_fact_fails(
     pack = load_pack(DEFAULT_PACK_PATH)
     assert main([], pack=pack, image=_reference_image(tmp_path, _OLD_AITER)) == 0
     assert capsys.readouterr().out.startswith(
-        f"Image check (strict) of rule pack {pack.version}: 12 pass, 0 fail, 33 unverifiable"
+        f"Image check (strict) of rule pack {pack.version}: 11 pass, 0 fail, 32 unverifiable"
     )
 
     other = tmp_path / "other"
@@ -632,7 +631,7 @@ def test_the_command_line_always_checks_whatever_the_session_input_says(
     pack = load_pack(DEFAULT_PACK_PATH)
     assert main([], pack=pack, image=_reference_image(tmp_path, _NEW_AITER)) == 1
     assert capsys.readouterr().out.startswith(
-        f"Image check (strict) of rule pack {pack.version}: 11 pass, 1 fail, 33 unverifiable\n- FAIL aiter_merged_view"
+        f"Image check (strict) of rule pack {pack.version}: 10 pass, 1 fail, 32 unverifiable\n- FAIL aiter_merged_view"
     )
 
 

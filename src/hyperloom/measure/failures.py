@@ -9,7 +9,7 @@ wherever it is read. The classes drive different follow-ups in the tool layer:
 * ``infra``: nothing about the candidate was learned; retry in a fresh sandbox, write no negative result;
 * ``candidate``: the log carries a known failure signature, the server refused its own command line, or it did not
   become ready within its boot limit; record a negative result;
-* ``unclear``: non-zero with no known signature, or a timeout; rerun once in a fresh sandbox. The reason still names
+* ``unclear``: non-zero with no known signature, a stalled server, or a timeout; rerun once in a fresh sandbox. The reason still names
   what the log says (a refused evaluation request, a Python exception) when it says anything.
 
 A refused instruction sheet or a rejected result bundle is none of these. It is a program error (or a tampered result),
@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import errno
 import re
-from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
+
+from inference_suite.contracts import FailedStep
 
 from hyperloom.common.failure_signature import (
     EVAL_RUNTIME_FAILURE,
@@ -32,6 +33,7 @@ from hyperloom.common.failure_signature import (
     IMPORT_ERROR,
     SERVE_FLAG,
     classify_failure,
+    framework_unimportable_line,
 )
 from hyperloom.contracts.measurement import FailureClass
 from hyperloom.measure import log_causes
@@ -102,6 +104,10 @@ HF_CACHE_PERMISSION = "hf_cache_permission"
 #: sandboxes: ``hyperloom_multibranch.toolbox.attempts`` ends the test with it.
 SANDBOX_ACQUIRE_TIMEOUT = "sandbox_acquire_timeout"
 
+#: The AgentX checkpoint stopped the measured round for trailing its reference by more than the allowed drop
+#: (``measure.checkpoint``): a ruling on the candidate, never retried. The ruling itself is in the round's slot.
+AGENTX_EARLY_STOP = "agentx_early_stop"
+
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
     {
@@ -135,6 +141,27 @@ TEST_TIMEOUT_REASON = "timeout"
 PORT_IN_USE_REASON = "port_in_use"
 #: The server did not report ready within the boot limit (``hyperloom.measure.boot_watch``).
 SERVER_BOOT_TIMEOUT_REASON = "server_boot_timeout"
+#: A requested GPU was not visible, or another process held it, when the suite checked before boot.
+HOST_GPUS_UNAVAILABLE_REASON = "host_gpus_unavailable"
+#: The server went quiet while serving (``FailedStep.SERVER_STALLED``): a hang or a slow candidate end alike.
+SERVER_STALLED_REASON = "server_stalled"
+#: The serving interpreter could not report its framework (``FailedStep.FRAMEWORK_VERSION_UNKNOWN``) in a test that
+#: changed nothing of the framework: the image or the sandbox's environment cannot serve it, whatever the candidate.
+FRAMEWORK_UNIMPORTABLE_REASON = "framework_unimportable"
+#: The steps inference_suite names a round failed at that are not about the candidate, or that name the cause better
+#: than any line of a log that holds only the symptom. Every other step leaves the verdict to the logs.
+_FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
+    # The suite parses the argv before the server starts, so no server log holds the refusal.
+    FailedStep.FLAG_UNKNOWN: (FailureClass.CANDIDATE, SERVE_FLAG),
+    FailedStep.PORT_IN_USE: (FailureClass.INFRA, PORT_IN_USE_REASON),
+    FailedStep.GPUS_UNAVAILABLE: (FailureClass.INFRA, HOST_GPUS_UNAVAILABLE_REASON),
+    FailedStep.SERVER_SILENT_BEFORE_READY: (FailureClass.INFRA, HUNG_BEFORE_READY),
+    FailedStep.DISK_FULL: (FailureClass.INFRA, DISK_FULL),
+    FailedStep.TEARDOWN_INCOMPLETE: (FailureClass.INFRA, FailedStep.TEARDOWN_INCOMPLETE.value),
+    FailedStep.SERVER_STALLED: (FailureClass.UNCLEAR, SERVER_STALLED_REASON),
+}
+#: The steps whose reason quotes the report's ``failure_detail``, as ``<reason>: <detail>``.
+_DETAILED_STEPS = frozenset({FailedStep.FLAG_UNKNOWN})
 #: The two causes an unclear failure names when its log carries them; the reason is ``<prefix>: <the log's line>``.
 #: A failure the log only calls a crashed evaluation names the refused request too, when the log carries one.
 LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
@@ -167,23 +194,17 @@ _PORT_IN_USE = re.compile(r"address already in use|\[Errno 98\]", re.IGNORECASE)
 # Sentinel return codes of the local flow (``orchestrator/actions/executors/_subprocess_kill.py``). The names stay
 # literal here because ``measure`` must not import another package's private module; ``test_failures`` pins every
 # value to its definition.
-_SERVER_STALLED_RC = -911
-_AGENTX_PREFLIGHT_RC = -912
-_EVAL_PROBE_UNPATCHABLE_RC = -914
 _SESSION_TIME_EXHAUSTED_RC = -915
 _ORCHESTRATOR_CANCELLED_RC = -917
+_AGENTX_EARLY_STOP_RC = -919
 
 _INFRA_RETURNCODES = {
     HOSTED_RUNNER_UNAVAILABLE_RC: "runner_unavailable",
     HOSTED_INFRA_FAILURE_RC: "infra_failure",
-    # The AgentX client is missing or not the pinned build: an environment failure.
-    _AGENTX_PREFLIGHT_RC: "agentx_preflight",
 }
 _PROGRAM_ERROR_RETURNCODES = {
     HOSTED_SPEC_REJECTED_RC: "spec_rejected",
     HOSTED_RESULT_REJECTED_RC: "result_rejected",
-    # The eval probe cannot be installed although its target is present: a framework defect, deterministic.
-    _EVAL_PROBE_UNPATCHABLE_RC: "eval_probe_unpatchable",
 }
 _STOPPED_RETURNCODES = {
     _SESSION_TIME_EXHAUSTED_RC: "session_time_exhausted",
@@ -217,23 +238,46 @@ class FailureClassification:
             raise ValueError("a success has no failure reason")
 
 
+@dataclass(frozen=True)
+class StepFailure:
+    """The step a failed round's ``report.json`` names, and its ``failure_detail`` (``""`` when it gave none)."""
+
+    step: FailedStep
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class FailureEvidence:
+    """What a failed test left to read, consulted only when neither its error class nor its return code decides it.
+
+    ``logs`` are the texts a known failure signature may be found in (stdout and stderr tails, the tails of
+    ``server.log`` and of the benchmark's stderr); ``client_logs`` are the benchmark client's own output, read only for
+    the infrastructure cause it states (a Hub download refused), never for a candidate's signature, since a client that
+    failed on its own says nothing of the server; ``detail`` is what the caller observed of a boot timeout, which the
+    return code alone does not say; ``step_failure`` is the step the failed round's ``report.json`` names, with its
+    detail, which inference_suite records in place of the return code it exits with; ``unrun`` is ``<error_class>:
+    <message>`` of a failed round refused before it ran, which left no log: the only account of it there is;
+    ``framework_changed`` is whether the test put a rebuilt framework on its server's import path
+    (:attr:`~hyperloom.measure.socket.TestCall.framework_changed`).
+    """
+
+    logs: tuple[str, ...] = ()
+    client_logs: tuple[str, ...] = ()
+    detail: str = ""
+    step_failure: StepFailure | None = None
+    unrun: str = ""
+    framework_changed: bool = False
+
+
 def classify_test_failure(
     *,
     returncode: int,
     timed_out: bool = False,
     error_class: str | None = None,
-    logs: Iterable[str] = (),
-    client_logs: Iterable[str] = (),
-    detail: str = "",
+    evidence: FailureEvidence = FailureEvidence(),
 ) -> FailureClassification:
-    """Classify how one test ended.
-
-    ``error_class`` is what the runner's ``status.json`` or the hosted backend reports; ``logs`` are the texts a known
-    failure signature may be found in (stdout and stderr tails, the tails of ``server.log`` and of the benchmark's
-    stderr); ``client_logs`` are the benchmark client's own output, read only for the infrastructure cause it states (a
-    Hub download refused), never for a candidate's signature, since a client that failed on its own says nothing of the
-    server; ``detail`` is what the caller observed of a boot timeout, which the return code alone does not say.
-    """
+    """Classify how one test ended; ``error_class`` is what the runner's ``status.json`` or the hosted backend
+    reports."""
     if error_class is not None:
         return _from_error_class(error_class)
     if returncode in _PROGRAM_ERROR_RETURNCODES:
@@ -242,25 +286,30 @@ def classify_test_failure(
         return FailureClassification(Disposition.STOPPED, failure_reason=_STOPPED_RETURNCODES[returncode])
     if returncode in _INFRA_RETURNCODES:
         return _infra(_INFRA_RETURNCODES[returncode])
+    if returncode == _AGENTX_EARLY_STOP_RC:
+        return _candidate(AGENTX_EARLY_STOP)
     if timed_out:
         return _unclear(TEST_TIMEOUT_REASON)
     if returncode == 0:
         return FailureClassification(Disposition.SUCCEEDED)
-    parts = [_bounded(part) for part in logs if part]
+    parts = [_bounded(part) for part in evidence.logs if part]
     text = "\n".join(parts)
-    refused = log_causes.hub_rate_limited("\n".join([text, *(_bounded(part) for part in client_logs if part)]))
+    refused = log_causes.hub_rate_limited("\n".join([text, *(_bounded(part) for part in evidence.client_logs if part)]))
     if refused:
         # Before the signatures: the client that was refused may then fail to load a tokenizer, which reads as one.
         return _infra(f"{HUB_RATE_LIMITED}: {refused}")
+    reported = evidence.step_failure
+    step = reported.step if reported else None
+    by_step = _from_step(reported, evidence.framework_changed) if reported else None
+    if by_step is not None:
+        return by_step
     named = _named_by_logs(text, parts)
     if named is not None:
         return named
-    if returncode == _SERVER_STALLED_RC:
-        # The silence watchdog reaped a ready server that stopped writing; a crash it logged before going quiet names it.
-        return _unclear("server_stalled")
-    if returncode == SERVER_BOOT_TIMEOUT_RC:
+    if returncode == SERVER_BOOT_TIMEOUT_RC or step is FailedStep.SERVER_BOOT_TIMEOUT:
+        detail = evidence.detail
         return _candidate(f"{SERVER_BOOT_TIMEOUT_REASON}: {detail}" if detail else SERVER_BOOT_TIMEOUT_REASON)
-    return _from_unnamed_logs(text)
+    return _from_unnamed_logs(text, evidence.unrun)
 
 
 def decides_test(verdict: FailureClassification) -> bool:
@@ -279,9 +328,35 @@ def _from_error_class(error_class: str) -> FailureClassification:
         return _infra(error_class)
     if error_class in PROGRAM_ERROR_CLASSES:
         return FailureClassification(Disposition.PROGRAM_ERROR, failure_reason=error_class)
+    if error_class == AGENTX_EARLY_STOP:
+        return _candidate(AGENTX_EARLY_STOP)
     # A class nobody handles is a framework defect. Calling it a candidate failure would write a false negative and
     # calling it infra would retry it forever, so it stops the line like any other program error.
     return FailureClassification(Disposition.PROGRAM_ERROR, failure_reason=f"unknown_error_class:{error_class}")
+
+
+def _from_step(reported: StepFailure, framework_changed: bool) -> FailureClassification | None:
+    """The verdict the step a round failed at gives by itself; ``None`` leaves it to the logs."""
+    if reported.step is FailedStep.FRAMEWORK_VERSION_UNKNOWN:
+        return _framework_unimportable(reported.detail.strip(), framework_changed)
+    if reported.step not in _FAILED_STEP_VERDICTS:
+        return None
+    failure_class, reason = _FAILED_STEP_VERDICTS[reported.step]
+    if reported.step in _DETAILED_STEPS and reported.detail.strip():
+        reason = f"{reason}: {log_causes.one_line(reported.detail)}"
+    return FailureClassification(Disposition.FAILED, failure_class, reason)
+
+
+def _framework_unimportable(detail: str, changed: bool) -> FailureClassification | None:
+    """The probe found no framework or its import raised: the rebuilt framework broke the import when the test laid one,
+    else the image's own install cannot be imported. Any other probe failure says neither and is left to the logs."""
+    unimportable = framework_unimportable_line(detail)
+    if unimportable is None:
+        return None
+    line = log_causes.one_line(unimportable)
+    if changed:
+        return _candidate(f"{IMPORT_ERROR}: {line}")
+    return _infra(f"{FRAMEWORK_UNIMPORTABLE_REASON}: {line}")
 
 
 def _named_by_logs(text: str, parts: list[str]) -> FailureClassification | None:
@@ -335,8 +410,11 @@ def _hf_cache_refusal(parts: list[str]) -> str | None:
     return refused[-1]
 
 
-def _from_unnamed_logs(text: str) -> FailureClassification:
-    """An unclear failure, with the line of the log that says what happened when there is one."""
+def _from_unnamed_logs(text: str, unrun: str) -> FailureClassification:
+    """An unclear failure, named by what the runner recorded of a round that never ran, else by the line of the log that
+    says what happened when there is one."""
+    if unrun:
+        return _unclear(" ".join(unrun.split())[:LOG_LINE_CHARS])
     for reason, cause in (
         (LM_EVAL_BAD_REQUEST_REASON, log_causes.bad_request(text)),
         (PYTHON_EXCEPTION_REASON, log_causes.python_exception(text)),

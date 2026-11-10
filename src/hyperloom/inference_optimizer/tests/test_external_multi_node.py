@@ -231,7 +231,6 @@ def test_provision_external_writes_state_and_skips_safe(
     assert saved["external"] is True
     assert saved["prefill_pod_ips"] == ["10.0.1.1"]
     assert os.environ["BENCHMARK_BASE_URL"] == "http://frontend:8000"
-    assert os.environ["MAGPIE_RUN_PHASE"] == "client"
 
 
 def test_provision_external_infera_requires_ssh(

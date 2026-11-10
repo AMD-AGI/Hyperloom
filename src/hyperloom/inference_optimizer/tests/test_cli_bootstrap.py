@@ -85,10 +85,18 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
         },
     )
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {"layers": 61})
+    resolved: dict[str, object] = {}
+    base = object()
+
+    def _resolve(args, session_dir, **kwargs):
+        resolved.update(kwargs, session_dir=session_dir)
+        return base
+
+    monkeypatch.setattr(cb, "resolve_base_launch", _resolve)
     monkeypatch.setattr(
         cb,
-        "_resolve_reference_recipe",
-        lambda _args, _framework: ("--block-size 64", {"ENV_A": "1"}, "Kimi-K2.6", {}),
+        "shared_state_fields",
+        lambda frozen: {"base_launch_digest": "d" * 64} if frozen is base else {},
     )
 
     from hyperloom.common import visible_devices
@@ -97,12 +105,15 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
     monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
+    args = _args()
     state = cb._seed_shared_state(
         tmp_path,
-        _args(),
+        args,
         session_id="session-1",
         framework="vllm",
-        platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        settled=cb.SettledLaunch(
+            compute_partition={}, gpu_power_settings={}, base=cb.resolve_session_base(tmp_path, args, framework="vllm")
+        ),
     )
 
     assert state.session_id == "session-1"
@@ -127,7 +138,14 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert state.framework_agent_phase_enabled is False
     assert state.conc_sweep_concs == [1, 4, 8]
     assert state.conc_sweep_total_budget_sec == 120
-    assert state.reference_server_args == "--block-size 64"
+    assert state.base_launch_digest == "d" * 64
+    # The base is resolved for the graded concurrency and every rung of the enabled sweep.
+    assert resolved == {
+        "session_dir": tmp_path,
+        "framework": "vllm",
+        "benchmark_mode": "synthetic",
+        "concurrencies": (64, 1, 4, 8),
+    }
     assert json.loads((tmp_path / "state.json").read_text())["session_id"] == "session-1"
 
 
@@ -138,10 +156,8 @@ def test_seed_shared_state_records_custom_workload_paths(
     monkeypatch.setenv("FRAMEWORK", "custom")
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "/scripts")
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "/fw")
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args, _framework: ("", {}, "", {}))
     from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
@@ -153,11 +169,11 @@ def test_seed_shared_state_records_custom_workload_paths(
         _args(framework="custom"),
         session_id="s-custom",
         framework="custom",
-        platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        settled=cb.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
     assert state.bypass_scripts_dir == "/scripts"
     assert state.framework_repo_path == "/fw"
-    assert state.benchmark_backend == "bypass"
+    assert not hasattr(state, "benchmark_backend")
     # No KB has run yet: the framework on disk comes from the seed alone.
     assert SharedState.load_or_init(tmp_path).framework == "custom"
 
@@ -166,7 +182,6 @@ def _neutralize_seed_io(monkeypatch, *, gpu_count: int = 1, lane_ceiling: int = 
     """Stub the model/recipe reads so a seed can be asserted on one field."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args, _framework: ("", {}, "", {}))
     from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
 
@@ -186,7 +201,7 @@ def test_seed_records_an_explicit_zero_research_lane_capacity(
         _args(research_lane_capacity=0),
         session_id="s-zero",
         framework="vllm",
-        platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        settled=cb.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
 
     assert state.research_lane_capacity == 0
@@ -206,7 +221,7 @@ def test_seed_records_the_launch_verdict_for_the_partition_shape(
         _args(),
         session_id="s-shape",
         framework="vllm",
-        platform=cb.LaunchPlatform(compute_partition=verdict, gpu_power_settings={}),
+        settled=cb.SettledLaunch(compute_partition=verdict, gpu_power_settings={}, base=None),
     )
 
     assert state.compute_partition == verdict
@@ -219,14 +234,13 @@ def test_seed_shared_state_exact_forge_records_the_forge_kernel_optimizer(
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args, _framework: ("", {}, "", {}))
 
     state = cb._seed_shared_state(
         tmp_path,
         _args(),
         session_id="session-forge",
         framework="vllm",
-        platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        settled=cb.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
 
     assert state.kernel_optimizer == "forge"
@@ -251,11 +265,6 @@ def test_seed_shared_state_loads_model_arch_from_session_dir(
         return {"source": "session-local"}
 
     monkeypatch.setattr(cb, "_load_model_arch", _load_arch)
-    monkeypatch.setattr(
-        cb,
-        "_resolve_reference_recipe",
-        lambda _args, _framework: ("", {}, "", {}),
-    )
 
     from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
@@ -268,7 +277,7 @@ def test_seed_shared_state_loads_model_arch_from_session_dir(
         _args(model="/models/Model-A"),
         session_id="session-arch",
         framework="vllm",
-        platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        settled=cb.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
 
     assert captured["root"] == session_dir
@@ -284,11 +293,6 @@ def test_seed_shared_state_preserves_quantized_model_identity(
     """
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(
-        cb,
-        "_resolve_reference_recipe",
-        lambda _args, _framework: ("", {}, "", {}),
-    )
 
     from hyperloom.common import visible_devices
     from hyperloom.orchestrator.policy import gate as policy
@@ -307,7 +311,7 @@ def test_seed_shared_state_preserves_quantized_model_identity(
         args,
         session_id="s-q",
         framework="vllm",
-        platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        settled=cb.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
 
     assert state.model_name == "google-gemma-4-26B-A4B-it-quantized"
@@ -326,7 +330,7 @@ def test_seed_shared_state_falls_back_to_path_basename(
         _args(model="/models/Qwen3-32B"),
         session_id="s-plain",
         framework="vllm",
-        platform=cb.LaunchPlatform(compute_partition={}, gpu_power_settings={}),
+        settled=cb.SettledLaunch(compute_partition={}, gpu_power_settings={}, base=None),
     )
     assert state.model_name == "Qwen3-32B"
 
@@ -423,46 +427,6 @@ def test_read_failure_summary_and_final_summary_output(tmp_path: Path, capsys) -
     assert "root_cause" in out
     assert "bad flag" in out
     assert "stack changed since validation" in out
-
-    cb._print_final_summary(
-        SharedState(session_id="s2", model_name="m2", baseline_tput=0.0),
-        "done",
-        tmp_path,
-    )
-    assert "never validated" in capsys.readouterr().out
-
-
-def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, monkeypatch, capsys) -> None:
-    import pytest
-    from hyperloom.inference_optimizer import reference_script
-
-    assert cb._resolve_reference_recipe(_args(reference_script=""), "vllm") == ("", {}, "", {})
-
-    monkeypatch.setattr(
-        reference_script,
-        "parse_reference_script",
-        lambda source, framework: SimpleNamespace(
-            server_args="--tp 8",
-            envs={"A": "1"},
-            model="kimi",
-        ),
-    )
-    assert cb._resolve_reference_recipe(_args(reference_script="usable.sh"), "vllm") == (
-        "--tp 8",
-        {"A": "1"},
-        "kimi",
-        {},
-    )
-
-    # Unreadable path raises SystemExit(2) instead of falling back to discovery.
-    monkeypatch.setattr(
-        reference_script,
-        "parse_reference_script",
-        lambda source, framework: (_ for _ in ()).throw(OSError("not found")),
-    )
-    with pytest.raises(SystemExit) as exc_info:
-        cb._resolve_reference_recipe(_args(reference_script="empty.sh"), "vllm")
-    assert exc_info.value.code == 2
 
     cb._print_final_summary(
         SharedState(session_id="s2", model_name="m2", baseline_tput=0.0),
@@ -661,37 +625,3 @@ def test_reconcile_crash_count_updates_state_and_final_json(tmp_path: Path) -> N
     patched = json.loads((reports / "final.json").read_text(encoding="utf-8"))
     assert patched["crash_count"] == 5
     assert patched["other"] is True
-
-
-def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
-    import pytest
-    from hyperloom.inference_optimizer import reference_script
-
-    args = _args(model="/models/kimi", reference_script="")
-    assert cb._resolve_reference_recipe(args, "vllm") == ("", {}, "", {})
-
-    monkeypatch.setattr(
-        reference_script,
-        "parse_reference_script",
-        lambda source, framework: SimpleNamespace(
-            server_args="--tp 8",
-            envs={"A": "1"},
-            model="kimi",
-        ),
-    )
-    assert cb._resolve_reference_recipe(_args(reference_script="usable.sh"), "vllm") == (
-        "--tp 8",
-        {"A": "1"},
-        "kimi",
-        {},
-    )
-
-    # Unreadable path → SystemExit(2), no discovery fallback.
-    monkeypatch.setattr(
-        reference_script,
-        "parse_reference_script",
-        lambda source, framework: (_ for _ in ()).throw(OSError("not found")),
-    )
-    with pytest.raises(SystemExit) as exc_info:
-        cb._resolve_reference_recipe(_args(reference_script="empty.sh"), "vllm")
-    assert exc_info.value.code == 2

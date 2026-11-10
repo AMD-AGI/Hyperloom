@@ -16,7 +16,7 @@ list), ``no_manifest`` and ``hang`` (never finishes); ``fake_ready: true`` stamp
 ``fake_throughput`` and ``fake_completed`` set the report. ``fake_accuracy`` adds an accuracy round to the rounds file
 with that score (``none``: a round that holds no score), and ``fake_accuracy_returncode`` gives that round a return code
 under the outcome's success, which the runner never writes. ``fake_trace: true`` adds the torch-profiler trace a profile
-test leaves (``profile/torch_trace/...``), ``capture_only`` only a CUDA-graph capture sidecar; ``fake_report: false`` leaves out the benchmark report, as a profiled round
+test leaves (``profile/torch_trace/...``), ``capture_only`` only a CUDA-graph capture sidecar; ``fake_report: false`` leaves out the round's report, as a profiled round
 that printed no readable measurement. ``fake_repro: true`` runs the repro case the sheet carries for real (the shipped
 attachment placement and ``run_case``) against no server, and lists the verdict and log it leaves in the manifest.
 ``fake_attached_env: [NAME, ...]`` places the sheet's attachments as the runner does and lists, in
@@ -38,7 +38,7 @@ task families (``niah``, ``tracking``, ``words``) and serves ``served`` tokens, 
 below the round's directory) with those lines.
 ``fake_eval_round: true`` lays the rounds out as a graded test with a warmup leaves them (one evaluation, in a round of
 its own after the measured bench): a warmup round, the measured round and the accuracy round, each on a directory of its
-own, and the lm-eval results file of ``fake_accuracy`` below the accuracy round's.
+own, and the accuracy round's report holds the score of ``fake_accuracy``.
 ``fake_log_line: <text>`` writes a server log whose last line that is, so the runner's progress reports it as the last
 line of the live output.
 ``fake_jit: true`` stages a contribution to the shared compiled-code cache (one aiter module, below ``/out/jit-cache``) and
@@ -64,18 +64,19 @@ from hyperloom.measure.attachments import place_attachments, substitute
 from hyperloom.measure.repro import REPRO_DIR, find_case, run_case
 from hyperloom.measure.jit_kinds import AITER_JIT
 from hyperloom.measure.jit.store import Snapshot, StoredFile
-from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
+from hyperloom.measure.manifest import encode_manifest, result_schema_for
 from hyperloom.measure.runner.service import Progress
 from hyperloom.measure.long_context.tests.support import outputs_files as long_context_outputs
 from hyperloom.measure.short_prompts.tests.support import outputs_files
-from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
+from hyperloom.measure.tests.run_dirs import run_dir_report
+from hyperloom.measure.spec import SPEC_SCHEMA_V1, MeasurementSpec, fingerprint, spec_sha256
 
-REPORT_PATH = "benchmark_fake_20000101_000000/benchmark_report.json"
+REPORT_PATH = "suite_run_0/report.json"
 TRACE_PATH = "profile/torch_trace/rank0.pt.trace.json.gz"
 #: What ``fake_trace: capture_only`` leaves instead: the CUDA-graph capture sidecar a profile whose profiler never started
 #: holds alone (named as on a speculative-decoding head).
 CAPTURE_TRACE_PATH = "profile/torch_trace/graph_capture_profile/EAGLEDraftExtendCudaGraphRunner_bs_8_rank0.json.gz"
-EXPORT_PATH = "benchmark_fake_20000101_000000/aiperf_artifacts/profile_export.jsonl"
+EXPORT_PATH = "suite_run_0/aiperf_artifacts/profile_export.jsonl"
 #: What a runner of the removed greedy decode pass left in a bundle: a header line, then one line per prompt.
 LEGACY_DECODE_PATH = "decode/outputs.jsonl"
 LEGACY_DECODE_IDENTITY = "sha256:0123456789abcdef|temperature=0|top_k=1"
@@ -96,7 +97,7 @@ def _visible_cards() -> list[int]:
     return [int(i) for i in os.environ.get("ROCR_VISIBLE_DEVICES", "").split(",") if i.strip().isdigit()]
 
 
-def _runner_facts(key: Any, sandbox_id: str, mode: str) -> dict[str, Any]:
+def _runner_facts(key: Any, sandbox_id: str, mode: str, spec: MeasurementSpec) -> dict[str, Any]:
     public_pem = signing.public_key_pem(key)
     return {
         "sandbox_id": "sbx-other" if mode == "other_sandbox" else sandbox_id,
@@ -107,7 +108,11 @@ def _runner_facts(key: Any, sandbox_id: str, mode: str) -> dict[str, Any]:
         "power_cap_w": 500,
         "partition_mode": "SPX/NPS1",
         "hyperloom_version": _version(),
-        "magpie_commit": "e" * 40,
+        **(
+            {"magpie_commit": spec.tools.magpie}
+            if spec.schema == SPEC_SCHEMA_V1
+            else {"inference_suite_staging": "e" * 64}
+        ),
         "inferencex_commit": "f" * 40,
         "gpu_ids": _visible_cards(),
         "ecc_delta": {"correctable": 0, "uncorrectable": 0},
@@ -125,17 +130,14 @@ def _version() -> str:
 
 
 def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, bytes]:
-    report = {
-        "success": mode != "fail_test",
-        "throughput": {
-            "output_throughput": float(config.get("fake_throughput", 5000.0)),
-            "completed_requests": int(config.get("fake_completed", 64)),
-            "num_prompts": int(config.get("fake_requested", 64)),
-        },
+    fixed = {
+        "output_throughput": float(config.get("fake_throughput", 5000.0)),
+        "completed_requests": int(config.get("fake_completed", 64)),
+        "requested_requests": int(config.get("fake_requested", 64)),
     }
     files = {"server.log": b"server up\nserver down\n"}
     if config.get("fake_report", True):
-        files[REPORT_PATH] = json.dumps(report).encode()
+        files[REPORT_PATH] = run_dir_report(fixed)
     if config.get("fake_trace") == "capture_only":
         files[CAPTURE_TRACE_PATH] = b"fake capture trace bytes"
     elif config.get("fake_trace"):
@@ -143,7 +145,7 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
     if "fake_export" in config:
         files[EXPORT_PATH] = "".join(f"{line}\n" for line in config["fake_export"]).encode()
     if config.get("fake_warmup") and REPORT_PATH in files:
-        files["warmup_round/benchmark_fake_20000101_000000/benchmark_report.json"] = files[REPORT_PATH]
+        files[f"warmup_round/{REPORT_PATH}"] = files[REPORT_PATH]
     held = bool(config.get("fake_eval_round")) and REPORT_PATH in files
     if held:
         report_bytes = files.pop(REPORT_PATH)
@@ -175,11 +177,8 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         }
         if held:
             accuracy_round["dir"] = f"variant_00_eval/{bench}"
-            if score is not None:
-                results = {"results": {"gsm8k": {"exact_match,flexible-extract": float(score)}}}
-                files[f"{accuracy_round['dir']}/lm_eval/results_2000-01-01T10-00-00.json"] = json.dumps(
-                    results
-                ).encode()
+            scores = None if score is None else {"exact_match,flexible-extract": float(score)}
+            files[f"{accuracy_round['dir']}/report.json"] = run_dir_report(fixed, scores, eval_code=0)
         rounds.append(accuracy_round)
     if "fake_warnings" in config:
         rounds[0]["nonfatal_warnings"] = list(config["fake_warnings"])
@@ -277,12 +276,12 @@ def _manifest(
 ) -> dict[str, Any]:
     failing = mode in ("fail_test", "fail_unknown", "timed_out")
     document = {
-        "schema": RESULT_SCHEMA,
+        "schema": result_schema_for(spec.schema),
         "request_id": "other-request" if mode == "other_request" else spec.request_id,
         "spec_fingerprint": ("0" * 16) if mode == "other_spec" else fingerprint(spec, hyperloom_version=_version()),
         "spec_sha256": spec_sha256(raw),
         "surface_sha256": None,
-        "runner": _runner_facts(key, os.environ["E2B_SANDBOX_ID"], mode),
+        "runner": _runner_facts(key, os.environ["E2B_SANDBOX_ID"], mode, spec),
         "outcome": {
             "returncode": 1 if failing else 0,
             "timed_out": mode == "timed_out",

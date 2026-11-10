@@ -11,7 +11,7 @@ hermetic: profile / trace_analyze boundaries are stubbed, filesystem uses
 ``tmp_path`` only, no GPU / subprocess / network.
 """
 
-import os
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,6 +28,8 @@ from hyperloom.orchestrator.actions.executors.roofline import (
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from inference_suite.contracts import FailedStep, RunStatus
+from inference_suite.tests.test_report_contract import _report
 from hyperloom.orchestrator.state.task_registry import Task
 
 
@@ -258,49 +260,38 @@ def test_preflight_probe_is_clean_on_a_fresh_session(tmp_path):
     assert probe["orphans_reaped_count"] == 0
 
 
-def _unused_pid() -> int:
-    """A pid no live process holds, so the probe's answer is not a coincidence of the test host."""
-    for candidate in range(4_000_000, 4_100_000):
-        try:
-            os.kill(candidate, 0)
-        except ProcessLookupError:
-            return candidate
-        except OSError:
-            continue
-    raise AssertionError("no unused pid available on this host")
-
-
-def test_server_liveness_probe_flags_a_pidfile_whose_process_is_gone(tmp_path):
-    """Teardown unlinks the pidfile, so a pidfile naming a dead pid means the engine died instead."""
-    dead = _unused_pid()
-    run_dir = tmp_path / "runs" / "roofline" / "t-rf-units"
+def _write_round_report(run_dir: Path, step: FailedStep | None) -> None:
     run_dir.mkdir(parents=True)
-    (run_dir / "sglang_30000.pid").write_text(f"{dead} {dead}\n", encoding="utf-8")
-    # Another task's leftover must not be attributed to this one.
-    other = tmp_path / "runs" / "roofline" / "t-other"
-    other.mkdir(parents=True)
-    (other / "sglang_30001.pid").write_text(f"{dead + 1} {dead + 1}\n", encoding="utf-8")
+    status = RunStatus.COMPLETED if step is None else RunStatus.FAILED
+    report = _report(run_status=status, failed_step=step)
+    (run_dir / "report.json").write_text(json.dumps(report.to_document()), encoding="utf-8")
+
+
+def test_server_liveness_probe_reads_the_server_fate_from_this_task_reports(tmp_path):
+    task_runs = tmp_path / "runs" / "roofline" / "t-rf-units"
+    _write_round_report(task_runs / "r0", FailedStep.SERVER_DIED)
+    _write_round_report(task_runs / "r1", FailedStep.SERVER_EXITED_BEFORE_READY)
+    _write_round_report(task_runs / "r2", FailedStep.TEARDOWN_INCOMPLETE)
+    _write_round_report(task_runs / "r3", None)
+    # Another task's round must not be attributed to this one.
+    _write_round_report(tmp_path / "runs" / "roofline" / "t-other" / "r0", FailedStep.SERVER_DIED)
 
     probe = _server_liveness_probe(tmp_path, "t-rf-units")
 
-    assert probe["pidfiles"] == 1
-    assert probe["dead_with_pidfile"] == 1
-    assert probe["alive"] == 0
-    assert probe["entries"][0]["pid"] == dead
-    assert probe["entries"][0]["is_server"] is False
+    assert probe["reports"] == 4
+    assert probe["server_died"] == 2
+    assert probe["server_outlived_teardown"] == 1
+    assert [entry["failed_step"] for entry in probe["entries"]] == [
+        "server_died",
+        "server_exited_before_ready",
+        "teardown_incomplete",
+    ]
 
 
-def test_server_liveness_probe_sees_a_live_process_as_not_a_server(tmp_path):
-    """A live pid that is not one of our engines is pid reuse, and must not read as a surviving server."""
-    run_dir = tmp_path / "runs" / "roofline" / "t-rf-units"
-    run_dir.mkdir(parents=True)
-    (run_dir / "sglang_30000.pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+def test_server_liveness_probe_counts_reports_whose_server_ended_cleanly(tmp_path):
+    _write_round_report(tmp_path / "runs" / "roofline" / "t-rf-units" / "r0", None)
 
-    probe = _server_liveness_probe(tmp_path, "t-rf-units")
-
-    assert probe["alive"] == 1
-    assert probe["dead_with_pidfile"] == 0
-    assert probe["entries"][0]["is_server"] is False
+    assert _server_liveness_probe(tmp_path, "t-rf-units") == {"reports": 1}
 
 
 def test_server_liveness_probe_is_empty_without_a_runs_dir(tmp_path):
@@ -340,7 +331,7 @@ async def test_executor_records_preflight_and_liveness_on_every_attempt(tmp_path
     action = _recorded_action(tmp_path)
     assert action["preflight"]["stale_trace_count"] == 1
     assert action["preflight"]["disk"]["free_bytes"] > 0
-    assert action["profile"]["runs"][0]["server_liveness"] == {"pidfiles": 0}
+    assert action["profile"]["runs"][0]["server_liveness"] == {"reports": 0}
 
 
 class _DrainingProfiler:

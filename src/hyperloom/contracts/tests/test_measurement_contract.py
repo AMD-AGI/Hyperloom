@@ -7,7 +7,15 @@ import json
 from dataclasses import replace
 
 import pytest
+from inference_suite.contracts import FIXED_METRIC_KEYS
 
+from hyperloom.common.perf_metric import (
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
+    GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    GRADED_OUTPUT,
+)
 from hyperloom.contracts.measurement import (
     AccuracyValue,
     AttachmentRef,
@@ -764,3 +772,25 @@ def test_a_reused_build_is_charged_no_seconds_and_no_build_is_charged_negative_s
         BuildCharge.from_document({"key": "k", "component": "c", "build_seconds": 0.0, "payment": "free"})
     with pytest.raises(MeasurementError, match="builds must be a tuple of BuildCharge"):
         _result(builds=[PAID])
+
+
+def test_round_metrics_are_named_by_the_report_fixed_key_table() -> None:
+    graded = {GRADED_OUTPUT, GRADED_INTVTY, GRADED_INTVTY_P50, GRADED_DURATION, GRADED_ERROR_RATE}
+    assert graded <= set(FIXED_METRIC_KEYS)
+    metrics = dict.fromkeys(FIXED_METRIC_KEYS, 1.0)
+    assert _roundtrip(RoundValue("measure", 8, metrics)).metrics == metrics
+
+
+def test_a_round_recorded_from_a_magpie_benchmark_report_still_loads_with_its_metric_names() -> None:
+    """Records made before rounds read inference_suite's report.json keep Magpie's metric names; they are read as is."""
+    recorded = {
+        "phase": "measure",
+        "concurrency": 64,
+        "metrics": {"output_throughput": 5000.0, "median_ttft_ms": 120.5, "p99_itl_ms": 9.25},
+        "completed_requests": 640,
+        "failed_requests": 0,
+    }
+
+    round_value = RoundValue.from_document(recorded)
+
+    assert round_value.to_document() == recorded

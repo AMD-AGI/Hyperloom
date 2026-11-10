@@ -520,7 +520,7 @@ runtime_env_write_kernel_agent_credentials() {
 # few. test_dotenv_allow_list.py holds the two equal and runtime_env_dotenv_lent to
 # is_lent_not_private_dotenv_assignment.
 RUNTIME_ENV_DOTENV_NOT_PRIVATE_LENT="FRAMEWORK=atom,custom,sglang,vllm,xdit HF_DATASETS_OFFLINE=0,1 HF_HUB_OFFLINE=0,1 \
-HYPERLOOM_BENCHMARK_BACKEND=bypass,magpie HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env \
+HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env \
 HYPERLOOM_FRAMEWORK_ENV=isolated,shared HYPERLOOM_LLM_MODE=anthropic,deepseek,openai HYPERLOOM_RUN_MODE=baremetal,docker"
 
 # Status 0 when a .env another account can write lends the variable named $1 (any case, as preflight compares it) with

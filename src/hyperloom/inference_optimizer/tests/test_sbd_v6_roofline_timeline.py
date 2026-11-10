@@ -161,14 +161,14 @@ def test_a_run_that_succeeded_still_reports_its_engine_dying(tmp_path: Path) -> 
             status="succeeded",
             disable_cuda_graph=False,
             profile_result=_profile_result(),
-            server_liveness={"pidfiles": 1, "alive": 0, "dead_with_pidfile": 1},
+            server_liveness={"reports": 1, "server_died": 1, "server_outlived_teardown": 0},
         ),
     )
     recorder.finish_failed(phase="trace_analyze", message="stopped")
 
     run = _actions(tmp_path)[0]["profile"]["runs"][0]
     assert run["status"] == "succeeded"
-    assert run["server_liveness"]["dead_with_pidfile"] == 1
+    assert run["server_liveness"]["server_died"] == 1
 
 
 def test_shape_capture_dispatch_does_not_claim_a_measured_arm(tmp_path: Path) -> None:

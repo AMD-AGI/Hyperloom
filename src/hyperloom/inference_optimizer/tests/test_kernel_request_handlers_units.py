@@ -170,10 +170,13 @@ class TestForgeGemmHelperCoverage:
 
         assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp4", "fp4")
 
-    def test_resolve_forge_precision_per_token_from_reference_env(self):
+    def test_resolve_forge_precision_per_token_from_the_base_env(self, tmp_path, monkeypatch):
+        from hyperloom.orchestrator.state import base_launch
+
+        base = base_launch.ServerBase(env={"SGLANG_USE_AITER_FP8_PER_TOKEN": "true"})
+        monkeypatch.setattr(base_launch, "session_server_base", lambda: base)
         state = SharedState(precision="bf16")
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
-        state.reference_envs = {"SGLANG_USE_AITER_FP8_PER_TOKEN": "true"}
 
         assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp8", "per_token")
 
@@ -2034,8 +2037,13 @@ class TestLoadMaterializedWorkloadMetadata:
     def test_empty_when_path_missing(self, tmp_path):
         assert ta._load_materialized_workload_metadata(str(tmp_path / "no.yaml")) == {}
 
+    def test_empty_when_the_config_has_no_benchmark_block(self, tmp_path):
+        cfg = tmp_path / "other.yaml"
+        cfg.write_text("other: {}\n")
+        assert ta._load_materialized_workload_metadata(str(cfg)) == {}
+
     def test_parses_sglang_metadata(self, tmp_path):
-        cfg = tmp_path / "magpie.yaml"
+        cfg = tmp_path / "point.yaml"
         cfg.write_text(
             "benchmark:\n"
             "  framework: sglang\n"
@@ -2050,7 +2058,7 @@ class TestLoadMaterializedWorkloadMetadata:
         )
         out = ta._load_materialized_workload_metadata(str(cfg))
         runtime = out["runtime_args"]
-        assert runtime["framework"] == "sglang"
+        assert (runtime["framework"], runtime["model"], runtime["precision"]) == ("sglang", "/weights/m", "bf16")
         assert runtime["server_args"] == "--foo 1"
         assert runtime["server_args_argv"] == ["--foo", "1"]
         workload = runtime["workload"]
@@ -2074,7 +2082,7 @@ class TestLoadMaterializedWorkloadMetadata:
         expected_args,
     ):
         """The handler reads the per-framework ``EXTRA_<FRAMEWORK>_ARGS`` slot."""
-        cfg = tmp_path / f"magpie_{framework}.yaml"
+        cfg = tmp_path / f"point_{framework}.yaml"
         cfg.write_text(
             "benchmark:\n"
             f"  framework: {framework}\n"
@@ -2096,7 +2104,7 @@ class TestLoadMaterializedWorkloadMetadata:
 
     def test_atom_server_args_ignore_stray_sglang_env(self, tmp_path):
         """When an atom YAML carries both EXTRA_ATOM_ARGS and a stray EXTRA_SGLANG_ARGS, the atom slot wins."""
-        cfg = tmp_path / "magpie_atom_mixed.yaml"
+        cfg = tmp_path / "point_atom_mixed.yaml"
         cfg.write_text(
             "benchmark:\n"
             "  framework: atom\n"
@@ -2295,7 +2303,6 @@ class TestRunGemmTuningHandler:
 
         from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
 
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
         monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
         base = tmp_path / "base.yaml"
         base.write_text(yaml.safe_dump({"benchmark": {"framework": "vllm", "model": "/models/m", "envs": {}}}))

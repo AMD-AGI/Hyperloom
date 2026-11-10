@@ -176,7 +176,7 @@ def test_atom_first_launch_runs_in_selected_context(tmp_path: Path, mode: str) -
     runtime.mkdir(parents=True)
     (runtime / "kernel-agent.env.sh").write_text(
         "export FRAMEWORK=vllm\nexport KERNEL_OPT_BACKEND_ORDER=stale\nexport PYTHON=/stale/python\n"
-        "export USER_DATA_PATH=/stale/data\nexport MAGPIE_PATH=/installed/Magpie\n",
+        "export USER_DATA_PATH=/stale/data\nexport INFERENCEX_PATH=/installed/InferenceX\n",
         encoding="utf-8",
     )
     model = workspace / "model files"
@@ -190,7 +190,7 @@ def test_atom_first_launch_runs_in_selected_context(tmp_path: Path, mode: str) -
         "KERNEL_OPT_BACKEND_ORDER",
         "PYTHON",
         "USER_DATA_PATH",
-        "MAGPIE_PATH",
+        "INFERENCEX_PATH",
         "ATOM_CONTEXT",
         "CLAW_SESSION_ID",
         "HYPERLOOM_RUN_MODE",

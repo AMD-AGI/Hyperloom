@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.measure import log_causes
-from hyperloom.measure.failures import FailureClass, classify_test_failure
+from hyperloom.measure.failures import FailureClass, FailureEvidence, classify_test_failure
 from hyperloom.measure.tests import eval_refusal_logs
 
 ARGPARSE_LOG = (
@@ -111,7 +111,7 @@ PLAIN_LOG = "INFO server booted\nINFO request finished in 3.1s\nsegfault somewhe
 
 
 def _classify(*logs: str, returncode: int = 1):
-    verdict = classify_test_failure(returncode=returncode, logs=list(logs))
+    verdict = classify_test_failure(returncode=returncode, evidence=FailureEvidence(logs=logs))
     return verdict.failure_class, verdict.failure_reason
 
 
@@ -288,12 +288,6 @@ def test_a_cause_line_is_one_bounded_line() -> None:
 
     assert "\n" not in reason and "\r" not in reason
     assert len(reason) <= len("serve_flag: ") + log_causes.CAUSE_CHARS
-
-
-def test_a_stalled_server_keeps_its_reason_when_its_log_holds_an_exception() -> None:
-    verdict = classify_test_failure(returncode=-911, logs=[PYTHON_EXCEPTION_LOG])
-
-    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.UNCLEAR, "server_stalled")
 
 
 @pytest.mark.parametrize(
