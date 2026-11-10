@@ -19,12 +19,16 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from hyperloom_common.aiter_jit_cache import (
     invalidate_jit_cache,
     resolve_jit_build_dir,
     resolve_package_root,
     resolve_serving_context,
 )
+from hyperloom.inference_optimizer import framework_registry
+from hyperloom.inference_optimizer.session.session_paths import jit_cache_dir
 
 log = logging.getLogger(__name__)
 
@@ -1016,6 +1020,30 @@ def result_is_aiter_jit_registry_mismatch(result: dict[str, Any] | None) -> bool
     return is_aiter_jit_registry_mismatch(str(result.get("error") or ""))
 
 
+def benchmark_framework(config_path: Path) -> str:
+    """Read the framework a rendered Magpie config benchmarks, or "" when it names none."""
+    cfg = yaml.safe_load(Path(config_path).read_text(encoding=_UTF8)) or {}
+    return str((cfg.get("benchmark") or {}).get("framework") or "")
+
+
+def apply_session_jit_cache(env: dict[str, str], *, framework: str, session_dir: Path) -> None:
+    """Point ``framework``'s JIT cache env names at session-scoped directories, in place.
+
+    Each benchmark round then starts on the kernels earlier rounds of the session compiled, so rounds stay
+    comparable across container restarts; an operator who set a name keeps their own location.
+    """
+    names = framework_registry.jit_cache_envs(framework)
+    if not names:
+        return
+    root = jit_cache_dir(session_dir)
+    for name in names:
+        if env.get(name):
+            continue
+        path = root / name.lower()
+        path.mkdir(parents=True, exist_ok=True)
+        env[name] = str(path)
+
+
 __all__ = [
     "AITER_CPP_BUILD_PROBE_PATHS",
     "AITER_ENV_TO_SERVING_MODULES",
@@ -1030,6 +1058,8 @@ __all__ = [
     "COMPILED_REGISTRY_MARKER",
     "NON_JIT_SO_LIBTYPES",
     "aiter_build_targets",
+    "apply_session_jit_cache",
+    "benchmark_framework",
     "card_target",
     "clean_stale_aiter_locks",
     "csv_jit_kernel_rows",

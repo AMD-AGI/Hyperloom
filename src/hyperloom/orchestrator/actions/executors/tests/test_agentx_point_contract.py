@@ -263,7 +263,7 @@ def test_profile_uses_same_workload(source, tmp_path, monkeypatch):
     assert torch_profiler["enabled"] is True
     assert torch_profiler["num_profiles"] == 1
     assert torch_profiler["num_steps"] == 5
-    assert torch_profiler["start_seconds"] == 300
+    assert torch_profiler["start_seconds"] == 900
     assert torch_profiler["interval_seconds"] == 900
     assert "PROFILE_EXTRA_BODY" not in bench["envs"]
     assert bench["model"] == "Qwen/Qwen3-0.6B"
@@ -274,6 +274,20 @@ def test_profile_uses_same_workload(source, tmp_path, monkeypatch):
         "num_steps": 5,
         "num_profiles": 1,
     }
+
+
+def test_a_profile_with_no_window_of_its_own_captures_the_steady_state(source, tmp_path, monkeypatch):
+    """The replay's opening prefills run at bs=1, so a capture with no window of its own starts past them."""
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    config = yaml.safe_load(source.read_text())
+    config["benchmark"]["profiler"] = {"torch_profiler": {"enabled": False}}
+    source.write_text(yaml.safe_dump(config))
+    rendered = materialize_benchmark_config(source, tmp_path / "profile")
+
+    enable_profile(rendered)
+
+    torch_profiler = load_benchmark(rendered)["profiler"]["torch_profiler"]
+    assert (torch_profiler["start_seconds"], torch_profiler["num_steps"]) == (900, 256)
 
 
 # vLLM server args of CI workloads (capture-size lists shortened): Hyperloom writes a JSON value as one unquoted token.
