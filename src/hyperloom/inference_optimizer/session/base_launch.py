@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.session_files import shared_options
 from hyperloom_common.io import atomic_write_json
 from inference_suite.contracts import BaseLaunch
 
@@ -24,9 +25,11 @@ def base_launch_path(session_dir: Path) -> Path:
 
 
 def write_base_launch(session_dir: Path, base: BaseLaunch) -> Path:
-    """Freeze ``base`` as the session's base launch; returns the file written."""
+    """Freeze ``base`` as the session's base launch, ``664`` below shared storage unless it holds a credential;
+    returns the file written."""
     path = base_launch_path(session_dir)
-    atomic_write_json(path, base.to_document())
+    document = base.to_document()
+    atomic_write_json(path, document, options=shared_options(document))  # a later leg may be another account
     return path
 
 

@@ -33,6 +33,7 @@ from hyperloom.common.outside_facts import (
     ENV_RUN_EVAL,
     ENV_TP,
 )
+from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 import json
@@ -481,6 +482,34 @@ def redact_secret_env_values(env: Mapping[str, object] | None) -> dict[str, obje
         else (redact_secret_values(value) if isinstance(value, str) and value else value)
         for key, value in (env or {}).items()
     }
+
+
+def _is_env_field(key: object) -> bool:
+    """Whether a document field named ``key`` holds environment variables (``env``, ``extra_envs``, ``launch_env``)."""
+    name = str(key).lower()
+    return name in ("environment", "environ") or name.rstrip("s").endswith("env")
+
+
+def holds_credentials(value: object, *, in_env: bool = False) -> bool:
+    """Whether a JSON-shaped ``value`` carries a credential: a string :func:`redact_secret_values` would change, with a
+    URL that has userinfo (``https://user:token@host``) or with a ``--flag`` named like one, or a value under a
+    credential-shaped name in an environment mapping (a field named ``env``, ``extra_envs``, ...: any other key is a
+    field of the document, and ``authored`` is not a secret)."""
+    if isinstance(value, str):
+        flags = (token.partition("=")[0] for token in value.split() if token.startswith("-"))
+        return (
+            redact_secret_values(value) != value
+            or CREDENTIALED_URL_RE.search(value) is not None
+            or any(is_credential_name(flag) for flag in flags)
+        )
+    if isinstance(value, Mapping):
+        return any(
+            (in_env and is_credential_name(key) and bool(item)) or holds_credentials(item, in_env=_is_env_field(key))
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(holds_credentials(item, in_env=in_env) for item in value)
+    return False
 
 
 def is_allowed_external_env_key(key: object) -> bool:
@@ -943,6 +972,7 @@ __all__ = [
     "credential_arg_indices",
     "env_file_list_elements",
     "filter_untrusted_env_mapping",
+    "holds_credentials",
     "is_allowed_dotenv_key",
     "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",
