@@ -381,7 +381,8 @@ def _read_record(path: Path, document: Mapping[str, Any]) -> ResolvedLaunch:
 
 def _flag_word(word: str) -> str:
     """``word`` as Arbor's server_flags carry it, which Arbor launches through a shell: quoted for the shell, a JSON
-    value compacted first, and of a ``--name=value`` word only its value, so that it still reads as a flag."""
+    value compacted first, and of a ``--name=value`` word only its value, so that it still reads as a flag, unless the
+    value holds whitespace, which Arbor's non-POSIX split would break inside a quoted value."""
 
     flag, value = _flag_and_value(word)
     if value[:1] in "{[":
@@ -389,25 +390,45 @@ def _flag_word(word: str) -> str:
             value = json.dumps(json.loads(value), separators=(",", ":"))
         except ValueError:
             pass
+    if any(char.isspace() for char in value):
+        return shlex.quote(flag + value)
     return flag + shlex.quote(value)
 
 
 def _shell_line(args: str) -> str:
-    """Server arguments as MB composes them, a JSON value unquoted, as the shell line Arbor's server_flags are: each
-    word as Arbor splits it, one pair of outer quotes taken off it or off its value, quoted by :func:`_flag_word`."""
+    """Server arguments as MB composes them as the shell line Arbor's server_flags are: each of
+    :func:`_shell_words` quoted by :func:`_flag_word`."""
 
-    words = []
-    for word in shlex.split(reserialize_json_blobs(args), posix=False):
-        flag, value = _flag_and_value(word)
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
-        words.append(_flag_word(flag + value))
-    return " ".join(words)
+    return " ".join(_flag_word(word) for word in _shell_words(args))
+
+
+def _shell_words(args: str) -> list[str]:
+    """The words a shell gives ``args``, in which a JSON value may also stand unquoted, as MB composes one; raise
+    ``ValueError`` when a quote is left open."""
+
+    text, decoder = reserialize_json_blobs(args), json.JSONDecoder()
+    parts: list[str] = []
+    blobs: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] in "{[":
+            try:
+                end = decoder.raw_decode(text, i)[1]
+            except ValueError:
+                pass
+            else:
+                parts.append(f"\0{len(blobs)}\0")
+                blobs.append(text[i:end])
+                i = end
+                continue
+        parts.append(text[i])
+        i += 1
+    return [re.sub(r"\0(\d+)\0", lambda found: blobs[int(found[1])], word) for word in shlex.split("".join(parts))]
 
 
 def _splits_as_shell(args: str) -> bool:
     try:
-        shlex.split(args)
+        _shell_words(args)
     except ValueError:
         return False
     return True
