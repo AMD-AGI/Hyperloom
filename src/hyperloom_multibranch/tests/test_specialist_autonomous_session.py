@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import Attempt, Purpose, TestKind, TestRequest
+from hyperloom.contracts.measurement import Attempt, Purpose, TestKind, TestRequest, Validity
 from hyperloom.contracts.recipe import (
     ConfigDelta,
     KernelKind,
@@ -32,7 +32,7 @@ from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, T
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.blackboard.tests.factories import result
-from hyperloom_multibranch.specialist import autonomous_session, worktree as worktree_module
+from hyperloom_multibranch.specialist import autonomous_session, keep_requeue, worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_onboarding import OnboardingSetup
 from hyperloom_multibranch.specialist.agent_spec import AgentSpec
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
@@ -1695,3 +1695,127 @@ async def test_a_multi_part_snapshot_of_the_start_s_tables_as_they_were_given_im
 
     assert (request.delta.add_kernels, request.delta.remove_kernels) == ((), ())
     assert request.delta.config == ConfigDelta()
+
+
+INFRA_REASON = "4 attempts failed for infrastructure reasons: foreign_process_on_card: pid 4242 on card 3"
+
+
+@pytest.fixture
+def quick_requeue(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 0.3)
+
+
+def _failed(request_id: str, validity: Validity, reason: str = INFRA_REASON):
+    return result(request_id, validity=validity, failure_reason=reason)
+
+
+async def test_a_keep_whose_import_measured_nothing_for_infrastructure_goes_once_more_and_is_measured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The agent exits while the requeue still waits: its run finishes only once the requeued import settled.
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 2.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256,), tail=0.3))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the requeued import")
+    await rig.toolbox_blackboard.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    first, again = rig.toolbox.requests
+    assert rig.patch(again) == rig.patch(first) and again.delta.config == first.delta.config, "the same keep again"
+    notices = await rig.notices()
+    assert any(f"keep 1's import r1 measured nothing ({INFRA_REASON}); it goes once more" in n for n in notices)
+    assert notices[-1] == f"{NOTICE} the agent finished its run", "the run waited for the requeued import"
+
+
+async def test_a_requeue_waits_its_time_after_the_import_ended(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(keep_requeue, "REQUEUE_SECONDS", 3.0)
+    rig = await _rig(tmp_path, Agent(keeps=(256,), tail=30.0))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await asyncio.sleep(1.5)
+    assert len(rig.toolbox.requests) == 1, "not before its time"
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the requeued import")
+
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)
+
+
+@pytest.mark.parametrize(
+    "validity, reason",
+    [
+        (Validity.CANDIDATE_FAILED, "server_boot_timeout: no ready line"),
+        (Validity.MEASUREMENT_FAILED, "measurement refused: the spec was rejected"),
+        (Validity.MEASUREMENT_FAILED, "inert_patch: process 1 imported aiter from the image, not from the farm"),
+    ],
+    ids=["candidate", "program_error", "repeats_in_every_sandbox"],
+)
+async def test_a_keep_whose_import_failed_otherwise_is_not_requeued(
+    tmp_path: Path, quick_requeue: None, validity: Validity, reason: str
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256,), tail=1.0))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", validity, reason))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+    await asyncio.sleep(0.6)
+
+    assert len(rig.toolbox.requests) == 1
+    assert not any("goes once more" in note for note in await rig.notices())
+
+
+async def test_a_keep_is_requeued_once_and_after_the_cap_of_failed_requeues_none_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quick_requeue: None
+) -> None:
+    monkeypatch.setattr(keep_requeue, "REQUEUE_FAILURES", 1)
+    rig = await _rig(tmp_path, Agent(keeps=(256, 512), gap=4.0, tail=1.0))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the requeued import")
+    await rig.toolbox_blackboard.write_result(_failed("r2", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 3, "the second keep's import", seconds=15.0)
+    await rig.toolbox_blackboard.write_result(_failed("r3", Validity.MEASUREMENT_FAILED))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 15)
+    await asyncio.sleep(0.6)
+
+    assert "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[2]) and len(rig.toolbox.requests) == 3
+    notices = await rig.notices()
+    assert any("keep 1's import r2 measured nothing" in n and "it went once more already" in n for n in notices)
+    assert any(
+        "keep 2's import r3 measured nothing" in n and "the last 1 requeued imports measured nothing again" in n
+        for n in notices
+    ), "a node that stays broken does not loop"
+
+
+async def test_a_later_keep_carries_the_change_of_one_that_measured_nothing_and_no_requeue_goes(
+    tmp_path: Path, quick_requeue: None
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256, 512), gap=0.3, tail=1.0))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    await asyncio.sleep(1.0)
+    await rig.toolbox_blackboard.write_result(_failed("r1", Validity.MEASUREMENT_FAILED))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the second keep's import")
+    await rig.toolbox_blackboard.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+    await asyncio.sleep(0.6)
+
+    assert len(rig.toolbox.requests) == 2 and "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[1])
+    assert not any("goes once more" in note for note in await rig.notices())

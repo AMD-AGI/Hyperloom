@@ -36,7 +36,9 @@ from hyperloom_multibranch.toolbox.attempts import (
     RUNNER_LOST,
     RUNNER_START_FAILED,
     SANDBOX_CREATE_FAILED,
+    INFRA_BACKOFF_SECONDS,
     AttemptRunner,
+    InfraBackoff,
     TestJob,
 )
 
@@ -46,15 +48,34 @@ DISK_FULL_REASON = "disk_full: OSError: [Errno 122] Disk quota exceeded: '/work/
 HUNG_REASON = f"{HUNG_BEFORE_READY}: no output for 600s before the server was ready"
 
 
-class _ScriptedExecutor:
-    """Fails every attempt with ``reason`` as an infrastructure failure, each on its own node."""
+class _FakeTime:
+    """A clock that only a wait moves, and the waits it was asked for."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.waits: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.waits.append(seconds)
+        self.now += seconds
+
+
+class _ScriptedExecutor:
+    """Fails every attempt with ``reason`` as an infrastructure failure, each on its own node; ``started`` is the clock
+    at each attempt."""
+
+    def __init__(self, reason: str, clock: _FakeTime | None = None) -> None:
         self.reason = reason
         self.jobs: list[TestJob] = []
+        self.clock = clock or _FakeTime()
+        self.started: list[float] = []
 
     async def run(self, job: TestJob) -> TestResult:
         self.jobs.append(job)
+        self.started.append(self.clock())
         return TestResult(
             request_id="r1",
             validity=Validity.MEASUREMENT_FAILED,
@@ -81,15 +102,44 @@ def _job() -> TestJob:
     return TestJob(request=request, attempt=1, avoid_nodes=(), priority=0, sandbox_priority=0)
 
 
-async def _run(reason: str) -> tuple[TestResult, _ScriptedExecutor, list[str]]:
+def _backoff(time: _FakeTime, latest: float | None = None) -> InfraBackoff:
+    return InfraBackoff(INFRA_BACKOFF_SECONDS, lambda _request: latest, clock=time, sleep=time.sleep)
+
+
+async def _run(reason: str, latest: float | None = None) -> tuple[TestResult, _ScriptedExecutor, list[str]]:
     executor = _ScriptedExecutor(reason)
     reported: list[str] = []
 
     async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
         reported.append(node)
 
-    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, max_infra_retries=3)
+    backoff = _backoff(executor.clock, latest)
+    runner = AttemptRunner(
+        executor, avoid=frozenset, on_node_failure=on_node_failure, max_infra_retries=3, backoff=backoff
+    )
     return await runner.run(_job()), executor, reported
+
+
+async def test_infrastructure_retries_wait_longer_each_time_before_they_start() -> None:
+    result, executor, _ = await _run(PORT_REASON)
+    assert len(executor.jobs) == 4 and result.validity is Validity.MEASUREMENT_FAILED
+    assert executor.clock.waits == [60.0, 120.0, 240.0]
+    gaps = [later - earlier for earlier, later in zip(executor.started, executor.started[1:])]
+    assert gaps == [60.0, 120.0, 240.0], "each retry starts only after its wait"
+
+
+async def test_an_infrastructure_retry_never_waits_past_the_latest_start_and_goes_at_once_after_it() -> None:
+    result, executor, _ = await _run(PORT_REASON, latest=1000.0 + 100.0)
+    assert len(executor.jobs) == 4, "a retry that cannot wait still goes"
+    assert executor.clock.waits == [60.0, 40.0], "the second wait ends at the latest start, the third is none"
+    assert executor.started == [1000.0, 1060.0, 1100.0, 1100.0]
+
+
+def test_the_default_backoff_is_minutes_and_bounded() -> None:
+    backoff = InfraBackoff()
+    request = _job().request
+    assert [backoff.before(retry, request) for retry in (0, 1, 2, 3, 4)] == [0.0, 60.0, 120.0, 240.0, 240.0]
+    assert InfraBackoff(()).before(1, request) == 0.0
 
 
 async def test_an_inert_patch_is_not_retried_and_stays_an_infrastructure_failure() -> None:
@@ -133,6 +183,12 @@ async def test_a_jit_build_timeout_is_retried_once_and_not_held_against_the_node
     assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
     assert result.failure_reason == JIT_REASON
     assert reported == [], "the tables, not the node, made the server build past its watchdog"
+
+
+@pytest.mark.parametrize("reason", [INERT_REASON, JIT_REASON], ids=["unretried", "retried_once"])
+async def test_only_the_retries_an_infrastructure_failure_gets_wait(reason) -> None:
+    _, executor, _ = await _run(reason)
+    assert executor.clock.waits == [60.0][: len(executor.jobs) - 1]
 
 
 #: Reasons a hosted runner can report on a failed start.
@@ -210,6 +266,7 @@ class _TimedOutExecutor(_ScriptedExecutor):
 )
 async def test_a_sweep_that_ran_out_of_time_is_not_rerun(kind, runs, validity) -> None:
     executor = _TimedOutExecutor(TEST_TIMEOUT_REASON)
+    time = _FakeTime()
     reported: list[str] = []
 
     async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
@@ -218,8 +275,10 @@ async def test_a_sweep_that_ran_out_of_time_is_not_rerun(kind, runs, validity) -
     job = _job()
     concs = (4, 8, 16) if kind is TestKind.SWEEP else ()
     job = replace(job, request=replace(job.request, kind=kind, concurrency=concs))
-    result = await AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure).run(job)
+    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, backoff=_backoff(time))
+    result = await runner.run(job)
     assert len(executor.jobs) == runs and len(result.attempts) == runs
+    assert time.waits == [], "an unclear rerun does not wait"
     assert result.validity is validity and result.failure_class is FailureClass.UNCLEAR
     assert result.failure_reason == TEST_TIMEOUT_REASON
     assert reported == [], "a timeout is held against neither node"
