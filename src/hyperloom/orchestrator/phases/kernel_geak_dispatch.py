@@ -49,6 +49,7 @@ from .kernel_gemm_tuning import _first_text
 log = logging.getLogger(__name__)
 
 _GEAK_RUNNER_MODULE = "hyperloom.orchestrator.kernel.geak_runner"
+_TIMEOUT = "timeout"
 
 # How long the GEAK handoff waits for the servers it stopped to release their VRAM.
 _GEAK_GPU_FREE_WAIT_SEC: float = 120.0
@@ -760,7 +761,7 @@ class _GeakDispatchMixin:
         """
         if not flushed:
             return {
-                "status": "timeout",
+                "status": _TIMEOUT,
                 "error_class": "external_timeout",
                 "phase_reached": "unknown",
                 "error": (
@@ -772,8 +773,8 @@ class _GeakDispatchMixin:
             }
         error = str(flushed.get("error") or "").strip()
         record: dict[str, Any] = {
-            "status": flushed.get("status") or "timeout",
-            "error_class": flushed.get("error_class") or flushed.get("status") or "timeout",
+            "status": flushed.get("status") or _TIMEOUT,
+            "error_class": flushed.get("error_class") or flushed.get("status") or _TIMEOUT,
             "error": error
             or f"GEAK e2e killed after {kill_timeout}s (budget-capped); retained the result GEAK flushed",
             "runner_timeout_s": runner_timeout,
@@ -911,7 +912,7 @@ class _GeakDispatchMixin:
             self._finish_geak_skip(
                 {
                     "status": "error",
-                    "error_class": "timeout",
+                    "error_class": _TIMEOUT,
                     "error": f"GEAK e2e killed after {kill_timeout}s (budget-capped); closing window preserved",
                     "runner_timeout_s": runner_timeout,
                     "kill_timeout_s": kill_timeout,
