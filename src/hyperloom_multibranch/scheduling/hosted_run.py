@@ -435,6 +435,36 @@ def earlier_session(state_dir: Path) -> EarlierSession:
     return EarlierSession(left=persisted_session(previous))
 
 
+#: What reading back an earlier session fails with when this account cannot read what it left: a file an earlier leg of
+#: another account of the group made owner-only, or one that is not the text it wrote.
+CANNOT_READ_SESSION = (PermissionError, UnicodeDecodeError, json.JSONDecodeError)
+
+
+def close_before_starting_again(close: Callable[[], int], left: PersistedRun) -> int | None:
+    """Close ``left``, which ended before PRELUDE recorded its baseline, with ``close`` (which ends the sandboxes of the
+    tests it left) before the run starts the spec's session again: the exit code the run ends with when a stop during
+    the close ended it, else ``None``. A close that cannot read ``left`` (:data:`CANNOT_READ_SESSION`) leaves it as it
+    is, one warning names the file and why, and ``None`` says the run goes on with a new session in a directory of its
+    own, as that session measured nothing a restart carries on from."""
+
+    root = left.layout.root
+    log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", root)
+    try:
+        closed = close()
+    except CANNOT_READ_SESSION as exc:
+        log.warning("cannot read %s to close it, so it is left as it is and a new session starts: %s", root, _why(exc))
+        return None
+    return None if reported_stop_reason(root) == left.ended.value else closed
+
+
+def _why(exc: BaseException) -> str:
+    """The file an error names, with its owner and mode, and the reason; else the error."""
+
+    if isinstance(exc, OSError) and exc.filename:
+        return f"{exc.filename}{ownership(Path(exc.filename))}: {exc.strerror}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 def reported_stop_reason(root: Path) -> str | None:
     """The stop reason the CLOSE of the session in ``root`` reported, ``None`` when it wrote no report."""
 
@@ -446,6 +476,7 @@ def reported_stop_reason(root: Path) -> str | None:
 
 
 __all__ = [
+    "CANNOT_READ_SESSION",
     "EXIT_FILE",
     "GRANT_MARGIN_SECONDS",
     "HOST_LAYER_ENV",
@@ -457,6 +488,7 @@ __all__ = [
     "HostedRefused",
     "arm_grant_stop",
     "campaign_spec",
+    "close_before_starting_again",
     "earlier_session",
     "grant_deadline",
     "grant_tests_that_fit",

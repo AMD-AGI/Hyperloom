@@ -25,6 +25,8 @@ import yaml
 
 from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
+from hyperloom.common.session_files import shared_options
+from hyperloom_common.io import atomic_write_text
 from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_EP,
@@ -113,7 +115,7 @@ def _render(canonical: CanonicalMeasurement, out_dir: Path, name: str, **overrid
     if inferencex:
         config["benchmark"]["inferencex_path"] = inferencex
     if concurrency is not None or inferencex:
-        path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
+        atomic_write_text(path, yaml.safe_dump(config, sort_keys=False), options=shared_options(config))
     return config
 
 
