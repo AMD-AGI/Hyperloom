@@ -13,7 +13,6 @@ import sys
 import pytest
 
 import hyperloom.cli as hyperloom_cli
-from hyperloom.cli import main
 from hyperloom.inference_optimizer.session.paths import ENV_LEDGER_DIR
 
 _ERROR = "ERROR: HYPERLOOM_LEDGER_DIR must be an absolute path, not 'relative/ledgers'\n"
@@ -28,7 +27,7 @@ _COMMANDS = [
 @pytest.mark.parametrize("argv", _COMMANDS)
 def test_a_relative_ledger_directory_is_one_clean_line_and_exit_code_2_at_the_entry(monkeypatch, capsys, argv):
     monkeypatch.setenv(ENV_LEDGER_DIR, "relative/ledgers")
-    assert main(argv) == 2
+    assert hyperloom_cli.main(argv) == 2
     seen = capsys.readouterr()
     assert (seen.out, seen.err) == ("", _ERROR)
 
@@ -38,7 +37,7 @@ def test_the_console_entry_exits_2_with_the_line_and_no_traceback_in_a_real_proc
         [
             sys.executable,
             "-c",
-            "import sys\nfrom hyperloom.cli import main\nsys.exit(main(sys.argv[1:]))",
+            "import sys\nfrom hyperloom.cli import main\nsys.exit(hyperloom_cli.main(sys.argv[1:]))",
             "optimize",
             "--model",
             "/models/m",
@@ -56,7 +55,9 @@ def test_the_console_entry_exits_2_with_the_line_and_no_traceback_in_a_real_proc
 
 def test_an_absolute_ledger_directory_is_not_this_error(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv(ENV_LEDGER_DIR, str(tmp_path / "ledgers"))
-    assert main(["session", "events", str(tmp_path)]) == 2  # no database in that directory: the tool's own message
+    assert (
+        hyperloom_cli.main(["session", "events", str(tmp_path)]) == 2
+    )  # no database in that directory: the tool's own message
     assert "HYPERLOOM_LEDGER_DIR" not in capsys.readouterr().err
 
 
@@ -130,7 +131,7 @@ def test_a_refusal_from_deep_in_a_run_is_ended_at_the_entry_the_same_way(tmp_pat
 
     monkeypatch.setitem(sys.modules, "ledger_probe", types.SimpleNamespace(main=run))
     monkeypatch.setitem(hyperloom_cli._COMMANDS, "optimize", ("ledger_probe", (), "stand-in for the optimizer"))
-    assert main(["optimize"]) == 2
+    assert hyperloom_cli.main(["optimize"]) == 2
     seen = capsys.readouterr()
     assert seen.out == "" and seen.err.startswith("ERROR: this session holds a credential")
     assert _one_line_naming_the_ledger_directory(seen.err)
