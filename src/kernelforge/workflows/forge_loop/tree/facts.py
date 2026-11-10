@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from kernelforge.workflows.forge_loop.iteration.merge_candidates import cases_beating_reference
-from kernelforge.workflows.forge_loop.tree.model import Attempt, Direction, SearchTree, TreeNode
+from kernelforge.workflows.forge_loop.tree.model import Attempt, Direction, MergeFailure, SearchTree, TreeNode
 
 _PLAN_CHARS = 110
 # How much of a direction's own record (hypothesis, ceiling, criterion, rebuttal) one line carries.
@@ -41,7 +41,7 @@ def render_facts(
     *,
     outlook: RoundOutlook,
     sources: FactSources,
-    compose_failures: tuple[tuple[str, str], ...] = (),
+    merge_failures: tuple[MergeFailure, ...] = (),
 ) -> str:
     """Every fact the selector is given, in the order it reads them."""
     return "\n".join(
@@ -50,7 +50,7 @@ def render_facts(
             *_standing(tree, outlook),
             *_directions(tree),
             *_nodes(tree),
-            *_compose_failures(compose_failures),
+            *_merge_failures(merge_failures),
             *_previous_selections(tree),
         ]
     )
@@ -193,11 +193,14 @@ def _detail(attempt: Attempt) -> str:
     return f": {_one_line(attempt.detail, _RECORD_CHARS)}" if attempt.detail else ""
 
 
-def _compose_failures(failures: tuple[tuple[str, str], ...]) -> list[str]:
+def _merge_failures(failures: tuple[MergeFailure, ...]) -> list[str]:
     if not failures:
         return []
-    lines = ["## Gains that did not stack mechanically (candidates for PORT)"]
-    lines.extend(f"- {_short(source)} onto {_short(target)}: the diff did not apply" for source, target in failures)
+    lines = ["## Merges of the last round that did not land (candidates for PORT)"]
+    lines.extend(
+        f"- {_short(item.source)} onto {_short(item.base)}: {_one_line(item.reason, _RECORD_CHARS)}"
+        for item in failures
+    )
     return [*lines, ""]
 
 

@@ -139,6 +139,15 @@ class Attempt:
 
 
 @dataclass(frozen=True)
+class MergeFailure:
+    """A merge of one round's gains that did not land: the node whose change was to be carried, onto which, and why."""
+
+    source: str
+    base: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class Round:
     """The slots and requests of the iteration in progress."""
 
@@ -371,6 +380,7 @@ __all__ = [
     "Direction",
     "DirectionProposal",
     "DirectionStatus",
+    "MergeFailure",
     "NodeSource",
     "Round",
     "SearchTree",

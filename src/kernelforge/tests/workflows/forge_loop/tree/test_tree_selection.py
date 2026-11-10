@@ -13,6 +13,7 @@ from kernelforge.workflows.forge_loop.tree.model import (
     AttemptOutcome,
     DirectionProposal,
     DirectionStatus,
+    MergeFailure,
     NodeSource,
     Round,
     SearchTree,
@@ -172,7 +173,7 @@ def test_the_facts_carry_directions_nodes_case_standing_and_earlier_rounds():
         tree,
         outlook=RoundOutlook(lanes=3, remaining_sec=3600, rounds_left=2),
         sources=FactSources("/a", "/s"),
-        compose_failures=((N3, N2),),
+        merge_failures=(MergeFailure(N3, N2, "the merge measured incorrect: FAIL"),),
     )
 
     assert f"Published best: {N2}" in facts
@@ -180,7 +181,7 @@ def test_the_facts_carry_directions_nodes_case_standing_and_earlier_rounds():
     assert "beats published beyond noise on: big; loses on: small" in facts
     assert "iter 3 slot 1 DEEPEN d002 INCORRECT" in facts
     assert "iteration 3: DEEPEN at 333333333333 (keep going) -> INCORRECT" in facts
-    assert "333333333333 onto 222222222222" in facts
+    assert "- 333333333333 onto 222222222222: the merge measured incorrect: FAIL" in facts
     assert "about 2 round(s)" in facts
 
 
