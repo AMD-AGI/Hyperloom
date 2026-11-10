@@ -32,7 +32,7 @@ from hyperloom.inference_optimizer.multi_node.state_paths import bind_state_file
 
 def _spec(**overrides: object) -> LaunchSpec:
     base = dict(
-        backend="atom",
+        backend="atomesh",
         model="/models/Qwen3-30B-A3B",
         framework="sglang",
         prefill_tp=8,
@@ -167,7 +167,24 @@ def test_multi_node_state_env_names_the_bound_state_file(monkeypatch: pytest.Mon
     assert multi_node_state_env() == {"MULTI_NODE_STATE": str(path), "MULTI_NODE_STATE_FILE": str(path)}
 
 
-def test_atom_handoff_keeps_ssh_env_and_uses_one_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("file_backend", ["atom", "atomesh"])
+def test_handoff_file_names_atomesh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, file_backend: str) -> None:
+    doc = {
+        "schema": "topology-handoff/v1",
+        "backend": file_backend,
+        "nodes": 3,
+        "gpus_per_node": 8,
+        "service_url": "http://10.0.0.10:8000",
+    }
+    path = tmp_path / "topology.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setenv(topo.TOPOLOGY_FILE_ENV, str(path))
+    overlay = topo.topology_file_overlay()
+    assert overlay is not None
+    assert overlay["INFERENCE_OPTIMIZER_MN_BACKEND"] == "atomesh"
+
+
+def test_atom_handoff_records_atomesh_and_uses_one_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     doc = {
         "schema": "topology-handoff/v1",
         "backend": "atom",
@@ -198,7 +215,7 @@ def test_atom_handoff_keeps_ssh_env_and_uses_one_port(monkeypatch: pytest.Monkey
     state = ext.build_external_state_from_env()
 
     assert os.environ["MULTI_NODE_STATE"] == str(state_file)
-    assert state["backend"] == "atom"
+    assert state["backend"] == "atomesh"
     assert state["external"] is True
     assert state["pd_mode"] == "disaggregated"
     assert state["nodes"] == 5
@@ -243,7 +260,7 @@ def test_record_profile_paths_updates_the_state_file(monkeypatch: pytest.MonkeyP
     session = tmp_path / "session"
     path = bind_state_file_to_session(session)
     path.write_text(
-        json.dumps({"backend": "atom", "profile_trace": "", "steady_state_trace": ""}),
+        json.dumps({"backend": "atomesh", "profile_trace": "", "steady_state_trace": ""}),
         encoding="utf-8",
     )
     path.chmod(0o600)

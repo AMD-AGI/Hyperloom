@@ -181,15 +181,15 @@ def _bash_payload(role: str, script_body: str, needle: str, action: str) -> str:
 def _require_state() -> dict[str, Any]:
     state = _cli()._load_state()
     backend = str(state.get("backend") or "")
-    if backend not in ("atom", "sglangrouter"):
-        raise _cli().ConfigurationError(f"state backend is {backend!r}, not atom or sglangrouter")
+    if backend not in ("atomesh", "sglangrouter"):
+        raise _cli().ConfigurationError(f"state backend is {backend!r}, not atomesh or sglangrouter")
     if not state.get("ssh_key_path"):
         raise _cli().ConfigurationError("no ssh_key_path in state; set HYPERLOOM_MN_EXT_SSH_KEY")
     if not state.get("ssh_port"):
         raise _cli().ConfigurationError("no ssh_port in state; set HYPERLOOM_MN_EXT_SSH_PORT")
     if not state.get("prefill_pod_ips") or not state.get("decode_pod_ips"):
         raise _cli().ConfigurationError(
-            "atom/sglangrouter restart needs HYPERLOOM_MN_EXT_PREFILL_IPS and HYPERLOOM_MN_EXT_DECODE_IPS"
+            "atomesh/sglangrouter restart needs HYPERLOOM_MN_EXT_PREFILL_IPS and HYPERLOOM_MN_EXT_DECODE_IPS"
         )
     return state
 
@@ -237,7 +237,7 @@ def _ssh_pod(
     ip = str(pod.get("podIP") or "")
     port = int(pod.get("sshPort") or state.get("ssh_port") or 0)
     body = launch_script(role, str(pod.get("launch_command") or "true"), _role_env(extra_env, role), log_ip=ip)
-    needle = cmdline_needle(role, str(state.get("backend") or "atom"))
+    needle = cmdline_needle(role, str(state.get("backend") or "atomesh"))
     payload = _bash_payload(role, body, needle, action)
     info(f"{state.get('backend')} {action}: ssh -> {ip}:{port} role={role}")
     try:
@@ -357,7 +357,7 @@ def engines_not_running(state: dict[str, Any], *, timeout: int = 30) -> list[str
         role = str(pod.get("role") or "")
         ip = str(pod["podIP"])
         port = int(pod.get("sshPort") or state.get("ssh_port") or 0)
-        needle = shlex.quote(cmdline_needle(role, str(state.get("backend") or "atom")))
+        needle = shlex.quote(cmdline_needle(role, str(state.get("backend") or "atomesh")))
         script = (
             f'pid=$(cat {_pidfile(role)} 2>/dev/null) && kill -0 "$pid" 2>/dev/null '
             f"&& tr '\\0' ' ' < /proc/\"$pid\"/cmdline | grep -qF -- {needle} && echo HL_ALIVE || echo HL_GONE"

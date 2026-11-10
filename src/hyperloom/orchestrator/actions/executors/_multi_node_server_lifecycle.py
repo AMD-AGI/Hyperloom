@@ -700,7 +700,7 @@ def select_pd_role_traces(root: str, since_unix: float) -> dict[str, str]:
 
 
 async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> None:
-    """POST /start_profile or /stop_profile on every atom/sglangrouter prefill and decode pod.
+    """POST /start_profile or /stop_profile on every atomesh/sglangrouter prefill and decode pod.
 
     The router does not write GPU traces. Each engine listens on its pod's
     ``enginePort``, else the worker port. A role with no pods in state is reached through
@@ -711,7 +711,7 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
     if not is_multi_node():
         return
     state = _read_state() or {}
-    if str(state.get("backend") or "").strip().lower() not in ("atom", "sglangrouter"):
+    if str(state.get("backend") or "").strip().lower() not in ("atomesh", "sglangrouter"):
         return
     port = str(os.environ.get("HYPERLOOM_MN_WORKER_PORT", "8000") or "8000").strip() or "8000"
     targets: list[tuple[str, str]] = []
@@ -892,7 +892,7 @@ def _worker_health_targets(state: dict, default_port: int) -> list[tuple[str, st
 
 def _pd_engines_not_running(state: dict) -> list[str]:
     """Atom/sglangrouter engine pods whose launched server is gone; empty for other backends."""
-    if str(state.get("backend") or "").strip().lower() not in ("atom", "sglangrouter"):
+    if str(state.get("backend") or "").strip().lower() not in ("atomesh", "sglangrouter"):
         return []
     from hyperloom.inference_optimizer.multi_node.commands.pd_cluster import engines_not_running
 
@@ -900,7 +900,7 @@ def _pd_engines_not_running(state: dict) -> list[str]:
 
 
 def pd_engines_lost_reason() -> str | None:
-    """Why the atom/sglangrouter engines launched for this round no longer serve it, or None when they do."""
+    """Why the atomesh/sglangrouter engines launched for this round no longer serve it, or None when they do."""
     gone = _pd_engines_not_running(_read_state() or {})
     return _pd_launch_lost_reason(gone) if gone else None
 
@@ -1240,7 +1240,7 @@ async def _wait_for_server_health_async(settings: RestartSettings, timeout_s: in
     # actually serve traffic (Infera registers models in /v1/models before the worker is ready to accept requests;
     # this causes the first benchmark to get 503 "Model temporarily unavailable" for every request, surfacing as
     # `completed=0` -> `baseline_failed`).
-    wait_model_ready = str(state.get("backend") or "").strip().lower() in ("infera", "atom", "sglangrouter")
+    wait_model_ready = str(state.get("backend") or "").strip().lower() in ("infera", "atomesh", "sglangrouter")
     wait = _ServingWait(settings, base, timeout_s)
     async with _httpx.AsyncClient(timeout=15.0) as client:
         while True:

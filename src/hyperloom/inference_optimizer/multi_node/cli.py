@@ -952,7 +952,7 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     backend = _load_state().get("backend")
     if backend == "infera":
         return _infera_apply_tracelens_patch(args)
-    if backend in ("atom", "sglangrouter"):
+    if backend in ("atomesh", "sglangrouter"):
         from .commands.pd_cluster import apply_tracelens_patch
 
         return apply_tracelens_patch(args)
@@ -1304,7 +1304,7 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
     backend = _load_state().get("backend")
     if backend == "infera":
         return _infera_restart_server(args)
-    if backend in ("atom", "sglangrouter"):
+    if backend in ("atomesh", "sglangrouter"):
         from .commands.pd_cluster import restart_pd_cluster
 
         return restart_pd_cluster(args)
@@ -1329,7 +1329,7 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
     backend = _load_state().get("backend")
     if backend == "infera":
         return _infera_kill_inference(args)
-    if backend in ("atom", "sglangrouter"):
+    if backend in ("atomesh", "sglangrouter"):
         from .commands.pd_cluster import kill_pd_cluster
 
         return kill_pd_cluster(args)

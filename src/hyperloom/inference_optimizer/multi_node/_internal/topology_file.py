@@ -29,7 +29,15 @@ TOPOLOGY_FILE_ENV = "TOPOLOGY_HANDOFF_FILE"
 
 _SCHEMA_RE = re.compile(r"^topology-handoff/v(\d+)(?:\.\d+)*$")
 _SUPPORTED_MAJOR = 1
-_BACKENDS = ("rayjob", "infera", "atom", "sglangrouter")
+_BACKENDS = ("rayjob", "infera", "atomesh", "sglangrouter")
+_BACKEND_ALIASES = {"atom": "atomesh"}
+
+
+def normalize_mn_backend(raw: object) -> str:
+    """Canonical multi-node backend name (lower-case; ``atom`` reads as ``atomesh``)."""
+    name = str(raw or "").strip().lower()
+    return _BACKEND_ALIASES.get(name, name)
+
 
 # Every legacy variable the file describes. When a file is in force these are read
 # from it only (empty when the file omits them), never from the process env, except
@@ -130,7 +138,7 @@ def _read_secret(path: str, secret_path: str) -> str:
     return content
 
 
-# SSH and pod-IP names an atom/sglangrouter file leaves unset. Popping them from
+# SSH and pod-IP names an atomesh/sglangrouter file leaves unset. Popping them from
 # the overlay lets the process environment supply them; a file that only names
 # the router URL must not blank a hand-off that still carries the IPs.
 _PD_FALLTHROUGH = (
@@ -221,9 +229,9 @@ def _parse(path: str) -> dict[str, str]:
         raise _fail(path, "the document must be a JSON object")
     _check_schema(path, doc)
 
-    backend = doc.get("backend")
+    backend = normalize_mn_backend(doc.get("backend"))
     if backend not in _BACKENDS:
-        raise _fail(path, f"backend {backend!r} must be one of {', '.join(_BACKENDS)}")
+        raise _fail(path, f"backend {doc.get('backend')!r} must be one of {', '.join(_BACKENDS)}")
     for key in ("nodes", "gpus_per_node"):
         if not _is_int(doc.get(key), 1):
             raise _fail(path, f"{key} must be an integer >= 1")
@@ -240,7 +248,7 @@ def _parse(path: str) -> dict[str, str]:
             "HYPERLOOM_MN_EXT_SERVICE_URL": url.strip(),
         }
     )
-    if backend in ("atom", "sglangrouter"):
+    if backend in ("atomesh", "sglangrouter"):
         if doc.get("ray") is not None or doc.get("infera") is not None:
             raise _fail(path, f"backend {backend} must not include a ray or infera block")
         filled = _pd_cluster_overlay(path, doc)

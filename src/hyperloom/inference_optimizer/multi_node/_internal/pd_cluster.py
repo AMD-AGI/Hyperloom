@@ -20,8 +20,9 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from ..state_paths import resolve_state_file, state_file_safe_to_read
+from .topology_file import normalize_mn_backend
 
-PD_ROUTER_BACKENDS = ("atom", "sglangrouter")
+PD_ROUTER_BACKENDS = ("atomesh", "sglangrouter")
 ENGINE_PORT = 8000
 PREFILL_BOOTSTRAP_PORT = 8998
 DECODE_BOOTSTRAP_PORT = 9098
@@ -183,7 +184,7 @@ def engine_command(role: str, spec: LaunchSpec) -> str:
 
 
 def router_command(spec: LaunchSpec) -> str:
-    """Router command. Atomesh for ``atom``, sglang_router for ``sglangrouter``."""
+    """Router command. Atomesh for ``atomesh``, sglang_router for ``sglangrouter``."""
     if spec.backend == "sglangrouter":
         argv = [
             "python3",
@@ -250,7 +251,7 @@ def role_ips(get: Lookup) -> tuple[list[str], list[str], list[str]]:
 def ssh_port_from_handoff(get: Lookup) -> int | None:
     """The shared SSH port, or None when the hand-off does not name one.
 
-    Unlike Infera, atom and sglangrouter do not invent a port and do not add a
+    Unlike Infera, atomesh and sglangrouter do not invent a port and do not add a
     decode stride. ``HYPERLOOM_MN_EXT_SSH_PORT`` is the port on every pod.
     """
     raw = get("HYPERLOOM_MN_EXT_SSH_PORT").strip()
@@ -266,8 +267,8 @@ def ssh_port_from_handoff(get: Lookup) -> int | None:
 
 
 def pd_cluster_has_control(get: Lookup) -> bool:
-    """True when this hand-off can SSH-restart an atom or sglangrouter cluster."""
-    if get("INFERENCE_OPTIMIZER_MN_BACKEND").strip().lower() not in PD_ROUTER_BACKENDS:
+    """True when this hand-off can SSH-restart an atomesh or sglangrouter cluster."""
+    if normalize_mn_backend(get("INFERENCE_OPTIMIZER_MN_BACKEND")) not in PD_ROUTER_BACKENDS:
         return False
     if not get("HYPERLOOM_MN_EXT_SSH_KEY").strip():
         return False
@@ -299,7 +300,7 @@ def spec_from_env(state: dict[str, Any], get: Lookup | None = None) -> LaunchSpe
     if not decode_url and decode_ips:
         decode_url = f"http://{decode_ips[0]}:{ENGINE_PORT}"
     return LaunchSpec(
-        backend=str(state.get("backend") or "atom"),
+        backend=str(state.get("backend") or "atomesh"),
         model=os.environ.get("MODEL_PATH", "").strip(),
         framework=(os.environ.get("FRAMEWORK", "") or "sglang").strip().lower() or "sglang",
         prefill_tp=_positive(os.environ.get("PD_PREFILL_TP", ""), tp),
@@ -331,7 +332,7 @@ def spec_from_restart(args: Any, state: dict[str, Any]) -> LaunchSpec:
     prefill_url = _endpoint(os.environ.get("HYPERLOOM_MN_EXT_PREFILL_URL", ""), prefill_ips)
     decode_url = _endpoint(os.environ.get("HYPERLOOM_MN_EXT_DECODE_URL", ""), decode_ips)
     return LaunchSpec(
-        backend=str(state.get("backend") or "atom"),
+        backend=str(state.get("backend") or "atomesh"),
         model=str(getattr(args, "model", "") or os.environ.get("MODEL_PATH", "")).strip(),
         framework=str(getattr(args, "framework", "") or os.environ.get("FRAMEWORK", "") or "sglang").strip().lower(),
         prefill_tp=_positive(str(getattr(args, "pd_prefill_tp", 0) or 0), tp),
@@ -455,7 +456,7 @@ def _keep_profile_bookkeeping(state: dict[str, Any]) -> None:
 
 
 def stamp_pd_cluster(state: dict[str, Any], get: Lookup) -> None:
-    """Fill router/prefill/decode pods and profile paths on an atom or sglangrouter state."""
+    """Fill router/prefill/decode pods and profile paths on an atomesh or sglangrouter state."""
     if str(state.get("backend") or "").strip().lower() not in PD_ROUTER_BACKENDS:
         return
     router, prefill, decode = role_ips(get)

@@ -10,7 +10,7 @@ import os
 import sys
 from typing import Any
 
-from ..multi_node import TopologyHandoffError, topology_file_overlay
+from ..multi_node import TopologyHandoffError, normalize_mn_backend, topology_file_overlay
 
 
 def _topology_file_overlay() -> dict[str, str] | None:
@@ -50,17 +50,16 @@ def _resolve_gpus_per_node(args: argparse.Namespace) -> int:
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
     """Multi-node backend selector: --mn-backend > $TOPOLOGY_HANDOFF_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
     from_file = (_topology_file_overlay() or {}).get("INFERENCE_OPTIMIZER_MN_BACKEND", "")
-    backend = (
+    backend = normalize_mn_backend(
         (getattr(args, "mn_backend", None) or "").strip()
         or from_file
         or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
         or os.environ.get("MN_BACKEND", "").strip()
         or "rayjob"
-    ).lower()
-    if backend not in ("rayjob", "infera", "atom", "sglangrouter"):
+    )
+    if backend not in ("rayjob", "infera", "atomesh", "sglangrouter"):
         print(
-            "ERROR: --mn-backend must be 'rayjob', 'infera', 'atom', or 'sglangrouter', "
-            f"got {backend!r}",
+            f"ERROR: --mn-backend must be 'rayjob', 'infera', 'atomesh', or 'sglangrouter', got {backend!r}",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -95,7 +94,7 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
 
     ext_state = build_external_state_from_env()
     ext_state["backend"] = _resolve_mn_backend(args)
-    if ext_state["backend"] in ("atom", "sglangrouter"):
+    if ext_state["backend"] in ("atomesh", "sglangrouter"):
         from ..multi_node._internal.pd_cluster import stamp_pd_cluster
 
         if (os.environ.get("PD_MODE", "") or "").strip().lower() != "disaggregated":

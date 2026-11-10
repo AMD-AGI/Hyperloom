@@ -16,7 +16,7 @@ from typing import Any
 from ..state_paths import resolve_state_file, state_file_safe_to_read
 from .infera_support import ssh_role_port_offset
 from .ssh_client import DEFAULT_SSH_PORT
-from .topology_file import Lookup, handoff_lookup
+from .topology_file import Lookup, handoff_lookup, normalize_mn_backend
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ _HANDOFF_IDENTITY_KEYS = (
 # Port assumed when a ClusterIP service URL carries none.
 _DEFAULT_FRONTEND_PORT = "8888"
 
-_MN_BACKENDS = ("infera", "rayjob", "atom", "sglangrouter")
+_MN_BACKENDS = ("infera", "rayjob", "atomesh", "sglangrouter")
 # Mirrors the CLI's --mn-backend default (cli/multi_node.py::_resolve_mn_backend) so a hand-off and a fresh `optimize`
 # never disagree about the same cluster.
 _DEFAULT_MN_BACKEND = "rayjob"
@@ -57,7 +57,7 @@ _DEFAULT_MN_BACKEND = "rayjob"
 
 def _handoff_backend(get: Lookup, *, ssh_key: str, has_pod_ips: bool, head_ip: str) -> str:
     """Resolve which control plane a handed-over cluster speaks."""
-    explicit = get("INFERENCE_OPTIMIZER_MN_BACKEND").strip().lower()
+    explicit = normalize_mn_backend(get("INFERENCE_OPTIMIZER_MN_BACKEND"))
     if explicit in _MN_BACKENDS:
         return explicit
     if ssh_key and has_pod_ips:
@@ -176,9 +176,9 @@ def build_external_state_from_env() -> dict[str, Any]:
         has_pod_ips=bool(prefill or decode or worker),
         head_ip=head_ip,
     )
-    router = _ips("HYPERLOOM_MN_EXT_ROUTER_IPS") if backend in ("atom", "sglangrouter") else []
+    router = _ips("HYPERLOOM_MN_EXT_ROUTER_IPS") if backend in ("atomesh", "sglangrouter") else []
     pod_count = _handoff_pod_count(pd_mode, prefill=prefill, decode=decode, worker=worker)
-    if backend in ("atom", "sglangrouter"):
+    if backend in ("atomesh", "sglangrouter"):
         pod_count = len(set(router + prefill + decode))
     nodes = _handoff_nodes(get, pod_count)
     ray_address = f"{head_ip}:6379" if head_ip else ""
@@ -212,7 +212,7 @@ def build_external_state_from_env() -> dict[str, Any]:
     if ray_dash_token:
         state["ray_dashboard_token"] = ray_dash_token
     _record_pd_split(state, pd_mode, pn, dn)
-    if backend in ("atom", "sglangrouter"):
+    if backend in ("atomesh", "sglangrouter"):
         from .pd_cluster import stamp_pd_cluster
 
         stamp_pd_cluster(state, get)
@@ -237,11 +237,11 @@ def external_has_ssh_control() -> bool:
 
 
 def external_has_server_control() -> bool:
-    """True when external mode can restart servers (SSH for infera/atom, head IP for rayjob)."""
+    """True when external mode can restart servers (SSH for infera/atomesh/sglangrouter, head IP for rayjob)."""
     if not external_service_url():
         return False
     get = handoff_lookup()
-    if get("INFERENCE_OPTIMIZER_MN_BACKEND").strip().lower() in ("atom", "sglangrouter"):
+    if normalize_mn_backend(get("INFERENCE_OPTIMIZER_MN_BACKEND")) in ("atomesh", "sglangrouter"):
         from .pd_cluster import pd_cluster_has_control
 
         return pd_cluster_has_control(get)
