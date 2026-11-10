@@ -10,6 +10,11 @@ trusted between the two calls) and landing either all files or none.
 
 Every refusal is a :class:`ResultRejected` whose ``reason`` names the check that failed, so a test and an operator can
 tell a tampered byte from a wrong sandbox.
+
+Landed files are this account's alone (``600``, directories ``700``), except in an output directory on storage set up to
+be shared (:func:`~hyperloom_common.shared_storage.parent_is_shared`), where a later leg of the run may be another
+account of the group and reads them: there the output directory and the ones made on the way to it are the group's
+(``2775``), and what is landed in it is ``640`` (directories ``2750``), which the group reads and only the writer changes.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
+from hyperloom_common.shared_storage import make_shared_dirs, parent_is_shared
 from hyperloom.measure import fsafe
 from hyperloom.measure.docs import DocumentError, parse_json_object
 from hyperloom.measure.manifest import RESERVED_NAMES, ManifestFile, ResultManifest, manifest_sha256
@@ -33,6 +39,9 @@ MANIFEST_NAME, SIGNATURE_NAME = RESERVED_NAMES
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_SIGNATURE_BYTES = 4096
 _SEAL = object()
+#: A landed file and a directory made for one, in an output directory on shared storage: the group reads them.
+LANDED_FILE_MODE = 0o640
+LANDED_DIR_MODE = 0o2750
 
 
 class RejectReason(str, Enum):
@@ -338,8 +347,8 @@ def materialize(bundle: VerifiedBundle, output_dir: Path) -> None:
     """
     if bundle._seal is not _SEAL:
         raise ResultRejected(RejectReason.NOT_VERIFIED, "the bundle was not produced by verify_bundle")
-    output = Path(output_dir)
-    output.mkdir(parents=True, exist_ok=True)
+    output = make_shared_dirs(Path(output_dir))
+    shared = parent_is_shared(output / MANIFEST_NAME)
     out_fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     scratch_name = f".hl-materialize-{uuid.uuid4().hex}"
     try:
@@ -351,7 +360,7 @@ def materialize(bundle: VerifiedBundle, output_dir: Path) -> None:
             )
             try:
                 _stage_files(bundle, scratch_fd)
-                _place_all(bundle.result.files, scratch_fd, out_fd)
+                _place_all(bundle.result.files, scratch_fd, out_fd, shared)
             finally:
                 os.close(scratch_fd)
         finally:
@@ -424,13 +433,16 @@ def _check_written(relative: str, written: int, size: int) -> None:
         raise MaterializeError(f"{relative}: the copy holds {written} bytes, the manifest lists {size}")
 
 
-def _place_all(files: tuple[ManifestFile, ...], scratch_fd: int, out_fd: int) -> None:
+def _place_all(files: tuple[ManifestFile, ...], scratch_fd: int, out_fd: int, shared: bool) -> None:
     placed: list[str] = []
     created: list[str] = []
     try:
         for entry in files:
             _place(entry, scratch_fd, out_fd, created)
             placed.append(entry.path)
+        if shared:
+            _share_landed(out_fd, ((rel, LANDED_FILE_MODE) for rel in placed))
+            _share_landed(out_fd, ((rel, LANDED_DIR_MODE) for rel in created))
     except BaseException:
         _roll_back(out_fd, placed, created)
         raise
@@ -484,6 +496,21 @@ def _copy_exclusive(source_parent: int, destination: int, name: str, size: int) 
             os.close(target)
     finally:
         os.close(source)
+
+
+def _share_landed(out_fd: int, entries: Iterable[tuple[str, int]]) -> None:
+    """Give each landed ``(relative path, mode)`` its mode, reached below ``out_fd`` without following a link."""
+    for rel, mode in entries:
+        *parents, name = rel.split("/")
+        parent = fsafe.open_dir_beneath(out_fd, parents)
+        try:
+            landed = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        finally:
+            os.close(parent)
+        try:
+            os.fchmod(landed, mode)
+        finally:
+            os.close(landed)
 
 
 def _roll_back(out_fd: int, placed: list[str], created: list[str]) -> None:
