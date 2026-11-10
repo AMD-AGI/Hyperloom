@@ -47,6 +47,11 @@ Without an observed `server_launch_flags` snapshot, this mode prevents recipe
 arguments from being restored. A nonempty snapshot from the same promoted
 measurement remains the complete launch base, including script-derived defaults.
 
+The environment assignments include those of the measured round's own launch,
+except a credential (`HF_TOKEN`, `AWS_SECRET_ACCESS_KEY`), which is never
+written into the handoff, and a loader or path variable, which would displace
+the overlay; a launch setting whose name merely contains `TOKEN`
+(`SGLANG_SIMULATE_ACC_TOKEN_MODE`) is carried like any other.
 Environment removals precede the accepted assignments, so a later explicit
 assignment can re-add a variable. The launch identity includes removal and
 replacement controls: changing them invalidates the same-configuration throughput

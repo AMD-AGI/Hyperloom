@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
+from hyperloom.common.env_safety import is_credential_name, redact_secret_values
 from hyperloom_common.io import WriteOptions, atomic_write_text
 from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
 from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
@@ -93,7 +93,7 @@ def _environment_overrides(
             continue
         for key, value in source.items():
             name = str(key or "").strip()
-            if not name or is_secret_shaped_env_name(name):
+            if not name or is_credential_name(name):
                 continue
             merged[name] = redact_secret_values(str(value))
     return dict(sorted(merged.items()))

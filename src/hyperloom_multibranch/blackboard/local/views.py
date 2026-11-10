@@ -126,6 +126,9 @@ def _apply_event(
     elif event.kind is LineageKind.STOP:
         if draft is not None:
             draft.stop_reason, draft.stopped_at = event.reason, at
+    elif event.kind is LineageKind.REOPEN:
+        if draft is not None:
+            draft.stop_reason, draft.stopped_at = None, None
     elif event.kind is LineageKind.REROOT:
         if draft is not None:
             draft.head, draft.rerooted = event.commit_id, True
@@ -228,6 +231,7 @@ def committed(state: BlackboardState, view: LineageView) -> tuple[CommittedCommi
                 merged_into=next((merge.commit_id for merge in merges if node.commit_id in merge.merged_from), None),
                 last_merge=attempts[-1] if attempts else None,
                 merge_attempts=len(attempts),
+                not_stackable=sum(item.outcome is MergeOutcome.NOT_STACKABLE for item in attempts),
                 first_failed_at=next((item.at for item in attempts if item.outcome in FAILED_MERGES), None),
             )
         )

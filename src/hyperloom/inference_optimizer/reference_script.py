@@ -15,7 +15,7 @@ import shlex
 from dataclasses import dataclass, field
 from typing import Any
 
-from hyperloom.common.env_safety import is_allowed_external_env_key, is_secret_shaped_env_name
+from hyperloom.common.env_safety import is_allowed_external_env_key, is_credential_name
 from hyperloom.common.overlay import validate_overlay_pythonpath
 
 _CONTROLS_PREFIX = "# hyperloom-launch-controls: "
@@ -162,7 +162,7 @@ def render_reference_script(
         if not str(k).strip():
             continue
         # The artifact is archived and uploaded, so a credential-shaped value is named but never written out.
-        if is_secret_shaped_env_name(k):
+        if is_credential_name(k):
             lines.append(f"# export {k}=<redacted; supply manually>")
         else:
             lines.append(f"export {k}={shlex.quote(str(v))}")
