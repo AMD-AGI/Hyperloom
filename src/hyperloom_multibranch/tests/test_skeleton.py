@@ -30,7 +30,7 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 import pytest
 
@@ -235,6 +235,7 @@ from hyperloom_multibranch.scheduling.settings import DOSSIER_MINUTES
 from hyperloom_multibranch.specialist import autonomous_session
 from hyperloom_multibranch.specialist.arbor_adapter import MAPPED
 from hyperloom_multibranch.specialist.arbor_map import DealRequest, SplitFailed
+from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
 from hyperloom_multibranch.specialist.prompts import prompt_versions
@@ -462,6 +463,7 @@ class Stage:
     image_check: Callable[[], ImageCheckReport] = lambda: IMAGE_CHECK
     isolation: LaunchIsolation = ISOLATION
     dossier_pass: DossierPass | None = None
+    dev_leases: DevLeases | None = None
     toolbox: RecordingToolbox = field(init=False)
     sessions: RecordedSessions = field(init=False)
     repo: HeldGitRepo = field(init=False)
@@ -534,6 +536,7 @@ class Stage:
             self.regression,
             self.isolation,
             self.dossier_pass,
+            self.dev_leases,
         )
 
     async def root(self) -> str:
@@ -3183,6 +3186,50 @@ async def test_a_branch_whose_specialist_gave_up_is_not_stopped_while_its_candid
     assert steering["detail"]["held"] == {"b02": HoldReason.PENDING_CONFIRM.value}
     [stopped] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
     assert str(stopped["reason"]).startswith(StopCause.SESSION_END.value)
+
+
+@dataclass(frozen=True)
+class DevLine:
+    """The session's dev sandboxes as the scheduler reads them: ``b02`` in line for one while ``waits()`` holds."""
+
+    waits: Callable[[], bool]
+
+    def waiting(self) -> frozenset[str]:
+        return frozenset({"b02"}) if self.waits() else frozenset()
+
+
+async def test_the_judge_cannot_stop_a_branch_in_line_for_a_dev_sandbox_but_the_session_end_does(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path)
+    stage.dev_leases = cast(DevLeases, DevLine(lambda: True))
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    _opening, steering, *_ = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
+    assert {row["branch"]: row.get("held") for row in steering["branches"]}["b02"] == HoldReason.DEV_WAIT.value
+    [_, steered] = [row for row in _decisions(stage) if row["kind"] == "judge"]
+    assert (steered["detail"]["stop"], steered["detail"]["held"]) == ({}, {"b02": HoldReason.DEV_WAIT.value})
+    [stopped] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
+    assert str(stopped["reason"]).startswith(StopCause.SESSION_END.value)
+
+
+async def test_a_branch_that_left_the_dev_sandbox_line_while_the_judge_answered_is_stopped_on_that_answer(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path)
+    stage.dev_leases = cast(DevLeases, DevLine(lambda: len(stage.judge.calls) < 2))
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    _opening, steering, *_ = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
+    assert {row["branch"]: row.get("held") for row in steering["branches"]}["b02"] == HoldReason.DEV_WAIT.value
+    [_, steered] = [row for row in _decisions(stage) if row["kind"] == "judge"]
+    assert (steered["detail"]["stop"], steered["detail"]["held"]) == ({"b02": STOP_REASON}, {})
+    [stopped] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
+    assert str(stopped["reason"]).startswith(StopCause.JUDGE.value)
 
 
 async def test_a_failed_opening_judge_call_opens_no_branch_beside_the_user_branches(tmp_path: Path) -> None:

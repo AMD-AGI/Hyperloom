@@ -269,6 +269,19 @@ async def test_a_stopped_branch_leaves_the_line(rig):
     await built.server.call("dev_sandbox_lease", branch=B3)
 
 
+async def test_the_branches_waiting_are_those_in_line_until_granted_or_stopped(rig):
+    built = rig.build(cap=1)
+    await built.server.call("dev_sandbox_lease")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B2), "cap_reached")
+    await _refused(built.server.call("dev_sandbox_lease", branch=B3), "cap_reached")
+    assert built.leases.waiting() == {B2, B3}
+    await built.leases.reclaim(B3, "its branch stopped")
+    await built.server.call("dev_sandbox_release")
+    assert built.leases.waiting() == {B2}
+    await built.server.call("dev_sandbox_lease", branch=B2)
+    assert built.leases.waiting() == frozenset()
+
+
 async def test_a_branch_the_toolbox_has_no_cards_for_is_put_in_line(rig):
     server = rig.build(cap=2).server
     rig.toolbox.refusal = SandboxUnavailable("no card is free")
