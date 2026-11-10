@@ -682,7 +682,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--route",
-        choices=[route.value for route in AnalysisRoute],
+        choices=[route.value for route in AnalysisRoute if route is not AnalysisRoute.PRIMUS],
         default=AnalysisRoute.AGENT.value,
         help=(
             "agent runs the TraceLens analysis-orchestrator skill through claude_agent_sdk; "

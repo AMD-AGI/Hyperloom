@@ -348,6 +348,10 @@ def _enrich_candidates_artifact(
 
 _TRACELENS_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.tracelens_analysis"
 _ANALYSIS_TOOL = "tracelens"
+_PRIMUS_TOOL = "primus"
+_PRIMUS_MODULE = "hyperloom.orchestrator.trace_analysis.primus_targets"
+#: A ``primus.kernel_calibration`` every Primus analysis takes when the payload names none.
+_PRIMUS_CALIBRATION_ENV = "HYPERLOOM_PRIMUS_CALIBRATION"
 
 
 def _optional_flags(*pairs: tuple[str, Any]) -> list[str]:
@@ -648,6 +652,57 @@ def _settle_tool_result(
         _enrich_candidates_artifact(candidates_path, metadata, trace_report_path=report_path)
 
 
+def _budget_seconds(payload: dict[str, Any]) -> int:
+    return int(payload.get("budget_minutes", 60)) * 60
+
+
+def _build_primus_cmd(payload: dict, state: Any, *, session_dir: Path) -> list[str]:
+    """The ``primus_targets analyze`` argv: a projection of the training config (``primus_config``, else the baseline)."""
+    return [
+        sys.executable,
+        "-m",
+        _PRIMUS_MODULE,
+        "analyze",
+        "--workspace-path",
+        str(payload.get("workspace_path") or session_dir),
+        "--session-id",
+        str(payload.get("session_id") or session_dir.name),
+        "--framework",
+        "megatron",
+    ] + _optional_flags(
+        ("--model-name", first_text(payload.get("model_name"), state.model_name, state.model_path)),
+        ("--target-platform", first_text(payload.get("target_platform"), state.gpu_type)),
+        ("--config", payload.get("primus_config") or state.baseline_config_path),
+        ("--kernel-report", payload.get("kernel_report")),
+        ("--gpu-arch", payload.get("gpu_arch")),
+        ("--nodes", payload.get("nodes")),
+        ("--kernel-calibration", payload.get("kernel_calibration") or os.environ.get(_PRIMUS_CALIBRATION_ENV, "")),
+        ("--kernel-speedups", payload.get("kernel_speedups")),
+        ("--roofline-output-name", str(payload.get("roofline_output_name") or "").strip()),
+    )
+
+
+async def _primus_analyze(payload: dict, *, session_dir: Path) -> HandlerResult:
+    """Training kernel targets from Primus' projection instead of a trace; the result has TraceLens' shape."""
+    from ...state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    cmd = _build_primus_cmd(payload, state, session_dir=session_dir)
+    started = time.monotonic()
+    result = await _run_analysis_tool(cmd, _budget_seconds(payload))
+    duration_sec = round(time.monotonic() - started, 3)
+    _settle_tool_result(result, {}, [])
+    result["analysis_meta"] = _build_analysis_meta(
+        result,
+        route=AnalysisRoute.PRIMUS,
+        requested_mode="",
+        trace_input=str(payload.get("kernel_report") or payload.get("primus_config") or ""),
+        duration_sec=duration_sec,
+    )
+    result["analysis_meta"]["tool"] = _PRIMUS_TOOL
+    return result
+
+
 async def trace_analyze_handler(
     payload: dict,
     *,
@@ -668,10 +723,16 @@ async def trace_analyze_handler(
 
     Required payload:
         trace_input: path to a torch_trace dir or single .trace.json.gz file.
+            The ``primus`` route reads no trace: Primus' simulate-mode projection of
+            ``primus_config`` (default: the baseline config) prices the training
+            iteration, calibrated by ``kernel_calibration`` (or
+            ``HYPERLOOM_PRIMUS_CALIBRATION``).
 
     Returns the tool's result dict with ``status``, surfaced artifact paths, and
     ``trace_health_warnings``; on failure, ``returncode`` / ``error`` and empty ``hot_kernels``.
     """
+    if _requested_route(payload) == AnalysisRoute.PRIMUS.value:
+        return await _primus_analyze(payload, session_dir=session_dir)
     trace_input = payload.get("trace_input") or payload.get("trace_dir")
     if not trace_input:
         return {"status": "failed", "error": "missing 'trace_input' in payload"}
@@ -729,7 +790,7 @@ async def trace_analyze_handler(
         session_dir=session_dir,
         workload=workload,
     )
-    timeout_sec = int(payload.get("budget_minutes", 60)) * 60
+    timeout_sec = _budget_seconds(payload)
 
     _disc_started = time.monotonic()
     result = await _run_analysis_tool(cmd, timeout_sec)
