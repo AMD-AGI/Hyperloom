@@ -191,7 +191,10 @@ def test_an_unknown_gpu_type_is_refused_naming_the_types_a_session_runs_on(capsy
         cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", "MI325X"])
 
     assert exc.value.code == cli.EXIT_USAGE
-    assert "invalid choice: 'mi325x' (choose from 'mi300x', 'mi350x', 'mi355x')" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "invalid choice: 'mi325x'" in err
+    # argparse quotes the choices before Python 3.12.8 and lists them bare from it on.
+    assert "(choose from mi300x, mi350x, mi355x)" in err.replace("'", "")
 
 
 def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivity_at_its_conc_alone() -> None:
@@ -201,9 +204,10 @@ def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivit
     assert (workload.kind, workload.metric, workload.final_concs) == (WorkloadKind.AGENTX, GRADED_INTVTY_P50, (16,))
 
 
-def test_an_agentx_run_is_served_at_the_ep_it_names_and_at_ep_1_by_default() -> None:
-    assert _settings(workload=AGENTX_ARGS).workload.ep == 1
-    assert _settings("--ep", "8", workload=AGENTX_ARGS).workload.ep == 8
+@pytest.mark.parametrize("workload", [WORKLOAD_ARGS, AGENTX_ARGS], ids=["inferencex", "agentx"])
+def test_a_run_is_served_at_the_ep_it_names_and_at_ep_1_by_default(workload: list[str]) -> None:
+    assert _settings(workload=workload).workload.ep == 1
+    assert _settings("--ep", "8", workload=workload).workload.ep == 8
 
 
 def test_run_help_names_the_ep_option(capsys: pytest.CaptureFixture[str]) -> None:
@@ -275,7 +279,7 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *AGENTX_ARGS, "--isl", "1024"],
         ["run", *AGENTX_ARGS, "--osl", "512"],
         ["run", *AGENTX_ARGS, "--ep", "0"],
-        ["run", *WORKLOAD_ARGS, "--ep", "2"],
+        ["run", *WORKLOAD_ARGS, "--ep", "0"],
     ],
 )
 def test_usage_errors_exit_two(argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1312,6 +1316,20 @@ def test_a_hosted_spec_names_its_gpu_type_in_any_case(
     assert cli.main(["hosted", "run"]) == 0
 
     assert agent_cli == [on_the_command_line]
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_inferencex_spec_runs_its_session_at_the_hardware_ep_it_names(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.spec(hardware={"gpu_type": "mi300x", "tp": 2, "ep": 2})
+    on_the_command_line = _settings(*SPEC_RUN_ARGS, "--ep", "2")
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert agent_cli == [on_the_command_line]
+    assert on_the_command_line.workload.ep == 2
 
 
 @pytest.mark.parametrize(

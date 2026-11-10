@@ -180,6 +180,7 @@ def test_the_workload_reaches_the_renderer_as_hyperloom_optimize_exports_it(monk
         "FRAMEWORK": "sglang",
         "MODEL_PATH": "/models/Llama-3-8B",
         "TP": "2",
+        "EP": "1",
         "ISL": "1024",
         "OSL": "512",
         "PRECISION": "bf16",
@@ -187,6 +188,11 @@ def test_the_workload_reaches_the_renderer_as_hyperloom_optimize_exports_it(monk
         "TARGET_GPU_TYPE": "mi355x",
         "KERNEL_OPT_BACKEND_ORDER": "forge",
     }
+
+
+def test_an_inferencex_workload_at_an_ep_reaches_the_renderer_at_that_ep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    assert workload_environment(replace(WORKLOAD, ep=8))["EP"] == "8"
 
 
 def test_an_mi350x_is_measured_on_mi355x_scripts_and_named_as_itself(monkeypatch: pytest.MonkeyPatch) -> None:
