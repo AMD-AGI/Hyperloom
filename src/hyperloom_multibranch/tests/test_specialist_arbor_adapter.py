@@ -859,11 +859,20 @@ def test_an_agentx_branch_is_refused_before_arbor_starts_unless_it_is_given_the_
         ("{", "cannot be read"),
         (["--tp 1"], "is not a JSON object"),
         ({"server_env": {}}, "no server_flags"),
+        ({**RESOLVED, "server_flags": "--chat-template 'a b"}, "a quote is left open"),
         ({**RESOLVED, "server_env": {"N": 1}}, "server_env is not an object of strings"),
         ({**RESOLVED, "flags": "--tp 1", "model_name": 7}, "keys a launch does not: flags; its model_name is not"),
         ({**RESOLVED, "client": "python3 bench.py --port 8000"}, "names no --result-dir"),
     ],
-    ids=["unreadable", "a-list", "no-flags", "env-not-strings", "unknown-key-and-name", "client-arbor-cannot-fill"],
+    ids=[
+        "unreadable",
+        "a-list",
+        "no-flags",
+        "open-quote",
+        "env-not-strings",
+        "unknown-key-and-name",
+        "client-arbor-cannot-fill",
+    ],
 )
 def test_a_launch_file_the_adapter_cannot_use_is_refused_with_why(tmp_path: Path, document: object, said: str) -> None:
     path = Path(_launch_file(tmp_path, document))
@@ -916,11 +925,57 @@ def test_a_base_launch_record_is_served_as_the_gate_seeds_its_launch_with_its_go
 
     assert launch.server_flags == (
         "--tensor-parallel-size 2 --max-num-seqs 128 --chat-template 'a b'"
-        ' --speculative-config {"method":"mtp","num_speculative_tokens":3}'
+        """ --speculative-config '{"method":"mtp","num_speculative_tokens":3}'"""
     )
     assert launch.server_env == {"VLLM_ROCM_USE_AITER": "1", "VLLM_SIMULATE_ACC": "3"}
     assert (launch.record, launch.digest, launch.entrypoint) == (str(record), base_record().digest(), ("vllm", "serve"))
     assert (launch.model_name, launch.client) == ("", "")
+
+
+def _shell_argv(flags: str) -> list[str]:
+    """The words a POSIX shell passes a server launched with ``flags``, as Arbor launches one through bash."""
+
+    script = f"{shlex.quote(sys.executable)} -c 'import json, sys; print(json.dumps(sys.argv[1:]))' {flags}"
+    return json.loads(subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout)
+
+
+def _arbor_split(flags: str) -> list[str]:
+    """``flags`` as the vendored Arbor's ``split_flags`` (arbor/base_launch.py), the split its start check reads."""
+
+    script = "import json, sys; from arbor import base_launch; print(json.dumps(base_launch.split_flags(sys.argv[1])))"
+    run = subprocess.run(
+        [sys.executable, "-c", script, flags], cwd=VENDORED_ARBOR, capture_output=True, text=True, check=True
+    )
+    return json.loads(run.stdout)
+
+
+#: The record's server argv, its JSON value compact, as the server is to receive it.
+RECORD_ARGV = [
+    *("--tensor-parallel-size", "2", "--max-num-seqs", "128", "--chat-template", "a b"),
+    *("--speculative-config", '{"method":"mtp","num_speculative_tokens":3}'),
+]
+
+
+@pytest.mark.parametrize(
+    ("recipe", "argv"),
+    [
+        ("", []),
+        ('--compilation-config {"level": 3}', ["--compilation-config", '{"level":3}']),
+        ('--override-generation-config={"t":1}', ['--override-generation-config={"t":1}']),
+        ('--served-model-name="m 1"', ["--served-model-name=m 1"]),
+        ('--override-generation-config {"stop": ["a b"]}', ["--override-generation-config", '{"stop":["a b"]}']),
+    ],
+)
+def test_a_flag_reaches_the_server_arbor_launches_through_a_shell_as_its_words(
+    tmp_path: Path, recipe: str, argv: list[str]
+) -> None:
+    record = write_record(tmp_path / "record" / "base_launch.json")
+    spec = replace(_spec(tmp_path, launch=str(record)), server_args=recipe, envs={})
+
+    flags = arbor_config(spec, tmp_path / "checkout", BRANCH_RUN)["server_flags"]
+
+    assert _shell_argv(flags) == [*RECORD_ARGV, *argv]
+    assert _arbor_split(flags) == _shell_argv(flags)
 
 
 def test_arbor_s_own_start_check_passes_a_branch_served_a_record_on_the_base_and_refuses_another(

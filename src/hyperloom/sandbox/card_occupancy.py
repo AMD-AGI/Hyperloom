@@ -287,8 +287,8 @@ class CardReading:
         return tuple(found)
 
     def _render_users(self, card: int, own: OwnProcesses) -> str:
-        """Who of this container has memory on ``card``'s render node, each with its id, command and memory, for the
-        record of a crowded card; or why that could not be read."""
+        """Who of this container has more than almost no memory (:data:`NEGLIGIBLE_VRAM`) on ``card``'s render node,
+        each with its id, command and memory, for the record of a crowded card; or why that could not be read."""
         if self.method != METHOD_CENSUS_FDINFO:
             gap = f" ({self.accounting_gap})" if self.accounting_gap else ""
             return f"the render node's descriptors were not read{gap}"
@@ -296,7 +296,7 @@ class CardReading:
             f"pid {pid} ({'the test' if own.owns(pid) else 'not the test'}) with {client.vram / _GIB:.1f} GiB"
             + (f": {command[:_DETAIL_COMMAND_CHARS]}" if command else "")
             for client in self.render_clients
-            if client.card == card and client.vram > 0
+            if client.card == card and client.vram > NEGLIGIBLE_VRAM
             for pid, command in client.processes
         ]
         if not users:
