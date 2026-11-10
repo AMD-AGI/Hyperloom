@@ -259,7 +259,8 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "check). 'handoff' (the default for a fresh campaign) runs one profile at a time and hands the search "
             "to another at a blockage. 'split' needs --search-strategy tree: every round's slots are split across "
             "the profiles that can run, in turn, each slot planned and implemented on its own profile, and the "
-            "selector is told which profile each slot position runs on. Immutable per campaign: snapshotted into "
+            "selector is told which profile each slot position runs on. 'off' builds no relay: the campaign runs "
+            "the configured provider alone and probes no other. Immutable per campaign: snapshotted into "
             "campaign_config.json, and a --resume may only repeat it.",
         ),
     ),

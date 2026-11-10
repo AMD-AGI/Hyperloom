@@ -59,6 +59,8 @@ class RelayMode(str, Enum):
     HANDOFF = "handoff"
     # Every profile at once: each tree round's slots are split across the profiles that can run.
     SPLIT = "split"
+    # No relay: the campaign records no relay policy and runs its configured provider alone.
+    OFF = "off"
 
 
 # Fields a campaign written before they existed may lack, and the value such a campaign ran with.
@@ -170,12 +172,15 @@ def _validate_campaign(config: CampaignConfig) -> None:
         raise ValueError("campaign pristine implementation signature is missing or invalid")
     if hash_implementation_identity(config.implementation_identity) != config.implementation_signature:
         raise ValueError("campaign pristine implementation identity does not match its signature")
-    _require_relay_mode_fits(config.search_strategy, config.relay_mode)
+    _require_relay_mode_fits(config.search_strategy, config.relay_mode, config.agent_relay)
 
 
-def _require_relay_mode_fits(search_strategy: str, relay_mode: str) -> None:
-    if RelayMode(relay_mode) is RelayMode.SPLIT and SearchStrategy(search_strategy) is not SearchStrategy.TREE:
+def _require_relay_mode_fits(search_strategy: str, relay_mode: str, agent_relay: AgentRelayPolicy | None) -> None:
+    mode = RelayMode(relay_mode)
+    if mode is RelayMode.SPLIT and SearchStrategy(search_strategy) is not SearchStrategy.TREE:
         raise ValueError("a campaign whose relay mode is split needs the tree search strategy")
+    if mode is RelayMode.OFF and agent_relay is not None:
+        raise ValueError("a campaign whose relay mode is off records no model relay policy")
 
 
 def derive_campaign_implementation_contract(
@@ -565,7 +570,7 @@ def create_campaign_config(
     base_commit: str | None = None,
 ) -> CampaignConfig:
     """Resolve and normalize all immutable inputs for a fresh campaign."""
-    _require_relay_mode_fits(inputs.search_strategy, inputs.relay_mode)
+    _require_relay_mode_fits(inputs.search_strategy, inputs.relay_mode, inputs.agent_relay)
     workspace = Path(workspace_dir).resolve()
     kernel_path = _relative_file(workspace, inputs.kernel, "kernel")
     driver_path = _driver_reference(workspace, inputs.driver)
