@@ -10,6 +10,7 @@ builds the module on its card."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sys
 from functools import partial
 from pathlib import Path
@@ -29,9 +30,10 @@ from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.runner.native import aiter_modules
 from hyperloom.measure.runner.native.aiter_modules import AITER_COMPONENT, AiterModules
 from hyperloom.measure.runner.native.builder import BuildMachine
-from hyperloom.measure.runner.native.isolated import IsolatedBuilds, Isolation
+from hyperloom.measure.runner.native.isolated import ISOLATION_BWRAP_NETNS, ISOLATION_KEY, IsolatedBuilds, Isolation
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.runner.native.tests import _aiter_standin as standin
+from hyperloom.measure.runner.native.tests._bwrap_compile import bwrap_compile_isolation
 from hyperloom.measure.spec import Environment
 from hyperloom.measure.tests._recipes import IMAGE, git_patch, put_patch, recipe_with
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
@@ -48,9 +50,10 @@ PATCHED = "// patched k.cu\n"
 
 
 class AiterRig:
-    """One session over the stand-in aiter image: the compiler with the module plan, the store and the driver."""
+    """One session over the stand-in aiter image: the compiler with the module plan, the store and the driver, whose
+    compile runs under ``isolation`` (by default the test's own user, unconfined)."""
 
-    def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch, isolation: Isolation = Isolation((), None)) -> None:
         self.tmp, self.blobs = tmp, LocalBlobStore(tmp / "blobs")
         self.patches = 0
         self.package = standin.aiter_image(tmp / "image")
@@ -59,11 +62,11 @@ class AiterRig:
         monkeypatch.setattr(farm_module, "locate_package", locate)
         key = signing.generate_private_key()
         self.store = BuildStore(tmp / "store", Trust((TrustedKey(signing.public_key_pem(key), 1),), 1))
-        machine = BuildMachine(IMAGE, BUILDER, "gfx942", sys.executable)
+        self.machine = machine = BuildMachine(IMAGE, BUILDER, "gfx942", sys.executable)
         planner = NativePlanner(NativeSite(machine, {}, tmp / "sources", tmp / "image-root"), self.blobs)
         history = partial(self.store.ready_records, AITER_COMPONENT, IMAGE)
         self.modules = AiterModules(planner, history=history, environ={})
-        runner = IsolatedBuilds(planner, self.blobs, Isolation((), None), {AITER_COMPONENT: standin.FACTORY})
+        runner = IsolatedBuilds(planner, self.blobs, isolation, {AITER_COMPONENT: standin.FACTORY})
         site = BuildSite(IMAGE, BUILDER, "gfx942", {AITER_COMPONENT: standin.recipe()})
         self.driver = StoreBuildDriver(self.store, Signer(key), site, compiled_needs, runner)
         self.compiler = EnvironmentCompiler(
@@ -116,6 +119,28 @@ async def test_a_touched_module_waits_for_its_cpu_build_and_the_sheet_names_it_o
     environment = Environment.parse(sheet, "environment")
     assert [(b.root_id, b.key) for b in environment.builds] == [("aiter", record.key)]
     assert {root.id: root.kind for root in environment.roots} == {"aiter": "package", "aiter.meta": "package"}
+
+
+@pytest.mark.agent_isolation
+async def test_under_bubblewrap_a_touched_module_is_built_from_its_farm_and_the_image_files_it_links_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The farm is laid in the compile's own work directory and its untouched files are links into the image's aiter:
+    the sandbox shows the one writable and the other read-only, so aiter's own build runs and reads the patched
+    source."""
+    rig = AiterRig(tmp_path, monkeypatch, isolation=bwrap_compile_isolation(monkeypatch))
+    compiled = rig.compile(PATCHED)
+    (need,) = compiled.builds
+
+    hooks = Hooks()
+    await rig.wait(compiled, hooks)
+
+    assert (hooks.ready, hooks.ended) == (["r1"], [])
+    record = rig.store.read(need.inputs)
+    assert record is not None and (record.status, record.toolchain[ISOLATION_KEY]) == (READY, ISOLATION_BWRAP_NETNS)
+    (output,) = record.outputs
+    built = standin.built(rig.machine.gfx_arch, PATCHED)
+    assert output.sha256 == hashlib.sha256(built).hexdigest(), "built for the target from the patch"
 
 
 async def test_a_csrc_that_does_not_compile_is_the_candidates_compile_error_before_any_card(rig: AiterRig) -> None:

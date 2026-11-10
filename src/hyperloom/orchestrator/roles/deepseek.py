@@ -220,8 +220,6 @@ class DeepSeekBackend:
     transport = TRANSPORT_STRUCTURED_OUTPUT
 
     _session: DeepSeekSession | None = field(default=None, init=False, repr=False)
-    # Instructions the open conversation was started with.
-    _conversation_instructions: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Normalize and secure the session-private runtime root."""
@@ -247,6 +245,11 @@ class DeepSeekBackend:
         # The harness owns its tool set and its own turn loop.
         del tools, max_turns
         turn_prompt = f"{prompt}\n\n{_ENVELOPE_REMINDER} {self._legal_intent_types()}"
+        # Each round's prompt carries the whole run state. The harness resends the full conversation on every
+        # model step and compacts only near the model's window, so a conversation kept across rounds only grows
+        # every request; the runtime itself stays up.
+        if self._session is not None:
+            self._session.reset_conversation()
 
         sdk_result = await self._drive_turn(system_prompt, turn_prompt, prompt_chars=len(prompt))
         usage = dict(sdk_result.usage or {})
@@ -370,7 +373,7 @@ class DeepSeekBackend:
             await session.aclose()
 
     async def _session_for(self, system_prompt: str | None) -> DeepSeekSession:
-        """Return the held session, opening it (or re-scoping it) as needed."""
+        """Return the held session with ``system_prompt``'s instructions, opening it as needed."""
         instructions = self._instructions_for(system_prompt)
         if self._session is None:
             self._session = DeepSeekSession(
@@ -393,10 +396,9 @@ class DeepSeekBackend:
                 # Left as it is so the retry wrapper around the attempt can see it.
                 self._session = None
                 raise
-        elif instructions != self._conversation_instructions:
+        else:
+            # Instructions ride a conversation's first message, and every round opens a new one.
             self._session.instructions = instructions
-            self._session.reset_conversation()
-        self._conversation_instructions = instructions
         return self._session
 
 

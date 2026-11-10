@@ -231,6 +231,10 @@ def _specialist_module(name: str) -> ModuleType:
     return pytest.importorskip(f"hyperloom_multibranch.specialist.{name}")
 
 
+def _dossier_outcome() -> type[DossierOutcome]:
+    return _specialist_module("dossier_pass").DossierOutcome
+
+
 START = 1_700_000_000.0
 CONC = 16
 #: An ownership scope of a pod that is gone: another boot, so none of its pids is a process of this environment.
@@ -2054,6 +2058,7 @@ PASS_SECONDS = 600.0
 async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    outcome = _dossier_outcome()
     asked: list[tuple[str, OpShares | None]] = []
     started: list[DossierStart] = []
 
@@ -2066,7 +2071,7 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
     async def dossier(start: DossierStart) -> DossierOutcome:
         started.append(start)
         await stage.time.sleep(PASS_SECONDS)
-        return DossierOutcome(Path("/pass/directions.json"), Path("/pass/docs/dossier/qwen3-8b"), MAPPED)
+        return outcome(Path("/pass/directions.json"), Path("/pass/docs/dossier/qwen3-8b"), MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
@@ -2109,6 +2114,7 @@ async def test_without_a_map_two_arbors_split_the_map_of_the_session_s_dossier_p
 async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_generic_map(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minutes: float
 ) -> None:
+    outcome = _dossier_outcome()
     asked: list[str] = []
     started: list[DossierStart] = []
 
@@ -2120,7 +2126,7 @@ async def test_a_dossier_pass_with_no_map_or_no_minutes_leaves_the_split_to_the_
 
     async def dossier(start: DossierStart) -> DossierOutcome:
         started.append(start)
-        return DossierOutcome(None, None, "it refused its config: the pack has no dossier skill")
+        return outcome(None, None, "it refused its config: the pack has no dossier skill")
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
@@ -2158,12 +2164,13 @@ def _pass_wrote(tmp_path: Path) -> tuple[Path, Path]:
 async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossier_and_opens_no_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
     started: list[DossierStart] = []
 
     async def mapping(start: DossierStart) -> DossierOutcome:
         started.append(start)
-        return DossierOutcome(map_file, dossier, MAPPED)
+        return outcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
     stage = _stage(tmp_path)
@@ -2197,11 +2204,12 @@ async def test_a_run_that_stops_after_its_map_maps_one_arbor_keeps_map_and_dossi
 async def test_a_run_that_stops_after_its_map_keeps_a_map_generated_from_the_root_when_the_pass_set_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    outcome = _dossier_outcome()
     generated = tmp_path / "generated-directions.json"
     generated.write_text(json.dumps({"directions": [{"id": "m-gemm"}]}))
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return DossierOutcome(None, None, "it set no map by its deadline and was stopped")
+        return outcome(None, None, "it set no map by its deadline and was stopped")
 
     async def generate(*_args: object) -> Path:
         return generated
@@ -2227,8 +2235,10 @@ async def test_a_run_that_stops_after_its_map_keeps_a_map_generated_from_the_roo
 async def test_a_run_that_stops_after_its_map_and_gets_none_fails_with_why_and_keeps_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    outcome = _dossier_outcome()
+
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return DossierOutcome(None, None, "it refused its config: the pack has no dossier skill")
+        return outcome(None, None, "it refused its config: the pack has no dossier skill")
 
     async def generate(*_args: object) -> Path:
         raise SplitFailed("the root has no shares to generate a map from")
@@ -2299,6 +2309,7 @@ def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: 
     """A session of two Arbors with the review on, whose dossier pass writes a map and a dossier; the split records
     the map's text as it reads it."""
 
+    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
 
     async def split(
@@ -2308,7 +2319,7 @@ def _two_arbors_reviewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: 
         return ("/shares/share-1.json", "/shares/share-2.json")
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return DossierOutcome(map_file, dossier, MAPPED)
+        return outcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _two_arbors)
@@ -2436,6 +2447,7 @@ async def test_without_the_review_gate_two_arbors_split_their_map_at_once_and_th
 async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_reviewed_map_whole(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
     asked: list[tuple[tuple[str, ...], str]] = []
 
@@ -2446,7 +2458,7 @@ async def test_with_the_review_on_one_arbor_gets_the_map_step_and_takes_the_revi
         return ("/shares/share-1.json",)
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return DossierOutcome(map_file, dossier, MAPPED)
+        return outcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "agent_plans", split)
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
@@ -2498,10 +2510,11 @@ async def test_a_run_that_stops_after_its_map_does_not_pause_even_with_the_revie
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Its stop is the review point: the map is kept and reviewed offline, across the points.
+    outcome = _dossier_outcome()
     map_file, dossier = _pass_wrote(tmp_path)
 
     async def mapping(_start: DossierStart) -> DossierOutcome:
-        return DossierOutcome(map_file, dossier, MAPPED)
+        return outcome(map_file, dossier, MAPPED)
 
     monkeypatch.setattr(lifecycle, "arbor_agents", _one_arbor)
     stage = _stage(tmp_path)
