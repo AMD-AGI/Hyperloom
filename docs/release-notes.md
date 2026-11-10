@@ -20,6 +20,18 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **Every round runs through InferenceSuite; Magpie and the `bypass` backend
+  are removed.** Baseline, explore, grid, KEEP, profile and GEAK-replay rounds
+  are inference_suite run directories with a `report.json`, and `failed_step`
+  follows the step it names. Magpie is no longer installed or imported, and
+  nothing clones InferenceX: `install.sh` stages the pinned client into
+  `INFERENCE_SUITE_TOOL_CACHE`. `MAGPIE_*`, `HYPERLOOM_BENCHMARK_BACKEND` and
+  `INFERENCEX_REF` are no longer read; `MAGPIE_EVAL_LIMIT` is now
+  `HYPERLOOM_EVAL_LIMIT`. **Upgrade note:** hosted measurement sheets and
+  result manifests are v2 and a runner refuses a v1 sheet, so build the runner
+  cache (`cache_build`) for the new commit before starting hosted sessions on
+  it; a runner whose published staging differs from the sheet's refuses with
+  `preflight_mismatch`.
 - **A GEAK or Forge reproduction of the measured launch keeps settings whose
   names contain `TOKEN`.** The GEAK handoff's `baseline_env_spec`, the Forge
   handoff's serving context and the reference launch script now carry launch
