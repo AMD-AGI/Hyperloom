@@ -28,8 +28,9 @@ on in both modes and the signed result says ``unknown`` and why; it is never wri
 the machine refuses it the list for its cards (a container that is shown no GPU node, not its card's, or no process list),
 the result is ``unobservable`` and why: enforcing, it is refused as ``cards_unobservable`` before the test starts while
 :data:`REFUSE_UNOBSERVABLE` is set, and kept with a note when it is not; observing, it is kept with a note. In a pid namespace of its
-own the probe counts instead of naming (before the test nothing may hold a card, during it one process may hold memory on
-each, and no memory may be held that no process of this container accounts for): the result says so in its ``method``.
+own the probe counts instead of naming (before the test nothing may hold a card; during it one process may hold memory on
+each, not counting one with a few MiB and no queue, and no memory may be held that no process of this container accounts
+for): the result says so in its ``method``.
 """
 
 from __future__ import annotations
