@@ -8,7 +8,7 @@ myst:
 
 `hyperloom-multibranch` (also `python -m hyperloom_multibranch`) is installed with Hyperloom. `run` starts one
 session: PRELUDE, EXPLORE, FINAL and CLOSE. The other subcommands are `review` (see
-[Review the agent map](multibranch-review-gate.md)), `final-only SESSION_DIR` (emergency FINAL and CLOSE over a
+[Review the agent map](#review-the-agent-map)), `final-only SESSION_DIR` (emergency FINAL and CLOSE over a
 session that ended before FINAL) and `hosted run` (a session a host injects; see
 [Run hosted multi-branch on a new cluster](hosted-multibranch-new-cluster.md)).
 
@@ -51,6 +51,38 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
   `--agent-directions`, `--agent-dossier-minutes`, `--agent-share-minutes`, `--agent-pack`, `--agent-launch`,
   `--agent-port`, `--stop-after-map`, `--agent-dossier`, `--no-review-gate`.
 - **Scheduling playbook:** `--playbook auto|champion|challenger` (default `auto`).
+
+## Review the agent map
+
+By default, a run with Arbor `--autonomous-agent` branches waits for a person's review of their map before opening
+those branches. The session writes `MB-review/REVIEW.md` and `MB-review/review.json` under its session directory.
+Use the session path printed at launch, as it is visible on the machine where you review it:
+
+```bash
+SESSION_DIR='/path/to/session'
+hyperloom-multibranch review --session "$SESSION_DIR" show
+```
+
+Read the generated review page and inspect the map and dossier it names. You can edit those files in place before
+deciding; on approval the session reads them again. To approve the map:
+
+```bash
+hyperloom-multibranch review --session "$SESSION_DIR" approve --note "Reviewed the map and dossier"
+```
+
+To reject it instead:
+
+```bash
+hyperloom-multibranch review --session "$SESSION_DIR" reject --note "The map needs revision"
+```
+
+The command records the decision in the session's files; it can run on a login node with access to the session
+directory and does not require a GPU. `--by` overrides the recorded reviewer name, which defaults to the login name.
+
+A supplied `--agent-directions` map is reviewed before EXPLORE: the pause does not count against `--max-hours`, and
+rejection ends the session with `review_rejected`. A map generated during EXPLORE waits only its mapping branch;
+other branches and the clock continue, and rejection opens no Arbor share branches. `show` reports the time left
+for that review when it has a deadline. `--no-review-gate` skips review; `--stop-after-map` ends the run for offline review instead of waiting.
 
 ## Exit codes
 
