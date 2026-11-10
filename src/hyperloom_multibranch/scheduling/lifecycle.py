@@ -199,6 +199,7 @@ COMPLETED_REASONS = frozenset(
         SessionStopReason.GPU_HOURS_EXHAUSTED,
         SessionStopReason.LLM_BUDGET_EXHAUSTED,
         SessionStopReason.JUDGE_STOPPED,
+        SessionStopReason.FINISHED_AFTER_RESTART,
     }
 )
 CUT_SHORT = "CLOSE was cut short after a stop signal"
@@ -437,12 +438,13 @@ class Session:
         aborted = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
         return await self._run_and_close(self._phases(budget), aborted, budget, hard_stop)
 
-    async def finish(self, ended: SessionStopReason) -> SessionOutcome:
+    async def finish(self, ended: SessionStopReason, *, restart: bool = False) -> SessionOutcome:
         """Run FINAL and CLOSE over the directory a session that ended for ``ended`` before FINAL left behind, and
         report as that session would have; the manifest and the blackboard that session wrote are this one's input, so
         this opens no session of its own and only its report, dashboard and breakdown are written again. It ends for
         ``ended`` however FINAL goes: the session did not run its course, and a FINAL run after the fact does not
-        make it so.
+        make it so; except that for the ``restart`` of a hosted run, which its host starts again after a preemption, a
+        FINAL that chose ends it for ``finished_after_restart`` when ``ended`` is not in :data:`COMPLETED_REASONS`.
 
         The candidates are read before anything else happens, so a session FINAL cannot run over is refused without a
         stop or a report being written. A session that ended before PRELUDE recorded its baseline has no candidate:
@@ -459,7 +461,7 @@ class Session:
         self._in_final = True
         hard_stop = HardStop(budget, self._clock)
         ending = SessionOutcome(ended, None, None, "")
-        work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended)
+        work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended, restart)
         return await self._run_and_close(work, ending, budget, hard_stop)
 
     async def resume(self, ended: SessionStopReason, deadline: float) -> SessionOutcome:
@@ -942,9 +944,11 @@ class Session:
         self._decisions.record(Decision(DecisionKind.PRELUDE, DOSSIER_ENDED, INTEGRATION_BRANCH, ended))
         return outcome
 
-    async def _final_phases(self, candidates: FinalCandidates, ended: SessionStopReason) -> SessionOutcome:
+    async def _final_phases(
+        self, candidates: FinalCandidates, ended: SessionStopReason, restart: bool
+    ) -> SessionOutcome:
         """FINAL alone over ``candidates``, inside the phases coroutine, so a failure still goes through CLOSE and
-        leaves a report.
+        leaves a report; for ``restart`` see :meth:`finish`.
 
         The toolbox takes the dead session's unfinished tests up again from its submit log when it starts, and they
         belong to branches that are over: they are withdrawn, and the quota then admits FINAL's validation alone.
@@ -952,7 +956,11 @@ class Session:
 
         await self._take_up(ended)
         await self._toolbox.set_policy(final_quota(self._settings.caps))
-        return await self._final(candidates, ended)
+        outcome = await self._final(candidates, ended)
+        chose = outcome.final is not None and outcome.final.chosen is not None
+        if restart and chose and ended not in COMPLETED_REASONS:
+            return replace(outcome, stop_reason=SessionStopReason.FINISHED_AFTER_RESTART)
+        return outcome
 
     async def _no_final(self, ended: SessionStopReason) -> SessionOutcome:
         """No FINAL over a session that recorded no baseline: the toolbox takes the dead session's unfinished tests up

@@ -91,7 +91,9 @@ the same path; a usage error names what is missing.
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`) or on this container's
 cards, as the spec says. Started again over a run whose ``session.json`` names a session, it resumes that session to
-its first deadline where its baseline still holds, else finishes it as ``final-only`` does (``hosted_restart_leg``). It
+its first deadline where its baseline still holds, else finishes it as ``final-only`` does (``hosted_restart_leg``),
+except that a finish whose FINAL chooses a commit ends for ``finished_after_restart`` with exit code 0, as the restart
+completed the run, and one that chooses nothing or fails keeps the reason the session ended for and fails. It
 tells the host the run is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the
 environment, agents it cannot isolate, a missing package of the ``hosted`` extra or the runner cache keeps a session
 from running, with exit code 2 for a refused spec or session and 1 otherwise; a crash leaves no ``exit.json``, and the
@@ -947,11 +949,16 @@ async def _run_session(
     return (await session.run()).exit_code
 
 
-def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:
+def final_only(
+    persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, *, restart: bool = False
+) -> int:
     """Run FINAL and CLOSE over the session directory ``persisted`` was read from, print it on one stdout line and
-    return the session's exit code. No session directory is created, which is why this cannot start one."""
+    return the session's exit code. No session directory is created, which is why this cannot start one. For
+    ``restart``, a hosted run's, see :meth:`Session.finish`."""
 
-    return _over_session(persisted, peer_factory, services, Session.finish)
+    return _over_session(
+        persisted, peer_factory, services, lambda session, ended: session.finish(ended, restart=restart)
+    )
 
 
 def resume(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, deadline: float) -> int:
@@ -1090,7 +1097,8 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     require_session_environment(settings, os.environ)
     ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
     if persisted is not None:
-        run = partial(hosted_restart_leg(persisted, final_only, resume), persisted, ready.peer_factory, ready.services)
+        finish = partial(final_only, restart=True)
+        run = partial(hosted_restart_leg(persisted, finish, resume), persisted, ready.peer_factory, ready.services)
     elif earlier.left is not None:
         run = partial(_start_again, earlier.left, settings, ready, host.state_dir)
     else:
