@@ -876,3 +876,22 @@ def test_parent_is_shared_judges_the_nearest_existing_directory_as_the_walk_reac
     assert shared_storage.parent_is_shared(tmp_path / "link" / "below" / "new"), "past the link its target decides"
     assert not shared_storage.parent_is_shared(shared / "dangling" / "new"), "a link to nothing is no shared storage"
     assert not shared_storage.parent_is_shared(shared / "planted" / "new"), "a link the walk refuses: not shared"
+
+
+@pytest.mark.parametrize("shared", [True, False], ids=["shared", "private"])
+def test_a_directory_just_made_is_shared_only_below_shared_storage_and_never_through_a_link(tmp_path, shared):
+    parent = _setgid_parent(tmp_path / "parent") if shared else tmp_path / "parent"
+    if not shared:
+        parent.mkdir(mode=0o755)
+    made = Path(tempfile.mkdtemp(prefix="made-", dir=parent))  # 0700, whatever the umask
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    (parent / "dir-link").symlink_to(elsewhere)
+
+    shared_storage.share_new_directory(made)
+
+    assert _mode(made) == (0o2775 if shared else 0o700 | (parent.stat().st_mode & stat.S_ISGID))
+    with pytest.raises(OSError) as refused:
+        shared_storage.share_new_directory(parent / "dir-link")
+    assert refused.value.errno in (errno.ELOOP, errno.ENOTDIR), "a link at the name is not followed"
+    assert _mode(elsewhere) == 0o700

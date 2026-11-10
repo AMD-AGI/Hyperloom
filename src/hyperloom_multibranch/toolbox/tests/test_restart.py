@@ -150,6 +150,10 @@ def test_a_torn_last_line_is_ignored_and_an_aborted_number_is_not_reused(tmp_pat
     assert reread.get(entry.request_id).aborted  # type: ignore[union-attr]
     assert reread.request_id("b", 1) == entry.request_id
     assert SubmissionLog(tmp_path / "other.jsonl", "c2").request_id("b", 1) != entry.request_id
+    assert SubmissionLog(tmp_path / "scoped.jsonl", "c", "s1").request_id("b", 1) not in (
+        entry.request_id,
+        SubmissionLog(tmp_path / "scoped.jsonl", "c", "s2").request_id("b", 1),
+    )
 
 
 async def test_nothing_is_dispatched_after_close(tmp_path: Path) -> None:

@@ -816,7 +816,9 @@ class HostedMeasurementBackend:
         except ValueError as exc:
             raise ResultRejected(RejectReason.MANIFEST_INVALID, str(exc)) from None
         if manifest.total_size() > spec.outputs.max_total_bytes:
-            raise ResultRejected(RejectReason.TOO_LARGE, f"{manifest.total_size()} > {spec.outputs.max_total_bytes}")
+            # The sum is not shown: sizes thousands of digits long can add up to more digits than str() converts.
+            limit = spec.outputs.max_total_bytes
+            raise ResultRejected(RejectReason.TOO_LARGE, f"the listed files hold more than {limit} bytes")
         return manifest
 
     def _expected_fingerprint(self, spec: MeasurementSpec, claimed_version: str) -> str:

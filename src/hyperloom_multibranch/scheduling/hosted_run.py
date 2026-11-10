@@ -24,30 +24,36 @@ that grace.
 The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the run again: never once it holds
 ``final: true`` (:func:`write_final_exit`), and again when it is missing. ``session.json`` there names the session
 directory as soon as it exists (:func:`record_session`), so a start that finds it finishes that session instead of
-starting another. The two file names and their fields are the legacy entry's, ``hyperloom.hosted.entry``, which this
-package does not import: importing it loads the legacy flow's state.
+starting another, once that session got through PRELUDE; one that ended before its baseline was recorded is closed,
+which ends the measurement sandboxes it left, and the spec's session starts again. The two file names and their fields
+are the legacy entry's, ``hyperloom.hosted.entry``, which this package does not import: importing it loads the legacy
+flow's state.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import threading
 from dataclasses import dataclass
 from datetime import datetime
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
+from hyperloom_common.shared_storage import ownership
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, persisted_session, prelude_landed
 from hyperloom_multibranch.scheduling.settings import RunSettings
+from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
 
 # hyperloom/hosted/entry.py EXIT_FILE and SESSION_FILE
@@ -55,8 +61,12 @@ EXIT_FILE = "exit.json"
 SESSION_FILE = "session.json"
 #: Seconds between the session's hard stop and the grant's end, for the process to write ``exit.json`` and exit.
 GRANT_MARGIN_SECONDS = 60.0
-_DURABLE = WriteOptions(fsync=True)
+#: ``exit.json`` and ``session.json`` reach the disk before their names, and are ``664``: the run's next leg, maybe
+#: another account of the group, reads ``session.json`` to finish the session it names.
+_DURABLE = WriteOptions(fsync=True, shared=True)
 _ENCODING = "utf-8"
+
+log = logging.getLogger(__name__)
 
 
 class HostedRefused(ValueError):
@@ -175,6 +185,21 @@ def _multibranch_section(section: object) -> dict[str, Any]:
     return section
 
 
+def grant_tests_that_fit(host: HostInfo, make_before_break: bool = True) -> Callable[[int], int]:
+    """How many tests of a TP the grant ``host`` holds runs at once, as the hosted toolbox runs them (``handover_for``
+    with ``make_before_break``); raises ValueError when one does not fit, ImportError without the ``hosted`` extra."""
+
+    # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
+    from hyperloom_multibranch.toolbox.hosted_toolbox import handover_for, parallel_tests_for
+
+    grant = toolbox_grant(host.grant_limits)
+
+    def tests_that_fit(tp: int) -> int:
+        return parallel_tests_for(grant, tp, handover_for(grant, tp) if make_before_break else None)
+
+    return tests_that_fit
+
+
 def toolbox_grant(limits: HostGrantLimits | None) -> GrantLimits | None:
     """The grant ``limits`` as the hosted toolbox reads it, ``None`` when the host gave none.
 
@@ -271,13 +296,58 @@ def record_session(state_dir: Path, root: Path) -> None:
 
 
 def recorded_session(state_dir: Path) -> Path | None:
-    """The session directory an earlier start of the run named, ``None`` when none did."""
+    """The session directory an earlier start of the run named, ``None`` when none did.
 
+    Raises:
+        HostedRefused: When this account cannot read ``session.json``, naming it with its owner and mode: an earlier
+            leg of another account wrote it owner-only, and a restart would meet the same file.
+    """
+
+    path = state_dir / SESSION_FILE
     try:
-        text = (state_dir / SESSION_FILE).read_text(encoding=_ENCODING)
+        text = path.read_text(encoding=_ENCODING)
     except FileNotFoundError:
         return None
+    except PermissionError as exc:
+        raise HostedRefused(f"this account cannot read {path}{ownership(path)}: {exc.strerror}") from None
     return Path(json.loads(text)["session_dir"])
+
+
+@dataclass(frozen=True)
+class EarlierSession:
+    """The session an earlier start of the run began: ``finish``, which a restart finishes, when it got through
+    PRELUDE; ``left``, which a restart closes before it starts the spec's session again, when it committed its root
+    and ended before its baseline was recorded without closing, or was closed by such a restart; ``closed``, the
+    directory of one that closed on its own before its baseline was recorded, which ended the run; none of them when
+    there was none or it committed no root, and so started no test."""
+
+    finish: PersistedRun | None = None
+    left: PersistedRun | None = None
+    closed: Path | None = None
+
+
+def earlier_session(state_dir: Path) -> EarlierSession:
+    """The session ``session.json`` names, read back; raises what :func:`recorded_session` and
+    :func:`~hyperloom_multibranch.scheduling.lifecycle.persisted_run` raise. Blocks.
+
+    The host starts a run again only once its earlier start has ended, so a ``final-only`` lock that start left in the
+    session is that start's, whose pid names a process of a machine that is gone: it is removed, or the finish would be
+    refused for good. A session that is closed and started again holds no measurement this build has to read back, so
+    it may have run on another build: a restart onto a new build is how a fix reaches a run that is failing."""
+
+    previous = recorded_session(state_dir)
+    if previous is None or not SessionLayout(previous).root_recipe.is_file():
+        return EarlierSession()
+    lock = SessionLayout(previous).final_only_lock
+    if lock.is_file():
+        log.warning("removing %s, which the earlier start of this run left", lock)
+        lock.unlink(missing_ok=True)
+    if prelude_landed(previous):
+        return EarlierSession(finish=persisted_run(previous))
+    reported = reported_stop_reason(previous)
+    if reported not in (None, SessionStopReason.KILLED.value):
+        return EarlierSession(closed=previous)
+    return EarlierSession(left=persisted_session(previous))
 
 
 def reported_stop_reason(root: Path) -> str | None:
@@ -294,12 +364,15 @@ __all__ = [
     "EXIT_FILE",
     "GRANT_MARGIN_SECONDS",
     "SESSION_FILE",
+    "EarlierSession",
     "GrantDeadline",
     "HostedExit",
     "HostedRefused",
     "arm_grant_stop",
     "campaign_spec",
+    "earlier_session",
     "grant_deadline",
+    "grant_tests_that_fit",
     "record_session",
     "recorded_session",
     "refuse_unhosted_branches",

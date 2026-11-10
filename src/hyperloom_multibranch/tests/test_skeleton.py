@@ -23,6 +23,8 @@ import errno
 import json
 import os
 import signal
+import subprocess
+import sys
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -32,6 +34,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 import pytest
 
+import hyperloom_multibranch
 from hyperloom_common.jsonio import read_jsonl
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.common.proctree import running
@@ -135,12 +138,14 @@ from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.scheduling.lifecycle import (
     CUT_SHORT,
     LESSONS_KEY,
+    NO_BASELINE,
     NO_CARDS_LEFT,
     Session,
     SessionHost,
     SessionOutcome,
     SessionServices,
     persisted_run,
+    prelude_landed,
 )
 from hyperloom_multibranch.scheduling.local_peers import workload_rule
 from hyperloom_multibranch.scheduling.manifest import read_manifest
@@ -1812,6 +1817,101 @@ async def test_final_only_finishes_a_session_that_was_killed_before_it_could_clo
 
     with pytest.raises(ValueError, match="already chose"):
         persisted_run(stage.layout.root)
+
+
+class KilledInPreludeToolbox(LeasingToolbox):
+    """A toolbox whose process dies, as a machine that is lost kills it, the moment it has accepted the first root
+    test: no test it accepted ever measures, so nothing lands and PRELUDE records no baseline. It prints where the
+    session is and when it died first. For :func:`_killed_in_prelude`, run in a process of its own."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.executor.gate.clear()
+
+    async def submit_test(self, request: TestRequest) -> str:
+        request_id = await super().submit_test(request)
+        if request.purpose is Purpose.BASELINE:
+            print(json.dumps({"now": self.clock(), "request_id": request_id}), flush=True)
+            os._exit(0)
+        return request_id
+
+
+class HeldToolbox(LeasingToolbox):
+    """The leasing toolbox whose tests never end on their own, as a hosted measurement takes minutes: one taken up
+    from the submit log is still running when the session withdraws it. ``stopped`` holds every running test its
+    executor was told to stop, as the hosted backend is told to end the test's sandbox. Not a placeholder: the fake
+    runs every test at once otherwise."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.executor.gate.clear()
+        self.stopped: list[str] = []
+        self.executor.withdraw = self.stopped.append  # type: ignore[method-assign]
+
+
+def _killed_in_prelude(workspace: Path) -> dict[str, object]:
+    """Run a session in ``workspace`` until its process dies with the first root test accepted and not measured
+    (:class:`KilledInPreludeToolbox`). Never returns: it prints where the session is, the framework checkout it rooted
+    on, and the time it died at and the root test it left as its last line. Run it in a process of its own."""
+
+    framework = framework_checkout(workspace)
+    os.environ[MB_FRAMEWORK_REPO_ENV] = str(framework)
+    stage = _stage(workspace)
+    stage.toolbox_type = KilledInPreludeToolbox
+    print(json.dumps({"root": str(stage.layout.root), "framework": str(framework)}), flush=True)
+    asyncio.run(stage.run())
+    raise AssertionError("the session outlived the kill of its process")
+
+
+def _in_a_process(call: str) -> dict[str, object]:
+    """``call``, an expression of this module's, run in a process of its own that dies in it: what it printed, every
+    line a JSON object, merged."""
+
+    source = Path(hyperloom_multibranch.__file__).parents[1]
+    code = (
+        f"import sys\nfrom pathlib import Path\nsys.path.insert(0, {str(source)!r})\n"
+        f"from hyperloom_multibranch.tests import test_skeleton\ntest_skeleton.{call}"
+    )
+    ran = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600, check=False)
+    assert ran.returncode == 0, ran.stderr
+    printed: dict[str, object] = {}
+    for line in ran.stdout.splitlines():
+        if line.startswith("{"):
+            printed.update(json.loads(line))
+    return printed
+
+
+async def test_a_finish_over_a_session_killed_before_its_baseline_ends_with_no_candidate_and_withdraws_its_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    left = await asyncio.to_thread(_in_a_process, f"_killed_in_prelude(Path({str(tmp_path / 'workspace')!r}))")
+    monkeypatch.setenv(MB_FRAMEWORK_REPO_ENV, str(left["framework"]))
+    root = Path(str(left["root"]))
+    layout = SessionLayout(root)
+    assert not layout.report.exists(), "the process died before CLOSE"
+    _as_another_pod(layout.pids)
+    persisted = persisted_run(root)
+    assert persisted.ended is SessionStopReason.KILLED
+    assert not await asyncio.to_thread(prelude_landed, root), "the rule gate wrote no baseline"
+
+    time = VirtualClock(float(str(left["now"])))
+    recovery = Stage(layout, time, HeldRegistry(layout.pids, time), ScriptedCompletion(), [], settings=SETTINGS)
+    recovery.toolbox_type = HeldToolbox
+    outcome = await recovery.finish(persisted.ended)
+
+    assert (outcome.stop_reason, outcome.final, outcome.error) == (SessionStopReason.KILLED, None, NO_BASELINE)
+    assert outcome.exit_code == 1 and outcome.close is not None and outcome.close.stop.clean
+    report = json.loads(layout.report.read_text())
+    assert (report["stop_reason"], report["final"]) == (SessionStopReason.KILLED.value, None)
+    assert NO_BASELINE in str(report["error"])
+    # The root test the dead process left in flight is taken up from the submit log and stopped while it runs, not
+    # left to hold its sandbox; CLOSE's own session-wide withdrawal follows and finds nothing left.
+    in_flight = str(left["request_id"])
+    assert isinstance(recovery.toolbox, HeldToolbox) and in_flight in recovery.toolbox.stopped
+    assert recovery.toolbox.withdrawals == [SessionStopReason.KILLED.value] * 2
+    record = await recovery.handle(Role.OBSERVER).record(in_flight)
+    assert record.result is None and record.withdrawal_reason == SessionStopReason.KILLED.value
+    assert [row["reason"] for row in _decisions(recovery) if row["kind"] == "final"] == [NO_BASELINE]
 
 
 async def test_a_stop_signal_during_a_final_only_still_leaves_a_report_within_one_close_grace(
