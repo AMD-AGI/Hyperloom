@@ -752,15 +752,25 @@ def refused_reasons(path: Path) -> str:
     return "; ".join(str(reason) for reason in reasons if str(reason).strip())
 
 
+def exit_reason(path: Path) -> str:
+    """Why Arbor says its run ended, as the exit file at ``path`` it writes before an exit 0 has it; else what is
+    wrong with that file."""
+
+    try:
+        document = json.loads(path.read_text(encoding=ENCODING))
+    except FileNotFoundError:
+        return "it wrote no exit reason"
+    except (OSError, ValueError) as error:
+        return f"its exit reason cannot be read: {error}"
+    reason = document.get("reason") if isinstance(document, dict) else None
+    return reason if isinstance(reason, str) and reason else f"its exit file names no reason: {document!r}"
+
+
 def mapped(session: Path) -> bool:
     """Whether the dossier pass whose session is ``session`` ended with its map set, as its exit file says; the map is
     then the session's :data:`MAP_FILE`."""
 
-    try:
-        document = json.loads((session / EXIT_FILE).read_text(encoding=ENCODING))
-    except (OSError, ValueError):
-        return False
-    return isinstance(document, dict) and document.get("reason") == MAPPED
+    return exit_reason(session / EXIT_FILE) == MAPPED
 
 
 async def split_directions(checkout: Path, map_file: Path, shares: int, out: Path) -> tuple[Path, ...]:
@@ -832,6 +842,7 @@ __all__ = [
     "bench_command",
     "carry_dossier",
     "dossier_notes",
+    "exit_reason",
     "generate_directions",
     "has_review_gate",
     "host_rules",

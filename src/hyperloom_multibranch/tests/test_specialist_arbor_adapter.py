@@ -41,6 +41,7 @@ from hyperloom_multibranch.specialist.arbor_adapter import (
     generate_directions,
     is_arbor,
     link_built,
+    exit_reason,
     mapped,
     read_launch,
     refusals,
@@ -705,6 +706,25 @@ def test_a_dossier_pass_ended_mapped_only_when_its_exit_file_says_so(
         (tmp_path / "component_exit.json").write_text(json.dumps({"reason": exit_file, "detail": "m-attn, m-moe"}))
 
     assert mapped(tmp_path) is ended
+
+
+@pytest.mark.parametrize(
+    ("content", "said"),
+    [
+        (None, "it wrote no exit reason"),
+        ("{", "its exit reason cannot be read: "),
+        (json.dumps({"reason": ""}), "its exit file names no reason: {'reason': ''}"),
+        (json.dumps({"reason": "deadline"}), "deadline"),
+    ],
+)
+def test_arbor_s_exit_reason_is_its_exit_file_s_or_what_is_wrong_with_the_file(
+    tmp_path: Path, content: str | None, said: str
+) -> None:
+    path = tmp_path / "component_exit.json"
+    if content is not None:
+        path.write_text(content)
+
+    assert exit_reason(path).startswith(said)
 
 
 async def test_a_map_is_split_into_one_plan_per_share_by_arbor_s_command_line(tmp_path: Path) -> None:
