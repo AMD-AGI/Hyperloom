@@ -260,8 +260,9 @@ class LocalOptions:
     ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted. ``python`` is the interpreter the
     runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
     infrastructure retries per test before it ends as ``measurement_failed``, ``infra_backoff_seconds`` the wait before
-    each one after a failure that is not the node's (:class:`~.attempts.InfraBackoff`) and ``poll_interval_sec`` how often the backend polls a runner for its
-    result. ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None``
+    each one after a failure that is not the node's (:class:`~.attempts.InfraBackoff`) and ``poll_interval_sec`` how
+    often the backend polls a runner for its result. ``tools`` are the asynchronous tools ``start_analysis``
+    may reach; ``None``
     is the local set: TraceLens, the roofline of a profile test's trace (``non-llm`` analysis, no card and no model), the
     upstream PR search (GitHub is asked from this process, never from a sandbox) and ``kernel_tune`` when the pool can spare a
     card for it without leaving fewer than one test needs (it leases the card from the pool the branches' sandboxes lease

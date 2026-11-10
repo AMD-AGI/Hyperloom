@@ -192,8 +192,8 @@ class HostedOptions:
     when higher. ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted.
     ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the infrastructure retries per test before it
     ends as ``measurement_failed``, ``infra_backoff_seconds`` the wait before each
-    one after a failure that is not the node's (:class:`~.attempts.InfraBackoff`) and ``poll_interval_sec`` how often the backend polls a runner sandbox for its
-    result.
+    one after a failure that is not the node's (:class:`~.attempts.InfraBackoff`) and ``poll_interval_sec`` how often
+    the backend polls a runner sandbox for its result.
     ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None`` is the hosted set, TraceLens: it reads the
     traces a profile test lands below ``session_dir``. ``kernel_tune`` leases a card of a local pool and the roofline
     profiles on host cards, and the hosted toolbox has neither. ``retry`` is how the service client repeats a control-plane

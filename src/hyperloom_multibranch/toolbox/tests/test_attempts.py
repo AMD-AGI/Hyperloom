@@ -114,7 +114,9 @@ def _backoff(time: _FakeTime, latest: float | None = None) -> InfraBackoff:
     return InfraBackoff(INFRA_BACKOFF_SECONDS, lambda _request: latest, clock=time, sleep=time.sleep)
 
 
-async def _run(reason: str | tuple[str, ...], latest: float | None = None) -> tuple[TestResult, _ScriptedExecutor, list[str]]:
+async def _run(
+    reason: str | tuple[str, ...], latest: float | None = None
+) -> tuple[TestResult, _ScriptedExecutor, list[str]]:
     executor = _ScriptedExecutor(reason)
     reported: list[str] = []
 
