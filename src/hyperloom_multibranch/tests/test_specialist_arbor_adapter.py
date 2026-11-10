@@ -940,16 +940,13 @@ def _shell_argv(flags: str) -> list[str]:
 
 
 def _arbor_split(flags: str) -> list[str]:
-    """``flags`` split as Arbor's ``split_flags`` splits them: non-POSIX words, one pair of outer quotes taken off a
-    word or off the value of ``--a='b'``."""
+    """``flags`` as the vendored Arbor's ``split_flags`` (arbor/base_launch.py), the split its start check reads."""
 
-    words = []
-    for word in shlex.split(flags, posix=False):
-        name, eq, value = word.partition("=") if word.startswith("-") else ("", "", word)
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
-        words.append(f"{name}={value}" if eq else (value if not name else word))
-    return words
+    script = "import json, sys; from arbor import base_launch; print(json.dumps(base_launch.split_flags(sys.argv[1])))"
+    run = subprocess.run(
+        [sys.executable, "-c", script, flags], cwd=VENDORED_ARBOR, capture_output=True, text=True, check=True
+    )
+    return json.loads(run.stdout)
 
 
 #: The record's server argv, its JSON value compact, as the server is to receive it.
@@ -965,9 +962,11 @@ RECORD_ARGV = [
         ("", []),
         ('--compilation-config {"level": 3}', ["--compilation-config", '{"level":3}']),
         ('--override-generation-config={"t":1}', ['--override-generation-config={"t":1}']),
+        ('--served-model-name="m 1"', ["--served-model-name=m 1"]),
+        ('--override-generation-config {"stop": ["a b"]}', ["--override-generation-config", '{"stop":["a b"]}']),
     ],
 )
-def test_a_json_valued_flag_reaches_the_server_arbor_launches_through_a_shell_as_its_json(
+def test_a_flag_reaches_the_server_arbor_launches_through_a_shell_as_its_words(
     tmp_path: Path, recipe: str, argv: list[str]
 ) -> None:
     record = write_record(tmp_path / "record" / "base_launch.json")
