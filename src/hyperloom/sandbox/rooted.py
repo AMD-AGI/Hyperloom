@@ -91,11 +91,11 @@ class _Walk:
         return inside[0]
 
 
-def open_rooted(root: Path, virtual: str, flags: int, *, make_parents: bool = False) -> int:
+def open_rooted(root: Path, virtual: str, flags: int, *, make_parents: bool = False, mode: int = 0o600) -> int:
     """A descriptor of ``virtual`` (a path in the root, ``/`` its top) below the directory ``root``, opened with
-    ``flags`` (plus ``O_NOFOLLOW``; files it creates get mode ``0o666`` less the umask), by a walk no link leads out of
-    the root (see the module doc). ``make_parents`` makes each directory that is missing on the way. The caller closes
-    the descriptor.
+    ``flags`` (plus ``O_NOFOLLOW``; a file it creates gets ``mode`` less the umask, owner-only by default), by a walk
+    no link leads out of the root (see the module doc). ``make_parents`` makes each directory that is missing on the
+    way. The caller closes the descriptor.
 
     Raises:
         SandboxDenied: A link on the way leads out of the root, or the walk follows more than :data:`MAX_LINKS`.
@@ -112,9 +112,7 @@ def open_rooted(root: Path, virtual: str, flags: int, *, make_parents: bool = Fa
                 continue
             last = not pending
             try:
-                # 0o666 as open() and Path.write_bytes make a file: the umask decides, and an account a sandbox's
-                # processes run as must read what the app writes for them.
-                opened = os.open(name, (flags if last else _DIRECTORY) | _STEP, 0o666, dir_fd=walk.stack[-1])
+                opened = os.open(name, (flags if last else _DIRECTORY) | _STEP, mode, dir_fd=walk.stack[-1])
             except FileNotFoundError:
                 if last or not make_parents or made == (len(walk.stack), name):
                     raise

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,7 @@ def test_parents_are_made_below_the_root_and_through_a_link_in_it(root: Path) ->
     for virtual in ("/in/a/b/file.txt", "/work/via/c/file.txt"):
         os.close(open_rooted(root, virtual, os.O_WRONLY | os.O_CREAT, make_parents=True))
     assert (root / "in" / "a" / "b" / "file.txt").is_file() and (root / "work" / "dir" / "c" / "file.txt").is_file()
+    assert stat.S_IMODE((root / "in" / "a" / "b" / "file.txt").stat().st_mode) == 0o600, "owner-only by default"
     with pytest.raises(FileNotFoundError):
         _open_and_close(root, "/missing/file.txt", os.O_WRONLY | os.O_CREAT)
 
