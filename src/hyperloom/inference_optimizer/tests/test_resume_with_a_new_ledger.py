@@ -13,6 +13,7 @@ work they left running would go unseen (fail closed, as the guard did on the sha
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import stat
@@ -25,11 +26,12 @@ from hyperloom.inference_optimizer.session.resume_guard import ResumeBlocked, en
 from hyperloom.inference_optimizer.session.paths import (
     ENV_LEDGER_DIR,
     db_path_for,
+    ledger_mark_path,
     private_db_path_for,
     shared_db_path_for,
 )
 from hyperloom.orchestrator.bus.message_bus import Message
-from hyperloom.orchestrator.bus.storage.connection import DatabaseNotPrivate
+from hyperloom.orchestrator.bus.storage.connection import DatabaseNotPrivate, SqliteConnection
 from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
@@ -204,26 +206,79 @@ async def test_a_named_ledger_directory_that_is_not_safe_is_refused_and_nothing_
 
 
 @pytest.mark.asyncio
-async def test_a_credential_added_to_a_session_that_ran_without_one_is_resumed_on_an_empty_ledger_with_a_warning(
+async def test_a_credential_added_to_a_session_that_ran_without_one_is_resumed_once_and_then_refused_in_a_new_container(
     session_dir, tmp_path, monkeypatch, caplog
 ):
-    """A database is in the session directory, which the guard inspects: the resume goes on, on a ledger of this
-    account's that starts empty, and a warning says the earlier database is not read."""
-    _container(tmp_path, monkeypatch, "container")
+    """Leg 1 has no credential and leaves a database in the session directory, which the guard inspects: leg 2 adds a
+    credential and goes on, on an empty ledger of its own with a warning. From then on that database is stale (leg 2's
+    leases and tasks are in the ledger), and leg 3 in a new container, with no ledger, is refused for all of it."""
+    monkeypatch.delenv(ENV_LEDGER_DIR, raising=False)
+    _container(tmp_path, monkeypatch, "container-1")
     first = _coordinator(session_dir)  # no credential: its database is in the session directory
     first.shared_state.tick = 3
     first.shared_state.save(session_dir)
     first.db.raw.close()
-    state = SharedState.load_or_init(session_dir)
+
+    state = SharedState.load_or_init(session_dir)  # leg 2: the operator adds a credential
     state.operator_extra_env = {"HF_TOKEN": _SECRET}
     state.save(session_dir)
-
     ensure_resume_safe(session_dir, owner_scope="host:1")
     caplog.set_level(logging.WARNING)
-    resumed = _coordinator(session_dir)
-    assert private_db_path_for(session_dir).exists()
-    resumed.db.raw.close()
+    second = _coordinator(session_dir)
+    assert private_db_path_for(session_dir).exists() and ledger_mark_path(session_dir).is_file()
+    second.db.raw.close()
     assert any("is not read" in record.getMessage() for record in caplog.records)
+
+    _container(tmp_path, monkeypatch, "container-2")  # leg 3: the ledger of leg 2 is not here, the old database is
+    assert shared_db_path_for(session_dir).exists()
+    with pytest.raises(ResumeBlocked, match="HYPERLOOM_LEDGER_DIR"):
+        ensure_resume_safe(session_dir, owner_scope="host:2")
+    with pytest.raises(ResumeBlocked, match="HYPERLOOM_LEDGER_DIR"):
+        _coordinator(session_dir)
+
+
+@pytest.mark.asyncio
+async def test_a_database_put_in_the_session_directory_does_not_stand_in_for_the_ledger_of_a_credential_session(
+    session_dir, tmp_path, monkeypatch
+):
+    """The session directory is one the group can write: an empty database a member puts there is not the ledger of the
+    legs that ran on a private one."""
+    monkeypatch.delenv(ENV_LEDGER_DIR, raising=False)
+    _container(tmp_path, monkeypatch, "container-1")
+    (await _stopped_leg(session_dir)).db.raw.close()
+    _container(tmp_path, monkeypatch, "container-2")
+    planted = shared_db_path_for(session_dir)
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    SqliteConnection(planted).raw.close()  # a database with its schema and not a row in it
+    assert planted.exists()
+    with pytest.raises(ResumeBlocked, match="HYPERLOOM_LEDGER_DIR"):
+        ensure_resume_safe(session_dir, owner_scope="host:2")
+    with pytest.raises(ResumeBlocked, match="HYPERLOOM_LEDGER_DIR"):
+        _coordinator(session_dir)
+
+
+@pytest.mark.asyncio
+async def test_a_credential_that_was_only_exported_is_remembered_by_the_session_not_by_its_pins(
+    session_dir, tmp_path, monkeypatch
+):
+    """A leg whose state records no pins (a ``--reset-state`` leg) still runs on a private ledger when the run exports a
+    credential: the mark the session keeps (``ledger_mark_path``) makes a resume in a new container refuse, whatever the
+    next launch exports."""
+    monkeypatch.delenv(ENV_LEDGER_DIR, raising=False)
+    _container(tmp_path, monkeypatch, "container-1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", "--tp 8 --api-key not-a-real-key")
+    SharedState().save(session_dir)  # no pins recorded
+    coord = _coordinator(session_dir)
+    coord.shared_state.tick = 3
+    coord.shared_state.save(session_dir)
+    coord.db.raw.close()
+    assert not json.loads((session_dir / "state.json").read_text())["operator_server_args"]
+    assert ledger_mark_path(session_dir).is_file(), "the session, not its pins, remembers"
+
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_SERVER_ARGS")
+    _container(tmp_path, monkeypatch, "container-2")
+    with pytest.raises(ResumeBlocked, match="HYPERLOOM_LEDGER_DIR"):
+        ensure_resume_safe(session_dir, owner_scope="host:2")
 
 
 @pytest.mark.asyncio

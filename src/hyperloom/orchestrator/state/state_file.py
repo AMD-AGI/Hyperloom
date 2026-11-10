@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.session_files import OPERATOR_PINS, pins_hold_credentials, shared_options
-from hyperloom.inference_optimizer.session.paths import private_db_exists, private_db_path_for, shared_db_path_for
+from hyperloom.inference_optimizer.session.paths import (
+    ledger_mark_path,
+    private_db_exists,
+    private_db_path_for,
+    shared_db_path_for,
+)
 from hyperloom.inference_optimizer.session.resume_guard import require_own_ledger
 from hyperloom_common.io import atomic_write_json
 from hyperloom_common.shared_storage import SHARED_FILE_MODE
@@ -53,6 +58,17 @@ def _recorded(state: Any) -> dict[str, Any]:
     }
 
 
+def _record_the_move(session_dir: Path) -> None:
+    """Record in the session directory that a leg opened a ledger outside it, for the resume guard: from then on a database
+    left in the session directory is not the session's. Said, not fatal, when it cannot be written."""
+    mark = ledger_mark_path(session_dir)
+    if not mark.is_file():
+        try:
+            atomic_write_json(mark, {"ledger_private": True}, options=shared_options({}))
+        except OSError as exc:
+            log.warning("cannot record that the session's database moved out of its directory (%s): %s", mark, exc)
+
+
 def database_target(session_dir: Path, state: Any) -> tuple[Path, int]:
     """Where this account opens the session's coordinator database, and the most its mode may be.
 
@@ -72,10 +88,10 @@ def database_target(session_dir: Path, state: Any) -> tuple[Path, int]:
     file_mode = database_file_mode(state)
     private = private_db_path_for(session_dir)
     made = private_db_exists(session_dir)
-    if file_mode == SHARED_FILE_MODE and not made:
-        return shared_db_path_for(session_dir), file_mode
     if not made:
         require_own_ledger(session_dir, _recorded(state))
+    if file_mode == SHARED_FILE_MODE and not made:
+        return shared_db_path_for(session_dir), file_mode
     earlier = shared_db_path_for(session_dir)
     if not made and earlier.exists():
         log.warning(
@@ -84,4 +100,5 @@ def database_target(session_dir: Path, state: Any) -> tuple[Path, int]:
             private,
             earlier,
         )
+    _record_the_move(session_dir)
     return private, _PRIVATE_FILE_MODE

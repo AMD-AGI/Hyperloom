@@ -83,8 +83,12 @@ from hyperloom.inference_optimizer.session.paths import (
 )
 from hyperloom.inference_optimizer.session.resume_guard import (
     CleanupConfirmationError,
+    ResumeBlocked,
     confirm_scope_gone,
+    ensure_resume_safe,
     foreign_owner_scopes,
+    recorded_state,
+    require_own_ledger,
 )
 from hyperloom.plugs.errors import ManifestError
 from hyperloom.plugs.manifest import LOCKABLE_SOCKETS, load_builtin_profile
@@ -182,9 +186,11 @@ def _run() -> int:
         print("[hosted] a stop was requested before this leg started; ending the run", flush=True)
         write_exit(info.state_dir, final=True, returncode=0, stop_reason=STOP_REQUEST_REASON)
         return 0
+    _require_own_ledger(session_dir)
     _put_interpreter_first_on_path()
     _run_installer(info.state_dir)
     _confirm_previous_containers_gone(session_dir)
+    _require_resume_safe(session_dir)
     with _plug_inputs(lock, info), _mcp_service(info, session_dir):
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
 
@@ -265,6 +271,32 @@ def _confirm_previous_containers_gone(session_dir: Path) -> None:
         print(
             "[hosted] the previous application container is gone; its unfinished work is marked interrupted", flush=True
         )
+
+
+def _require_own_ledger(session_dir: Path) -> None:
+    """Refuse for good, before the installer runs, a resume of a credential session that this account has no ledger for.
+
+    Left to ``optimize``, the refusal is an exit code 2 that ``exit.json`` records as final only when the previous leg
+    did not end on a watchdog restart; after one the host would start another container, which has no ledger either,
+    without end. As ``Refused`` it is ``final: true``, with the remedy (``HYPERLOOM_LEDGER_DIR``, which a hosted leg
+    does not default: the host names a persistent private directory of the account's) in ``error``.
+    """
+    if is_resumable(session_dir):
+        try:
+            require_own_ledger(session_dir, recorded_state(session_dir))
+        except ResumeBlocked as exc:
+            raise Refused(str(exc)) from None
+
+
+def _require_resume_safe(session_dir: Path) -> None:
+    """Refuse for good a resume the guard of ``optimize`` would refuse (work whose exit is not proven, a file this
+    account cannot read), for the reason above: ``optimize`` would exit 2 and, after a watchdog restart, ``exit.json``
+    would say the run is not over."""
+    if is_resumable(session_dir):
+        try:
+            ensure_resume_safe(session_dir, owner_scope=local_owner_scope())
+        except ResumeBlocked as exc:
+            raise Refused(f"the session cannot be resumed: {exc}") from None
 
 
 def _put_interpreter_first_on_path() -> None:

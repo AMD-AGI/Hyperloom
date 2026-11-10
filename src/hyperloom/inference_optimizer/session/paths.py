@@ -304,6 +304,12 @@ def private_db_path_for(session_dir: Path) -> Path:
     return ledgers / session_ledger_key(session_dir) / "coordinator.db"
 
 
+def ledger_mark_path(session_dir: Path) -> Path:
+    """Return the file a leg writes into the session directory when it opens a ledger outside it: from then on the
+    session's database is not in the session directory, and one found there is stale or was put there."""
+    return Path(session_dir) / "runtime" / "ledger_private.json"
+
+
 def private_db_exists(session_dir: Path) -> bool:
     """Whether this account has made its own coordinator database for a session: a regular file of this account's, a
     link never followed at the end. An entry another account planted there (a link, a file of its own) is not one."""
@@ -444,6 +450,7 @@ __all__ = [
     "make_session_dir",
     "mn_profile_trace_root",
     "deps_cache_root",
+    "ledger_mark_path",
     "named_ledger_dir",
     "private_db_exists",
     "private_db_path_for",
