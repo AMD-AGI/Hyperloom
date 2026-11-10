@@ -24,6 +24,11 @@ RISK=$4
 CARD="$WORK/card.md"
 
 [ -s "$CARD" ] || fail "the review produced no card"
+# The card is public text too (rules.md X9). The refusal names the kind of reference, never the reference: CI logs
+# are public as well.
+if ! leaks=$(bash "$(dirname "${BASH_SOURCE[0]}")/internal-refs.sh" "$CARD"); then
+  fail "the card names an internal reference: ${leaks%%$'\n'*}; quote what it showed instead"
+fi
 required=(rules.txt answers.txt core_files.txt verdicts.txt ai_diagnostic.txt refutations.txt independent.txt)
 for artifact in "${required[@]}"; do
   [ -s "$WORK/$artifact" ] || fail "the review did not produce non-empty ${artifact}"
