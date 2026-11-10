@@ -70,15 +70,15 @@ COMPONENT_SUBAGENT = "specialist"
 #: iteration a step belongs to is recoverable from the command line even when
 #: the agent forgets its mark.
 #:
-#: The lookbehind is not paranoia: without it this matched a name like
-#: ``aiter-<N>x-speedup`` in a URL and invented an iteration the run never had.
+#: The lookbehind is not paranoia: without it this would match a name like
+#: ``aiter-<N>x-speedup`` in a URL and invent an iteration the run never had.
 #: AITER is the central ROCm library in this domain, so ``aiter`` appears in
 #: nearly every session — an unbounded ``iter`` match misattributes constantly.
 #:
-#: The leading ``/`` is the second half of the same lesson: a subagent echoed
-#: a banner such as ``=== iter_<n> / baseline ===`` and this invented an
-#: iteration holding one step, which lowered the agent-dispatch rate and made
-#: the report show a protocol violation that never happened. Only a path
+#: The leading ``/`` is the second half of the same lesson: a banner a subagent
+#: echoes, such as ``=== iter_<n> / baseline ===``, would invent an iteration
+#: holding one step, which lowers the agent-dispatch rate and makes the report
+#: show a protocol violation that never happened. Only a path
 #: segment is evidence of an iteration; prose is not.
 _ITER_RE = re.compile(r"/iter[_-]?(\d+)")
 
@@ -212,9 +212,8 @@ def parse_transcripts(paths: list[Path]) -> dict[str, Any]:
                     }
 
                 elif btype == "thinking":
-                    # Text is empty on this deployment — the gateway strips
-                    # reasoning before it reaches the client, confirmed for both
-                    # the transcript and stream-json capture routes. The block is
+                    # Text can be empty: a gateway may strip reasoning before
+                    # it reaches the client. The block is
                     # still emitted so the gap is visible in the rendered log
                     # rather than reading as "the agent did not reason".
                     text = block.get("thinking") or ""
@@ -386,16 +385,16 @@ def load_artifacts(session_dir: Path) -> dict[int, dict[str, Any]]:
         it = int(m.group(1))
         entry: dict[str, Any] = {}
         # Glob, not a fixed name. A rigorous run writes more than one bench:
-        # observed in the wild were bench_output_cold<n>/confirm.json (cold
-        # runs plus a discarded hot one) and bench_output_<variant>.json for
+        # bench_output_cold<n>/confirm.json, say (cold runs plus a discarded
+        # hot one), or bench_output_<variant>.json for
         # an ablation. Matching only "bench_output.json" found nothing for most
         # iterations and silently left the agent's self-reported number
         # unchecked — which is the one thing this cross-check exists to prevent.
         # ``bench_result*`` as well as ``bench_output*``: the filename is the
-        # agent's choice, not the harness's, and a Sonnet-driven run named every
-        # one of them bench_result.json. Scoring that run as "gate unverified"
-        # would have been the collector's naming assumption masquerading as a
-        # finding about the agent.
+        # agent's choice, not the harness's, and an agent may name every one of
+        # them bench_result.json. Scoring that run as "gate unverified" would be
+        # the collector's naming assumption masquerading as a finding about the
+        # agent.
         measurements: list[dict[str, Any]] = []
         benches = sorted(child.glob("bench_output*.json")) + \
             sorted(child.glob("bench_result*.json"))
@@ -542,7 +541,7 @@ def build_trajectory(events: list[dict[str, Any]], parsed: dict[str, Any],
 
     # Tool calls that fired hooks but have no transcript entry are the
     # subagents'. Claude Code does not write dispatched-agent turns into the
-    # parent transcript — on a real run, most tool calls existed only in the
+    # parent transcript — most tool calls can exist only in the
     # hook stream, among them every WebSearch and WebFetch the
     # research-protocol check is supposed to score. Reconstructing them from
     # hooks alone is the only way the specialist's work reaches the trajectory.

@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 from ...enablement.recipe.credentials import detect_credential_channels
 
 if TYPE_CHECKING:
+    from hyperloom.common.deadline import Deadline
+
     from ...enablement.runtime.stack_actions import EnablementStackAction, ProvisionResult
     from ...state.shared_state import SharedState
 
@@ -22,6 +24,7 @@ class IntegrateAttempt:
     """Own the resolved inputs and acquired resources of one executor invocation."""
 
     task_id: str
+    phase_deadline: Deadline | None = None
     specialist_task_id: str = ""
     specialist_workspace: Path | None = None
     shared_state: SharedState | None = None
@@ -40,6 +43,8 @@ class IntegrateAttempt:
     applied_artifacts: list[dict[str, Any]] = field(default_factory=list)
     extra_envs_applied: dict[str, str] = field(default_factory=dict)
     extra_server_args_applied: str = ""
+    #: The round's non-default ``remove_args`` / ``unset_envs`` / ``args_mode``, applied over the base at the bench.
+    launch_controls: dict[str, Any] = field(default_factory=dict)
     dropped_env_overrides: list[str] = field(default_factory=list)
     setup_commands_applied: list[str] = field(default_factory=list)
     switch_manifest: list[dict[str, Any]] = field(default_factory=list)

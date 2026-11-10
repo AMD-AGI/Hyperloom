@@ -59,7 +59,9 @@ def main(argv: list[str] | None = None) -> int:
         from hyperloom.inference_optimizer.session.paths import session_dir as _resolve_sd
 
         session_dir = _resolve_sd()
-    db = pathlib.Path(session_dir) / "storage" / "coordinator.db"
+    from hyperloom.inference_optimizer.session.paths import db_path_for
+
+    db = db_path_for(pathlib.Path(session_dir))
     if not db.exists():
         print(f"coordinator.db not found at {db}", file=sys.stderr)
         return 2

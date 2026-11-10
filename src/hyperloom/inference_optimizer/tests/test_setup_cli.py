@@ -1177,6 +1177,8 @@ def _sourceable_installer(install_script: Path, tmp_path: Path) -> Path:
     assert marker in text, "install_baremetal.sh must end by invoking main"
     lib = tmp_path / "installer_lib.sh"
     lib.write_text(text.replace(marker, "\n"), encoding="utf-8", newline="\n")
+    # The installer sources the runtime_env.sh beside it.
+    (tmp_path / "runtime_env.sh").write_bytes((install_script.parent / "runtime_env.sh").read_bytes())
     return lib
 
 
@@ -2833,8 +2835,7 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
                 "PYTHONPATH=/old/workspace",
                 "scrub_stale_workspace_env_for_setup_dotenv",
                 "load_dotenv_no_clobber",
-                'HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"',
-                'KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"',
+                "runtime_env_derive_runtime_paths",
                 "printf 'USER_DATA_PATH=%s\n' \"${USER_DATA_PATH-}\"",
                 "printf 'HYPERLOOM_RUNTIME_DIR=%s\n' \"${HYPERLOOM_RUNTIME_DIR-}\"",
                 "printf 'KERNEL_AGENT_ENV=%s\n' \"${KERNEL_AGENT_ENV-}\"",
@@ -2855,13 +2856,16 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
 
     assert f"USER_DATA_PATH={workspace}/session\n" in out
     assert f"HYPERLOOM_RUNTIME_DIR={workspace}/session/runtime\n" in out
-    assert f"KERNEL_AGENT_ENV={workspace}/session/runtime/kernel-agent.env.sh\n" in out
+    kernel_agent_env = next(line for line in out.splitlines() if line.startswith("KERNEL_AGENT_ENV="))
+    assert kernel_agent_env.endswith("/kernel-agent.env.sh")
+    assert str(workspace) not in kernel_agent_env
     assert "KERNEL_AGENT_ROOT=\n" in out
     assert "/old/workspace" not in out
 
 
 def _kernel_env_writer_sources() -> tuple[str, str, str]:
-    """The .env upsert helpers, ``_compose_pythonpath`` and ``write_env_file`` cut out of install_kernel_tools.sh."""
+    """The .env upsert helpers, ``_compose_pythonpath`` and ``write_env_file`` cut out of install_kernel_tools.sh,
+    the first after the ``runtime_env.sh`` install.sh sources before it."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
@@ -2871,7 +2875,7 @@ def _kernel_env_writer_sources() -> tuple[str, str, str]:
     env_start = script_text.index("write_env_file() {")
     env_end = script_text.index("\nensure_geak() {")
     return (
-        script_text[upsert_start:upsert_end],
+        f'. "{install_script.with_name("runtime_env.sh").as_posix()}"\n' + script_text[upsert_start:upsert_end],
         script_text[compose_start:compose_end],
         script_text[env_start:env_end],
     )

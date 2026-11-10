@@ -43,6 +43,7 @@ from hyperloom.measure.phases import (
 
 __all__ = [
     "ROLE_BOOT",
+    "ROLE_EVAL",
     "ROLE_MEASURE",
     "ROLE_WARMUP",
     "BootParts",
@@ -54,10 +55,12 @@ __all__ = [
     "round_boundaries",
 ]
 
-#: The roles of a round's call: one that only boots the server, the warmup round of a graded test, and one that measures.
+#: The roles of a round's call: one that only boots the server, the warmup round of a test on a held server, one that
+#: measures, and the round that only evaluates a graded test after its measured bench.
 ROLE_BOOT = "boot"
 ROLE_WARMUP = "warmup"
 ROLE_MEASURE = "measure"
+ROLE_EVAL = "eval"
 #: Where ``run_grid`` keeps the discarded warmup run of a round, below the round's own directory.
 _WARMUP_DIR = "warmup_round"
 _ROUND_GLOB = "variant_*"
@@ -288,7 +291,9 @@ def round_boundaries(window: tuple[float, float], runs: Sequence[RunMarks], shap
     boundaries = [Boundary(ROUND_SETUP, started)]
     for index, run in enumerate(runs):
         last = index == len(runs) - 1
-        client = MEASURED if last and shape.role == ROLE_MEASURE else WARMUP
+        client = (
+            ACCURACY_EVAL if shape.role == ROLE_EVAL else MEASURED if last and shape.role == ROLE_MEASURE else WARMUP
+        )
         boundaries.extend(_run_boundaries(run, shape, client))
         if run.ended is not None:
             boundaries.append(Boundary(shape.tail if last else ROUND_COLLECT, run.ended))
@@ -299,8 +304,9 @@ def _run_boundaries(run: RunMarks, shape: RoundShape, client: str) -> list[Bound
     """One run: the boot when it booted the server, then its client work, which counts as ``client`` and is split at the
     instants the client left.
 
-    A discarded run, and the one run of a boot or a warmup call, is warmup. An AgentX measured run is split at its
-    client's own phases when its measured phase began; any other measured run is measured up to its evaluation.
+    A discarded run, and the one run of a boot or a warmup call, is warmup; the run of an evaluation call is the
+    evaluation from the start. An AgentX measured run is split at its client's own phases when its measured phase began;
+    any other measured run is measured up to its evaluation.
     """
     boundaries = _boot_boundaries(run) if run.boot_seconds > 0 else []
     if shape.agentx and client == MEASURED and run.client_measured_at is not None:
@@ -312,7 +318,7 @@ def _run_boundaries(run: RunMarks, shape: RoundShape, client: str) -> list[Bound
         ]
         return boundaries + [step for step in steps if step.at is not None]
     boundaries.append(Boundary(client, run.ready))
-    if run.eval_at is not None:
+    if run.eval_at is not None and client != ACCURACY_EVAL:
         boundaries.append(Boundary(ACCURACY_EVAL, run.eval_at))
     return boundaries
 

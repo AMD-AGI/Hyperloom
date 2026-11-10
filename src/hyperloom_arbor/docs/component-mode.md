@@ -9,9 +9,10 @@ to empty, it rolls from node to node, ends rounds with its own same-node A/B and
 
 **Component mode** is Arbor run by a host that owns all of that: Hyperloom's multibranch (MB)
 today, which runs Arbor as an "autonomous branch" on a lease of GPUs, under its own deadline, and
-gates and merges what Arbor keeps. MB already runs Arbor this way, with a sandbox built around what standalone Arbor did wrong inside it: stopping MB's
-servers with a pattern `pkill`, running on cards outside its lease, iterating after the session
-died, hanging for hours, loading kernel tables from paths outside the workspace.
+gates and merges what Arbor keeps. MB already runs Arbor this way, in a sandbox against what
+standalone Arbor would do wrong inside it: stop MB's servers with a pattern `pkill`, run on cards
+outside its lease, iterate past the session's end, hang, and load kernel tables from paths outside
+the workspace.
 Component mode makes Arbor do the right thing itself.
 
 Which side runs each step of an MB session, and the files between the two:
@@ -122,7 +123,7 @@ manifest without either side writing host-specific code.
 1. **The switch and the safety:** the mode and its validation; the deadline, the iteration
    estimate, phase timeouts, SIGTERM; stopping by PID; no masks, no memory kills, no docker on
    `@host`; the heartbeat; target, round ends and rolling refused or ignored. Tested on `@host`
-   fakes; then once on a node with a lease of 4 cards and something else on the other 4.
+   fakes; then on a GPU node with a lease of 4 cards and something else on the other 4.
 2. **The KEEP snapshot,** the notes and the bench command in the prompts, the tables check.
 3. **The short-prompt check** (the README section came with slice 2).
 
@@ -138,9 +139,8 @@ manifest without either side writing host-specific code.
    **One exception exits non-zero** (for model gateway outages): `unreachable`, a streak that ended while the model could not be reached, exits 3 after
    writing its record. The host resumes it as it does a crash, instead of retiring the branch; the
    resumed run moves that `ABORTED.md` aside and starts a fresh not-measured streak.
-2. **The snapshot format is proposed to MB now;** slice 2 starts after slice 1 and
-   at least an hour after the proposal, whether or not they have answered, and changes in flight
-   if they object.
+2. **The snapshot format was proposed to MB** before slice 2 was built, and slice 2 was built to
+   change if MB objected.
 3. **Component mode refuses to start without a deadline** (`deadline` or `seconds`), and refuses
    a `docker_container` other than `"@host"` and `ARBOR_ROLL=1`: exit 2, before it touches the
    session, with the reason on stderr.
@@ -154,7 +154,7 @@ build settled what the design left open:
   in hand before it, by the iteration gate and the phase timeouts alike. `component.json` keeps
   it across resumes; without that file the clock falls back to session.json's `start_epoch`,
   never to now. A session recorded in one mode and resumed in the other exits 2.
-- **Exit 2 is refusal only** (MB resumed an exit 2 like a crash). Two more ways of exiting 2 were added, so that no config a
+- **Exit 2 is refusal only.** Two more ways of exiting 2 were added, so that no config a
   restart cannot fix ever crashes: a config `load_campaign` cannot load (unparsable JSON, no
   `pack`, a missing or broken `pack.yaml`), and in component mode a campaign that
   `validate_campaign` rejects, or one without a `session_root`. Read errors that may pass (an
@@ -198,7 +198,7 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
   under it), made empty by the harness; the bench agent reads the metric from it into
   `bench_output.json` with a fixed one-line command, and with `bench_repeats` the fixed mean
   block aggregates, as with the pack's bench. The same command also takes the
-  pack's `secondary_metric` when the client gives it; before, the gate saw only the primary
+  pack's `secondary_metric` when the client gives it; without it, the gate would see only the primary
   (`secondary: None` on every KEEP).
 - **`component.root`** (MB's request): MB's worktree is at the branch's start
   commit with the experiment repository's history behind it, so the first commit is not what MB
@@ -212,9 +212,8 @@ command in the prompts (`arbor/component.py`, `arbor/policy/claude_loop.py`), an
 A second launch at each KEEP, component mode only.
 `arbor/measure/short_prompts.py`; the probe after correctness and the check after the critic in
 `arbor/policy/claude_loop.py`. Where the build settled what the design left open:
-- **What it answers:** AITER's vectorized_5d `mha_batch_prefill` gave wrong output on
-  short sequences intermittently, in some server processes and not others, and GSM8K did not
-  see it. The design's
+- **What it answers:** a kernel defect that gives wrong output on short sequences in some
+  server processes and not in others, which GSM8K does not see. The design's
   "against the base server" was dropped: MB compared with the parent first and stopped
   (Hyperloom `b315477e5`), because exact greedy matching fires on the largest gains (fp8 KV,
   quantized GEMMs). A defect wrong in every process is one GSM8K already sees, so the check

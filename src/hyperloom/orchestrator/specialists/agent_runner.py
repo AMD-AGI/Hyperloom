@@ -21,10 +21,13 @@ messages.
 Tokens reach the CLI only through environment variables: the MCP configuration
 written to disk names the variable, never its value.
 
-``HYPERLOOM_SPECIALIST_USER`` starts the CLI as that account, as
-:class:`~hyperloom.orchestrator.specialists.subprocess_.SpecialistSubprocessDispatcher`
-does: the workspace and ``cwd`` are shared with it, and every file the runner
-writes there is created without following a link the account left.
+Each launch is isolated as
+:class:`~hyperloom.orchestrator.specialists.subprocess_.SpecialistSubprocessDispatcher`'s
+are (:mod:`~hyperloom.orchestrator.specialists.launch_env`): as the account
+``HYPERLOOM_SPECIALIST_USER`` names, with the workspace and ``cwd`` shared with
+it; in a bubblewrap sandbox that writes the workspace and ``cwd`` and reads its
+toolchain and ``readable``; or unconfined as before. Every file the runner writes
+there is created without following a link the CLI left.
 """
 
 from __future__ import annotations
@@ -44,9 +47,14 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.env_safety import RunAs, RunAsError, redact_secret_values
+from hyperloom.common.agent_isolation import AgentIsolation
+from hyperloom.common.env_safety import RunAsError, redact_secret_values
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
-from hyperloom.inference_optimizer.session.session_paths import RESOURCES_RELATIVE_PATH
+from hyperloom.inference_optimizer.session.session_paths import (
+    CONTAINER_RECORD_KIND,
+    RESOURCES_RELATIVE_PATH,
+    SPECIALIST_RECORD_KIND,
+)
 from hyperloom_common.fs_utils import (
     append_text_nofollow,
     create_nofollow,
@@ -58,7 +66,21 @@ from hyperloom_common.fs_utils import (
 from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 
 from .agent_cli_config import _build_specialist_env as build_specialist_env
-from .launch_env import prepare_demote, resolve_launch_user, stage_mcp_config, stamp_reap_mark
+from .agent_cli_config import SpecialistAgentUnavailableError
+from .launch_env import (
+    LaunchPlace,
+    PreparedLaunch,
+    SandboxedProcess,
+    Spawn,
+    agent_pid,
+    claude_login_isolation,
+    codex_sandbox_off,
+    prepare_launch,
+    resolve_launch_isolation,
+    stage_mcp_config,
+    stamp_reap_mark,
+    without_codex_sandbox,
+)
 from .mcp_config import SPECIALIST_MCP_CONFIG_FILENAME
 from .reap_watch import PROCESS_LOG_NAME, cli_alive, newest_activity
 from .resources import ContainerSnapshot, ProcessTreeSampler, dir_usage_bytes, read_container_cgroup
@@ -75,10 +97,8 @@ from .subprocess_ import (
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "CONTAINER_RECORD_KIND",
     "DEFAULT_MCP_TOKEN_ENV",
     "LOST_AFTER_SEC",
-    "SPECIALIST_RECORD_KIND",
     "AgentConfigError",
     "AgentEnded",
     "AgentHandle",
@@ -98,11 +118,6 @@ __all__ = [
 #: How long a CLI may stay silent. Past it with no tool call in flight, the reap loop ends the CLI and ``poll`` reports
 #: it lost; ``poll`` also counts a beat and the session's start as life within it.
 LOST_AFTER_SEC: float = 300.0
-
-#: The ``kind`` of each line the runner appends to :data:`RESOURCES_RELATIVE_PATH`: one specialist's run, and one
-#: reading of the container.
-SPECIALIST_RECORD_KIND = "specialist_resources"
-CONTAINER_RECORD_KIND = "container_resources"
 
 #: Environment variable that carries a specialist's MCP bearer token when its endpoint names no other.
 DEFAULT_MCP_TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
@@ -174,6 +189,13 @@ class AgentLaunchSpec:
     stdin_open: bool = False
     """Keep the CLI's stdin open after prompt.md, so :meth:`LocalAgentRunner.send` reaches the same session later; the
     CLI ends once :meth:`LocalAgentRunner.close_stdin` closes it."""
+    readable: tuple[Path, ...] = ()
+    """Paths the CLI reads besides its toolchain (references, a model, a lease area): bound read-only when it runs in
+    a bubblewrap sandbox; nothing changes in another tier."""
+    git_admin: Path | None = None
+    """The admin directory of ``cwd`` when that is a linked worktree, as the repository it was added from records it
+    (:func:`~hyperloom_common.git_safety.recorded_admin_dir`): a bubblewrap sandbox shows that repository read-only,
+    and no git metadata without it."""
 
 
 @dataclass(frozen=True)
@@ -257,8 +279,14 @@ def _validate_spec(spec: AgentLaunchSpec, now_unix: float) -> None:
         raise AgentConfigError("duplicate MCP server names")
 
 
+def _mcp_json_path(spec: AgentLaunchSpec) -> Path:
+    """Where :func:`_write_mcp_json` writes ``spec``'s MCP config."""
+    return spec.workspace / "runtime" / SPECIALIST_MCP_CONFIG_FILENAME
+
+
 def _write_mcp_json(spec: AgentLaunchSpec) -> Path:
-    """Write the ``{"mcpServers": ...}`` file; headers reference the token by variable name only."""
+    """Write the ``{"mcpServers": ...}`` file (at :func:`_mcp_json_path`); headers reference the token by variable
+    name only."""
     servers = {
         endpoint.name: {
             "type": "http",
@@ -366,7 +394,7 @@ class _Session:
     concurrent_at_start: int
     oom_kill_at_start: int | None
     reap_mark: str
-    run_as: RunAs | None
+    prepared: PreparedLaunch
     version: str = UNKNOWN
     task: asyncio.Task[None] | None = None
     sampler_task: asyncio.Task[None] | None = None
@@ -424,22 +452,22 @@ class Liveness:
 
 @dataclass(frozen=True)
 class _Spawned:
-    """An agent CLI just started: its process, the MCP tokens and the reap mark its environment carries, the account it
-    runs as, and its CLI version."""
+    """An agent CLI just started: its process, the MCP tokens and the reap mark its environment carries, its launch as
+    its tier prepared it, and its CLI version."""
 
     proc: Any
     tokens: tuple[str, ...]
     reap_mark: str
-    run_as: RunAs | None
+    prepared: PreparedLaunch
     version: str
 
 
-def _launch_user() -> RunAs | None:
-    """The account ``HYPERLOOM_SPECIALIST_USER`` names, or ``None``; one that cannot be used refuses the launch."""
+def _launch_isolation() -> AgentIsolation:
+    """How to isolate the CLI; a launch that must be isolated and cannot be is refused."""
     try:
-        return resolve_launch_user(None)
+        return resolve_launch_isolation(None)
     except RunAsError as exc:
-        raise AgentConfigError(f"specialist user refused: {exc}") from exc
+        raise AgentConfigError(f"specialist isolation refused: {exc}") from exc
 
 
 def _refuse_stale_done_paths(spec: AgentLaunchSpec) -> None:
@@ -490,12 +518,14 @@ class LocalAgentRunner:
         backend = _infer_backend(spec)
         _refuse_stale_done_paths(spec)
         clear_wall_budget_extension(spec.task_id)  # an extension left by an earlier run must not move this deadline
-        run_as = _launch_user()
+        isolation = _launch_isolation()
         env = dict(spec.env)
         argv = list(spec.argv)
-        claim = self._prepare(spec, backend, env, argv, run_as)
+        if backend == AGENT_BACKEND_CLAUDE:
+            isolation = _claude_isolation(isolation, env)
+        claim = self._prepare(spec, backend, env, argv, isolation)
         try:
-            spawned = await self._spawned(spec, argv, env, run_as)
+            spawned = await self._spawned(spec, argv, env, isolation)
         except BaseException:
             self._release(claim)
             raise
@@ -513,7 +543,7 @@ class LocalAgentRunner:
         )
 
     async def _spawned(
-        self, spec: AgentLaunchSpec, argv: list[str], env: dict[str, str], run_as: RunAs | None
+        self, spec: AgentLaunchSpec, argv: list[str], env: dict[str, str], isolation: AgentIsolation
     ) -> _Spawned:
         spec.workspace.mkdir(parents=True, exist_ok=True)
         tokens = tuple(env[e.token_env] for e in spec.mcp_servers)
@@ -522,10 +552,26 @@ class LocalAgentRunner:
             self._version_probe, spec.argv[0], {k: v for k, v in env.items() if v not in tokens}
         )
         private = (spec.workspace / PROMPT_FILE, spec.workspace / PROCESS_LOG_NAME)
-        # The child works in ``cwd``, so that is the tree it must be able to write.
-        demote = await asyncio.to_thread(prepare_demote, run_as, spec.workspace, spec.cwd, env, private)
-        command = argv if run_as is None else run_as.command(argv)
-        return _Spawned(self._spawn(spec, command, env, demote), tokens, reap_mark, run_as, version)
+        # The child works in ``cwd``, so that is the tree it must be able to write. The MCP config written for it
+        # names the servers its network reaches, for either backend: codex takes them from its private config.toml,
+        # not from its argv.
+        mcp_config = str(_mcp_json_path(spec)) if spec.mcp_servers else None
+        place = LaunchPlace(
+            spec.workspace, spec.cwd, private, spec.readable, spec.gpus > 0, mcp_config, git_admin=spec.git_admin
+        )
+        try:
+            prepared = await asyncio.to_thread(prepare_launch, isolation, place, argv, env)
+        except RunAsError as exc:
+            raise AgentConfigError(f"specialist isolation refused: {exc}") from exc
+        try:
+            proc = prepared.started(self._spawn(spec, prepared.local(argv, env)))
+        except RunAsError as exc:
+            prepared.release()
+            raise AgentConfigError(f"specialist isolation refused: {exc}") from exc
+        except BaseException:
+            prepared.release()
+            raise
+        return _Spawned(proc, tokens, reap_mark, prepared, version)
 
     def _session(self, spec: AgentLaunchSpec, backend: str, spawned: _Spawned, claim: str | None) -> _Session:
         """The session of the CLI just ``spawned``, not yet supervised."""
@@ -545,7 +591,7 @@ class LocalAgentRunner:
             concurrent_at_start=0,
             oom_kill_at_start=read_container_cgroup(self._cgroup_root).oom_kill,
             reap_mark=spawned.reap_mark,
-            run_as=spawned.run_as,
+            prepared=spawned.prepared,
             version=spawned.version,
         )
 
@@ -592,7 +638,7 @@ class LocalAgentRunner:
         if now - (heartbeat or session.started_unix) <= self._lost_after:
             return False
         alive = await asyncio.to_thread(
-            cli_alive, session.spec.workspace, session.proc.pid, window_sec=self._lost_after, now_unix=now
+            cli_alive, session.spec.workspace, agent_pid(session.proc), window_sec=self._lost_after, now_unix=now
         )
         return not alive
 
@@ -643,7 +689,7 @@ class LocalAgentRunner:
 
     # Internals
     def _prepare(
-        self, spec: AgentLaunchSpec, backend: str, env: dict[str, str], argv: list[str], run_as: RunAs | None
+        self, spec: AgentLaunchSpec, backend: str, env: dict[str, str], argv: list[str], isolation: AgentIsolation
     ) -> str | None:
         claim: str | None = None
         if backend == AGENT_BACKEND_CLAUDE and spec.claude_config_dir == ISOLATED:
@@ -657,9 +703,11 @@ class LocalAgentRunner:
                 env["CODEX_HOME"] = str(spec.workspace / ".codex")  # always private to this task, as in the dispatcher
                 if mcp_json is not None:
                     _wire_codex(spec, env, mcp_json)
+                if codex_sandbox_off(isolation):
+                    argv[:] = without_codex_sandbox(argv)
             else:
                 _wire_claude(spec, env, argv, mcp_json)
-            stage_mcp_config(run_as, spec.workspace, argv)
+            stage_mcp_config(isolation, spec.workspace, argv)
             if spec.gpus == 0:
                 for name in GPU_MASK_ENV_NAMES:
                     env.setdefault(name, "")
@@ -672,7 +720,7 @@ class LocalAgentRunner:
         if claim is not None:
             self._claims.discard(claim)
 
-    def _spawn(self, spec: AgentLaunchSpec, argv: list[str], env: dict[str, str], demote: dict[str, Any]) -> Any:
+    def _spawn(self, spec: AgentLaunchSpec, spawn: Spawn) -> Any:
         prompt = _read_prompt(spec.workspace / PROMPT_FILE)
         if spec.stdin_open:
             stdin: Any = subprocess.PIPE
@@ -686,14 +734,14 @@ class LocalAgentRunner:
             # Created fresh, never through a name a previous (possibly demoted) child left in the workspace.
             with create_nofollow(spec.workspace, (PROCESS_LOG_NAME,), mode=PRIVATE_FILE_MODE) as out:
                 proc = self._popen(
-                    argv,
+                    spawn.argv,
                     stdin=stdin,
                     stdout=out,
                     stderr=subprocess.STDOUT,
-                    env=env,
+                    env=spawn.env,
                     cwd=str(spec.cwd),
                     start_new_session=True,
-                    **demote,
+                    **spawn.kwargs,
                 )
         finally:
             if hasattr(stdin, "close"):
@@ -712,6 +760,7 @@ class LocalAgentRunner:
                 deadline=session.deadline,
                 started=session.started_mono,
             )
+            self._unset_sandbox(session)
         except ScopeCancelled as exc:  # the caller's cancel scope fired: a stop request, not a failure
             session.cancelled = True
             session.outcome = {"exit_code": session.proc.poll(), "error": f"cancelled: {exc}"}
@@ -728,6 +777,20 @@ class LocalAgentRunner:
             if session.sampler_task is not None:
                 session.sampler_task.cancel()
             await asyncio.to_thread(self._tear_down, session)
+
+    @staticmethod
+    def _unset_sandbox(session: _Session) -> None:
+        """Record a sandbox bubblewrap could not set up as that, not as an exit of the CLI, which never ran."""
+        proc = session.proc
+        unset = (
+            proc.setup_failure(session.spec.workspace / PROCESS_LOG_NAME) if isinstance(proc, SandboxedProcess) else ""
+        )
+        if unset:
+            session.outcome = {
+                **session.outcome,
+                "exit_code": None,
+                "error": f"the CLI's sandbox could not be set up: {unset}",
+            }
 
     def _on_supervision_done(self, session: _Session, _task: asyncio.Task[None]) -> None:
         """Runs however the supervisor ended, and tears the session down when it was cancelled before its first step."""
@@ -746,7 +809,10 @@ class LocalAgentRunner:
         session's reap mark, which a CLI that exited on its own leaves running and a tree kill does not reach once it
         has detached."""
         self._ensure_dead(session)
-        self._dispatcher._reap_marked(session.reap_mark, session.run_as)
+        try:
+            self._dispatcher._reap_marked(session.reap_mark, session.prepared)
+        finally:
+            session.prepared.release()
 
     def _ensure_dead(self, session: _Session) -> None:
         """Kill the CLI's tree when the reap loop ended with its root still running; what it detached is the sweep's."""
@@ -879,6 +945,15 @@ class LocalAgentRunner:
             "max_concurrent_specialists": self._max_concurrent,
             "ts_unix": self._wall(),
         }
+
+
+def _claude_isolation(isolation: AgentIsolation, env: Mapping[str, str]) -> AgentIsolation:
+    """How to isolate a claude CLI launched with ``env``: unconfined where a sandbox could not log it in and need not
+    be used, refused where it must be (:func:`~.launch_env.claude_login_isolation`)."""
+    try:
+        return claude_login_isolation(isolation, env)
+    except SpecialistAgentUnavailableError as exc:
+        raise AgentConfigError(str(exc)) from exc
 
 
 def _read_prompt(path: Path) -> bytes | None:

@@ -45,10 +45,10 @@ from hyperloom_multibranch.blackboard.dashboard import build_dashboard, render_h
 from hyperloom_multibranch.blackboard.rsi.frontier import (
     CANDIDATE_COMPONENT,
     MERGED_GAIN_COMPONENT,
-    NEAR_BAR_COMPONENT,
-    NEAR_BAR_HOLD,
     STALL_BAR_COMPONENT,
     STALLED_COMPONENT,
+    STRANDED_COMPONENT,
+    STRANDED_HOLD,
     TREND_COMPONENT,
     FrontierPolicy,
     score_progress,
@@ -125,14 +125,14 @@ def test_the_dashboard_holds_branches_in_flight_work_lineage_and_infrastructure(
 def test_a_scored_branch_shows_its_stall_against_the_bar_what_holds_it_and_the_playbook_played(
     snapshot: BlackboardSnapshot,
 ) -> None:
-    near = {
+    stranded = {
         TREND_COMPONENT: 2.5,
         STALLED_COMPONENT: 7.0,
         STALL_BAR_COMPONENT: 6.0,
         MERGED_GAIN_COMPONENT: 4.0,
-        NEAR_BAR_COMPONENT: 1.0,
+        STRANDED_COMPONENT: 2.0,
     }
-    held = BranchProgress("s1", True, "c0", "c1", 6, 1, 3600.0, {METRIC: 1040.0}, FrontierScore(0.4, near))
+    held = BranchProgress("s1", True, "c0", "c1", 6, 1, 3600.0, {METRIC: 1040.0}, FrontierScore(0.4, stranded))
     stalled = {STALLED_COMPONENT: 8.0, STALL_BAR_COMPONENT: 6.0, CANDIDATE_COMPONENT: 1.0}
     candidate = BranchProgress("s2", True, "c0", "c0", 8, 0, 3600.0, {}, FrontierScore(0.0, stalled))
     unplayed = BranchProgress("s3", True, "c0", "c0", 2, 0, 600.0, {}, FrontierScore(0.5, {TREND_COMPONENT: 0.5}))
@@ -151,13 +151,13 @@ def test_a_scored_branch_shows_its_stall_against_the_bar_what_holds_it_and_the_p
         "stall_bar": 6.0,
         "merged_gain_pct": 4.0,
         "trend_pct": 2.5,
-        "held_by": [NEAR_BAR_HOLD],
+        "held_by": [STRANDED_HOLD],
         "stop_candidate": False,
     }
     assert evidence["s2"]["stop_candidate"] and evidence["s2"]["held_by"] == []
     assert evidence["s3"] is None
     assert dashboard["playbook"] == {"label": "patient", "fallback": breach}
-    assert "<td>7 of 6</td>" in page and f"<td>held: {NEAR_BAR_HOLD}</td>" in page and "<td>stop candidate</td>" in page
+    assert "<td>7 of 6</td>" in page and f"<td>held: {STRANDED_HOLD}</td>" in page and "<td>stop candidate</td>" in page
     assert f"playbook patient, fell back to the champion on {breach}" in page
     assert build_dashboard(snapshot)["playbook"] is None
 

@@ -137,6 +137,7 @@ def _changes_beyond_patches(attempt: IntegrateAttempt, deliverable: _Deliverable
     return bool(
         deliverable.extra_server_args
         or deliverable.extra_envs
+        or deliverable.launch_controls
         or deliverable.artifact_specs
         or attempt.setup_commands_applied
         or (attempt.attempt_venv_root and not attempt.shared_state.enablement.kept_stack_action)
@@ -232,6 +233,7 @@ class ApplyStageMixin:
             inherited_args, deliverable.extra_server_args
         )
         attempt.extra_envs_applied = {**inherited_envs, **deliverable.extra_envs}
+        attempt.launch_controls = deliverable.launch_controls
         attempt.dropped_env_overrides = deliverable.dropped_env_overrides
         if params.get("apply_only"):
             return _applied_no_bench_result(attempt, deliverable)

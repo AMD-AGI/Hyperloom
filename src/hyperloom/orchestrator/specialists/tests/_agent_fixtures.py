@@ -82,3 +82,24 @@ async def wait_finished(runner: LocalAgentRunner, handle: Any, timeout: float = 
 
 def read_all_files(root: Path) -> dict[str, bytes]:
     return {str(p): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+#: A stand-in claude CLI that runs as the app's uid (unconfined, or in a bubblewrap sandbox) and, from its worktree,
+#: notes the commit its own git sees (``git_seen`` in the workspace), edits ``mod.py`` and points the worktree's ``.git`` at an admin dir it made in a repository it wrote: the real
+#: objects and commit, its own config (diffs without the ``a/`` and ``b/`` prefixes) and a back pointer, so every
+#: ownership check passes. Format with ``workspace``, ``worktree``, ``objects`` (the real object store) and ``head``.
+FORGES_ITS_GIT = """#!/bin/sh
+cat > /dev/null
+git rev-parse HEAD > {workspace}/git_seen 2>&1
+echo "new = 2" > mod.py
+forged={workspace}/forged.git
+git init -q --bare "$forged"
+git --git-dir="$forged" config diff.noprefix true
+echo {objects} > "$forged/objects/info/alternates"
+mkdir -p "$forged/worktrees/w"
+echo {worktree}/.git > "$forged/worktrees/w/gitdir"
+echo ../.. > "$forged/worktrees/w/commondir"
+echo {head} > "$forged/worktrees/w/HEAD"
+echo "gitdir: $forged/worktrees/w" > .git
+echo '{{"summary": "forged", "proposal_set": []}}' > {workspace}/specialist_done.json
+"""

@@ -326,13 +326,15 @@ facts:
     project: InferenceX
     reason: >-
       The names of the workload, the request and the evaluation in benchmark.envs, as InferenceX's benchmark scripts read
-      them; a renamed variable is silently ignored by the script and the point measures another workload.
+      them; a renamed variable is silently ignored by the script and the point measures another workload. EVAL_ONLY is
+      the switch benchmark_lib.sh's run_benchmark_serving returns on before the bench, so a round only evaluates.
     names:
       isl: ISL
       osl: OSL
       random_range_ratio: RANDOM_RANGE_RATIO
       conc: CONC
       run_eval: RUN_EVAL
+      eval_only: EVAL_ONLY
       num_prompts: NUM_PROMPTS
       num_warmups: NUM_WARMUPS
       max_model_len: MAX_MODEL_LEN
@@ -392,11 +394,14 @@ facts:
   hsa_status_error:
     kind: log_regex
     project: ROCm (ROCr runtime)
-    reason: A failed HSA call is reported with a status name that starts with this prefix.
+    reason: >-
+      A failed HSA call is reported with a status name that starts with this prefix; the HIP runtime aborts a queue with
+      one when a kernel that is running faults, so the status names a GPU fault, not an absent kernel.
     pattern: HSA_STATUS_ERROR
     examples:
       match:
         - "HSA_STATUS_ERROR_EXCEPTION: An HSAIL operation resulted in a hardware exception."
+        - ":0:rocdevice.cpp            :3020: 2245381405 us:  Callback: Queue 0x7f2b44400000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29"
       no_match:
         - "HSA runtime initialised with status success"
 

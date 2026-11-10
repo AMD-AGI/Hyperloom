@@ -46,8 +46,9 @@ done
 
 # Single artefact root: everything writable defaults to $USER_DATA_PATH so
 # operators can monitor a run end-to-end by tailing one directory. Magpie
-# clone, source mirrors, and generated env / GEAK config all derive from
-# $HYPERLOOM_RUNTIME_DIR.
+# clone, source mirrors and GEAK config derive from $HYPERLOOM_RUNTIME_DIR;
+# the kernel-agent env file, which carries credentials, does not (see
+# runtime_env_derive_runtime_paths).
 # Removed envs: WORKSPACE_ROOT / WORKSPACE_PATH (collapsed into USER_DATA_PATH).
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -535,14 +536,30 @@ acquire_install_lock() {
 # configures both sides on one host.
 #
 # Loader (env wins; never overwrites a key that is already set):
-#   env > $REPO_ROOT/.env
+#   env > $REPO_ROOT/.env > $KERNEL_AGENT_ENV (credentials only, for a checkout another account can write,
+#   whose .env lends none)
 #
 # Strict mode by design: --check-only / --dry-run is the only path that
 # downgrades the die to a warn (introspection mode, no install runs).
 preflight_load_dotenv() {
+  local elsewhere
   load_dotenv_no_clobber
   if [ "${DOTENV_LOADED_COUNT:-0}" -gt 0 ]; then
     log "loaded ${DOTENV_LOADED_COUNT} missing var(s) from $REPO_ROOT/.env (env wins)"
+  fi
+  # A checkout another account can write keeps no credentials in .env: write_env_file put them in this container's
+  # kernel-agent env file alone, so a re-install here takes them from there, as preflight does.
+  elsewhere="$(runtime_env_dotenv_credentials_elsewhere "$REPO_ROOT/.env")"
+  [ -n "$elsewhere" ] || return 0
+  # load_dotenv_no_clobber took none of its credential lines: another account may have written them, and its gateway
+  # URL or headers would carry this account's key to it. Nor are they copied into the kernel-agent env file.
+  if [ "${DOTENV_SKIPPED_CREDENTIAL_COUNT:-0}" -gt 0 ]; then
+    warn "ignored ${DOTENV_SKIPPED_CREDENTIAL_COUNT} credential line(s) in $REPO_ROOT/.env, which keeps none, as ${elsewhere}"
+  fi
+  if ! runtime_env_load_kernel_agent_credentials "$KERNEL_AGENT_ENV"; then
+    warn "credentials not taken from ${KERNEL_AGENT_ENV}; export them in this shell"
+  elif [ "$RUNTIME_ENV_CREDENTIALS_LOADED" -gt 0 ]; then
+    log "loaded ${RUNTIME_ENV_CREDENTIALS_LOADED} missing credential(s) from ${KERNEL_AGENT_ENV} (env wins): $REPO_ROOT/.env keeps none, as ${elsewhere}"
   fi
 }
 
@@ -645,11 +662,18 @@ preflight_validate_credentials() {
     return 0
   fi
   missing+=("a self-consistent provider side: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY, or OPENAI_BASE_URL + OPENAI_API_KEY")
-  local env_file_status
+  local env_file_status elsewhere kernel_agent_source=""
   if [ -f "$REPO_ROOT/.env" ]; then
     env_file_status="present"
   else
     env_file_status="not found"
+  fi
+  elsewhere="$(runtime_env_dotenv_credentials_elsewhere "$REPO_ROOT/.env")"
+  if [ -n "$elsewhere" ]; then
+    kernel_agent_source="
+  - \$KERNEL_AGENT_ENV  (${KERNEL_AGENT_ENV}): .env keeps no credentials, as
+    ${elsewhere}; export them in the shell that
+    runs install.sh, once per container: a re-install in the same container finds them here."
   fi
   if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     warn "missing credential(s): ${missing[*]} (.env=${env_file_status}); " \
@@ -663,7 +687,7 @@ preflight_validate_credentials() {
 
 Tried loading from:
   - shell environment
-  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
+  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)${kernel_agent_source}
 
 Fix one of:
   1. Anthropic:
@@ -809,7 +833,8 @@ try:
     out["torch_version"] = torch.__version__
     out["hip"] = getattr(torch.version, "hip", None)
     out["cuda_str"] = getattr(torch.version, "cuda", None)
-except Exception as exc:
+except BaseException as exc:
+    # A module ``import torch`` loads may call ``sys.exit`` instead of raising.
     out["rc"] = 2
     out["error"] = type(exc).__name__ + ": " + str(exc)[:200]
 print(json.dumps(out))
@@ -827,9 +852,17 @@ PY
     warn "torch probe produced no output (PYTHON=${PYTHON})"
     return 0
   fi
-  local rc; rc="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('rc',0))" "$probe" 2>/dev/null || echo 0)"
+  # The verdict is the last line; modules imported by torch may print before it.
+  local probe_json; probe_json="$(printf '%s\n' "$probe" | tail -1)"
+  local rc; rc="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('rc',0))" "$probe_json" 2>/dev/null || echo unreadable)"
+  if [ "$rc" = "unreadable" ]; then
+    warn "torch probe did not return readable JSON (PYTHON=${PYTHON}); leaving the torch/GPU match undetermined"
+    warn "last probe line: ${probe_json}"
+    return 0
+  fi
   if [ "$rc" = "2" ]; then
-    warn "torch is NOT importable from PYTHON=${PYTHON}"
+    local probe_error; probe_error="$("$PYTHON" -c "import json,sys; print(json.loads(sys.argv[1]).get('error') or '')" "$probe_json" 2>/dev/null || echo "")"
+    warn "torch is NOT importable from PYTHON=${PYTHON}: ${probe_error}"
     warn "this pod has ROCm GPUs (rocm-smi works) -- letting pip install proceed"
     warn "would pull plain 'torch' from PyPI (= NVIDIA CUDA wheel) and break"
     warn "downstream RAG / baseline / kernel steps with 'Found no NVIDIA driver'."
@@ -843,8 +876,8 @@ PY
     warn "INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 set; continuing despite missing torch"
     return 0
   fi
-  local hip; hip="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('hip') or '')" "$probe" 2>/dev/null || echo "")"
-  local tv;  tv="$("$PYTHON"  -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('torch_version') or '')" "$probe" 2>/dev/null || echo "")"
+  local hip; hip="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('hip') or '')" "$probe_json" 2>/dev/null || echo "")"
+  local tv;  tv="$("$PYTHON"  -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('torch_version') or '')" "$probe_json" 2>/dev/null || echo "")"
   if [ -z "$hip" ]; then
     warn "torch=${tv} in PYTHON=${PYTHON} is NOT a ROCm build (torch.version.hip is None)"
     warn "but this pod reports ROCm GPUs via rocm-smi. RAG-index / baseline / kernel"
@@ -875,8 +908,7 @@ log "INFERENCEX_DEFAULT_DIR=${INFERENCEX_DEFAULT_DIR}"
 export USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV
 # Pre-create the writable runtime root so ensure_magpie / install_kernel_agent_tools
 # never race on missing parents (Magpie's pip install -e writes egg-info
-# under MAGPIE_PATH; the kernel-agent steps write kernel-agent.env.sh into
-# HYPERLOOM_RUNTIME_DIR).
+# under MAGPIE_PATH).
 if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
   mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
 fi
@@ -2017,7 +2049,7 @@ _write_specialist_secret_env_opt_in() {
     log "would append HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1 to ${KERNEL_AGENT_ENV}"
     return 0
   fi
-  mkdir -p "$(dirname "$KERNEL_AGENT_ENV")"
+  runtime_env_private_kernel_agent_env "$KERNEL_AGENT_ENV" write || die "kernel-agent env file not updated"
   if [ -f "$KERNEL_AGENT_ENV" ] && grep -q '^export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=' "$KERNEL_AGENT_ENV" 2>/dev/null; then
     sed -i 's|^export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=.*|export HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=1|' "$KERNEL_AGENT_ENV"
   else
@@ -2111,7 +2143,7 @@ PY
     log "would append INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=$roots to ${KERNEL_AGENT_ENV}"
     return 0
   fi
-  mkdir -p "$(dirname "$KERNEL_AGENT_ENV")"
+  runtime_env_private_kernel_agent_env "$KERNEL_AGENT_ENV" write || die "kernel-agent env file not updated"
   if [ -f "$KERNEL_AGENT_ENV" ] && grep -q '^export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=' "$KERNEL_AGENT_ENV" 2>/dev/null; then
     sed -i "s|^export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=.*|export INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS=${roots}|" "$KERNEL_AGENT_ENV"
   else
@@ -2134,6 +2166,6 @@ fi
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"
 log ""
-log "next step: launch python3 -m hyperloom optimize. Its preflight loads"
-log "  \$KERNEL_AGENT_ENV (or \$USER_DATA_PATH/runtime/kernel-agent.env.sh)"
-log "  and stops before the optimisation loop if that file is missing or stale."
+log "next step: launch python3 -m hyperloom optimize in this container. Its preflight"
+log "  loads \$KERNEL_AGENT_ENV (the file above) and stops before the optimisation loop"
+log "  if that file is missing or stale."

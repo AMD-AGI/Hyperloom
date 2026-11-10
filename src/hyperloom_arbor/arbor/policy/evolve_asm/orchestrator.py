@@ -532,7 +532,7 @@ class EvolveOrchestrator:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def load_task(yaml_path: str, kernel_index: int = 0) -> dict:
-    """Load a kernel task from a DSv4.1-Flash-style evolve YAML."""
+    """Load a kernel task from an evolve task YAML."""
     import yaml
     with open(yaml_path) as f:
         doc = yaml.safe_load(f)

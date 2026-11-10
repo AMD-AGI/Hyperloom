@@ -4,7 +4,9 @@
 """review-pr's check-card.sh holds a card to the card contract before anyone publishes it, from CI or a local run.
 
 These pin the parts the risk grade adds: the card's Risk never falls below risk.txt and says when it was raised, and a
-medium- or high-risk card lists what a person must decide, naming every high-risk path.
+medium- or high-risk card lists what a person must decide, naming every high-risk path. They also pin that a card,
+public text like the PR it reviews, names no internal-only reference, and that the scanner behind that check refuses
+an input it cannot read rather than calling it clean.
 """
 
 from __future__ import annotations
@@ -126,3 +128,41 @@ def test_a_card_that_does_not_hold_its_risk_or_decisions_is_refused(
 
     assert code == 1
     assert defect in printed
+
+
+@pytest.mark.parametrize(
+    ("reference", "kind"),
+    [
+        pytest.param("https://example.primus-safe.amd.com/board/boards/team/issues/12", "board link", id="board-link"),
+        pytest.param("boards/team#12", "board topic", id="board-topic"),
+        pytest.param("c7651", "board comment", id="board-comment"),
+        pytest.param("node-7.crusoe.amd.com", "cluster host", id="cluster-host"),
+        pytest.param("/shared_nfs/users/someone/run", "cluster path", id="cluster-path"),
+        pytest.param("MB-20261109T102718Z-0123abcd", "session id", id="session-id"),
+        pytest.param("ktsk_01ABCDEFGHJKMNPQRS", "task id", id="task-id"),
+    ],
+)
+def test_a_card_naming_an_internal_reference_is_refused_by_its_kind_alone(
+    tmp_path: Path, reference: str, kind: str
+) -> None:
+    code, printed = _check(
+        tmp_path, f"Risk: low -- prose, as {reference} showed", "risk: low\nlow docs/guide.md -- prose\n"
+    )
+
+    assert code == 1
+    assert f": {kind}; quote what it showed instead" in printed
+    assert reference not in printed
+
+
+@pytest.mark.parametrize("name", [pytest.param("missing.txt", id="missing"), pytest.param(".", id="directory")])
+def test_the_scanner_refuses_an_input_it_cannot_read_rather_than_calling_it_clean(tmp_path: Path, name: str) -> None:
+    result = subprocess.run(
+        ["bash", str(_CHECK.with_name("internal-refs.sh")), str(tmp_path / name)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode == 2
+    assert "cannot read" in result.stderr

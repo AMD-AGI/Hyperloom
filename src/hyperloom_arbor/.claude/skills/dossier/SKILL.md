@@ -1,24 +1,23 @@
 ---
 name: dossier
-description: Find, or write if it is missing, the dossier an optimization campaign starts from, for one model, workload and GPU target. When a campaign's gains run small, it says so and ranks kernel rewrites, each written up as a kernel plan. It first looks for an existing dossier and uses it, refreshing only stale parts. A dossier covers model and framework architecture, a method-by-method reading of the served code, the workload and the CPU work it causes, the target and the baseline, a profile, which kernels run and whether better ones exist (AITER, KernelForge, kernels in the codebase that go unused, what B200 picks), an optional B200 comparison the user supplies, AMD's earlier optimizations, and ranked directions. Use before starting or re-basing a campaign, when a new model, framework or workload arrives, when asked what to optimize and why, or to update the dossier in rounds (code re-read, baseline, profile, directions) after a long campaign or a merge has moved the served tree.
+description: Find, or write if it is missing, the dossier an optimization campaign starts from, for one model, workload and GPU target. When a campaign's gains run small, it says so and ranks kernel rewrites, each written up as a kernel plan. It first looks for an existing dossier and uses it, refreshing only stale parts. A dossier covers model and framework architecture, a method-by-method reading of the served code, the workload and the CPU work it causes, the target and the baseline, a profile, which kernels run and whether better ones exist (AITER, KernelForge, kernels in the codebase that go unused), AMD's earlier optimizations, and ranked directions. Use before starting or re-basing a campaign, when a new model, framework or workload arrives, when asked what to optimize and why, or to update the dossier in rounds (code re-read, baseline, profile, directions) after a long campaign or a merge has moved the served tree.
 ---
 
 # The dossier: what to know before optimizing
 
 Audience: an agent (or a person) about to optimize a model on a GPU target,
 or asked what to optimize. The dossier answers, in order and with sources,
-what the campaign would otherwise rediscover. In earlier campaigns,
-each of these cost a plan its result or its time:
+what the campaign would otherwise rediscover. Each of these can cost a plan
+its result or its time:
 
-- a knob aimed at a fused kernel that never ran;
-- a kernel-boundary win that graph capture had already amortized;
-- a nominal concurrency turned out to put far fewer requests in flight, and
-  far fewer rows per step, than its label;
-- profiles across several plans captured the client's warmup instead of the
-  measured load;
-- one plan's best possible gain sat far below its noise floor;
-- AITER's tuned MoE table had no row for the model's shapes, so every token
-  tier ran the untuned fallback.
+- a knob aimed at a fused kernel that never runs;
+- a kernel-boundary win that graph capture has already amortized;
+- a nominal concurrency that puts far fewer requests in flight, and far
+  fewer rows per step, than its label;
+- a profile that captures the client's warmup instead of the measured load;
+- a plan whose best possible gain sits far below its noise floor;
+- a tuned kernel table with no row for the model's shapes, so every token
+  tier runs the untuned fallback.
 
 Kernel usage (part 8) is in [kernels.md](kernels.md); how to write up a kernel
 rewrite, part 11's other kind of direction, is in
@@ -74,24 +73,21 @@ one, ask for all of them in one message at the start, then continue without
 waiting; a part that needs an answer stays pending. In a run with no one to ask (a campaign), write the questions in the
 dossier's index under "Open asks" and go on.
 
-1. **Reference-platform traces** (optional; they help a lot): traces of the
-   same model and workload on B200 or another NVIDIA GPU, or access to a node
-   to take them. Part 9 lists what is needed.
-2. **Earlier optimizations, where no public record exists.** For training,
+1. **Earlier optimizations, where no public record exists.** For training,
    or an internal framework, ask where AMD's earlier work on this model or
    workload is recorded: pull requests, branches, MLPerf submission notes,
    internal reports. For inference, part 10 reads InferenceX first and asks
    only for what is missing. If nothing is available, part 10 says so and is
    skipped.
-3. **The target**, if no one has stated it: the metric, the operating points,
+2. **The target**, if no one has stated it: the metric, the operating points,
    what counts as a win (part 4).
 
 ## Rules
 
 - **Parts in order.** Each states its question, what it contains, where the
   evidence comes from, and when it is done. Parts 1 to 5 and 10 need no GPU
-  if the evidence exists; 6 and 7 need a node; 8 needs 3 and 7; 9 needs the
-  user; 11 is written last, from the others only.
+  if the evidence exists; 6 and 7 need a node; 8 needs 3 and 7; 11 is
+  written last, from the others only.
 - **The profile is taken while the dossier is written.** Where the target
   hardware is available (a campaign holds a node), part 7 is a TraceLens profile
   (the `profiler` skill) on the served tree, taken right after parts 1 to 6
@@ -110,8 +106,7 @@ dossier's index under "Open asks" and go on.
   with what would fill it, its date, and the pins and workload it depends on.
   When one of those moves, the part is stale, and it is refreshed before a
   campaign relies on it.
-- **One GPU type per claim.** MI350 results never stand in for MI355X, and a
-  B200 result is a lead for an AMD claim, never evidence for one.
+- **One GPU type per claim.** MI350 results never stand in for MI355X.
 - **The dossier informs; it never gates.** Gates are the operator's.
 - **Where it lives**: in the project's repository, `docs/dossier/<model>-<workload>-<gpu>/`,
   from [template.md](template.md). A campaign gets a digest of it as pack
@@ -134,9 +129,9 @@ dossier's index under "Open asks" and go on.
 - **From:** the model's config and code in the pinned tree, read whole (a
   truncated print of `quantization_config` can hide most of a long exclude
   list); the checkpoint's `config.json` as the container sees it, its
-  README, and the tensor dtypes in the safetensors headers (a router stored in
-  fp32 was reported as BF16). Write the routing function out, and the MoE's
-  dataflow in order, collectives included.
+  README, and the tensor dtypes in the safetensors headers (a reported dtype
+  can differ from the stored one). Write the routing function out, and the
+  MoE's dataflow in order, collectives included.
 - **Done when:** every component in part 7's profile maps to a row, and each
   row names the kernel that ran, not the one expected; and the parameter
   bytes per GPU reconcile with the server's own "Model loading took" line
@@ -174,13 +169,13 @@ dossier's index under "Open asks" and go on.
   tree (AITER, CK) is read where it decides dispatch (part 8). Then:
   - **Line numbers come only from numbered output** (`cat -n`, `grep -n`,
     `nl`). A file too large for one read is read in numbered ranges, never in
-    unnumbered `sed -n` slices: a reader that did that cited mostly wrong
-    lines, some past the end of the file.
+    unnumbered `sed -n` slices, whose citations come out wrong, some past the
+    end of the file.
   - **A reader's report is a lead, not a source.** Before a claim enters the
     dossier, the writer opens the cited range itself and confirms the named
-    class, function or line is there. A writer who copied readers' reports
-    without opening a source file let one claim a missing capability the code
-    already had, and it became a ranked direction.
+    class, function or line is there. A report copied without opening the
+    source can claim a missing capability the code already has, and it then
+    becomes a ranked direction.
   - **Write the part after the readers return**, not while one is still out.
   - **A partial part lists every area above it did not read**, not some of
     them.
@@ -275,13 +270,12 @@ The procedure is [kernels.md](kernels.md).
 
 - **Answers:** which kernels serve each op at the served shapes, why those
   were chosen, and whether better ones exist: unused in the libraries already
-  shipped, documented in AITER and KernelForge, or picked by the reference
-  platform.
+  shipped, or documented in AITER and KernelForge.
 - **Contains:** one row per op family: the kernels that ran (symbol,
   provider, calls and share per step, shapes, step kinds); the dispatch
   decision (call site, flag, tuned-table hit or fallback); alternatives in the
   codebase that do not run at these shapes, why not, and how to try each;
-  KernelForge's pages; what B200 runs for the same op; the gfx950 gap that may
+  KernelForge's pages; the gfx950 gap that may
   block a port; the lead, with its ceiling from part 7. The serving playbook's
   `knobs.json` says whether a vendor knob changes numerics, depends on the
   operating point, or belongs to a bundle.
@@ -291,47 +285,28 @@ The procedure is [kernels.md](kernels.md).
   regime has a row, with its dispatch decision and its alternatives checked,
   or "none found" and where the search looked.
 
-### 9. Reference platform (B200): optional, with the user
-
-- **Answers:** what a faster platform does differently on the same model and
-  workload.
-- **Needs the user** (asked up front). Without traces or access, the part is
-  "not available", and parts 8 and 11 say what they could not compare.
-- **What to get:** the reference recipe (for inference, InferenceX's script
-  for that GPU: image, model revision, flags); the same workload settings
-  (dataset snapshot, seed, concurrency, duration); a PyTorch-profiler trace on CUDA (TraceLens
-  reads it there too) or an Nsight Systems trace; the client's
-  metrics.
-- **Compare:** at matched operating points (rows per step, context, requests
-  in flight), because one concurrency puts a different load on each platform; time per step by module; which
-  kernel serves each op (into part 8); framework choices (graph mode, capture
-  sizes, backends, where the KV cache and other tables live, warmup).
-- **Hardware gaps:** name the gap before porting an idea: native number
-  formats, matrix instruction shapes, wavefront width (64 on gfx950), on-chip
-  memory per compute unit, asynchronous copy engines, interconnect.
-
 ### 10. Earlier optimizations
 
-- **Answers:** what AMD, and the reference side, already did for this model
+- **Answers:** what AMD already did for this model
   or workload, so the campaign neither repeats it nor retries a known dead
   end.
 - **Inference:** InferenceX, from a clone with full history
   (`SemiAnalysisAI/InferenceX`):
   - `perf-changelog.yaml`: entries whose `config-keys` match the model on AMD
-    GPUs (`mi300x`, `mi325x`, `mi355x`) and on the reference platform, with
+    GPUs (`mi300x`, `mi325x`, `mi355x`), with
     their pull requests;
   - the recipe's history: `git log -p` on
     `benchmarks/single_node/<suite>/<model>_<gpu>_*.sh`, for image bumps,
-    flags and kernel choices (one InferenceX recipe chose CK's a8w4 MoE experts for DSV4.1
-    on MI355X);
-  - the AMD recipe beside the reference platform's, and beside AMD's recipes
-    for the same model on other frameworks (InferenceX has ATOM, SGLang and
-    vLLM recipes for DSV4 on MI355X);
+    flags and kernel choices (a recipe's pull request that chose CK's a8w4
+    MoE experts on MI355X is such an entry);
+  - the AMD recipe beside AMD's recipes
+    for the same model on other frameworks (InferenceX often has ATOM, SGLang
+    and vLLM recipes for one model on MI355X);
   - upstream pull requests to vLLM and AITER for the model's ops; the
     project's own ledger and campaign ledgers.
 - **Training:** InferenceX has no equivalent. Tell the user we want the
   history of AMD's optimizations for this workload, and ask where it is
-  (asks, item 2). If it is not available, write that and skip the part.
+  (asks, item 1). If it is not available, write that and skip the part.
 - **Contains:** per earlier change: what it did, where (pull request or
   commit), its measured effect and conditions (GPU, pins, operating point),
   and whether the baseline has it; the dead ends, with reasons.
@@ -345,7 +320,7 @@ The procedure is [kernels.md](kernels.md).
 - **Contains:** per direction: the component and kernel it targets (parts 7,
   8); its largest gain in the target's unit (part 4) beside the floor (part
   6); what it depends on, what it costs, what would stop it; whether it was
-  tried before (part 10) or the reference platform shows it (part 9); the
+  tried before (part 10); the
   rules of part 4's table it touches, and how it stays within each, or
   "none". A direction that only pays by breaking a rule is not a direction:
   list it with the rule, and set it aside.
@@ -367,8 +342,8 @@ The procedure is [kernels.md](kernels.md).
   - Part 11 lists rewrites in their own table, each with a kernel plan
     ([kernel-plan.md](kernel-plan.md)), even while increments lead.
 - **When rewrites go first: the increments are running out.** Watch for these
-  signs. They're calibrated on earlier campaigns; revisit the numbers once a
-  rewrite campaign has run.
+  signs. Their numbers are a starting point; revisit them after the first
+  rewrite campaign.
   - **The KEEPs are small:** the median of the last five KEEPs is under 3×
     the gate.
   - **The probes kill their own leads:** five or more probes in a row each
@@ -569,10 +544,9 @@ measured. Then, on the served tree as it now is, in order:
      level sees it.
 
    The hand-off a restarted campaign reads is cut from this part. It can be
-   written by hand, as a ledger file for the round. Across earlier campaigns, a
-   fair share of the KEEPs that came from a handed ranking reworked something an
-   earlier map had killed: kills that rested on a floor the kernel under test had
-   measured itself.
+   written by hand, as a ledger file for the round. A handed ranking can rightly
+   rework something an earlier map killed, when the kill rested on a floor that
+   the kernel under test had measured itself.
 5. **11.uK, the directions again**, as part 11, from 03.uK, 06.uK, 07.uK and
    10.uK, and the parts still current. A direction the campaign killed stays
    killed unless the new tree removes the reason it died or 10.uK marks it
@@ -615,7 +589,7 @@ python3 <this skill>/check-dossier.py <reports dir> --round uK --no-index   # a 
 - **What fails a file:** missing, a copied template, a status of "missing", or a round the index doesn't list.
 - **What it doesn't judge:** whether the content is right. That's what each part's "Done when" is for.
 
-Calibrated on a real dossier: every written part is well above these thresholds, while a template skeleton with one line filled in is far below them. A FAIL names the file and why. Write or finish that file. A part that genuinely can't be filled says so in its own status line ("not available", with the reason); it isn't left out.
+The minimums sit well below a complete part and far above a template skeleton with one line filled in. A FAIL names the file and why. Write or finish that file. A part that genuinely can't be filled says so in its own status line ("not available", with the reason); it isn't left out.
 
 ## Done when
 

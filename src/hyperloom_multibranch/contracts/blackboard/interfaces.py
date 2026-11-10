@@ -13,7 +13,7 @@ A write checks the role of the caller's :class:`~hyperloom_multibranch.contracts
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Protocol, runtime_checkable
 
 from hyperloom.contracts.recipe import RecipeDelta
@@ -46,12 +46,14 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     LlmUsage,
     LlmUsageRecord,
     ManifestFingerprint,
+    MapDirection,
     MergeAttempt,
     BlackboardSnapshot,
     OpShares,
     QuarantineEvent,
     RecordedValue,
     RegressionCase,
+    RetractionRef,
     SearchHit,
     SessionProfile,
     StartupBrief,
@@ -186,11 +188,13 @@ class JudgementSink(Protocol):
         conclusion: Conclusion,
         commit_id: str | None = None,
         recipe_digest: str | None = None,
+        retracts: RetractionRef | None = None,
     ) -> TestRecord:
         """Append a judgement; the latest one of a request is in force, earlier ones stay in the history.
 
         A judgement that makes ``commit_id`` may name ``recipe_digest``, the ``Recipe.digest()`` of the recipe the
-        experiment repository stores for it; a commit keeps the digest it was first recorded with.
+        experiment repository stores for it; a commit keeps the digest it was first recorded with. ``retracts`` names
+        what a retraction undoes, and only a ``COMMITTED`` judgement may carry it (``ValueError``).
         """
 
     async def record_merge_attempt(self, attempt: MergeAttempt) -> None: ...
@@ -329,7 +333,8 @@ class DirectionNotes(Protocol):
 
 
 class SessionRecords(Protocol):
-    """What the session is and what it ran with; the scheduler writes both, the profile once at PRELUDE."""
+    """What the session is, what it ran with and Arbor's map of its directions; the scheduler writes all three, the
+    profile once at PRELUDE."""
 
     async def write_session_profile(self, profile: SessionProfile) -> None: ...
 
@@ -339,6 +344,10 @@ class SessionRecords(Protocol):
     async def write_manifest_fingerprint(self, fingerprint: ManifestFingerprint) -> None: ...
 
     async def manifest_fingerprints(self) -> tuple[ManifestFingerprint, ...]: ...
+
+    async def write_agent_map(self, directions: Sequence[MapDirection]) -> None:
+        """Keep Arbor's map, its ``directions`` in the map's order; the latest map written is in force. Raises
+        ``ValueError`` for a direction without an id or with the id of another."""
 
 
 class SnapshotQuery(Protocol):

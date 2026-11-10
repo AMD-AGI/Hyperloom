@@ -33,7 +33,7 @@ persist:   True/False           # persistent kernel
 async_copy: True/False          # async global→LDS
 ```
 
-**Start with: tile_m=64, k_wave=7, gui_mode=True** — historically the highest-leverage combo for MoE on gfx950.
+**Start with: tile_m=64, k_wave=7, gui_mode=True** — a common starting point for MoE on gfx950.
 
 ## Roofline context (moe1 M=32, FP4 weights)
 
@@ -46,5 +46,5 @@ async_copy: True/False          # async global→LDS
 ## Integration
 
 On KEEP: run bench driver with `--deploy --config-name <name> --tile-config <tile>`
-This writes to the aiter CSV which is git-tracked on the host.
+This writes to the aiter CSV.
 The model will automatically pick up the tuned config on next server start.

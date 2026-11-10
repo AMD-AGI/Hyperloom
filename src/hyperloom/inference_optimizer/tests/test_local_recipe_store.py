@@ -7,11 +7,16 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import os
+import stat
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import hyperloom
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeUpsert,
@@ -577,3 +582,31 @@ def test_history_dir_lives_at_six_levels_below_root(tmp_path: Path) -> None:
     assert history_dir.is_dir()
     rel = history_dir.relative_to(tmp_path).parts
     assert len(rel) == 8  # 7 identity levels + history dir
+
+
+def test_a_recipe_upserted_under_umask_077_is_2775_and_664_for_the_next_account_of_the_group(tmp_path: Path) -> None:
+    """The recipe KB of a workspace is upserted into by every account of the group in turn: the lock, the live row and
+    its history are the group's, whatever umask the account that made them ran under."""
+    root = tmp_path / "recipe_kb"
+    root.mkdir()
+    root.chmod(0o2775)
+    code = (
+        "import os, sys\n"
+        f"os.umask(0o077)\nsys.path.insert(0, {str(Path(hyperloom.__file__).parents[1])!r})\n"
+        "from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeUpsert\n"
+        f"store = LocalRecipeStore(root=__import__('pathlib').Path({str(root)!r}))\n"
+        f"cid = {_cid()!r}\n"
+        "for tput in (1.0, 2.0):\n"
+        "    store.put_recipe(RecipeUpsert(canonical_id=cid, best_throughput=tput))\n"
+    )
+    done = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+
+    def mode(path: Path) -> int:
+        return stat.S_IMODE(os.lstat(path).st_mode)
+
+    live = root / "deepseek-r1" / "mi300x" / "sglang" / "unknown_model_type" / "unknown_arch" / "0.4.5" / "fp8"
+    directories = {path.relative_to(root).as_posix(): mode(path) for path in root.rglob("*") if path.is_dir()}
+    assert set(directories.values()) == {0o2775}, directories
+    files = {path.relative_to(live).as_posix(): mode(path) for path in live.rglob("*") if path.is_file()}
+    assert files == {".lock": 0o664, "recipe.json": 0o664, "history/v1.json": 0o664}

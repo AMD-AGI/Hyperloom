@@ -27,7 +27,7 @@ from hyperloom.measure.short_prompts.staging import (
     verified_prompts,
 )
 
-__all__ = ["KEY_PREFIX", "load_prompt_set", "manifest_length", "stage_entry"]
+__all__ = ["KEY_PREFIX", "load_prompt_set", "manifest_bound", "manifest_length", "stage_entry"]
 
 KEY_PREFIX = "long-context-"
 _UTF8 = "utf-8"
@@ -38,19 +38,44 @@ def stage_entry(root: Path, prompts: Sequence[Prompt], inputs: Mapping[str, Any]
     return stage_file(root, prompts_bytes(prompts), inputs, generator=GENERATOR, prefix=KEY_PREFIX)
 
 
+def _manifest_inputs(entry: Path) -> Mapping[str, Any]:
+    try:
+        inputs = json.loads((entry / MANIFEST_NAME).read_text(encoding=_UTF8))["inputs"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise PromptSetError(f"the entry {entry} records no inputs ({type(exc).__name__})") from exc
+    if not isinstance(inputs, Mapping):
+        raise PromptSetError(f"the entry {entry} records inputs that are not an object")
+    return inputs
+
+
+def _manifest_integer(entry: Path, name: str) -> int | None:
+    """The integer ``name`` of the manifest's inputs, ``None`` when it records none."""
+    value = _manifest_inputs(entry).get(name)
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+        raise PromptSetError(f"the entry {entry} records a {name} that is not an integer")
+    return value
+
+
 def manifest_length(entry: Path) -> int:
     """The token length the manifest of ``entry`` records its prompts were built for.
 
     Raises:
         PromptSetError: The manifest cannot be read or records no length.
     """
-    try:
-        length = json.loads((entry / MANIFEST_NAME).read_text(encoding=_UTF8))["inputs"]["length"]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise PromptSetError(f"the entry {entry} records no length ({type(exc).__name__})") from exc
-    if isinstance(length, bool) or not isinstance(length, int):
-        raise PromptSetError(f"the entry {entry} records a length that is not an integer")
+    length = _manifest_integer(entry, "length")
+    if length is None:
+        raise PromptSetError(f"the entry {entry} records no length")
     return length
+
+
+def manifest_bound(entry: Path) -> int | None:
+    """The context bound the manifest of ``entry`` records its set was built under; ``None`` for a set that records none
+    (one built before the bound).
+
+    Raises:
+        PromptSetError: The manifest cannot be read, or records a bound that is not an integer.
+    """
+    return _manifest_integer(entry, "bound")
 
 
 def load_prompt_set(plan: LongContextPlan, environ: Mapping[str, str]) -> tuple[Prompt, ...]:

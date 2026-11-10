@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import time
@@ -1396,6 +1397,8 @@ async def test_a_launch_known_only_by_its_image_is_measured_again(sub_agent_runn
     grid = [{"name": "v_revert", "extra_args": "--revert-flag", "extra_envs": {}, "provenance": "llm_direct"}]
     await _explore_round(sub, tr, tmp_path, "a", base_tput=800.0, grid=grid, fake_run=fake)
     benchmarked.clear()
+    # Another session on the image, so only the measurement store knows the first verdict.
+    sub.shared_state = SharedState(stack_fingerprint_meta={"image_digest": "sha256:aaa"})
     second = await _explore_round(sub, tr, tmp_path, "b", base_tput=800.0, grid=grid, fake_run=fake)
     assert benchmarked
     assert not second["skipped_dup"]
@@ -1434,7 +1437,7 @@ async def test_a_different_image_measures_again(sub_agent_runner, tmp_path, monk
     grid = [{"name": "v_revert", "extra_args": "--revert-flag", "extra_envs": {}, "provenance": "llm_direct"}]
     await _explore_round(sub, tr, tmp_path, "a", base_tput=800.0, grid=grid, fake_run=fake)
     benchmarked.clear()
-    state.stack_fingerprint_meta = {"image_digest": "sha256:bbb", "sglang": "0.5.1"}
+    sub.shared_state = SharedState(stack_fingerprint_meta={"image_digest": "sha256:bbb", "sglang": "0.5.1"})
     second = await _explore_round(sub, tr, tmp_path, "b", base_tput=800.0, grid=grid, fake_run=fake)
     assert benchmarked
     assert not second["skipped_dup"]
@@ -1720,6 +1723,72 @@ async def test_explore_guard_revert_row_reads_as_measured(sub_agent_runner, tmp_
     assert "no_meas" not in line
     assert "+10.00%" in line
     assert "p90_regressed" in line
+
+
+@pytest.mark.asyncio
+async def test_explore_reverts_a_variant_its_checkpoint_stopped(sub_agent_runner, tmp_path, monkeypatch):
+    """The decision round runs under the anchor's checkpoint median, and a round it stopped is a REVERT."""
+    from hyperloom.orchestrator.actions.executors._agentx_checkpoint import (
+        CHECKPOINT_ARTIFACT_NAME,
+        EARLY_STOP_ENV,
+        AgentxCheckpoint,
+    )
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import AGENTX_EARLY_STOP_RETURNCODE
+
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.delenv(EARLY_STOP_ENV, raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "e2e_norm_intvty_p50_1800s": 100.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
+    state.current_best = {"action": "baseline", "tput": 200.0, **state.baseline_perf}
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    write_benchmark_yaml(base)
+    watched = []
+
+    def _stopped_at_checkpoint(cmd, *args, watch, **kwargs):
+        watched.append(watch.checkpoint)
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        slot.mkdir(parents=True, exist_ok=True)
+        ruling = {"at_sec": 1800.0, "candidate_p50": 95.0, "reference_p50": 100.0, "gain_pct": -5.0}
+        (slot / CHECKPOINT_ARTIFACT_NAME).write_text(json.dumps({**ruling, "max_drop_pct": 2.0}))
+        return subprocess.CompletedProcess(args=cmd, returncode=AGENTX_EARLY_STOP_RETURNCODE, stdout="", stderr="")
+
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-early-stop"),
+                "base_tput": 200.0,
+                "grid": [{"name": "v_trailing", "extra_args": "--trailing-flag"}],
+            },
+            idempotency_key="ex-early-stop",
+        ),
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_stopped_at_checkpoint,
+    ):
+        res = await sub.run_task(task)
+
+    assert watched == [AgentxCheckpoint(100.0, enforce=True)]
+    tested = res.result["explore_search_update"]["tested"][canonical_fingerprint("--trailing-flag", {})]
+    assert tested["outcome"] == "REVERT"
+    assert tested["reason"] == "agentx_early_stop (intvty p50 at 1800s 100.0->95.0 (-5.00%; stops below -2.0%))"
+    assert tested["e2e_norm_intvty_p50_1800s"] == 95.0
 
 
 @pytest.mark.asyncio
@@ -3618,6 +3687,34 @@ async def test_explore_executor_measures_and_attributes_authored_levers(
     assert all(row["outcome"] == "KEEP" and row["source"] == "additive" for row in attributions)
 
 
+def test_a_leave_one_out_arm_that_regressed_attributes_its_lever():
+    """Dropping a kept switch and getting slower is a REVERT, and it is the reading that says the switch pays."""
+    from hyperloom.orchestrator.actions.executors.explore import _framework_lever_attributions, _outcome_row
+
+    row = _outcome_row(
+        {"name": "fwlever_drop_hl_a", "outcome": "REVERT", "gain_pct": None, "graded_gain_pct": -4.0}, "fp", "", "t"
+    )
+    seed = {"name": "fwlever_drop_hl_a", "framework_lever": "HL_A", "framework_lever_source": "leave_one_out"}
+
+    attributions = _framework_lever_attributions([row], [seed])
+
+    assert [(a["switch"], a["gain_pct"], a["outcome"]) for a in attributions] == [("HL_A", 4.0, "REVERT")]
+
+
+def test_a_lever_attribution_arm_runs_after_the_candidates_that_could_keep():
+    """Additive lever arms may KEEP and run first; leave-one-out arms only attribute and run last."""
+    from hyperloom.orchestrator.actions.executors.explore import _lever_seeded_payload
+
+    levers = [
+        {"name": "fwlever_drop_hl_a", "framework_lever": "HL_A", "framework_lever_source": "leave_one_out"},
+        {"name": "fwlever_hl_b", "framework_lever": "HL_B", "framework_lever_source": "additive"},
+    ]
+
+    payload = _lever_seeded_payload([{"name": "llm_proposal"}], levers)
+
+    assert [v["name"] for v in payload] == ["fwlever_hl_b", "llm_proposal", "fwlever_drop_hl_a"]
+
+
 @pytest.mark.asyncio
 async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
     sub_agent_runner,
@@ -4451,6 +4548,63 @@ async def test_a_measured_variant_with_removals_is_not_measured_again(sub_agent_
     )
     assert len(calls) == 1
     assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_round_keeps_the_verdicts_it_already_judged(sub_agent_runner, tmp_path, monkeypatch):
+    """Each non-KEEP verdict lands in the ledger when judged, so the round's retry does not measure it again."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    judged = [
+        {"name": "mrr_48", "extra_args": "--max-running-requests 48"},
+        {"name": "chunk_4k", "extra_args": "--chunked-prefill-size 4096"},
+    ]
+    calls: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        calls.append(slot.name)
+        if slot.name.endswith("_preempted"):
+            raise asyncio.CancelledError
+        _fake_workspace(slot, tput=801.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    base = tmp_path / "base.yaml"
+    write_benchmark_yaml(base)
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "r1"),
+                "base_tput": 800.0,
+                "grid": [*judged, {"name": "preempted", "extra_args": "--preempted-flag"}],
+            },
+            idempotency_key="r1",
+        ),
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=_fake_run):
+        with pytest.raises(asyncio.CancelledError):
+            await sub.run_task(task)
+
+    persisted = SharedState.load_or_init(tmp_path).explore_search
+    landed = {row["name"]: row["outcome"] for row in persisted["tested"].values()}
+    assert landed == {"mrr_48": "REVERT", "chunk_4k": "REVERT"}
+    assert {row["fingerprint"] for row in persisted["rejected"]} == set(persisted["tested"])
+    assert persisted["cursor"] == 0
+
+    calls.clear()
+    out = await _run_explore_round(
+        sub, tr, tmp_path, state, key="r1-retry2", grid=judged, base_args="", bench_calls=calls
+    )
+    assert calls == []
+    assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured", "already_measured"]
+    assert state.explore_search["cursor"] == 1
+    assert len(state.explore_search["rejected"]) == 2
 
 
 @pytest.mark.asyncio
