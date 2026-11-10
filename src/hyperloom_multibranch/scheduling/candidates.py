@@ -20,6 +20,17 @@ every head costs a test each time. The session's base image is fixed, and
 :func:`~hyperloom_multibranch.repo.merge.carry` refuses a candidate that moves it, so an image is never one of the
 things a change names here.
 
+An answer the rule gate measured is released at most once: a candidate not stackable on
+:data:`NOT_STACKABLE_ANSWERS` integration heads is not offered again, whatever later merges change. A change that
+names a file every change of its kind patches is released by nearly every merge, and a head that only grows by
+improvements rarely makes room for a change it already turned down twice. The count is the blackboard's, over every
+merge attempt the candidate took part in, so a conflict on a later head, which replaces its latest merge, does not
+reset it.
+
+The commits offered on a head come in two groups, each in the order the blackboard gives them: first those no merge
+attempt took yet, then those coming back. The integration branch tests one merge at a time, and a commit waiting for
+its first answer learns more, and tells its branch more, than one coming back for another.
+
 A commit that a retraction on its branch was committed on top of is never offered: the retraction undoes a change one
 of those commits made, the agent found that change invalid, and merging the retraction carries what the rest changed.
 
@@ -47,6 +58,14 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 
 #: How many times a candidate is offered again after a merge test that ended as an infrastructure failure.
 MERGE_INFRA_RETRIES = 2
+#: On how many integration heads a candidate is measured not stackable before it is no longer offered.
+NOT_STACKABLE_ANSWERS = 2
+
+
+def no_longer_offered(commit: CommittedCommit) -> bool:
+    """Whether ``commit`` was measured not stackable on as many heads as :data:`NOT_STACKABLE_ANSWERS`."""
+
+    return commit.not_stackable >= NOT_STACKABLE_ANSWERS
 
 
 def _upstreams(recipe: Recipe) -> dict[str, str]:
@@ -143,7 +162,8 @@ class Candidates:
         self._retractions: dict[str, bool] = {}
 
     async def offered_on(self, head: str) -> tuple[CommittedCommit, ...]:
-        """The committed commits to test on ``head``, in the order the blackboard gives them."""
+        """The committed commits to test on ``head``: those no merge attempt took yet, then those coming back, each in
+        the order the blackboard gives them."""
 
         committed = await self._blackboard.committed()
         unmerged = {commit.commit_id: commit for commit in committed if commit.merged_into is None}
@@ -152,7 +172,7 @@ class Candidates:
         for commit in committed:
             if commit.commit_id not in retracted and await self._offered(commit, head, unmerged):
                 offered.append(commit)
-        return tuple(offered)
+        return tuple(sorted(offered, key=lambda commit: commit.merge_attempts > 0))
 
     async def _retracted(self, committed: tuple[CommittedCommit, ...]) -> set[str]:
         """The commits a retraction on their branch was committed on top of. The retraction undoes a change one of them
@@ -174,7 +194,7 @@ class Candidates:
 
     async def _offered(self, commit: CommittedCommit, head: str, unmerged: Mapping[str, CommittedCommit]) -> bool:
         last = commit.last_merge
-        if commit.merged_into is not None:
+        if commit.merged_into is not None or no_longer_offered(commit):
             return False
         if last is None:
             return True
@@ -239,4 +259,11 @@ class Candidates:
         return self._recipes[commit]
 
 
-__all__ = ["MERGE_INFRA_RETRIES", "CandidateBlackboard", "Candidates", "touched"]
+__all__ = [
+    "MERGE_INFRA_RETRIES",
+    "NOT_STACKABLE_ANSWERS",
+    "CandidateBlackboard",
+    "Candidates",
+    "no_longer_offered",
+    "touched",
+]

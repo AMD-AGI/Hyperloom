@@ -92,7 +92,7 @@ from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, St
 from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
 from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
-from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchResolver, MergeRecords
+from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION, PLAYBOOK_JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.layout import SessionLayout
@@ -385,7 +385,8 @@ class Session:
             services.resolver_model,
         )
         records = MergeRecords(merger, DecisionLog(self._layout.merges, self._clock))
-        return Integrator(records, repo, checks, resolver, self._clock)
+        integrator = BundlingIntegrator if self._settings.workload.bundles_merges else Integrator
+        return integrator(records, repo, checks, resolver, self._clock)
 
     def _open_llm_roles(self, services: SessionServices) -> None:
         """The judge, and the playbook author and the curator CLOSE asks, each recording its spend on the blackboard."""

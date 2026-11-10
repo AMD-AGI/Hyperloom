@@ -54,12 +54,14 @@ from hyperloom_multibranch.blackboard.knowledge.warm_start import PreparedReplay
 from hyperloom_multibranch.blackboard.rsi.stranded import StrandedLead
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock, intent, judgement, request, result
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
-from hyperloom_multibranch.scheduling.candidates import MERGE_INFRA_RETRIES
+from hyperloom_multibranch.scheduling.candidates import MERGE_INFRA_RETRIES, NOT_STACKABLE_ANSWERS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.integrator import (
     ADOPTING_LEAD,
     ALREADY_ON_HEAD,
+    BUNDLING,
+    BundlingIntegrator,
     CONFLICT_TRUNCATED,
     CONFLICT_UNRESOLVED,
     FOUNDATION_FIX_VERDICTS,
@@ -75,16 +77,20 @@ from hyperloom_multibranch.scheduling.integrator import (
     LlmPatchResolver,
     MergeRecords,
     MergeReport,
+    NOT_OFFERED_AGAIN,
     not_stackable_reason,
 )
 from hyperloom_multibranch.contracts.llm import STOPPED_AT_MAX_TOKENS, CompletionFailed, CompletionReply
 from hyperloom_multibranch.rulegate import agentx
 from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     BASE_IMAGE_DIGEST,
     MAIN_POINT,
     TAG_FLAG,
+    recipe_tags,
+    tagged,
     Curves,
     FakeRegressionCheck,
     RecordingToolbox,
@@ -282,6 +288,7 @@ async def _bench(
     toolbox_type: type[RecordingToolbox] = RecordingToolbox,
     repo_type: type[GitExperimentRepo] = GitExperimentRepo,
     completion_type: type[ScriptedCompletion] = ScriptedCompletion,
+    bundles: bool = False,
 ) -> Bench:
     clock = FakeClock()
     blackboard = tmp_path / "blackboard"
@@ -303,7 +310,8 @@ async def _bench(
     resolver = LlmPatchResolver(completion, repo, RESOLVER_MODEL)
     records = MergeRecords(merger, DecisionLog(decisions, Clock(now=clock)))
     regression = FakeRegressionCheck()
-    integrator = Integrator(records, repo, SessionChecks(tests, gate, regression), resolver, Clock(clock, _poll))
+    checks = SessionChecks(tests, gate, regression)
+    integrator = (BundlingIntegrator if bundles else Integrator)(records, repo, checks, resolver, Clock(clock, _poll))
     texts = (CANDIDATE_TEXT, CONFLICTING_TEXT) if conflicting else (CANDIDATE_TEXT,)
     patches = tuple([await repo.store_patch(COMPONENT, text) for text in texts])
     deltas = {"c1": _change("c1", patches), "c2": _change("c2")}
@@ -808,41 +816,49 @@ async def test_a_merge_test_the_candidate_failed_is_not_tried_again_on_a_head_it
     assert len(tried) == 1
 
 
-#: ``c1`` then ``c2``, then ``e1`` and ``e2``, each committed on a branch of its own, move the head four times; only
+#: ``k1``, ``k2``, ``e1`` and ``e2``, each committed on a branch of its own, move the head four times in turn; only
 #: ``e2`` sets a variable ``apart`` sets.
-LATER_CURVES: Curves = {
-    **CURVES,
-    frozenset({"c1", "c2", "e1"}): {MAIN_POINT: 1070.0},
-    frozenset({"c1", "c2", "e1", "e2"}): {MAIN_POINT: 1090.0},
-}
-LATER = {
+LATER: dict[str, RecipeDelta] = {
+    "k1": tagged("k1"),
+    "k2": tagged("k2"),
     "e1": RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}e1", envs={"HL_E1": "1"})),
     "e2": RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}e2", envs={"HL_APART": "2"})),
 }
+LATER_CURVES: Curves = {
+    frozenset(list(LATER)[:count]): {MAIN_POINT: 1000.0 + 30.0 * count} for count in range(1, len(LATER) + 1)
+}
+
+
+async def _committed_alone(bench: Bench, name: str, delta: RecipeDelta, gain: float = 1.0) -> str:
+    """``name``, ``delta`` committed on the root of a new branch ``name`` and judged ``gain``."""
+
+    await bench.handle(Role.SCHEDULER).record_lineage(
+        LineageEvent(LineageKind.OPEN, name, from_commit=bench.root, reason="refill")
+    )
+    await bench.repo.create_branch(name, bench.root)
+    return await _committed_on(bench, name, bench.root, delta, gain, name=name)
 
 
 async def test_a_merge_test_ended_by_the_infrastructure_is_retried_on_the_next_heads_up_to_the_cap(
     tmp_path: Path,
 ) -> None:
     """Past the cap such a test holds as an answer: ``apart`` comes back only on the head ``e2``, which sets what it
-    sets, moved to."""
+    sets, moved to. Each later commit arrives after ``apart``'s last try, so a commit never tried does not go first."""
 
-    bench = await _bench(tmp_path, LATER_CURVES)
+    bench = await _bench(tmp_path, LATER_CURVES, tags=())
     apart = await _committed_elsewhere(bench, APART, 9.0)
-    for gain, (name, delta) in zip((1.5, 1.0), LATER.items()):
-        await bench.handle(Role.SCHEDULER).record_lineage(
-            LineageEvent(LineageKind.OPEN, name, from_commit=bench.root, reason="refill")
-        )
-        await bench.repo.create_branch(name, bench.root)
-        await _committed_on(bench, name, bench.root, delta, gain, name=name)
     infra_ending = [Fate.INFRA] * (DEFAULT_MAX_INFRA_RETRIES + 1)
     bench.toolbox.script(lambda test: f"{TAG_FLAG}apart" in test.delta.config.server_args, infra_ending)
 
-    rounds = [await _one(bench) for _ in range(9)]
+    rounds = [await _one(bench)]
+    for name, delta in LATER.items():
+        await _committed_alone(bench, name, delta)
+        rounds += [await _one(bench), await _one(bench)]
+    rounds.append(await _one(bench))
 
     tried = [report for report in rounds if report is not None and report.candidate == apart]
     heads = [report.merged_commit for report in rounds if report is not None and report.merged_commit is not None]
-    assert len(heads) == 4 and rounds[8] is None
+    assert len(heads) == 4 and rounds[-1] is None
     assert [report.onto for report in tried] == [bench.root, *heads[:2], heads[3]]
     assert all(report.outcome is MergeOutcome.PENDING for report in tried)
     assert all(report.reason.startswith("the merge test failed") for report in tried)
@@ -898,6 +914,50 @@ async def test_a_not_stackable_commit_is_not_tried_again_on_a_head_that_patched_
     assert rounds[3] is None
     tried = [test for test in bench.merge_tests().values() if f"{TAG_FLAG}aside" in test.delta.config.server_args]
     assert len(tried) == 1
+
+
+#: ``n1``, ``n2`` and ``n3``, each committed on a branch of its own, each set the variable ``apart`` sets.
+RESETTING = {
+    name: RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}{name}", envs={"HL_APART": value}))
+    for name, value in (("n1", "2"), ("n2", "3"), ("n3", "4"))
+}
+RESETTING_CURVES: Curves = {
+    frozenset({"n1"}): {MAIN_POINT: 1030.0},
+    frozenset({"n1", "n2"}): {MAIN_POINT: 1060.0},
+    frozenset({"n1", "n2", "n3"}): {MAIN_POINT: 1090.0},
+}
+
+
+async def test_a_commit_not_stackable_on_two_heads_is_not_offered_again_and_new_commits_go_before_a_retry(
+    tmp_path: Path,
+) -> None:
+    """Every head after the root sets what ``apart`` sets, which brings a not-stackable answer back; ``apart``'s own
+    gain is the largest, yet ``n2``, never tried, goes before it on ``n1``'s head."""
+
+    bench = await _bench(tmp_path, RESETTING_CURVES, tags=())
+    apart = await _committed_elsewhere(bench, APART, 9.0)
+    n1 = await _committed_alone(bench, "n1", RESETTING["n1"], 1.5)
+    n2 = await _committed_alone(bench, "n2", RESETTING["n2"], 1.0)
+
+    rounds = [await _one(bench) for _ in range(4)]
+    n3 = await _committed_alone(bench, "n3", RESETTING["n3"], 0.5)
+    later = [await _one(bench) for _ in range(2)]
+
+    heads = [report.merged_commit for report in rounds + later if report is not None and report.merged_commit]
+    assert [(report.candidate, report.onto, report.outcome) for report in rounds if report is not None] == [
+        (apart, bench.root, MergeOutcome.NOT_STACKABLE),
+        (n1, bench.root, MergeOutcome.MERGED),
+        (n2, heads[0], MergeOutcome.MERGED),
+        (apart, heads[1], MergeOutcome.NOT_STACKABLE),
+    ]
+    assert later[0] is not None and (later[0].candidate, later[0].outcome) == (n3, MergeOutcome.MERGED)
+    assert later[1] is None
+    retried = rounds[3]
+    assert retried is not None and retried.reason.endswith(f"{NOT_OFFERED_AGAIN}: {apart}")
+    assert bench.logged()[3]["reason"] == retried.reason
+    assert rounds[0] is not None and NOT_OFFERED_AGAIN not in rounds[0].reason
+    counts = {item.commit_id: item.not_stackable for item in await bench.handle(Role.OBSERVER).committed()}
+    assert counts[apart] == NOT_STACKABLE_ANSWERS
 
 
 async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improvement(bench: Bench) -> None:
@@ -1506,3 +1566,186 @@ async def test_a_merge_cancelled_while_committing_is_still_recorded_and_logged(t
     assert bench.toolbox.withdrawn == {}
     [logged] = bench.logged()
     assert (logged["detail"]["outcome"], logged["detail"]["merged_commit"]) == ("merged", record.commit_id)
+
+
+#: ``d1`` and ``e1``, each made on a branch of its own off the root, gain 2% and 1% on it, and 4% together.
+BUNDLED: Curves = {
+    **CURVES,
+    frozenset({"d1"}): {MAIN_POINT: 1020.0},
+    frozenset({"e1"}): {MAIN_POINT: 1010.0},
+    frozenset({"d1", "e1"}): {MAIN_POINT: 1040.0},
+    frozenset({"c1", "d1"}): {MAIN_POINT: 1050.0},
+    frozenset({"c1", "d1", "e1"}): {MAIN_POINT: 1060.0},
+}
+
+
+async def _committed_off_root(bench: Bench, branch: str, tag: str, gain: float) -> str:
+    """Commit ``tag``'s change on a new ``branch`` off the root, judged ``gain`` and committed."""
+
+    scheduler = bench.handle(Role.SCHEDULER)
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit=bench.root, reason="refill"))
+    await bench.repo.create_branch(branch, bench.root)
+    return await _committed_on(bench, branch, bench.root, tagged(tag), gain, name=tag)
+
+
+async def _merged_into(bench: Bench, commit: str) -> str | None:
+    committed = await bench.handle(Role.OBSERVER).committed()
+    return next(item.merged_into for item in committed if item.commit_id == commit)
+
+
+def test_only_an_agentx_workload_bundles_its_merges() -> None:
+    agentx = Workload("org/model", "sglang", 4, 10, "fp4", "mi355x", KernelOptimizer.FORGE, None)
+    inferencex = replace(agentx, inferencex=InferenceXShape(1024, 1024))
+
+    assert agentx.bundles_merges and not inferencex.bundles_merges
+
+
+async def test_a_bundle_that_improves_lands_as_one_commit_of_every_member_after_one_merge_test(
+    tmp_path: Path,
+) -> None:
+    bench = await _bench(tmp_path, BUNDLED, tags=("c1",), bundles=True)
+    d1 = await _committed_off_root(bench, "s2", "d1", 2.0)
+    c1 = bench.commits["c1"]
+
+    [report] = await bench.integrator.integrate_next(2, TICK_SECONDS, ())
+
+    head = await bench.repo.head(INTEGRATION_BRANCH)
+    assert (report.candidate, report.members, report.outcome) == (c1, (c1, d1), MergeOutcome.MERGED)
+    assert (report.onto, report.merged_commit, report.gain_pct) == (bench.root, head, pytest.approx(5.0))
+    [test] = bench.merge_tests().values()
+    assert recipe_tags(apply(await bench.repo.read_recipe(bench.root), test.delta)) == {"c1", "d1"}
+    assert bench.regression.calls == [(bench.root, test.delta, (c1, d1))]
+    assert [await _merged_into(bench, commit) for commit in (c1, d1)] == [head, head]
+    assert recipe_tags(await bench.repo.read_recipe(head)) == {"c1", "d1"}
+    [logged] = bench.logged()
+    assert (logged["detail"]["members"], logged["detail"]["merged_commit"]) == ([c1, d1], head)
+    assert logged["reason"].startswith(BUNDLING.format(f"{c1}, {d1}"))
+    assert await bench.integrator.integrate_next(2, TICK_SECONDS, ()) == ()
+
+
+async def test_a_bundle_that_does_not_improve_falls_back_to_one_merge_test_per_member(tmp_path: Path) -> None:
+    bench = await _bench(
+        tmp_path, {**BUNDLED, frozenset({"c1", "d1"}): {MAIN_POINT: 1005.0}}, tags=("c1",), bundles=True
+    )
+    d1 = await _committed_off_root(bench, "s2", "d1", 2.0)
+    c1 = bench.commits["c1"]
+
+    [bundle] = await bench.integrator.integrate_next(2, TICK_SECONDS, ())
+    singles = await bench.integrator.integrate_next(2, TICK_SECONDS, ())
+
+    assert (bundle.members, bundle.outcome, bundle.merged_commit) == ((c1, d1), MergeOutcome.NOT_STACKABLE, None)
+    assert [sources for _, _, sources in bench.regression.calls] == [(c1,)]
+    merged = await bench.repo.head(INTEGRATION_BRANCH)
+    assert [(r.candidate, r.members, r.onto, r.outcome) for r in singles] == [
+        (c1, (), bench.root, MergeOutcome.MERGED),
+        (d1, (), bench.root, MergeOutcome.PENDING),
+    ]
+    assert singles[0].merged_commit == merged and singles[1].reason == SUPERSEDED
+    assert await _merged_into(bench, c1) == merged and await _merged_into(bench, d1) is None
+    assert len(bench.merge_tests()) == 3
+    assert [row["detail"]["members"] for row in bench.logged()] == [[c1, d1], [], []]
+
+
+async def test_a_member_that_does_not_combine_is_left_out_of_the_bundle_and_takes_the_single_path(
+    tmp_path: Path,
+) -> None:
+    """``c1`` moves the base image, which no merge carries: the bundle carries ``d1`` and ``e1``, and ``c1`` is
+    tried on its own on the same head, while the bundle's test still runs."""
+
+    bench = await _bench(tmp_path, BUNDLED, tags=("c1",), invalid=True, bundles=True)
+    d1 = await _committed_off_root(bench, "s2", "d1", 2.0)
+    e1 = await _committed_off_root(bench, "s3", "e1", 1.0)
+    bench.toolbox.executor.gate.clear()
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, TICK_SECONDS, ()))
+
+    async def skipped() -> None:
+        while await bench.outcome("c1") is None:
+            await asyncio.sleep(POLL_SECONDS)
+
+    await asyncio.wait_for(skipped(), WAIT_SECONDS)
+    bench.toolbox.executor.gate.set()
+    bundle, single = await merging
+
+    c1 = bench.commits["c1"]
+    assert (bundle.members, bundle.onto, bundle.outcome) == ((d1, e1), bench.root, MergeOutcome.MERGED)
+    assert (single.candidate, single.members, single.onto) == (c1, (), bench.root)
+    assert single.outcome is MergeOutcome.CONFLICT_SKIPPED and single.reason.startswith("the merge does not combine")
+    [test] = bench.merge_tests().values()
+    assert recipe_tags(apply(await bench.repo.read_recipe(bench.root), test.delta)) == {"d1", "e1"}
+
+
+async def test_a_foundation_fix_is_never_bundled(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, BUNDLED, tags=("c1",), foundation="c1", bundles=True)
+    d1 = await _committed_off_root(bench, "s2", "d1", 2.0)
+    e1 = await _committed_off_root(bench, "s3", "e1", 1.0)
+
+    reports = await bench.integrator.integrate_next(2, TICK_SECONDS, ())
+
+    c1 = bench.commits["c1"]
+    assert [(report.candidate, report.members) for report in reports] == [(c1, ()), (d1, (d1, e1))]
+    assert reports[0].outcome is MergeOutcome.MERGED and reports[0].foundation_fix
+
+
+async def test_a_bundle_cancelled_while_committing_is_still_recorded_with_every_member(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, BUNDLED, tags=("c1",), repo_type=HeldRepo, bundles=True)
+    d1 = await _committed_off_root(bench, "s2", "d1", 2.0)
+    repo = bench.repo
+    assert isinstance(repo, HeldRepo)
+    repo.committing, repo.released = asyncio.Event(), asyncio.Event()
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, TICK_SECONDS, ()))
+    await repo.committing.wait()
+
+    await _cancel(merging)
+    abandoning = asyncio.ensure_future(bench.integrator.abandon())
+    repo.released.set()
+    await abandoning
+
+    head = await repo.head(INTEGRATION_BRANCH)
+    [request_id] = bench.merge_tests()
+    record = await bench.handle(Role.OBSERVER).record(request_id)
+    assert (record.conclusion, record.commit_id) == (Conclusion.MERGED, head)
+    assert [await _merged_into(bench, commit) for commit in (bench.commits["c1"], d1)] == [head, head]
+    [logged] = bench.logged()
+    assert (logged["detail"]["members"], logged["detail"]["merged_commit"]) == ([bench.commits["c1"], d1], head)
+
+
+async def test_the_members_of_a_bundle_that_failed_are_each_tested_alone_after_the_head_moved(tmp_path: Path) -> None:
+    """The foundation fix ``c1`` merges in the round the bundle of ``d1`` and ``e1`` regresses in, so the head moves
+    before either member had a test of its own; ``d1``, which gains on its own, is still tested alone and merged."""
+
+    curves = {
+        **BUNDLED,
+        frozenset({"d1", "e1"}): {MAIN_POINT: 950.0},
+        frozenset({"c1", "d1"}): {MAIN_POINT: 1060.0},
+    }
+    bench = await _bench(tmp_path, curves, tags=("c1",), foundation="c1", bundles=True)
+    d1 = await _committed_off_root(bench, "s2", "d1", 2.0)
+    e1 = await _committed_off_root(bench, "s3", "e1", 1.0)
+
+    first = await bench.integrator.integrate_next(2, TICK_SECONDS, ())
+    later = await bench.integrator.integrate_next(2, TICK_SECONDS, ())
+
+    assert [(report.members, report.outcome) for report in first] == [
+        ((), MergeOutcome.MERGED),
+        ((d1, e1), MergeOutcome.NOT_STACKABLE),
+    ]
+    moved = first[0].merged_commit
+    assert [(report.candidate, report.members, report.onto) for report in later] == [(d1, (), moved), (e1, (), moved)]
+    assert later[0].outcome is MergeOutcome.MERGED
+    assert await _merged_into(bench, d1) == later[0].merged_commit
+
+
+async def test_a_superseded_bundle_is_offered_together_again_on_the_new_head(tmp_path: Path) -> None:
+    curves = {**BUNDLED, frozenset({"c1", "d1", "e1"}): {MAIN_POINT: 1080.0}}
+    bench = await _bench(tmp_path, curves, tags=("c1",), foundation="c1", bundles=True)
+    d1 = await _committed_off_root(bench, "s2", "d1", 2.0)
+    e1 = await _committed_off_root(bench, "s3", "e1", 1.0)
+
+    first = await bench.integrator.integrate_next(2, TICK_SECONDS, ())
+    [again] = await bench.integrator.integrate_next(2, TICK_SECONDS, ())
+
+    assert [(report.members, report.reason) for report in first][1] == (
+        (d1, e1),
+        f"{BUNDLING.format(f'{d1}, {e1}')}: {SUPERSEDED}",
+    )
+    assert (again.members, again.onto, again.outcome) == ((d1, e1), first[0].merged_commit, MergeOutcome.MERGED)
