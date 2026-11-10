@@ -18,12 +18,15 @@ cards cite.
 
 ## What this knowledge base is
 How to **author, tune, and debug Triton kernels on AMD Instinct** (CDNA3 gfx942 / MI300X·MI325X, CDNA4
-gfx950 / MI350X·MI355X). The Triton Python API is **identical to NVIDIA**; everything here is about what
+gfx950 / MI350X·MI355X), with one R9700 gfx1201 weight-only MXFP4 serving recipe. The Triton Python API is **identical to NVIDIA**; everything here is about what
 changes underneath — the `TritonGPU → TritonAMDGPU → AMDGCN` lowering, the AMD-only knobs
 (`matrix_instr_nonkdim`, `kpack`, `waves_per_eu`, `num_stages`), and the CDNA hardware facts that break
 CUDA habits. This is a **kernel-source authoring** folder: it sits **below** `framework/aiter/` (the
 library control plane that dispatches Triton kernels) and references `hardware/` for the raw numbers
 rather than duplicating them.
+
+The general wave64/MFMA examples below describe CDNA. For R9700, read the
+dedicated gfx1201 recipe and `hardware/r9700.md` before choosing a tile or profiler.
 
 **Honest positioning (internalize before choosing Triton):** on a *plain* dense GEMM, AMD Triton typically
 **loses to tuned hipBLASLt/aiter/CK/asm** (corroborated by HipKittens, arXiv 2511.08083). The real Triton
@@ -79,6 +82,7 @@ Paths are relative to this folder unless prefixed with `local_knowledge/`.
 | "Verify the compiled kernel / read the ISA" | `skills/optimize/triton_levers/triton_isa_check.md` → `.../triton_lowering.md` |
 | "Understand `tl.dot`→MFMA / the compile pipeline" | `skills/optimize/triton_levers/triton_lowering.md` → `.../triton_isa_check.md` |
 | "Block-scaled MXFP8 / MXFP4 GEMM on CDNA4 (gfx950)" | `API_docs/tl_dot_scaled_gfx950.md` → `local_knowledge/hardware/mi350_dtypes.md` |
+| "BF16 activation × MXFP4 weight `matmul_ogs` on R9700 (gfx1201)" | `skills/optimize/triton_levers/r9700_mxfp4_matmul_ogs.md` → `local_knowledge/hardware/r9700.md` |
 | "Should I even use Triton for this?" | `skills/optimize/triton_levers/triton_amd_delta.md` ("where it fits" table) |
 | "Numerics / parity gate, or fusion neighbours, for operator X" | not covered in this repo — read the source (`framework/aiter/overall/operator_catalog.md` gives the entry point) |
 | **"Autotune converged but MFMA utilization is still low"** | **`../gluon/INDEX.md` → `../gluon/skills/optimize/gluon_levers/overview.md`** — that is a *scheduling* limit, not a hardware one, and the next lever is Gluon (see below) |

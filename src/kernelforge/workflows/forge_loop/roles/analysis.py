@@ -39,7 +39,8 @@ from kernelforge.workflows.forge_loop.roles.analysis_prompts import (
     FRAMEWORK_OWNED_FILES,
     INCREMENTAL_REANALYSIS_PROMPT,
     MARKDOWN_CONTRACT,
-    PROFILED_SYSTEM_PROMPT,
+    profiled_system_prompt_for_target,
+    profiling_reference_note,
     PUBLICATION_POLICY,
     STATIC_SYSTEM_PROMPT,
 )
@@ -1313,7 +1314,7 @@ class AnalysisAgentService:
         methodology_candidates = tuple(profiling_root / name for name in PROFILING_METHODOLOGY_FILES)
         methodology = tuple(path.resolve() for path in methodology_candidates if path.is_file())
         missing_methodology = tuple(path.name for path in methodology_candidates if not path.is_file())
-        system_prompt = self._system_prompt(request, reference_script)
+        system_prompt = self._system_prompt(request, reference_script, context.gpu_target)
         user_payload = {
             "analysis_commit": context.analysis_commit,
             "analysis_mode": ("PROFILED" if self.profiling_enabled else "STATIC_ONLY"),
@@ -1352,10 +1353,10 @@ class AnalysisAgentService:
         }
         return system_prompt, json.dumps(user_payload, indent=2, sort_keys=True)
 
-    def _system_prompt(self, request: dict, reference_script: Path) -> str:
+    def _system_prompt(self, request: dict, reference_script: Path, gpu_target: str) -> str:
         """The Analysis Agent's instructions for this tier, trigger and profiling reference."""
         if self.profiling_enabled:
-            system_prompt = PROFILED_SYSTEM_PROMPT
+            system_prompt = profiled_system_prompt_for_target(gpu_target)
         else:
             system_prompt = STATIC_SYSTEM_PROMPT
         if request["analysis_trigger"] == "post_keep_incremental":
@@ -1364,12 +1365,7 @@ class AnalysisAgentService:
                 incremental_diff_path=request["incremental_diff_path"],
                 previous_analysis_bundle=request["previous_analysis_bundle"],
             )
-        system_prompt += (
-            "\nThe exact profiling reference for this session is:\n"
-            f"    {reference_script}\n"
-            "It already exists inside staging. Use it directly and never search "
-            "the root filesystem for another copy.\n"
-        )
+        system_prompt += profiling_reference_note(reference_script, gpu_target)
         return system_prompt
 
     def _step_rules(self) -> list:

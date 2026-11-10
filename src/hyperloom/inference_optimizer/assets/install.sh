@@ -1383,6 +1383,15 @@ _ensure_pandas_lt3_for_rocpc() {
 }
 
 ensure_rocprof_compute() {
+  local profiler
+  profiler="$(
+    "${PYTHON}" "${_script_dir}/../../../kernelforge/gpu_guidance.py" \
+      "${HYPERLOOM_GFX_ARCH:-}" 2>/dev/null
+  )" || profiler=""
+  if [ "$profiler" = "rocprofv3" ]; then
+    log "rocprof-compute: target uses the image's rocprofv3 for kernel tracing"
+    return 0
+  fi
   # UNCONDITIONAL, not gated on KERNEL_OPT_BACKEND_ORDER: install.sh runs at
   # setup time under the default geak backend — the carrier sets
   # KERNEL_OPT_BACKEND_ORDER=forge only later on the optimize command, AFTER

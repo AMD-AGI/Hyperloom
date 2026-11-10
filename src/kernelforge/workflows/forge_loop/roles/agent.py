@@ -24,6 +24,7 @@ from kernelforge.agent_backends.runtime import agent_runtime, agent_runtime_sett
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
 from kernelforge.config import Config, resolve_agent_model
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS, TOOL_OWNED_UNTRACKED_GLOBS
+from kernelforge.gpu_guidance import profiler_for_target
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.workflows.forge_loop.gate.gate_tag import gate_outcome_tag
 from kernelforge.workflows.forge_loop.gate.insession_gate import GateMeasurement, GateScope, InSessionGate
@@ -112,6 +113,14 @@ bandwidth / latency-occupancy) yourself using measure_triage.md and measure_roof
 script rather than raw `rocprof-compute` (it finds a usable interpreter, runs profile+analyze, and
 prints the tables). If this environment lacks rocprof-compute's deps the script prints an
 "unavailable — skipping" notice and exits without data; just proceed without profiling (don't retry it).
+"""
+
+_RDNA_SELF_PROFILING_SECTION = """
+## Self-profiling (optional, on demand)
+If you need hardware profiling to decide the next change — which bottleneck (compute / bandwidth /
+latency-occupancy), inspect the target hardware card.
+Use rocprofv3 kernel tracing first. Read the target hardware card for supported counters.
+Use finite timeouts and retain raw traces; classify only what the collected evidence supports.
 """
 
 _BASE_SYSTEM_PROMPT = """\
@@ -707,6 +716,16 @@ Make your change(s) now.
 """
 
 
+def _self_profiling_section(config: Config, setup: ImplementerSetup, driver_run: str) -> str:
+    """Select the target's self-profiling instructions when profiling is enabled."""
+    if not setup.task.profiling_enabled:
+        return ""
+    if profiler_for_target(config.gpu_target) == "rocprofv3":
+        return _RDNA_SELF_PROFILING_SECTION
+    profiling_dir = Path(config.local_knowledge_dir) / "common_methodology" / "profiling"
+    return _SELF_PROFILING_SECTION.format(profiling_dir=profiling_dir, driver_run=driver_run)
+
+
 def make_agent_fn(
     config: Config,
     setup: ImplementerSetup,
@@ -739,13 +758,7 @@ def make_agent_fn(
         if driver_run == driver_base
         else _DRIVER_INTERPOSITION_SECTION.format(driver_run=driver_run, driver_base=driver_base)
     )
-    profiling_dir = Path(config.local_knowledge_dir) / "common_methodology" / "profiling"
-    # Suppressed when profiling is disabled so the implementer prompt carries no profiling affordance/hint at all.
-    self_profiling_section = (
-        ""
-        if not task.profiling_enabled
-        else _SELF_PROFILING_SECTION.format(profiling_dir=profiling_dir, driver_run=driver_run)
-    )
+    self_profiling_section = _self_profiling_section(config, setup, driver_run)
 
     pr_mcp_servers = _pr_mcp_servers(task.pr_kb_repo, backend)
 
