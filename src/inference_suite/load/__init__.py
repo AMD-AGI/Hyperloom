@@ -25,6 +25,11 @@ def inherited_env(server: ServerConfig) -> dict[str, str]:
     return {name: os.environ[name] for name in server.env_inherit if name in os.environ}
 
 
+def server_tp(server: ServerConfig) -> str:
+    """The ``TP`` a client is told: the server's card count, which InferenceX divides per-GPU figures by."""
+    return str(len(server.gpus))
+
+
 def exit_stop(ended: Exited | Stop, what: str, stderr: Path) -> Stop | None:
     """Why the child's end fails the round: the gate that stopped it, or its non-zero exit."""
     if isinstance(ended, Stop):
@@ -47,4 +52,4 @@ def read_result(path: Path, what: str) -> Mapping[str, object] | Stop:
     return document
 
 
-__all__ = ["exit_stop", "inherited_env", "read_result"]
+__all__ = ["exit_stop", "inherited_env", "read_result", "server_tp"]

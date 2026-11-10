@@ -35,7 +35,7 @@ from inference_suite.contracts.base_launch import (
 from inference_suite.contracts.config import ScriptableRunEnv, ScriptableWorkload, ServerConfig, SuiteConfig
 from inference_suite.contracts.layout import RunLayout
 from inference_suite.contracts.report import FailedStep, ScriptableResult
-from inference_suite.load import exit_stop, inherited_env, read_result
+from inference_suite.load import exit_stop, inherited_env, read_result, server_tp
 from inference_suite.runtime.phases import Phase, PhaseClock
 from inference_suite.runtime.process import spawn
 from inference_suite.runtime.watch import RoundGate, Stop, wait_child
@@ -137,7 +137,7 @@ def script_env(workload: ScriptableWorkload, server: ServerConfig, layout: RunLa
         ScriptableRunEnv.RESULT_DIR: str(result.parent),
         ScriptableRunEnv.RESULT_FILENAME: result.stem,
         ScriptableRunEnv.MODEL: server.model_path,
-        ScriptableRunEnv.TP: str(len(server.gpus)),
+        ScriptableRunEnv.TP: server_tp(server),
         ScriptableRunEnv.ROCR_VISIBLE_DEVICES: ",".join(str(gpu) for gpu in server.gpus),
     }
     if workload.quality_reference is not None:
