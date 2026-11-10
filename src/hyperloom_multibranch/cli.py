@@ -335,12 +335,7 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         "--make-before-break",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help=(
-            "Measured in the grant's sandboxes, keep a finished test's sandbox until the next test's runs, so that the"
-            " cluster does not give its node to another job between two tests; only where the grant fits at least three"
-            " tests at once, and it runs one test fewer at once there. --no-make-before-break runs every test the grant"
-            " fits and closes each sandbox when its test ends. Ignored where tests run on this machine's cards."
-        ),
+        help="Hosted: keep a finished test's sandbox until the next one runs, where 3+ tests fit (one fewer runs).",
     )
     run.add_argument(
         "--measurement",
@@ -990,10 +985,8 @@ def hosted_runner_cache(env: Mapping[str, str]) -> Path:
 
 
 def grant_tests_that_fit(host: HostInfo, make_before_break: bool = True) -> Callable[[int], int]:
-    """How many tests of a TP the grant ``host`` holds runs at once, as the hosted toolbox runs them: with
-    ``make_before_break``, one fewer than the grant fits where a finished test's sandbox is kept for the next (where the
-    grant fits at least three); raises ValueError when one does not fit, and ImportError when the ``hosted`` extra is
-    not installed."""
+    """How many tests of a TP the grant ``host`` holds runs at once, as the hosted toolbox runs them (``handover_for``
+    with ``make_before_break``); raises ValueError when one does not fit, ImportError without the ``hosted`` extra."""
 
     # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
     from hyperloom_multibranch.toolbox.hosted_toolbox import handover_for, parallel_tests_for
