@@ -5,7 +5,8 @@
 
 Every specialist test of kind ``test`` that the rule gate judged, or that failed by the candidate's own fault, becomes
 one Experience through the packaged ``multibranch-notebook-v1`` mapping; the other kinds (profile, accuracy, repro,
-sweep) examine a state rather than try a change, so they are not published:
+sweep) examine a state rather than try a change, so they are not published, nor is a landed retraction, which undoes
+a change its agent found invalid:
 
 * conditions: the session profile under the names the ``inference-recipe-v1`` declaration gives them, plus the
   intent's target (as ``bottleneck``), mechanism and layer;
@@ -197,8 +198,9 @@ def _state(snapshot: BlackboardSnapshot, commit_id: str) -> str:
 def candidate_row(
     record: TestRecord, snapshot: BlackboardSnapshot, profile: SessionProfile, metric: str
 ) -> dict[str, object] | None:
-    """One export row; ``None`` for a merge, another kind than ``test``, a test in flight or not measured, or a
-    judgement waiting on its split."""
+    """One export row; ``None`` for a merge, another kind than ``test``, a test in flight or not measured, a
+    judgement waiting on its split, or a landed retraction, which tried no optimisation and has no decision the
+    declarations' ``keep``, ``revert`` and ``failed`` name."""
 
     result = record.result
     if (
@@ -206,6 +208,7 @@ def candidate_row(
         or record.request.kind is not TestKind.TEST
         or result is None
         or not record.measured
+        or record.landed_retraction
     ):
         return None
     failed = result.validity is Validity.CANDIDATE_FAILED
