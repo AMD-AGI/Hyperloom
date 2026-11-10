@@ -232,7 +232,7 @@ Required env vars:
 | `ANTHROPIC_BASE_URL` | operator | Anthropic-side endpoint (point it at your gateway) |
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | operator | OpenAI-side key and endpoint; with only this side configured, TraceLens and Forge run on Codex and GEAK cannot start. The DeepSeek Harness (`INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`) authenticates on this side too |
 | `INFERENCE_OPTIMIZER_AGENT_BACKEND` | operator | `claude`, `codex` or `deepseek`: the agent CLI orchestration, specialists, TraceLens and Forge run on, instead of the credential-ranked choice. Quantization honours only `deepseek`. With `deepseek`, specialists run on the `dsh` CLI with `DSH_PERMISSION_MODE=danger-full-access` |
-| `TRACELENS_ROOT` | `install.sh` (operator can override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
+| `TRACELENS_ROOT` | `install.sh` (operator can override) | TraceLens checkout; defaults to `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<SHA>`, where `<SHA>` is the pinned TraceLens commit |
 | `KERNEL_OPT_BACKEND_ORDER` | Unset/blank resolves to `geak` for every framework, ATOM included; the CLI fills in nothing. Bare-metal setup only persists nonempty choices; Slurm launchers still export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Exact, case-insensitive `forge` enables per-kernel Forge; existing `.env` choices are retained |
 
 Forge needs **no path variable**. It ships inside the Hyperloom wheel, so the
