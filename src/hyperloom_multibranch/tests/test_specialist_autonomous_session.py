@@ -67,6 +67,7 @@ from hyperloom_multibranch.tests.agent_rig import (
     ROOT,
     TABLE_ENV,
     Component,
+    LocalProcess,
     LocalSandbox,
     Toolbox,
     _aiter,
@@ -1570,6 +1571,28 @@ async def test_an_agent_in_component_mode_stopped_by_mb_records_its_sigterm_exit
     await asyncio.wait_for(running, 10)
 
     assert (await rig.notices())[-1] == f"{NOTICE} the agent stopped: sigterm"
+
+
+async def test_a_stop_whose_kill_times_out_is_noted_and_the_lease_still_goes_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(), tail=30.0))
+    kill = LocalProcess.kill
+
+    async def unavailable(self: LocalProcess) -> None:
+        await kill(self)
+        raise SandboxUnavailable("the sandbox service timed out")
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await asyncio.sleep(0.3)
+    monkeypatch.setattr(LocalProcess, "kill", unavailable)
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)
+    await rig.session.release()
+
+    assert any("the sandbox service timed out" in notice for notice in await rig.notices())
+    assert rig.toolbox.released == ["L1"]
 
 
 def _spec_envs(rig: Rig) -> dict[str, str]:
