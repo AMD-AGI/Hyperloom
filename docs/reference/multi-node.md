@@ -28,7 +28,7 @@ differ only in how Hyperloom restarts the inference server each optimization rou
 ## Cluster hand-off
 
 Hyperloom never provisions or releases a cluster. The provisioning platform
-(typically [Primus-Claw](https://github.com/AMD-AGI/Primus-Claw)) creates the GPU
+(typically [Primus-Claw](https://github.com/AMD-AGI/PrimusClaw)) creates the GPU
 pods and hands the running cluster over through `HYPERLOOM_MN_EXT_*` environment
 variables. Hyperloom adopts it, benchmarks it, and restarts the server on it each
 round.
@@ -347,7 +347,7 @@ For issues not covered here, see [Troubleshooting Hyperloom](troubleshooting.md)
 ## Related topics
 
 - [Workload skill](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md) — copy-paste flags and environment for Qwen3-30B-A3B
-- [Primus-Claw](https://github.com/AMD-AGI/Primus-Claw) — provisions the cluster and hands it over
+- [Primus-Claw](https://github.com/AMD-AGI/PrimusClaw) — provisions the cluster and hands it over
 - [Multi-node CLI, SSH, and hand-off semantics](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/multi_node/SKILL.md)
 - [Environment variables](environment-variables.md) — full list of `HYPERLOOM_MN_EXT_*` variables
 - [Run a Hyperloom optimization](../how-to/optimize.md) — single-node counterpart
