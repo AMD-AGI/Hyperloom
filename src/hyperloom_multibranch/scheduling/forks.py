@@ -193,7 +193,8 @@ class ForkDesk:
         self._decisions.record(Decision(DECISION_KINDS[pending.origin], reason, pending.branch, detail))
 
     def fill_free_slots(self) -> None:
-        """Move the queued requests, oldest first, onto the roster's free slots; each waits on the desk to start."""
+        """Move the queued requests onto the roster's free slots, shares first and then forks and repairs oldest
+        first; each waits on the desk to start."""
 
         while self._queue and not self._roster.open_refusal():
             pending = self._queue.popleft()
@@ -208,7 +209,8 @@ class ForkDesk:
         return self._void(tuple(voided), reason)
 
     def void_all(self, reason: str) -> tuple[str, ...]:
-        """Void the whole queue, as the session stops for ``reason``; the reserved branch ids, oldest first."""
+        """Void the whole queue, as the session stops for ``reason``; the reserved branch ids, shares first and then
+        forks and repairs oldest first."""
 
         return self._void(tuple(self._queue), reason)
 
@@ -222,7 +224,7 @@ class ForkDesk:
         return tuple(pending.branch for pending in voided)
 
     def pending(self) -> tuple[PendingBranch, ...]:
-        """The requests waiting for a slot, oldest first."""
+        """The requests waiting for a slot: shares first, then forks and repairs, each oldest first."""
 
         return tuple(self._queue)
 
