@@ -27,7 +27,6 @@ frameworks, see [Run a Hyperloom optimization](optimize.md) instead.
 ## Launch
 
 ```bash
-export HYPERLOOM_BENCHMARK_BACKEND=bypass
 python3 -m hyperloom optimize -v \
   --framework custom \
   --framework-path /path/to/my-checkout \
@@ -35,14 +34,6 @@ python3 -m hyperloom optimize -v \
   --model /path/to/weights \
   --gpu-type mi355x --tp 8 --max-hours 12 \
   --extra-env MYFW_STEPS=50 --extra-env MYFW_CKPT=/path/to/ckpt
-```
-
-```{important}
-`HYPERLOOM_BENCHMARK_BACKEND=bypass` is required. The backend defaults to
-Magpie, which cannot run an operator-supplied script, so launch refuses any
-other value with `--framework custom requires HYPERLOOM_BENCHMARK_BACKEND=bypass`.
-This is easy to lose when you move to a fresh shell, and it is the most common
-launch failure on this path.
 ```
 
 Neither `--framework-path` nor `--benchmark-scripts-dir` is optional here. With
@@ -75,13 +66,22 @@ reference.
 Hyperloom looks for your entrypoint inside `--benchmark-scripts-dir` in this
 order:
 
-1. `custom_<runner_type>.sh` — with `--gpu-type mi355x`, that is `custom_mi355x.sh`.
+1. `custom_<gpu-type>.sh`, named after the board itself — with `--gpu-type mi325x`,
+   that is `custom_mi325x.sh`.
 2. Failing that, the **single** `.sh` file in the directory, which is what an
    operator who wrote one script for one machine actually has.
-3. If neither applies, the entrypoint is unresolved and the run reports the miss.
+3. If neither applies, the launch exits 2: there is no script to run.
 
-Your script is invoked with `RESULT_DIR` and `RESULT_FILENAME=inferencex_result`
-injected into its environment. It must write an InferenceX-shaped report to
+The session freezes the script it found, with the sha256 of its content, as its
+base launch. A round whose script has changed since is refused with
+`source_files_changed`; start a new session to measure an edited script.
+
+Your script is invoked with `RESULT_DIR`, `RESULT_FILENAME=inferencex_result`,
+`MODEL`, `TP`, `ROCR_VISIBLE_DEVICES` and, when the session holds a quality
+reference, `QUALITY_REFERENCE` injected into its environment; a profile round
+adds `PROFILE=1` and the trace directory as `VLLM_TORCH_PROFILER_DIR` and
+`SGLANG_TORCH_PROFILER_DIR`. Pins named like an acceptance threshold (`*_MAX`,
+`*_MIN`, `*threshold*`) are refused: Hyperloom judges the result. It must write an InferenceX-shaped report to
 `$RESULT_DIR/inferencex_result.json`:
 
 ```json
@@ -104,9 +104,9 @@ A scriptable workload has no server, and therefore no accuracy benchmark. The
 fail-closed:
 
 ```{important}
-A missing or unparseable `quality_gate` scores 0.0 accuracy, which **rejects
-every candidate** the run produces. The symptom is a run that completes, reports
-speedups, and keeps nothing.
+A baseline whose report carries no `quality_gate` **stops the run at once** with
+`stop_reason: baseline_accuracy_failed`; the log line names the report it read.
+A candidate whose report has no gate scores 0.0 accuracy and is rejected.
 ```
 
 Run your entrypoint by hand once and confirm the key is actually present in
@@ -256,10 +256,9 @@ the bundle rather than the lever.
 ## Other requirements
 
 **GPU type.** `--gpu-type` accepts `mi300x`, `mi308x`, `mi325x`, `mi355x`,
-`r9700`, `r9600d` and `radeon8060s` (Strix Halo).
-Note that **`mi308x` and `mi325x` map to `runner_type=mi300x`** with a warning,
-since those GPUs share the MI300X runner family. Without the flag, Hyperloom
-auto-detects through `rocm-smi --showproductname`.
+`r9700`, `r9600d` and `radeon8060s` (Strix Halo). The entrypoint name uses the board as
+given: `mi325x` looks for `custom_mi325x.sh`, not `custom_mi300x.sh`. Without the flag, Hyperloom auto-detects through
+`rocm-smi --showproductname`.
 
 **Pin GPUs with `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.** On the known
 ROCm stack the latter can make `torch.cuda.is_available()` return false.
@@ -297,8 +296,9 @@ The benchmark output does not go to the launcher log; it lands in the session
 directory:
 
 ```text
-<session>/runs/baseline/<id>/benchmark_custom_<stamp>/scriptable_stdout.log
-<session>/runs/baseline/<id>/benchmark_custom_<stamp>/inferencex_result.json
+<session>/runs/baseline/<id>/.../suite_run_<n>/client/stdout.log
+<session>/runs/baseline/<id>/.../suite_run_<n>/client/inferencex_result.json
+<session>/runs/baseline/<id>/.../suite_run_<n>/report.json
 <session>/reports/optimization_journal.json
 ```
 
@@ -311,10 +311,9 @@ denominator. For the full artifact schema, see
 
 | Symptom | Cause |
 |---------|-------|
-| `requires HYPERLOOM_BENCHMARK_BACKEND=bypass` at launch | The backend is unset or set to something else |
 | Missing-path error at launch | `--framework-path` or `--benchmark-scripts-dir` not given; `custom` has no shipped entrypoint to fall back on |
-| Entrypoint not resolved | The directory has no `custom_<runner_type>.sh` and does not contain exactly one `.sh` |
-| Run completes but keeps no optimization | The report carries no `quality_gate`, so accuracy scores 0.0 and every candidate is rejected |
+| Entrypoint not resolved | The directory has no `custom_<gpu-type>.sh` and does not contain exactly one `.sh` |
+| Run stops after the baseline with `baseline_accuracy_failed` | The report carries no `quality_gate`; the stop line names the report |
 | Whole budget spent in `PRELUDE` | Credentials not exported from the launching shell; every orchestration turn returns 401 |
 | Specialist patches never land | `--framework-path` not given, so PolicyGate does not recognize the tree |
 | Baseline higher than expected | `--extra-env` pins optimization switches, so the search is incrementing on already-optimized code |
