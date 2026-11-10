@@ -373,11 +373,11 @@ def add_run_mode_arguments(opt: argparse.ArgumentParser) -> None:
         "--no-kernel",
         action="store_true",
         default=False,
-        help="Disable the Kernel-agent entirely. The run will "
-        "only do baseline + explore + sweep (pure "
-        "parameter search). Useful when GEAK/GPU "
-        "compile env is unavailable or you just want the "
-        "quick-win parameter path. Default: kernel enabled.",
+        help="Disable the Kernel-agent entirely: the KERNEL_AGENT phase and "
+        "its actions are skipped. Useful when GEAK/GPU compile env is "
+        "unavailable. The framework phase can still land source patches; "
+        "pass --no-source-changes as well for a run that keeps only server "
+        "arguments and environment variables. Default: kernel enabled.",
     )
     opt.add_argument(
         "--launch-info-file",
