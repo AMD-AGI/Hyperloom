@@ -14,7 +14,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
-from hyperloom_common.io import WriteOptions, atomic_write_text
+from hyperloom.common.session_files import shared_options
+from hyperloom_common.io import atomic_write_text
 from hyperloom_common.timeutil import now_iso
 
 from .sections import EVENT_SECTIONS, slug
@@ -349,7 +350,7 @@ class Recorder:
             else None
         )
         try:
-            atomic_write_text(target, data, options=WriteOptions(make_parents=True))
+            atomic_write_text(target, data, options=shared_options(record))
         except BaseException as exc:
             if trace is not None:
                 trace_write(replace(trace, error=exc))
