@@ -94,6 +94,10 @@ search tree the session's own CLOSE archived is left as it was. It is refused wi
 nothing, when the directory is no session that ran, ran on another build than this one, committed no root, is still
 running -- any process ``MB-pids.jsonl`` records, the scheduler included, still alive in this environment -- already
 chose in FINAL, or has another ``final-only`` running over it.
+``run --resume SESSION_DIR`` continues such a session in its directory on its manifest's settings, taking no other
+option but ``-v``: no PRELUDE, new branches on the integration head, and the deadline moved by the time it was down
+(:meth:`~hyperloom_multibranch.scheduling.lifecycle.Session.resume`). It is refused, holds the lock and archives as
+``final-only`` does, and is refused too for a session with no baseline or run with ``--stop-after-map``.
 """
 
 from __future__ import annotations
@@ -107,7 +111,7 @@ import logging
 import math
 import os
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import partial
@@ -153,8 +157,10 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     PersistedRun,
     Session,
     SessionHost,
+    SessionOutcome,
     SessionServices,
     persisted_run,
+    resumable_run,
 )
 from hyperloom_multibranch.scheduling.llm import (
     MB_RESOLVER_MAX_TOKENS,
@@ -172,6 +178,7 @@ from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.reference import ReferenceSource, reference_source
 from hyperloom_multibranch.scheduling.roster import RosterCaps
+from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.scheduling.settings import (
     AGENT_PORT,
     DOSSIER_MINUTES,
@@ -199,6 +206,8 @@ log = logging.getLogger(__name__)
 #: mi355x's (the same gfx950 die) through ``gpu_runner_type``, as the toolbox's environment sets ``GPU_TYPE``.
 #: ``hyperloom optimize`` also runs mi308x and mi325x on mi300x's script; a session does not accept them yet.
 MAGPIE_RUNNER_GPU_TYPES = ("mi300x", "mi350x", "mi355x")
+#: The options ``run`` requires unless it is given ``--resume``, by their argparse names.
+RUN_REQUIRED = ("model", "framework", "gpu_type", "workload", "tp", "conc", "precision")
 #: The options an inferencex workload requires and an agentx one refuses.
 SEQUENCE_LENGTHS = ("isl", "osl")
 #: The argparse action of an option the user may give more than once, each giving one more value.
@@ -207,6 +216,8 @@ REPEATABLE = "append"
 SWITCH = "store_true"
 #: Where ``run`` measures: this machine's cards, or the sandboxes of a grant handed to it.
 LOCAL_MEASUREMENT, HOSTED_MEASUREMENT = "local", "hosted"
+#: The command that runs FINAL and CLOSE alone over a session directory.
+FINAL_ONLY_COMMAND = "final-only"
 #: The command a host runs a session under, with the campaign spec it injects.
 HOSTED_COMMAND = "hosted"
 #: What a grant handed to ``run --measurement hosted`` must give: the sandbox service, the measurement key and
@@ -224,7 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_run_options(commands.add_parser("run", help="Run one session: PRELUDE, EXPLORE, FINAL and CLOSE."))
     review.add_parser(commands)
     final_only = commands.add_parser(
-        "final-only",
+        FINAL_ONLY_COMMAND,
         help=(
             "Emergency recovery: run FINAL and CLOSE over a session directory that ended before FINAL, a session"
             " killed with its machine included. It rewrites that session's report, dashboard and breakdown, and"
@@ -247,6 +258,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_run_options(run: argparse.ArgumentParser) -> None:
+    resume = "Continue the session in SESSION_DIR, which ended before FINAL, on its own settings; no other option."
+    run.add_argument("--resume", type=Path, metavar="SESSION_DIR", help=resume)
     _add_workload_options(run)
     _add_budget_options(run)
     _add_specialist_input_options(run)
@@ -259,20 +272,18 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
     """The fixed workload, spelled as ``hyperloom optimize`` spells it, and the kernel optimizer its recipes are scoped
     to."""
 
-    run.add_argument("--model", required=True, help="Model path or id.")
-    run.add_argument("--framework", required=True, help="Inference framework, e.g. vllm or sglang.")
-    run.add_argument(
-        "--gpu-type", required=True, type=str.lower, choices=MAGPIE_RUNNER_GPU_TYPES, help="GPU type, in any case."
-    )
-    run.add_argument("--workload", required=True, choices=[kind.value for kind in WorkloadKind], help="Workload kind.")
-    run.add_argument("--tp", type=int, required=True, help="Tensor-parallel size; must fit the machine's cards.")
+    run.add_argument("--model", help="Model path or id.")
+    run.add_argument("--framework", help="Inference framework, e.g. vllm or sglang.")
+    run.add_argument("--gpu-type", type=str.lower, choices=MAGPIE_RUNNER_GPU_TYPES, help="GPU type, in any case.")
+    run.add_argument("--workload", choices=[kind.value for kind in WorkloadKind], help="Workload kind.")
+    run.add_argument("--tp", type=int, help="Tensor-parallel size; must fit the machine's cards.")
     run.add_argument(
         "--ep", type=int, default=None, help=f"Expert-parallel size the server runs at, default {DEFAULT_EP}."
     )
-    run.add_argument("--conc", type=int, required=True, help="Concurrency of the primary operating point.")
+    run.add_argument("--conc", type=int, help="Concurrency of the primary operating point.")
     for name in SEQUENCE_LENGTHS:
         run.add_argument(f"--{name}", type=int, default=None, help="Required for inferencex; refused for agentx.")
-    run.add_argument("--precision", required=True, help="Model precision, as hyperloom optimize spells it.")
+    run.add_argument("--precision", help="Model precision, as hyperloom optimize spells it.")
     run.add_argument(
         "--kernel-optimizer",
         choices=[optimizer.value for optimizer in KernelOptimizer],
@@ -695,7 +706,10 @@ def settings_from(
     does not fit: this machine's cards for ``run``, the grant for ``hosted run``.
     """
 
-    sizes = ("tp", "conc") if args.ep is None else ("tp", "ep", "conc")
+    missing = [f"--{name.replace('_', '-')}" for name in RUN_REQUIRED if getattr(args, name) is None]
+    if missing:
+        raise ValueError(f"the following arguments are required: {', '.join(missing)}")
+    sizes = tuple(name for name in ("tp", "ep", "conc") if getattr(args, name) is not None)
     errors = _shape_errors(args) + _positive(args, sizes)
     errors += _limit_errors(args)
     if errors:
@@ -890,11 +904,27 @@ async def _run_session(
 
 def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:
     """Run FINAL and CLOSE over the session directory ``persisted`` was read from, print it on one stdout line and
-    return the session's exit code. No session directory is created, which is why this cannot start one.
+    return the session's exit code. No session directory is created, which is why this cannot start one."""
 
-    The run holds the session's lock file while it works; a second one over the same directory is refused rather
-    than left to write over the first one's report.
-    """
+    return _over_session(persisted, peer_factory, services, Session.finish)
+
+
+def resume(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:
+    """Continue the session in the directory ``persisted`` was read from (:meth:`Session.resume`), print it on one
+    stdout line and return the session's exit code."""
+
+    return _over_session(persisted, peer_factory, services, Session.resume)
+
+
+#: What a run over a session directory runs on the session it builds there, given how that session ended.
+SessionLeg = Callable[[Session, SessionStopReason], Awaitable[SessionOutcome]]
+
+
+def _over_session(
+    persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, leg: SessionLeg
+) -> int:
+    """Run ``leg`` over the session directory ``persisted`` was read from, holding the session's lock file while it
+    works; a second run over the same directory is refused rather than left to write over the first one's report."""
 
     lock = persisted.layout.final_only_lock
     try:
@@ -906,19 +936,21 @@ def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: Ses
     os.close(holder)
     try:
         with adopting_orphans():
-            return asyncio.run(_final_only(persisted, peer_factory, services))
+            return asyncio.run(_run_leg(persisted, peer_factory, services, leg))
     finally:
         lock.unlink()
 
 
-async def _final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:
+async def _run_leg(
+    persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, leg: SessionLeg
+) -> int:
     clock = Clock()
     layout = persisted.layout
     print(layout.root, flush=True)
     logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
     session = Session(persisted.settings, peer_factory, host, services)
-    return (await session.finish(persisted.ended)).exit_code
+    return (await leg(session, persisted.ended)).exit_code
 
 
 def _file_handler(path: Path) -> logging.Handler:
@@ -1116,6 +1148,18 @@ def _start(settings: RunSettings, grant: HandedGrant | None) -> int:
     return run_session(settings, ready.peer_factory, ready.services)
 
 
+def _refuse_options_beside_resume(args: argparse.Namespace) -> None:
+    """Raise ValueError naming the options of ``run`` given beside ``--resume``, whose session's manifest sets them."""
+
+    defaults = argparse.ArgumentParser()
+    _add_run_options(defaults)
+    unset = vars(defaults.parse_args([]))
+    if given := [
+        name for name, value in unset.items() if name not in ("resume", "verbose") and getattr(args, name) != value
+    ]:
+        raise ValueError(f"--resume takes the session's own settings and no other option; given: {', '.join(given)}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1125,8 +1169,12 @@ def main(argv: list[str] | None = None) -> int:
         return review.main(args)
     persisted = grant = None
     try:
-        if args.command == "final-only":
+        if args.command == FINAL_ONLY_COMMAND:
             persisted = persisted_run(args.session_dir)
+            settings = persisted.settings
+        elif args.resume is not None:
+            _refuse_options_beside_resume(args)
+            persisted = resumable_run(args.resume)
             settings = persisted.settings
         else:
             grant = _handed_grant(args) if args.measurement == HOSTED_MEASUREMENT else None
@@ -1140,7 +1188,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if persisted is not None:
             ready = ready_session(settings.workload, load_peers)
-            return final_only(persisted, ready.peer_factory, ready.services)
+            leg = final_only if args.command == FINAL_ONLY_COMMAND else resume
+            return leg(persisted, ready.peer_factory, ready.services)
         return _start(settings, grant)
     except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
@@ -1169,6 +1218,7 @@ __all__ = [
     "require_rsi_archive",
     "require_session_environment",
     "require_workload_switch",
+    "resume",
     "run_session",
     "session_services",
     "settings_from",
