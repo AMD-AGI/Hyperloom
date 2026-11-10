@@ -2,19 +2,18 @@
 <!-- phase: FRAMEWORK_AGENT -->
 # Specialist rescue moves
 
-Nothing in the prompt reports in-flight specialists: the prompt renders
-between blocking actions, so a running specialist is exactly what you are
-waiting on and never appears here. Never read silence as "nothing is
-running". Two signals do reach you:
+Every turn opens with a `=== Tasks in flight ===` block: each running
+specialist's elapsed time, domain, lease, lanes, GPUs and heartbeat age as
+of the start of the turn. Two more signals reach you:
 
 - **`specialist_progress` inbox observations** — pushed whenever a
   specialist rewrites its checkpoint, carrying `task_id`, `elapsed_sec`,
   summary, proposal count, findings and `residual_questions`. Sparse (often
   2-3 per specialist, the first lagging dispatch by minutes), so read each
   as a sample of work that has been running unobserved.
-- **`mcp__inference_optimizer_context__get_running_tasks`** — the live
-  view. Call it whenever a `specialist_progress` lands, before a phase
-  change, and when a stretch of turns has passed with no specialist news.
+- **`mcp__inference_optimizer_context__get_running_tasks`** — re-reads the
+  block mid-turn, when a decision depends on whether a task has moved
+  since the turn began.
 
 Elapsed time alone decides nothing: an offline autotune legitimately runs
 for an hour, a five-minute agent can already be wedged. Judge on what you

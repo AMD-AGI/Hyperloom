@@ -14,13 +14,16 @@
 # namespaces, which the container's root has in its own user namespace.
 #
 # An application pod copies /layer into a volume with an init container, and the main container (any framework
-# image with git, setpriv and bash) runs it as root:
+# image with git and bash) runs its start.sh:
 #
 #   initContainers: [{name: layer, image: <this image>, command: [cp, -a, /layer/., /opt/hyperloom-host/],
 #                     volumeMounts: [{name: hyperloom-host, mountPath: /opt/hyperloom-host}]}]
 #   containers:     [{image: <framework image>, command: [sh, /opt/hyperloom-host/start.sh],
 #                     volumeMounts: [{name: hyperloom-host, mountPath: /opt/hyperloom-host}]}]
 #   volumes:        [{name: hyperloom-host, emptyDir: {}}]
+#
+# start.sh makes the specialist account only where it runs as root, the image has setpriv (util-linux) and the
+# account can be switched to; elsewhere the specialists run under bin/bwrap, which needs neither.
 ARG BWRAP_BUILD_IMAGE=alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4
 ARG BASE_IMAGE=busybox:1.37
 
