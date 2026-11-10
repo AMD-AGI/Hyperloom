@@ -18,7 +18,8 @@ from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.scheduling.agent_plans import GENERATED_MAP, agent_plans, arbor_agents, map_dealer
 from hyperloom_multibranch.specialist.agent_onboarding import PROFILE_FILE, ROOT_PROFILE_SOURCE
 from hyperloom_multibranch.specialist.arbor_adapter import SplitFailed
-from hyperloom_multibranch.tests.agent_rig import CHECKOUT_FILES, MAP, _committed, _write
+from hyperloom_multibranch.tests.agent_rig import CHECKOUT_FILES, MAP, _committed, _write, worker_report
+from hyperloom_multibranch.tests.test_specialist_arbor_keys import VENDORED_ARBOR
 
 #: The root's op shares as PRELUDE's profile reports them, in percent.
 ROOT_SHARES = OpShares("c0ffee", "prelude-1", "p1", {"attn_fwd": 41.0, "moe_gemm": 33.0, "rmsnorm": 1.5, "nccl": 9.0})
@@ -130,10 +131,8 @@ DEAL_MAP = {
 }
 
 
-def _report(tmp_path: Path, name: str, *entries: dict[str, object]) -> Path:
-    path = tmp_path / f"{name}.json"
-    path.write_text(json.dumps({"directions": list(entries)}), encoding="utf-8")
-    return path
+def _report(tmp_path: Path, name: str, *closed: dict[str, str], left_open: tuple[str, ...] = ()) -> Path:
+    return worker_report(tmp_path / f"{name}.json", *closed, left_open=left_open)
 
 
 def _share(tmp_path: Path, name: str, *ids: str) -> str:
@@ -155,16 +154,28 @@ async def test_a_reporting_worker_s_slot_is_dealt_open_directions_no_report_sett
     # m-moe is held by the running worker, m-rope was closed in the map; at most two by rank.
     assert order is not None and _ids(str(order)) == ["m-allreduce", "m-sampler"]
 
-    back = _report(tmp_path, "r2", {"id": "m-allreduce", "status": "open"}, {"id": "m-sampler", "status": "done"})
+    back = _report(tmp_path, "r2", {"id": "m-sampler", "status": "done"}, left_open=("m-allreduce",))
     again = await dealer.deal(Path(arbor), str(order), back)
 
     # Given back open once, m-allreduce is dealt again; the closed m-attn and m-sampler stay closed.
     assert again is not None and _ids(str(again)) == ["m-allreduce"]
 
-    spent = _report(tmp_path, "r3", {"id": "m-allreduce", "status": "open"})
+    spent = _report(tmp_path, "r3", left_open=("m-allreduce",))
 
     # Given back open by a second worker, m-allreduce is exhausted: every report is passed, so it is not reopened.
     assert await dealer.deal(Path(arbor), str(again), spent) is None
+
+
+async def test_arbor_s_own_master_settles_what_a_worker_report_closed(tmp_path: Path) -> None:
+    share = _share(tmp_path, "share-1", "m-attn", "m-moe")
+    dealer = map_dealer(_map(tmp_path, DEAL_MAP), (share,), tmp_path / "work")
+    assert dealer is not None
+
+    closed = ({"id": "m-allreduce", "status": "killed", "why": "no gain"}, {"id": "m-sampler", "status": "done"})
+    order = await dealer.deal(VENDORED_ARBOR, share, _report(tmp_path, "r1", *closed, left_open=("m-attn",)))
+
+    # The vendored Arbor reads the report as the fake master does: m-attn back open, the two it closed settled.
+    assert order is not None and _ids(str(order)) == ["m-attn", "m-moe"]
 
 
 async def test_with_every_open_direction_settled_or_held_the_deal_leaves_the_slot_without_an_order(

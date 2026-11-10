@@ -11,6 +11,7 @@ from pathlib import Path
 
 from hyperloom_multibranch.contracts.blackboard.records import MapDirection
 from hyperloom_multibranch.scheduling.agent_map import SharedMap
+from hyperloom_multibranch.tests.agent_rig import worker_report
 
 GEMM = {"id": "m-gemm", "kind": "increment", "title": "Dense   GEMMs: tuned kernels", "status": "open"}
 FUSE = {"id": "m-fuse", "title": "Small kernels", "status": "open", "why": "rms_norm_kernel 4 %", "ops": ["rms_norm"]}
@@ -59,10 +60,13 @@ def test_a_report_closes_its_directions_and_a_dealt_order_moves_its_own_to_the_b
 ) -> None:
     shared, one, two = _shared(tmp_path)
     held = shared.dealt(one, "b01").dealt(two, "b02")
-    report = Path(_write(tmp_path / "worker_report.json", {"id": "m-gemm", "status": "done", "why": "KEEP 2"}))
+    closed = ({"id": "m-gemm", "status": "done", "why": "KEEP 2"}, {"id": "m-fp8", "status": "done", "why": "late"})
+    report = worker_report(tmp_path / "worker_report.json", *closed, left_open=("m-fuse",))
     order = Path(_write(tmp_path / "order-1.json", FUSE))
 
     folded = held.folded(report, order)
+
+    # m-fp8 was set aside in the map before the report closed it, and keeps the map's verdict.
 
     assert [(item.id, item.status, item.why, item.holder) for item in folded.directions] == [
         ("m-gemm", "done", "KEEP 2", "b01"),
@@ -73,3 +77,9 @@ def test_a_report_closes_its_directions_and_a_dealt_order_moves_its_own_to_the_b
     holders = {item.id: item.holder for item in folded.dealt(str(order), "b04").directions}
     assert holders == {"m-gemm": "b01", "m-fuse": "b04", "m-fp8": ""}
     assert held.folded(report, None).shares == held.shares
+
+
+def test_a_report_that_cannot_be_read_closes_nothing(tmp_path: Path) -> None:
+    shared, _one, _two = _shared(tmp_path)
+
+    assert shared.folded(tmp_path / "missing.json", None) == shared

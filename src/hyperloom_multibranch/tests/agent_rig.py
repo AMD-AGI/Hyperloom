@@ -510,8 +510,9 @@ for number in range(1, shares + 1):
 
 
 #: Arbor's master in a fake checkout, as Arbor ``74933a2`` deals: the open directions of ``--map`` that no report
-#: settled, two reports gave back open (exhausted) or a ``--held-order`` (or ``--held`` id) holds; fresh ones before those
-#: reported back open once, then by rank; at most ``--size`` of them, always written to ``--out``.
+#: closed, two reports gave back open (exhausted) or a ``--held-order`` (or ``--held`` id) holds; fresh ones before those
+#: reported back open once, then by rank; at most ``--size`` of them, always written to ``--out``. It reads each report
+#: as Arbor's ``pool`` does, its ``directions.closed`` and ``directions.open`` (:func:`worker_report`).
 FAKE_ROLES = """
 import json, pathlib, sys
 args = sys.argv[2:]
@@ -524,9 +525,9 @@ def given(flag):
     return found
 def directions(path):
     return json.loads(pathlib.Path(path).read_text())["directions"]
-reported = [e for r in given("--reports") + given("--report") for e in directions(r)]
-settled = {e["id"] for e in reported if e.get("status", "open") != "open"}
-back = [e["id"] for e in reported if e.get("status", "open") == "open"]
+reported = [directions(r) for r in given("--reports") + given("--report")]
+settled = {e["id"] for r in reported for e in r["closed"]}
+back = [i for r in reported for i in r["open"]]
 exhausted = {i for i in back if back.count(i) >= 2}
 held = set(given("--held")) | {e["id"] for order in given("--held-order") for e in directions(order)}
 live = [e for e in directions(given("--map")[0]) if e.get("status", "open") == "open"]
@@ -536,6 +537,16 @@ pathlib.Path(given("--out")[0]).write_text(json.dumps({"directions": dealt}))
 print(json.dumps({"order": given("--out")[0], "directions": [e["id"] for e in dealt], "free": len(free),
                   "held": sorted(held), "settled": sorted(settled), "exhausted": sorted(exhausted)}))
 """
+
+
+def worker_report(path: Path, *closed: dict[str, str], left_open: tuple[str, ...] = ()) -> Path:
+    """Write to ``path`` a worker report as Arbor's worker writes one (``arbor.worker_report/1``): the directions it
+    ``closed``, each with its id, status and why, and the ids of those it ``left_open``."""
+
+    directions = {"closed": list(closed), "open": list(left_open), "added": [], "proposals": []}
+    report = {"schema": "arbor.worker_report/1", "order": "o-1", "ended": "reported", "directions": directions}
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return path
 
 
 #: What an Arbor checkout needs for the adapter: its markers and the serving pack's validator.

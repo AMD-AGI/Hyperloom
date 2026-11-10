@@ -196,6 +196,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
 from hyperloom_multibranch.scheduling.tests.framework_checkout import framework_checkout
 from hyperloom_multibranch.scheduling.tests.model_checkout import model_checkout
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH
+from hyperloom_multibranch.tests.agent_rig import worker_report
 from hyperloom_multibranch.tests.fakes import RecordingVerifier, RefusingCritic
 from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.tests.fake_model import DEFAULT_BASELINE, Fate
@@ -2246,9 +2247,7 @@ def _one_reports(
         _directions_file(tmp_path / "share-1.json", {"id": "m-attn"}),
         _directions_file(tmp_path / "share-2.json", {"id": "m-moe"}),
     )
-    report = Path(
-        _directions_file(tmp_path / "worker_report.json", {"id": "m-attn", "status": "done", "why": "KEEP 1"})
-    )
+    report = worker_report(tmp_path / "worker_report.json", {"id": "m-attn", "status": "done", "why": "KEEP 1"})
 
     async def split(
         agents: tuple[str, ...], map_file: str, work_dir: Path, root_shares: OpShares | None = None, *_source: str
