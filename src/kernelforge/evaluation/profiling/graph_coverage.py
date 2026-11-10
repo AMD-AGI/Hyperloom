@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Which steps replay a captured graph and which still launch every kernel one at a time.
+
+A kernel replayed from a graph carries no launch call of its own; an eagerly dispatched one does, and the trace
+records it. Counting each step class's eager share says where the per-launch cost is still paid.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, NamedTuple
+
+from kernelforge.evaluation.profiling.serving_windows import StepWindow, kernels_in, step_windows
+from kernelforge.evaluation.profiling.trace_events import load_trace_events
+
+#: Runtime calls that dispatch one kernel. A kernel whose correlation id matches one of these was launched for
+#: that call; a kernel with no match came out of a graph replay.
+_LAUNCH_MARKER: str = "LaunchKernel"
+
+#: Share of a class's kernel time that must be eager before the class is called ungraphed.
+UNGRAPHED_SHARE: float = 0.5
+
+
+def _launch_correlations(events: list[dict[str, Any]]) -> set[Any]:
+    """Correlation ids that had their own kernel-launch call."""
+    return {
+        (event.get("args") or {}).get("correlation")
+        for event in events
+        if event.get("cat") == "cuda_runtime" and _LAUNCH_MARKER in str(event.get("name") or "")
+    }
+
+
+class _KernelTime(NamedTuple):
+    kernels: int
+    eager: int
+    total_us: float
+    eager_us: float
+
+
+def _kernel_time_in(events: list[dict[str, Any]], windows: list[StepWindow], launched: set[Any]) -> _KernelTime:
+    """Kernel counts and time of the kernels starting inside *windows*, and the eagerly launched share of them."""
+    kernels = eager = 0
+    total_us = eager_us = 0.0
+    for event in kernels_in(events, windows):
+        duration = float(event["dur"])
+        kernels += 1
+        total_us += duration
+        if (event.get("args") or {}).get("correlation") in launched:
+            eager += 1
+            eager_us += duration
+    return _KernelTime(kernels, eager, total_us, eager_us)
+
+
+def graph_coverage(trace_path: str | Path) -> dict[str, dict[str, Any]]:
+    """Per window class, how much of its kernel time replays a graph rather than launching per kernel."""
+    events = load_trace_events(trace_path)
+    windows = step_windows(events)
+    if not windows:
+        return {}
+    launched = _launch_correlations(events)
+    if not launched:
+        return {}
+    by_class: dict[str, list[StepWindow]] = defaultdict(list)
+    for window in windows:
+        by_class[window.window_class].append(window)
+    out: dict[str, dict[str, Any]] = {}
+    for window_class, members in by_class.items():
+        kernels, eager, total_us, eager_us = _kernel_time_in(events, members, launched)
+        if not kernels:
+            continue
+        eager_time_share = eager_us / total_us
+        out[window_class] = {
+            "eager_kernels_per_step": round(eager / len(members), 1),
+            "eager_time_pct": round(eager_time_share * 100.0, 1),
+            "ungraphed": eager_time_share >= UNGRAPHED_SHARE,
+        }
+    return dict(sorted(out.items(), key=lambda kv: kv[1]["eager_time_pct"], reverse=True))
+
+
+__all__ = [
+    "UNGRAPHED_SHARE",
+    "graph_coverage",
+]

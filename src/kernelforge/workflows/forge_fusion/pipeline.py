@@ -639,6 +639,7 @@ def _campaign_runtime(run: _FusionRun, agent: FuseAgentOptions, llm_model: Optio
         model=llm_model or "",
         agent_backend=_campaign_agent_provider(agent.agent_backend, llm_model),
         agent_sandbox_mode=agent.agent_sandbox_mode,
+        deadline_unix=run.deadline_unix,
     )
 
 
