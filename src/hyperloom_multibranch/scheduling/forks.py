@@ -7,7 +7,9 @@ blocked gain, and a mapping branch's share branch, which runs an Arbor agent on 
 :class:`ForkDesk` is the scheduler's :class:`~hyperloom_multibranch.contracts.fork.ForkAdmissionService`. A request of a
 branch that is on the roster and not stopped is queued, first in first out, under a reserved branch id; it enters the
 roster when a slot is free and nothing queued before it waits, which for a request that finds the queue empty and a slot
-free is at once, answered ``ACCEPTED`` with its branch. One that has to wait is answered ``PENDING`` with its reserved
+free is at once, answered ``ACCEPTED`` with its branch. A share is queued ahead of every fork and repair, behind the
+shares already queued: the slots its mapping branch held for it, and that branch's own, are the share's
+(:meth:`~hyperloom_multibranch.scheduling.roster.Roster.hold`), not the queue's. One that has to wait is answered ``PENDING`` with its reserved
 branch, which stays off the roster until it enters when the explore loop fills the slots freed after it, before the
 judge's new branches. The queue holds at most ``max_branches`` requests. A request is refused when its branch is unknown
 or stopped, the session is stopping, or the queue is full; a repair is also refused while a repair of the same change,
@@ -139,22 +141,32 @@ class ForkDesk:
         return self._admit(pending, f"share {request.plan} of {request.agent}", _share_refusal(self._roster, request))
 
     def _admit(self, pending: PendingBranch, reason: str, refusal: str) -> ForkAdmission:
-        """Refuse, queue or admit ``pending``; nothing jumps the queue, even onto a slot freed while it waits."""
+        """Refuse, queue or admit ``pending``; nothing jumps the requests ahead of it (:meth:`_ahead`), even onto a slot
+        freed while it waits."""
 
         refusal = refusal or self._queue_refusal()
         if refusal:
             self._record(pending, refusal, AdmissionStatus.REJECTED.value)
             return ForkAdmission(AdmissionStatus.REJECTED, refusal)
-        waits = bool(self._queue) or bool(self._roster.open_refusal())
+        ahead = self._ahead(pending)
+        waits = bool(ahead) or bool(self._roster.open_refusal())
         pending = replace(pending, branch=self._roster.next_branch_id())
         if waits:
-            self._queue.append(pending)
+            self._queue.insert(ahead, pending)
             answer = ForkAdmission(AdmissionStatus.PENDING, WAITING, pending.branch)
         else:
             self._enter(pending)
             answer = ForkAdmission(AdmissionStatus.ACCEPTED, reason, pending.branch)
         self._record(pending, reason, answer.status.value)
         return answer
+
+    def _ahead(self, pending: PendingBranch) -> int:
+        """How many queued requests ``pending`` waits behind: for a share the queued shares, which the queue keeps at its
+        front; for a fork or repair the whole queue."""
+
+        if pending.origin is not BranchOrigin.SHARE:
+            return len(self._queue)
+        return sum(1 for queued in self._queue if queued.origin is BranchOrigin.SHARE)
 
     def _queue_refusal(self) -> str:
         if self._roster.closed:
@@ -181,7 +193,8 @@ class ForkDesk:
         self._decisions.record(Decision(DECISION_KINDS[pending.origin], reason, pending.branch, detail))
 
     def fill_free_slots(self) -> None:
-        """Move the queued requests, oldest first, onto the roster's free slots; each waits on the desk to start."""
+        """Move the queued requests onto the roster's free slots, shares first and then forks and repairs oldest
+        first; each waits on the desk to start."""
 
         while self._queue and not self._roster.open_refusal():
             pending = self._queue.popleft()
@@ -196,7 +209,8 @@ class ForkDesk:
         return self._void(tuple(voided), reason)
 
     def void_all(self, reason: str) -> tuple[str, ...]:
-        """Void the whole queue, as the session stops for ``reason``; the reserved branch ids, oldest first."""
+        """Void the whole queue, as the session stops for ``reason``; the reserved branch ids, shares first and then
+        forks and repairs oldest first."""
 
         return self._void(tuple(self._queue), reason)
 
@@ -210,7 +224,7 @@ class ForkDesk:
         return tuple(pending.branch for pending in voided)
 
     def pending(self) -> tuple[PendingBranch, ...]:
-        """The requests waiting for a slot, oldest first."""
+        """The requests waiting for a slot: shares first, then forks and repairs, each oldest first."""
 
         return tuple(self._queue)
 
