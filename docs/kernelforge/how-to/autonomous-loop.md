@@ -201,27 +201,48 @@ iteration is one round:
    the workspace in `<workspace>.tree-starts/`, all starts side by side, with
    one planned lane per slot: the specialists probe that node's code, and the
    Plan Critic reviews that node's plans. A start with a `BRANCH` slot is
-   planned with every specialist role. A `PORT` slot is planned by the
-   framework from the two nodes' diff.
+   planned with every specialist role. The lanes of one start are materially
+   different attempts, which may change the same code: the round planner gives
+   each lane an approach, and may aim a lane at some of the scored cases when
+   the evidence shows different cases limited by different things. A `PORT`
+   slot is planned by the framework from the two nodes' diff.
 3. One Implementer lane per slot runs on a copy of its start's worktree, and is
-   asked for its record of what it tried before the copy is removed.
+   asked for its record of what it tried before the copy is removed. A lane
+   aimed at some cases is told which, and that it can time one of them alone by
+   adding `--bench-case <case_id>` to the driver's bench-mode command while it
+   iterates.
 4. Each candidate is validated and benchmarked, one at a time on the shared
    device, in its start's worktree. A correct one is committed there and kept
    as a node under `refs/forge/nodes/`; each direction has a branch
-   `<git_branch>-dNNN` at its best node. New nodes that win cases the
-   published best loses are stacked onto it and measured too.
-5. The round's best node that cleared the published best's KEEP bar is staged
-   in the campaign workspace and measured there once more; a KEEP commits it on
-   the campaign branch, which is therefore the chain of published bests.
+   `<git_branch>-dNNN` at its best node.
+5. The round's new nodes are merged. The base is the round's best node that
+   cleared the published best's KEEP bar, else its best node. Every other new
+   node that runs some case faster than the base beyond its own noise, and the
+   published best when the base does not descend from it, is merged onto the
+   base, best first: its change since the two nodes' common ancestor is applied
+   when it applies, and otherwise an Implementer session merges the two from
+   both changes and the per-case times, so that each case runs on the faster
+   implementation. A merge that measures correct is a node under its base, and
+   one that scores higher than its base is the base of the next merge. Merges
+   that did not land are listed to the next round's selector as candidates for
+   `PORT`. A merge session runs only while the campaign's remaining time pays
+   for it and still leaves the publication's measurement.
+6. The round's best node that cleared the published best's KEEP bar, a merge
+   included, is staged in the campaign workspace and measured there once more;
+   a KEEP commits it on the campaign branch, which is therefore the chain of
+   published bests.
 
-The tree is `forge_experiments/search_tree.json`; each round's selection is
-`forge_experiments/tree_selection/iter_NNN.md`, and its plans, diffs,
-measurements and each slot's Implementer record are under
-`forge_experiments/tree_rounds/iter_NNN/`. A tree campaign has no Supervisor
-and runs no merge stacking of archived candidates. It refuses a workspace with
+The tree is `forge_experiments/search_tree.json`, saved as each node is
+added; each round's selection is `forge_experiments/tree_selection/iter_NNN.md`,
+and its plans, diffs, measurements and each slot's Implementer record are under
+`forge_experiments/tree_rounds/iter_NNN/`, each merge's under `merge_KK/`
+there. A tree campaign has no Supervisor and does not run the linear loop's
+merge stacking of archived candidates. A round in which a lane or a merge
+session leaves the device held measures nothing after it, publishes nothing,
+and is recorded as `REVERT_CONTENDED`. A tree campaign refuses a workspace with
 untracked, unignored files a worktree would not see. On `--resume`, the slots
-of a round a killed session left open are recorded as lost and the campaign
-continues.
+of a round a killed session left open are recorded as lost, unless the slot's
+node was already added, and the campaign continues.
 
 ## Round admission
 
