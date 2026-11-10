@@ -112,9 +112,9 @@ are evidence in prompt context, not hard disqualifiers; what *enters* the KB is
 strict, because a bad entry outlives the run that created it.
 
 Profiling and bottleneck analysis are backed by
-[TraceLens](https://github.com/AMD-AGI/TraceLens), with trace collection from
-[Magpie](https://github.com/AMD-AGI/Magpie) and low-level GPU tooling from
-[IntelliKit](https://github.com/AMDResearch/intellikit). Long-horizon search and
+[TraceLens](https://github.com/AMD-AGI/TraceLens), with traces collected by the
+profile rounds of [InferenceSuite](docs/reference/inference-suite.md), the in-tree
+package that runs every benchmark round. Long-horizon search and
 the knowledge base are described further in
 [Arbor](https://arxiv.org/abs/2606.12563).
 

@@ -1,17 +1,15 @@
 ---
 myst:
     html_meta:
-        "description": "Reference for InferenceSuite, the package that resolves a session's base launch and runs one benchmark round: recipe sources, framework checks, launch layers, server lifecycle, staging, the run directory and report.json."
+        "description": "Reference for InferenceSuite, the package that resolves a session's base launch and runs every Hyperloom benchmark round: recipe sources, framework checks, launch layers, server lifecycle, staging, the run directory and report.json."
         "keywords": "Hyperloom, InferenceSuite, inference_suite, base launch, recipe, InferenceX, SGLang cookbook, vLLM recipes, ATOM, AgentX, run_round, report.json, staging, lm-eval, GSM8K, AMD GPU, ROCm"
 ---
 # InferenceSuite reference
 
 InferenceSuite (`src/inference_suite/`) resolves a session's base launch and runs
-one benchmark round. It runs standalone as `python -m inference_suite` with the
-commands `resolve`, `run`, `stop`, `stage` and `publish`, and `install.sh
-<tool-cache-dir>` stages the tools a round runs. It builds only on
-`hyperloom_common` and third-party libraries. It records what a round measured;
-thresholds, KEEP decisions and validity belong to its caller.
+every benchmark round Hyperloom measures. It builds only on `hyperloom_common` and
+third-party libraries. It records what a round measured; thresholds, KEEP decisions
+and validity stay in Hyperloom.
 
 ## Base launch
 
@@ -21,7 +19,7 @@ that file and resolves nothing. Sources are tried in this order, and the first t
 holds a launch for the session's model, board, workload, concurrency, TP and EP
 gives the base:
 
-1. the operator's own launch file (`resolve --user-file`): a shell launch script, or a
+1. the operator's `--reference-script`: a shell launch script, or a
    `base_launch.json` frozen by an earlier session;
 2. InferenceX's AMD single-node master entries;
 3. the framework's cookbook: the SGLang cookbook, the vLLM recipes site, or
@@ -29,15 +27,16 @@ gives the base:
 4. for a fixed workload only, the default table shipped in
    `src/inference_suite/recipe/defaults/table.yaml`.
 
-An AgentX session that no recipe and no operator launch file serves is refused.
+An AgentX session that no recipe and no `--reference-script` serves is refused.
 When a source cannot be read, a fixed session runs the default table, unless
 InferenceX is pinned (below), and an AgentX session is refused. A pinned fixed
 session no recipe serves is refused too, naming why each source missed. Repositories are read at the head of their `main` and recorded
 with that commit; the vLLM recipes site has no commit and is recorded as the
 response it was read from.
 
-To match a run made at an older InferenceX, pin it with `resolve --inferencex-commit
-<sha>`: a full sha, or a prefix of 7 or more hex digits of a commit on one of
+To match a run made at an older InferenceX, pin it with `--inferencex-commit
+<sha>` (`resolve` and `hyperloom optimize` both take it): a full sha, or a prefix
+of 7 or more hex digits of a commit on one of
 InferenceX's branches or at the head of one of its refs, a pull request's
 included. The base records the full sha it read. Only InferenceX is pinned; the
 cookbooks, the vLLM recipes site and ATOM's catalog are still read at `main`. A
@@ -50,7 +49,7 @@ when the commit lacks a function the resolver runs from InferenceX's own code
 (for example, a commit without `acceptance_length`, `generation_role` and
 `verifier` in `infx.srt_slurm.synthetic_acceptance`); the message names what it
 lacks. To run on such a commit, resolve the base where its code was run and hand
-the frozen `base_launch.json` to `resolve --user-file`.
+the session the frozen `base_launch.json` as `--reference-script`.
 
 A launch script is read, never run. It must launch the session's framework and fix
 every flag in its own text: a flag whose value names a shell variable, or a
@@ -121,7 +120,8 @@ runner owns, nor, under a golden layer, what golden owns
 The golden layer carries a base's golden acceptance length (speculative decoding
 draft and simulation settings) as its own record. An AgentX session runs a GSM8K
 accuracy round, on its own server and without the golden layer, at the baseline and
-at each candidate that passes the KEEP threshold.
+at each candidate that passes the KEEP threshold. `hyperloom optimize
+--no-agentx-accuracy` turns it off for the session.
 
 An AgentX round replays the trace corpus for a fixed profiling duration, as
 InferenceX does: the point's `DURATION` in seconds, 3600 when it sets none, passed
@@ -148,6 +148,8 @@ round's GPU numbers are `HIP_VISIBLE_DEVICES` numbers, matched to amd-smi cards 
 their KFD node). A process holds a card when `amd-smi process` reports more than 1 GiB
 of VRAM for it there, or reports none at all: every ROCm process opens all cards and
 keeps up to a few MiB of page tables and runtime context on each, which does not count.
+Hyperloom stops
+the session on the first `gpus_unavailable` with `stop_reason=host_gpus_unavailable`.
 
 A server is ready when `/health` answers 200, its process is alive and its log
 shows a ready marker. Every child runs in a session of its own with a run mark in
@@ -224,7 +226,7 @@ One round writes one run directory and leaves it unchanged once the round ends.
 | `eval/` | `stdout.log`, `stderr.log`, lm-eval's `results_<time>.json`, `hyperloom_eval_probe.json` and `definition.json`. |
 | `profile/` | `torch_trace/`, `capture_traces/`, `graph_capture_profile/` and `capture.json`. |
 
-A host writes `gpu_metrics.json` from `report.json` into its own round
+Hyperloom writes `gpu_metrics.json` from `report.json` into its own round
 directory, never into the run directory.
 
 ## Power

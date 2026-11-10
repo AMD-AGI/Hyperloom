@@ -26,10 +26,6 @@ Hyperloom compatibility matrix
 
    <a href="https://github.com/AMD-AGI/AgentKernelArena"><i class="fab fa-github"></i></a>
 
-.. |magpie-github| raw:: html
-
-   <a href="https://github.com/AMD-AGI/Magpie"><i class="fab fa-github"></i></a>
-
 This topic lists the hardware, inference frameworks, and container images that
 Hyperloom is validated against.
 
@@ -85,15 +81,12 @@ The following table lists the validated Hyperloom version and component combinat
 |                   | `IntelliKit 0.1.1`_       | MI300X, MI325X, MI355X | 7.2.x, 10.0.0                      | 22.04, 24.04  | >= 3.10     | |intellikit-github|         |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 |                   | `AgentKernelArena 0.2.0`_ | MI300X, MI325X, MI355X | 7.2.x, 10.0.0                      | 22.04, 24.04  | >= 3.10     | |agent-kernel-arena-github| |
-+                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
-|                   | `Magpie 0.3.0`_           | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x, 10.0.0        | 22.04, 24.04  | >= 3.10     | |magpie-github|             |
 +-------------------+---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 
 .. _TraceLens 1.0.0: https://rocm.docs.amd.com/projects/tracelens/en/docs-1.0.0/
 .. _GEAK 4.0.0: https://rocm.docs.amd.com/projects/geak/en/docs-4.0.0/
 .. _IntelliKit 0.1.1: https://rocm.docs.amd.com/projects/intellikit/en/docs-0.1.1/
 .. _AgentKernelArena 0.2.0: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/docs-0.2.0/
-.. _Magpie 0.3.0: https://rocm.docs.amd.com/projects/magpie/en/latest/
 
 .. note::
 
@@ -106,9 +99,8 @@ The following table lists the validated Hyperloom version and component combinat
 
 .. note::
 
-   MI325X shares the gfx942/CDNA3 runner family with MI300X. Hyperloom keeps the
-   resolved GPU types distinct, but Magpie benchmark rendering reuses the MI300X
-   runner scripts and image family unless a dedicated image is supplied.
+   MI325X shares the gfx942/CDNA3 family with MI300X. Hyperloom keeps the
+   resolved GPU types distinct.
 
 Inference frameworks
 --------------------
@@ -137,7 +129,7 @@ The following inference frameworks are supported:
      - AMD out-of-tree engine, launched as ``python3 -m atom.entrypoints.openai_server``. Supports Docker, direct execution in a preinstalled ATOM/ROCm torch environment, or a bare-metal source install with ``--install-framework atom``. The recorded image-based stack used ``rocm/atom-dev:v0.1.7-rc0`` on MI355X, not a universal ATOM pip-version minimum. Other builds require local validation. An unset or empty ``KERNEL_OPT_BACKEND_ORDER`` resolves to GEAK here as it does for every framework, and explicit values are preserved.
    * - ``custom``
      - Host-defined
-     - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle. Requires ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` plus ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) and ``--benchmark-scripts-dir`` (or ``HYPERLOOM_BYPASS_SCRIPTS_DIR``); the CLI exits with status 2 when any of the three is missing.
+     - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle. Requires ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) and ``--benchmark-scripts-dir`` (or ``HYPERLOOM_BYPASS_SCRIPTS_DIR``); the CLI exits with status 2 when either is missing.
 
 Container images
 ----------------
@@ -208,7 +200,7 @@ plugins that both engines load by default, so setup refuses to install ATOM
 where either imports (including a ROCm 10 vLLM venv built over that Python),
 and refuses to install SGLang, shared vLLM or ROCm 10 source vLLM where ATOM
 imports. Run ATOM in a separate container instead. Verify a real ``import atom`` and a non-empty ``torch.version.hip``
-with that Python, keep its executable first on ``PATH`` for Magpie's ``python3``
+with that Python, keep its executable first on ``PATH`` for the server's ``python3``
 launch, and use ``PYTHON`` with ``INFERENCE_OPTIMIZER_FORCE_PYTHON=1`` if pinning
 the interpreter. Keep any activated venv consistent; ``/opt/venv`` is not required.
 

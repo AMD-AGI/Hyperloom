@@ -15,7 +15,7 @@ a failure surfaces, not by file size or churn.
 | 2 | `orchestrator/kernel/request_handlers.py` | `KERNEL_REQUEST_HANDLERS` dispatch table. A renamed kind dead-ends the lane; the agent waits out its budget |
 | 2 | `actions/executors/baseline.py`, `actions/executors/benchmark_run/` | The anchor every gain % is measured against |
 | 2 | `actions/executors/integrate_patch.py` | Patches live framework trees. A failed revert contaminates every later measurement |
-| 2 | `actions/executors/_workload_envs.py` | Single source of the rendered Magpie YAML; `seal_server_argv` settles the arg string. Divergence invalidates the A/B while both runs look healthy |
+| 2 | `actions/executors/_workload_envs.py` | Single source of the rendered point YAML that `_suite/config.py` turns into the round's inference_suite launch (`launch.json`, layered on the session's frozen `base_launch.json`); `seal_server_argv` settles the arg string. Divergence invalidates the A/B while both runs look healthy |
 | 2 | `actions/executors/_grid_runner.py` | Shared by explore and sweep |
 | 2 | `orchestrator/phases/framework.py`, `phases/framework_records.py`, `phases/framework_discovery.py`, `phases/kernel.py`, `phases/kernel_geak_dispatch.py`, `phases/kernel_geak_promotion.py`, `phases/kernel_gemm_tuning.py` | One phase produces nothing or loops |
 | 2 | `protocol/action_surfaces.py` | Consumed by the CLI catalogue, the gate, the phase machine and the dispatcher. An action here but not in the owning role's set is unroutable |

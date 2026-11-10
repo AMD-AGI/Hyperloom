@@ -20,14 +20,130 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A GEAK or Forge reproduction of the measured launch keeps settings whose
+  names contain `TOKEN`.** The GEAK handoff's `baseline_env_spec`, the Forge
+  handoff's serving context and the reference launch script now carry launch
+  settings such as `SGLANG_SIMULATE_ACC_TOKEN_MODE`,
+  `SGLANG_USE_AITER_FP8_PER_TOKEN` and `MAX_NUM_BATCHED_TOKENS`, and GEAK or a
+  reference script may unset one. Before, any name containing `TOKEN` was taken
+  for a credential: the reproduction ran without the setting the original
+  launch had, so its baseline was not the measured configuration, and a GEAK
+  result unsetting one was rejected. Credentials (`HF_TOKEN`,
+  `AWS_SECRET_ACCESS_KEY`) are still never written into these artifacts.
+- **Each round records its power in one `power.json`, with energy and J per token.**
+  An InferenceSuite round (and a GEAK replay) now writes `power.json` in place
+  of `gpu_power.json` and `gpu_samples.csv`: every card's sysfs power,
+  temperatures, clocks, voltage, busy and memory each second from the start of
+  the round to its end; each card's energy accumulator at every phase mark;
+  every `amd-smi metric` field every 10 s and at every mark; caps, performance
+  level and DPM tables at both ends; and the node's NPM power and the CPU's
+  RAPL or `amd_energy` counters where the node has them (`null` with a reason
+  where it does not). The measured window's energy is computed as InferenceX
+  does: `total_gpu_energy_j`, p75/p90 power, `joules_per_input_token`,
+  `joules_per_output_token`, `joules_per_total_token`,
+  `joules_per_successful_query`, and `power_valid` with InferenceX's reasons. The
+  window now opens at the instant the phase mark carries; on an AgentX round it
+  opened up to one sample interval late. `report.json` gains a `power` section,
+  and a round's measurement gains `gpu_energy_j`, `gpu_power_p75_w`,
+  `gpu_power_p90_w`, the four `joules_per_*` figures and `power_valid` (0/1),
+  which MB rounds publish. `gpu_power_avg_w` and `gpu_power_by_gpu_w` are now
+  the window's energy over its duration and are `null` when `power_valid` is 0,
+  so the power budget refuses such a round as unmeasured. A card `amd-smi`
+  reads as `N/A` is measured from sysfs. With configured cards, only those are
+  asked whether they hold a model; another server on the node's other cards
+  does not invalidate the round. `HYPERLOOM_GPU_POWER_INTERVAL_S` defaults to
+  1 s; above 1.5 s it is refused and the round samples nothing. AgentX counts
+  gain `input_tokens` and `output_tokens`; a report written before reads them,
+  and its `power` section, as `null`.
+- **Single-lineage AgentX keeps on a 2% P50 bar with P90 and total-throughput guards.** `hyperloom optimize` on an
+  AgentX replay now keeps a change on a 2% P50 interactivity gain, not 3%, with
+  P90 interactivity and total token throughput inside the noise band
+  (`HYPERLOOM_PERF_NOISE_PCT`). An output-throughput drop alone no longer
+  refuses: `output_regressed` is no longer given, `total_regressed` is new, and
+  a correctness fix's guard refusal names `total_throughput` instead of
+  `output_throughput`. The GEAK handoff's `workload_spec.acceptance` carries
+  `min_gain_pct` 2 and the P90 guard only, since GEAK records no total-throughput
+  guard. The 1800 s checkpoint's 2% early stop is unchanged. A resumed session
+  judges by the new rule. Before, a real 2-3% median gain was reverted, and a
+  gain was reverted when the window's output-length mix lowered output
+  throughput.
+- **A recipe image whose tag names no framework version no longer refuses an
+  older install.** For an untagged image such as
+  `lmsysorg/sglang-rocm:muse-spark-open`, the version InferenceSuite assumes
+  (the framework's latest release at resolve time) is recorded but no longer
+  held as a minimum, and `launch.json` reports `version_check:
+  assumed_not_held` with the installed version. Before, such a round stopped
+  with `framework_version_too_old` even when the server ran exactly the recipe's
+  image. A version read from the image tag is still held.
+- **The base launch can be resolved from InferenceX at a given commit.**
+  `--inferencex-commit SHA` on `hyperloom optimize` and `python -m
+  inference_suite resolve` reads InferenceX at that commit (a full sha, or a prefix of 7 or more hex digits; a pull request's
+  head commit included) instead of the head of `main`, so a session can match
+  a CI run; `base_launch.json` records the full sha. Before, InferenceX was
+  always read at `main`. The cookbooks, vLLM recipes and ATOM catalog are
+  still read at `main`, and a resumed session keeps its frozen base. A commit
+  InferenceX does not have, or one that lacks the functions the resolver runs
+  (such as `acceptance_length`), is refused before the session starts,
+  naming what it lacks; resolve that
+  base elsewhere and pass the frozen `base_launch.json` as
+  `--reference-script`. While a commit is pinned, a fixed session never falls
+  back to the default table: a source that cannot be read (InferenceX, the
+  model card, a release list, a cookbook) refuses it, naming the source and its
+  error, and so does no recipe serving it, naming why each source missed. See
+  [Base launch](reference/inference-suite.md#base-launch).
+
+- **A card that another process only opened no longer stops the session
+  with `host_gpus_unavailable`.** Every ROCm process opens all cards and
+  keeps up to a few MiB on each; the pre-boot GPU check now counts a
+  process as holding a card only above 1 GiB of VRAM there (or when
+  `amd-smi` reports none). It used to refuse any card with a nonzero
+  reading, so a scheduler or an idle server elsewhere on the host blocked
+  every card. See [inference-suite](reference/inference-suite.md).
+
+- **A serving round's server runs in the interpreter its framework checks
+  read.** The server now starts as `<framework_python> -m sglang.launch_server`
+  (vLLM: `-m vllm.entrypoints.cli.main serve`; ATOM: `-m
+  atom.entrypoints.openai_server`) instead of the base's `python3 -m ...` or
+  `vllm serve` through `PATH`, which could run another install than the one the
+  version probe and flag parser had validated. `launch.json` records the command
+  as `entrypoint` and in `argv`, so launch digests of new rounds differ from
+  earlier ones; base digests and earlier `launch.json` files read as before.
+  **Upgrade note:** a frozen base whose entrypoint is not its framework's
+  default (for example a hand-edited interpreter path) is refused as
+  `config_invalid`; set `framework_python` to that interpreter instead.
+
+- **A `custom` workload's entrypoint is named after the board itself.**
+  `--benchmark-scripts-dir` is searched for `custom_<gpu-type>.sh` with the
+  board as given, so `mi308x`, `mi325x` and `mi350x` now look for
+  `custom_mi308x.sh`, `custom_mi325x.sh` and `custom_mi350x.sh`; they were
+  folded into `custom_mi300x.sh` and `custom_mi355x.sh` before. **Upgrade
+  note:** on those boards, rename the script, or keep it the only `.sh` in
+  the directory; an unresolved entrypoint exits 2 at launch. See
+  [Optimize a custom workload](how-to/optimize-custom-workload.md#the-entrypoint).
+
+- **A fixed-workload session resolves its base launch once and freezes it
+  as `base_launch.json`.** The base comes from `--reference-script`, else
+  InferenceX `main`, else the framework's cookbook `main`, else a default
+  table (with a warning); omitted `--tp` / `--ep` follow the base. Resume
+  reads the frozen file and never refetches. A `--reference-script` flag set
+  from a shell variable, which used to be dropped silently, now exits 2, as
+  does a `# hyperloom-launch-controls:` line or a launch file or default row
+  that needs more GPUs than the session has; `--host`, `--port`,
+  `--served-model-name` and `--result-*` are recorded as stripped. A JSON
+  `base_launch.json` from an earlier session is accepted as the launch file.
+  **Upgrade note:** a session whose state predates `base_launch.json`
+  cannot be resumed; start a new one. A `current_setting.sh` that records
+  launch controls no longer re-feeds as `--reference-script`. See
+  [Choose the base launch](how-to/optimize.md#choose-the-base-launch).
+
 - **An explore variant that moves a lever its base launch pins is dropped
   before the round spends a slot on it.** When the base launch simulates
   speculative-decoding acceptance (`rejection_sample_method: synthetic`,
   `synthetic_acceptance_length`, `SGLANG_SIMULATE_ACC_LEN`), its draft and its
   simulated acceptance are pinned: a proposal that changes, removes or unsets
   one of them, or that declares an acceptance length on a base that verifies a
-  real draft, is now refused by the round's pre-flight filter with reason
-  `speculative_decoding_pinned` and listed in the round's skipped variants,
+  real draft, is now refused by the round's pre-flight filter as a `serve_flag`
+  failure naming the golden-owned key and listed in the round's skipped variants,
   where before it was admitted and then failed as the launch was materialized,
   having already taken a variant slot. The refusal at materialization stays as
   the backstop for launches the filter does not compose.
