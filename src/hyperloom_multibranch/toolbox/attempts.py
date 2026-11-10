@@ -117,19 +117,16 @@ class MeasurementRefused(Exception):
     """The measurement itself is broken (spec rejected, result failed verification): a program error, never retried."""
 
 
-def _no_latest_start(_request: TestRequest) -> float | None:
-    return None
-
-
 @dataclass(frozen=True)
 class InfraBackoff:
     """How long the attempts of a test wait before an infrastructure retry: ``seconds[n - 1]`` before the ``n``-th, the
     last of them before any later one, none when ``seconds`` is empty. ``latest_start`` gives the time by which a retry
-    of a request must start for its branch to still have it measured (``None``: no such time), and a wait never runs
-    past it: a retry that cannot wait goes at once, as before. ``clock`` and ``sleep`` are the real ones by default."""
+    of a request must start for its branch to still have it measured (``None``, or a ``latest_start`` of ``None``: no
+    such time), and a wait never runs past it: a retry that cannot wait goes at once, as before. ``clock`` and ``sleep``
+    are the real ones by default."""
 
     seconds: tuple[float, ...] = INFRA_BACKOFF_SECONDS
-    latest_start: Callable[[TestRequest], float | None] = _no_latest_start
+    latest_start: Callable[[TestRequest], float | None] | None = None
     clock: Callable[[], float] = field(default=time.time)
     sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep)
 
@@ -138,7 +135,7 @@ class InfraBackoff:
         if not self.seconds or retry < 1:
             return 0.0
         wait = self.seconds[min(retry, len(self.seconds)) - 1]
-        latest = self.latest_start(request)
+        latest = None if self.latest_start is None else self.latest_start(request)
         if latest is not None:
             wait = min(wait, latest - self.clock())
         return max(0.0, wait)
