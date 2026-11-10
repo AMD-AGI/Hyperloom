@@ -280,6 +280,9 @@ def agent_dir(session_dir: Path, role: str) -> Path:
 #: ``<sd>/agents/resources.jsonl``, relative to the session directory: the agent runner's resource readings of each
 #: specialist's run and of the container, one JSON object a line.
 RESOURCES_RELATIVE_PATH = Path("agents") / "resources.jsonl"
+#: The ``kind`` of each line in :data:`RESOURCES_RELATIVE_PATH`: one specialist's run, and one reading of the container.
+SPECIALIST_RECORD_KIND = "specialist_resources"
+CONTAINER_RECORD_KIND = "container_resources"
 
 
 def agent_prompt_snapshot(session_dir: Path, role: str, *, macro_cycle: int, phase: str = "") -> Path:
@@ -413,7 +416,9 @@ def failure_evidence_path(session_dir: Path, failure_id: str) -> Path:
 
 __all__ = [
     "BREAKDOWN_FILENAME",
+    "CONTAINER_RECORD_KIND",
     "RESOURCES_RELATIVE_PATH",
+    "SPECIALIST_RECORD_KIND",
     "allocate_turn_workdir",
     "agent_dir",
     "agent_mcp_setup_path",
