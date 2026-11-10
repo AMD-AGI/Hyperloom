@@ -16,6 +16,7 @@ import stat
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,15 +25,19 @@ from hyperloom.measure.runner.cache_build import RUNNER_TARGET_ENV, CacheBuildEr
 from hyperloom.measure.runner.cache_layout import manifest_from_json
 from hyperloom.measure.runner.cache_layout import MANIFEST_NAME
 from hyperloom.measure.runner.tests.bootstrap_rig import Rig, make_rig
+from hyperloom.measure.sandboxes import Handover
 from hyperloom_multibranch.scheduling.hosted_peers import (
+    HostedSandboxes,
     PinnedToolboxInputs,
     load_hosted_peers,
     runner_cache_pin,
     runner_source,
 )
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.peers import PeersUnavailable
-from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
+from hyperloom_multibranch.scheduling.peers import PeerSetup, PeersUnavailable
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
+from hyperloom_multibranch.toolbox import hosted_toolbox
+from hyperloom_multibranch.toolbox.tests.test_hosted_toolbox import _GRANT, _toolbox
 
 WORKLOAD = Workload(
     "/models/Llama-3-8B", "sglang", 2, 16, "bf16", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
@@ -231,3 +236,36 @@ def test_a_grant_without_a_run_id_names_its_sandboxes_by_the_session(
     inputs = PinnedToolboxInputs(host, tmp_path / "runner-cache")(SessionLayout(tmp_path / "MB-session"), 2)
 
     assert inputs.run_id == named
+
+
+@pytest.mark.parametrize(("keep", "handover", "parallel"), [(True, Handover(3, 3), 2), (False, None, 3)])
+def test_the_sessions_make_before_break_is_what_the_hosted_toolbox_is_built_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep: bool, handover: Handover | None, parallel: int
+) -> None:
+    """The operator's switch (``multibranch.make_before_break``, ``RunSettings`` and ``PeerSetup``) is the one the
+    hosted toolbox reads: off, a grant that fits three tests of the session's TP runs three and keeps no sandbox."""
+    given: list[hosted_toolbox.HostedOptions] = []
+
+    def build(inputs: object, blackboard: object, acceptance: object, spec: object, *, options):  # type: ignore[no-untyped-def]
+        given.append(options)
+        # The test's own inputs and grant, and no tables: the options are the session's.
+        built = dataclasses.replace(options, framework_configs="")
+        return _toolbox(None, tmp_path, options=built, grant_limits={**_GRANT, "max_sandboxes": 3, "max_gpus": 3})
+
+    monkeypatch.setattr(hosted_toolbox, "build_hosted_toolbox", build)
+    setup = SimpleNamespace(layout=None, workload=dataclasses.replace(WORKLOAD, tp=1), make_before_break=keep)
+
+    toolbox = HostedSandboxes(lambda layout, tp: None).toolbox(setup, None, None, None)  # type: ignore[arg-type]
+
+    [options] = given
+    assert options.make_before_break is keep
+    assert toolbox.backend._config.handover == handover
+    assert toolbox.backend._config.max_parallel_tests == parallel
+
+
+def test_make_before_break_is_on_unless_the_operator_turns_it_off() -> None:
+    fields = {field.name: field.default for field in dataclasses.fields(RunSettings)}
+    assert fields["make_before_break"] is True
+    assert {field.name: field.default for field in dataclasses.fields(PeerSetup)}["make_before_break"] is True
+    assert hosted_toolbox.HostedOptions().make_before_break is True
+    assert not hasattr(hosted_toolbox.HostedOptions(), "handover_timeout_sec"), "no option without a reader"

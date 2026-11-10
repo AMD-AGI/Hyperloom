@@ -16,6 +16,23 @@ No wait of :meth:`SandboxPool.acquire` is silent or open-ended: the wait for a s
 the sandbox to run each log when they begin and every :data:`WAIT_LOG_EVERY_SEC` while they last, and together they end
 when the test's own timeout has passed (:class:`AcquireTimedOut`, naming what was waited for). A rerun whose sandbox can
 never start thus ends its test with that reason instead of holding it, unlogged, until something else gives up.
+
+Make-before-break (:class:`Handover`): on a cluster that queues sandboxes, a sandbox that ends gives its node back to
+the queue, and the next test's sandbox asks again behind every other job of its priority. A test that is done with its
+sandbox may therefore hand it over (:meth:`SandboxPool.hand_over`) instead of releasing it: while another test of the
+session waits for a sandbox (:meth:`SandboxPool.note_upcoming`) and the grant has room for one more sandbox and its
+GPUs, the idle sandbox is kept until the next test's sandbox runs, then closed. It is kept for one test at a time,
+never takes a slot of ``max_parallel_tests``, and is closed anyway after :attr:`Handover.timeout_sec`, when the test
+that would take its place is gone, when that test's create fails or is stopped, when a sandbox of the pool runs and no
+test waits any more, when a branch lease needs its room (:meth:`SandboxPool.make_room`), and when the pool closes.
+
+The service counts every live sandbox of the grant, of every role, against its ``max_sandboxes`` and ``max_gpus``, the
+kept one too. The pool is where that whole count is made for the overlap: the sandboxes it holds (the kept one among
+them), those it is creating, the run's ``measurement`` sandboxes it does not hold (a sandbox is not kept while any such
+exists, since their GPUs are not known) and what the branch leases hold or are promised (:attr:`Handover.reserved`).
+The overlap therefore needs one test's room in the grant that the tests do not use: whoever sizes
+``max_parallel_tests`` leaves it free (the hosted toolbox runs one test fewer than the grant fits when make-before-break
+is on, which it is only where the grant fits at least three tests).
 """
 
 from __future__ import annotations
@@ -23,7 +40,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -48,9 +65,12 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "AcquireTimedOut",
+    "DEFAULT_HANDOVER_TIMEOUT_SEC",
     "DEFAULT_MAX_PARALLEL_TESTS",
     "DEFAULT_RUNNER_START_TIMEOUT_SEC",
     "DEFAULT_TIMEOUT_SLACK_SEC",
+    "HANDOVER_TIMER_NAME",
+    "Handover",
     "MEASUREMENT_ROLE",
     "NoRunnerTemplate",
     "PoolClosed",
@@ -65,6 +85,13 @@ MEASUREMENT_ROLE: Role = "measurement"
 DEFAULT_MAX_PARALLEL_TESTS = 8
 DEFAULT_RUNNER_START_TIMEOUT_SEC = 3600
 DEFAULT_TIMEOUT_SLACK_SEC = 900
+#: How long a handed-over sandbox is kept for the next test's sandbox to run before it is closed anyway. The service's
+#: gateway answers a blocking create that still queues for a node with a 502 after about 600 s, and the provider sends
+#: the create again with the same key to go on waiting (:meth:`~hyperloom.sandbox.e2b.E2BSandboxProvider.create`). The
+#: kept sandbox is there for exactly that queue wait, so it outlasts three such cut-and-resend cycles, not one.
+DEFAULT_HANDOVER_TIMEOUT_SEC = 1800.0
+#: The name of the thread that closes a handed-over sandbox when its timeout passes.
+HANDOVER_TIMER_NAME = "sandbox-handover-timeout"
 REQUEST_ID_KEY = "hyperloom.request-id"
 PURPOSE_KEY = "hyperloom.purpose"
 BRANCH_ID_KEY = "hyperloom.branch-id"
@@ -120,6 +147,33 @@ class RunnerSandbox:
     handle: Sandbox | None = field(default=None, compare=False, repr=False)
 
 
+def _nothing_reserved() -> tuple[int, int]:
+    return 0, 0
+
+
+@dataclass(frozen=True)
+class Handover:
+    """When a sandbox a test is done with is kept until the next test's sandbox runs (make-before-break).
+
+    ``max_sandboxes`` and ``max_gpus`` are the grant's: the idle sandbox is kept only while the grant has room for it,
+    every other sandbox of the pool (held or still being created) and the next one, with their GPUs. ``reserved`` says how many sandboxes and GPUs of
+    the grant are held for other uses (the branches' ``dev`` sandboxes); it is asked from the threads that measure.
+    ``timeout_sec`` is how long the idle sandbox waits for the next one to run before it is closed anyway: long enough
+    for a create that queues for a node through several gateway cuts (:data:`DEFAULT_HANDOVER_TIMEOUT_SEC`).
+    A gateway's 502 to the blocking create is no failed create: the provider sends it again with the same key, and the
+    kept sandbox stays until the sandbox that send finds runs.
+    """
+
+    max_sandboxes: int
+    max_gpus: int
+    timeout_sec: float = DEFAULT_HANDOVER_TIMEOUT_SEC
+    reserved: Callable[[], tuple[int, int]] = field(default=_nothing_reserved, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.timeout_sec <= 0:
+            raise ValueError("a handed-over sandbox needs a positive timeout_sec")
+
+
 @dataclass(frozen=True)
 class PoolLimits:
     """How many sandboxes a pool holds and how long it waits for them.
@@ -127,11 +181,13 @@ class PoolLimits:
     ``max_parallel_tests``: how many sandboxes may be held at once; ``acquire`` waits for a free slot.
     ``timeout_slack_sec``: added to a test's own timeout to give the sandbox its lifetime.
     ``request_timeout_sec``: how long ``create`` may wait for the sandbox to run.
+    ``handover``: when a sandbox a test is done with waits for the next one (:class:`Handover`); ``None`` never keeps one.
     """
 
     max_parallel_tests: int = DEFAULT_MAX_PARALLEL_TESTS
     timeout_slack_sec: int = DEFAULT_TIMEOUT_SLACK_SEC
     request_timeout_sec: float = DEFAULT_RUNNER_START_TIMEOUT_SEC
+    handover: Handover | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +198,24 @@ class AttemptTag:
     attempt: int
     avoid_nodes: tuple[str, ...] = ()
     meta: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class _Hold:
+    """A sandbox the pool holds: its GPUs (``None`` when not known, as for one re-attached) and the test it is for."""
+
+    gpus: int | None
+    request_id: str | None
+
+
+@dataclass
+class _Parked:
+    """The sandbox a finished test handed over, until the next test's sandbox runs or it is closed anyway."""
+
+    runner: RunnerSandbox
+    since: float
+    timer: threading.Timer | None = None
+    claimed_by: str | None = None  # the test whose create it waits for, once one began
 
 
 class SandboxPool:
@@ -178,9 +252,15 @@ class SandboxPool:
         self._max = max_parallel_tests
         self._slack = limits.timeout_slack_sec
         self._request_timeout = limits.request_timeout_sec
+        self._handover = limits.handover
         self._cond = threading.Condition()
-        self._held: set[str] = set()
+        self._held: dict[str, _Hold] = {}
+        self._parked: _Parked | None = None
+        self._upcoming: frozenset[str] = frozenset()
         self._claims = 0
+        # The creates and re-attaches that took a slot and whose sandbox is not held yet, with their GPUs (``None`` when
+        # not known): the grant's room counts them, since their sandboxes will be.
+        self._creating: dict[object, _Hold] = {}
         self._closed = False
         self._ended = 0  # how many held sandboxes have ended: a create waiting for quota wakes on a change
 
@@ -189,6 +269,12 @@ class SandboxPool:
         """How many tests hold a slot right now (a slot is taken before ``create`` returns)."""
         with self._cond:
             return self._claims
+
+    @property
+    def parked(self) -> str | None:
+        """The sandbox a finished test handed over and that waits for the next test's sandbox to run, if any."""
+        with self._cond:
+            return None if self._parked is None else self._parked.runner.sandbox_id
 
     def template_for(self, gpu_count: int) -> str:
         """The runner template for a card count; :class:`NoRunnerTemplate` when none serves it."""
@@ -215,11 +301,15 @@ class SandboxPool:
         ``tag`` names the attempt; ``timeout_sec`` is the test's own timeout; the sandbox lives that long plus the slack, but never past
         ``remaining_sec`` (what is left of the run). ``stop`` ends the wait for a slot with :class:`PoolClosed`. The
         waits for a slot, for room in the quota and for the sandbox to run share one deadline, ``timeout_sec`` (or
-        ``remaining_sec`` when less) from the call, and each logs when it begins and while it lasts.
+        ``remaining_sec`` when less) from the call, and each logs when it begins and while it lasts. A sandbox a
+        finished test handed over (:meth:`hand_over`) is closed once this one runs, or once this create fails or stops;
+        when the grant has no room for both it is closed before the create, and when the service refuses the create for
+        its quota it is closed before the create is repeated.
 
         Raises:
             NoRunnerTemplate: No template serves ``gpu_count`` (checked before any slot is taken).
-            PoolClosed: The pool was closed or ``stop`` was set while waiting.
+            PoolClosed: The pool was closed or ``stop`` was set while waiting, or the pool closed while the sandbox
+                was being created (it is closed again).
             AcquireTimedOut: The deadline passed while the test waited for a slot or for room in the quota.
             SandboxUnavailable, SandboxDenied: As the provider raised them; the slot is given back. A quota that is
                 full (``SandboxQuotaExceeded``) is not raised: the create waits for a sandbox to end and is repeated,
@@ -236,13 +326,33 @@ class SandboxPool:
         metadata = self._metadata(tag.request_id, tag.attempt, tag.avoid_nodes, tag.meta or {})
         wait = _Wait(f"test {tag.request_id} attempt {tag.attempt}", _wait_budget(timeout_sec, remaining_sec))
         self._take_slot(stop, wait=wait)
+        creating = object()
+        parked: _Parked | None = None
         try:
+            parked = self._claim_parked(_Hold(int(gpu_count), tag.request_id), wait.label, creating)
             sandbox = self._create(template, lifetime, metadata, stop, wait)
         except BaseException:
-            self._give_slot()
+            self._give_slot(creating)
+            if parked is not None:
+                self._end_parked(parked, "its create failed or was stopped")
             raise
+        with self._cond:
+            closed = self._closed
+        if closed:  # the pool closed while the create waited: nobody will release this one
+            try:
+                self._close_handle(sandbox)
+            finally:
+                self._give_slot(creating)
+            raise PoolClosed("the sandbox pool closed while the sandbox was being created")
         log.info("%s: sandbox %s is running after %.0fs", wait.label, sandbox.sandbox_id, wait.elapsed())
-        return self._adopt(sandbox)
+        try:
+            runner = self._adopt(sandbox, _Hold(int(gpu_count), tag.request_id), creating)
+        except BaseException:
+            if parked is not None:
+                self._end_parked(parked, "its create failed or was stopped")
+            raise
+        self._after_adopt(parked, f"sandbox {runner.sandbox_id} of {wait.label} is running")
+        return runner
 
     def reattach(
         self, sandbox_id: str, *, stop: threading.Event | None = None, timeout_sec: float | None = None
@@ -257,12 +367,17 @@ class SandboxPool:
         """
         budget = float("inf") if timeout_sec is None else max(0.0, float(timeout_sec))
         self._take_slot(stop, reattaching=sandbox_id, wait=_Wait(f"sandbox {sandbox_id} (re-attaching)", budget))
+        creating = object()
+        with self._cond:
+            self._creating[creating] = _Hold(None, None)  # its GPUs are not known
         try:
             sandbox = self._provider.connect(sandbox_id, role=MEASUREMENT_ROLE)
         except BaseException:
-            self._give_slot()
+            self._give_slot(creating)
             raise
-        return self._adopt(sandbox)
+        runner = self._adopt(sandbox, _Hold(None, None), creating)
+        self._after_adopt(None, f"sandbox {runner.sandbox_id} was re-attached")
+        return runner
 
     def release(self, runner: RunnerSandbox) -> None:
         """Close the sandbox and free its slot; calling it again changes nothing."""
@@ -282,6 +397,97 @@ class SandboxPool:
         finally:
             self._forget(runner.sandbox_id)
 
+    def hand_over(self, runner: RunnerSandbox) -> None:
+        """Keep ``runner``, whose test is done with it, until the next test's sandbox runs; else close it now.
+
+        Call it only once the test no longer uses the sandbox's GPUs: its result has landed and its server has exited.
+        It is kept when the pool has a :class:`Handover`, no other sandbox is kept already, a test other than its own
+        waits for a sandbox (:meth:`note_upcoming`) and the grant has room for one more sandbox and its GPUs; it gives
+        its slot back at once either way. Why it is not kept is logged, and it is then released as :meth:`release` does.
+        """
+        untracked = self._untracked_beside_creates() if self._handover is not None else 0
+        with self._cond:
+            refusal = self._park_refusal(runner, untracked)
+            if refusal is None:
+                parked = self._parked = _Parked(runner, time.monotonic())
+                self._claims = max(0, self._claims - 1)
+                timeout = self._handover.timeout_sec if self._handover is not None else 0.0
+                parked.timer = threading.Timer(timeout, self._expire_parked, args=(parked,))
+                parked.timer.name, parked.timer.daemon = HANDOVER_TIMER_NAME, True
+                parked.timer.start()
+                self._cond.notify_all()
+        if refusal is not None:
+            if runner.sandbox_id in self._held_ids():
+                log.info("sandbox %s is released at once: %s", runner.sandbox_id, refusal)
+            self.release(runner)
+            return
+        log.info(
+            "sandbox %s (node %s) is kept until the next test's sandbox runs, at most %.0fs",
+            runner.sandbox_id,
+            runner.node_name or "unknown",
+            timeout,
+        )
+
+    def note_upcoming(self, request_ids: Iterable[str]) -> None:
+        """Say which tests of the session will ask for a sandbox: those waiting to start and those running.
+
+        A test that holds a sandbox of the pool is not waiting for one. A handed-over sandbox that no test is waiting
+        for any more, and that no create has begun to replace, is closed (on a thread of its own: this is called from
+        the session's event loop).
+        """
+        with self._cond:
+            self._upcoming = frozenset(request_ids)
+            parked = self._parked
+            if parked is None or parked.claimed_by is not None or self._waiting_tests(parked.runner):
+                return
+        threading.Thread(
+            target=self._end_parked,
+            args=(parked, "no test waits for a sandbox any more"),
+            name="sandbox-handover-release",
+            daemon=True,
+        ).start()
+
+    def make_room(self) -> None:
+        """Close the kept sandbox when the grant has no room for it any more beside everything else it counts; call it
+        after a branch lease was promised (:attr:`Handover.reserved` grew), so that the lease's create finds the room
+        the kept sandbox held: a branch's ``dev`` sandbox outranks a sandbox kept for the next test. Blocks while it
+        closes, so call it from a thread."""
+        with self._cond:
+            parked = self._parked
+        if parked is None:
+            return
+        untracked = self._untracked_beside_creates()
+        with self._cond:
+            if self._parked is not parked:
+                return
+            hold = self._held.get(parked.runner.sandbox_id)
+            if hold is None:
+                return
+            # Unclaimed, it needs room for the next test's sandbox too; claimed, that create is counted already.
+            more = (0, 0) if parked.claimed_by is not None else (1, hold.gpus)
+            refusal = self._room_for(*more, untracked=untracked)
+        if refusal is not None:
+            self._end_parked(parked, f"a branch lease needs its room: {refusal}")
+
+    def sweep(self, keep: Iterable[str]) -> list[str]:
+        """Close the run's ``measurement`` sandboxes other than ``keep`` (those an unfinished attempt of the journal
+        names), as a start does: a sandbox an earlier process kept for its next test, or made and never journalled,
+        would otherwise hold its GPUs and a slot until its own lifetime ends. Returns the ids it closed; a list that
+        cannot be read is logged and closes nothing."""
+        kept = set(keep)
+        try:
+            found = [info.sandbox_id for info in self._provider.find(self._scope(), role=MEASUREMENT_ROLE)]
+        except SandboxError:
+            log.exception("the run's measurement sandboxes could not be listed; none was closed at start")
+            return []
+        closed = sorted(sandbox_id for sandbox_id in found if sandbox_id not in kept)
+        for sandbox_id in closed:
+            log.info(
+                "sandbox %s of an earlier process of the run is closed: no unfinished attempt names it", sandbox_id
+            )
+            self.discard(sandbox_id)
+        return closed
+
     def discard(self, sandbox_id: str) -> None:
         """Close a ``measurement`` sandbox this pool does not hold, as one an earlier process left behind; a sandbox
         that is already gone is fine."""
@@ -296,7 +502,10 @@ class SandboxPool:
         """Close every ``measurement`` sandbox still running and refuse new tests."""
         with self._cond:
             self._closed = True
+            parked, self._parked = self._parked, None
             self._cond.notify_all()
+        if parked is not None and parked.timer is not None:
+            parked.timer.cancel()
         for info in self._provider.find(self._scope(), role=MEASUREMENT_ROLE):
             self.discard(info.sandbox_id)
         with self._cond:
@@ -338,8 +547,9 @@ class SandboxPool:
         time, so a replay still finds a sandbox that is running. A sandbox the platform made and that failed before it
         ran (``SandboxCreateFailed``) ends the attempt: its key is not replayed and no next key is tried, because each
         would only make another sandbox that fails the same way. A full quota (``SandboxQuotaExceeded``) says nothing
-        about a node and is no failure of the test: the create waits for a sandbox to end and is repeated, until ``wait``
-        runs out (:class:`AcquireTimedOut`). The create's own wait for the sandbox to run is the lesser of the pool's
+        about a node and is no failure of the test: the sandbox kept for the next test, if any, is closed (the service
+        charges a sandbox the pool cannot count, so the grant can be full beside it), then the create waits for a sandbox
+        to end and is repeated, until ``wait`` runs out (:class:`AcquireTimedOut`). The create's own wait for the sandbox to run is the lesser of the pool's
         ``request_timeout_sec`` and what is left of ``wait``.
         """
         base = metadata[IDEMPOTENCY_KEY]
@@ -385,6 +595,7 @@ class SandboxPool:
                     refused = wait.begin("room in the grant's quota", f"the service refused the create: {said}")
                 else:
                     refused.tick(f"the service refused the create: {said}")
+                self._yield_parked(f"the service refused the create of {wait.label} for its quota: {said}")
                 self._await_room(stop, ended, wait)
 
     def _await_room(self, stop: threading.Event | None, ended: int, wait: _Wait) -> None:
@@ -436,25 +647,47 @@ class SandboxPool:
         """How many running ``measurement`` sandboxes of this run this pool does not hold."""
         running = {info.sandbox_id for info in self._provider.find(self._scope(), role=MEASUREMENT_ROLE)}
         with self._cond:
-            running -= self._held
+            running.difference_update(self._held)
         running.discard(reattaching or "")
         return len(running)
 
-    def _give_slot(self) -> None:
+    def _untracked_beside_creates(self) -> int | None:
+        """How many running ``measurement`` sandboxes of this run the pool neither holds nor is creating (a create's
+        sandbox is known by its request id before the create returns); ``None`` when they cannot be listed. Call it
+        without the lock: it asks the service."""
+        try:
+            found = self._provider.find(self._scope(), role=MEASUREMENT_ROLE)
+        except SandboxError:
+            log.exception("the run's measurement sandboxes could not be listed")
+            return None
         with self._cond:
+            creating = {hold.request_id for hold in self._creating.values() if hold.request_id is not None}
+            return sum(
+                1
+                for info in found
+                if info.sandbox_id not in self._held and info.metadata.get(REQUEST_ID_KEY) not in creating
+            )
+
+    def _give_slot(self, creating: object) -> None:
+        """Give back the slot of a create or re-attach whose sandbox the pool will not hold."""
+        with self._cond:
+            self._creating.pop(creating, None)
             self._claims = max(0, self._claims - 1)
             self._cond.notify_all()
 
-    def _adopt(self, sandbox: Sandbox) -> RunnerSandbox:
+    def _adopt(self, sandbox: Sandbox, hold: _Hold, creating: object) -> RunnerSandbox:
         try:
             info = sandbox.info()
         except BaseException:
-            self._close_handle(sandbox)
-            self._give_slot()
+            try:
+                self._close_handle(sandbox)
+            finally:
+                self._give_slot(creating)
             raise
-        with self._cond:
-            self._held.add(sandbox.sandbox_id)
         metadata = dict(info.metadata)
+        with self._cond:
+            self._creating.pop(creating, None)
+            self._held[sandbox.sandbox_id] = _Hold(hold.gpus, hold.request_id or metadata.get(REQUEST_ID_KEY))
         return RunnerSandbox(
             sandbox_id=sandbox.sandbox_id,
             public_key_pem=metadata.get(SIGNING_PUBLIC_KEY) or None,
@@ -465,12 +698,158 @@ class SandboxPool:
         )
 
     def _forget(self, sandbox_id: str) -> None:
+        timer = None
         with self._cond:
             if sandbox_id in self._held:
-                self._held.discard(sandbox_id)
-                self._claims = max(0, self._claims - 1)
+                del self._held[sandbox_id]
+                parked = self._parked
+                if parked is not None and parked.runner.sandbox_id == sandbox_id:
+                    self._parked, timer = None, parked.timer  # its slot was given back when it was handed over
+                else:
+                    self._claims = max(0, self._claims - 1)
                 self._ended += 1
             self._cond.notify_all()
+        if timer is not None:
+            timer.cancel()
+
+    def _held_ids(self) -> set[str]:
+        with self._cond:
+            return set(self._held)
+
+    def _waiting_tests(self, runner: RunnerSandbox) -> frozenset[str]:
+        """The tests that will ask for a sandbox and hold none of the pool's: neither ``runner``'s nor any other's.
+        Called with the lock held."""
+        holding = {hold.request_id for hold in self._held.values()}
+        own = self._held.get(runner.sandbox_id)
+        return frozenset(self._upcoming - holding - {own.request_id if own else runner.metadata.get(REQUEST_ID_KEY)})
+
+    def _room_for(self, more_sandboxes: int, more_gpus: int | None, *, untracked: int | None) -> str | None:
+        """Why the grant has no room for everything it counts and ``more_sandboxes`` more of ``more_gpus`` GPUs in all:
+        the sandboxes the pool holds (the kept one among them) or is creating, ``untracked`` sandboxes of the run that
+        it does not hold (``None``: not known) and what the branch leases hold or are promised; ``None`` when it has.
+        Called with the lock held."""
+        handover = self._handover
+        if handover is None:
+            return "no grant to count the sandboxes in"
+        if untracked is None:
+            return "the run's measurement sandboxes could not be listed"
+        if untracked:
+            return (
+                f"{untracked} measurement sandbox(es) of the run that the pool does not hold have GPUs it does not know"
+            )
+        reserved_sandboxes, reserved_gpus = handover.reserved()
+        gpus = [hold.gpus for hold in self._held.values()] + [hold.gpus for hold in self._creating.values()]
+        if more_gpus is None or any(count is None for count in gpus):
+            return "a sandbox of the pool has GPUs it does not know"
+        sandboxes = len(gpus) + reserved_sandboxes + more_sandboxes
+        in_gpus = sum(count for count in gpus if count is not None) + reserved_gpus + more_gpus
+        if sandboxes > handover.max_sandboxes or in_gpus > handover.max_gpus:
+            return (
+                f"the grant ({handover.max_sandboxes} sandboxes, {handover.max_gpus} GPUs) has no room for {sandboxes} "
+                f"sandboxes with {in_gpus} GPUs ({reserved_sandboxes} sandboxes, {reserved_gpus} GPUs reserved)"
+            )
+        return None
+
+    def _park_refusal(self, runner: RunnerSandbox, untracked: int | None) -> str | None:
+        """Why ``runner`` is not kept for the next test; ``None`` when it is. Called with the lock held."""
+        hold = self._held.get(runner.sandbox_id)
+        if hold is None:
+            return "the pool does not hold it"
+        if self._handover is None:
+            return "no make-before-break without a grant to count the sandboxes in"
+        if self._closed:
+            return "the pool is closed"
+        if self._parked is not None:
+            return f"sandbox {self._parked.runner.sandbox_id} is already kept for the next test"
+        if not self._waiting_tests(runner):
+            return "no test waits for a sandbox"
+        return self._room_for(1, hold.gpus, untracked=untracked)
+
+    def _claim_parked(self, hold: _Hold, label: str, creating: object) -> _Parked | None:
+        """Count ``label``'s create (``creating``, ``hold``'s GPUs) in the grant, and return the handed-over sandbox it
+        now replaces, kept until that create ends; ``None`` when there is none to replace. A handed-over sandbox the
+        grant has no room for beside everything it counts and the new one is closed before the create, also when
+        another test's create replaces it already."""
+        with self._cond:
+            maybe_parked = self._parked is not None
+        untracked = self._untracked_beside_creates() if maybe_parked else 0
+        with self._cond:
+            parked = self._parked
+            refusal = None if parked is None else self._room_for(1, hold.gpus, untracked=untracked)
+            self._creating[creating] = hold
+            if parked is None:
+                return None
+            if refusal is None:
+                if parked.claimed_by is not None:
+                    return None
+                parked.claimed_by = label
+                kept = time.monotonic() - parked.since
+                log.info(
+                    "%s: creates its sandbox while sandbox %s is kept (for %.0fs so far)",
+                    label,
+                    parked.runner.sandbox_id,
+                    kept,
+                )
+                return parked
+        self._end_parked(parked, f"{label} creates its sandbox after it is closed: {refusal}")
+        return None
+
+    def _after_adopt(self, claimed: _Parked | None, why: str) -> None:
+        """A sandbox of the pool runs: close the kept sandbox it replaces (``claimed``), and an unclaimed kept sandbox
+        when no test waits for a sandbox any more (the test it was kept for had its create in flight already). Closing
+        it never takes the new sandbox from its test: what goes wrong is logged."""
+        unclaimed: _Parked | None = None
+        with self._cond:
+            parked = self._parked
+            if parked is not None and parked is not claimed and parked.claimed_by is None:
+                if not self._waiting_tests(parked.runner):
+                    unclaimed = parked
+        for kept, reason in ((claimed, why), (unclaimed, f"{why} and no test waits for a sandbox any more")):
+            if kept is None:
+                continue
+            try:
+                self._end_parked(kept, reason)
+            except Exception:  # the new sandbox stays its test's whatever the old one's close raised
+                log.exception("sandbox %s, kept for the next test, could not be closed", kept.runner.sandbox_id)
+
+    def _yield_parked(self, why: str) -> None:
+        """Close the kept sandbox, whichever create it was kept for: the service refused a create for the grant's quota,
+        and an idle kept sandbox is the one thing in the grant the pool can free. What its close raises is logged, and
+        the create goes on waiting for room."""
+        with self._cond:
+            parked = self._parked
+        if parked is None:
+            return
+        try:
+            self._end_parked(parked, why)
+        except Exception:  # the create waits for room either way; the service still counts a sandbox it did not close
+            log.exception("sandbox %s, kept for the next test, could not be closed", parked.runner.sandbox_id)
+
+    def _end_parked(self, parked: _Parked, why: str) -> None:
+        """Close the handed-over sandbox, unless it is closed already; ``why`` is logged."""
+        with self._cond:
+            if parked.runner.sandbox_id not in self._held:
+                return
+        log.info(
+            "sandbox %s, kept for %.0fs, is closed: %s",
+            parked.runner.sandbox_id,
+            time.monotonic() - parked.since,
+            why,
+        )
+        self.release(parked.runner)
+
+    def _expire_parked(self, parked: _Parked) -> None:
+        with self._cond:
+            if parked.runner.sandbox_id not in self._held:
+                return
+            waiting_for = parked.claimed_by
+        log.warning(
+            "sandbox %s was kept %.0fs and the next sandbox does not run yet: it is closed anyway; %s",
+            parked.runner.sandbox_id,
+            time.monotonic() - parked.since,
+            f"{waiting_for} keeps waiting for its own" if waiting_for else "no create had begun to replace it",
+        )
+        self._end_parked(parked, "the make-before-break timeout passed")
 
     @staticmethod
     def _close_handle(sandbox: Sandbox) -> None:

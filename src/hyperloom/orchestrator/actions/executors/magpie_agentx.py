@@ -58,6 +58,8 @@ class RecipeLaunch(NamedTuple):
 
     argv: Sequence[str] = ()
     env: Mapping[str, str] = MappingProxyType({})
+    # The whole environment the launch ran with, the launcher's injections included; ``env`` stays what it set.
+    ran_env: Mapping[str, str] = MappingProxyType({})
 
 
 def recipe_base_launch(config_path: Path) -> RecipeLaunch:
@@ -68,6 +70,8 @@ def recipe_base_launch(config_path: Path) -> RecipeLaunch:
     already set: which options and variables it owns, and which settings a candidate composed on top of it is not
     free to change.
     """
+    from hyperloom.inference_optimizer.agentx.report import server_launch_environment
+
     receipt_path = config_path.parent / "launch_evidence.json"
     if not receipt_path.is_file():
         return RecipeLaunch()
@@ -80,6 +84,7 @@ def recipe_base_launch(config_path: Path) -> RecipeLaunch:
         [str(token) for token in launch.get("base_argv", [])],
         # A ``None`` value records a name the launch cleared, so it is not part of the environment it ran with.
         {str(name): str(value) for name, value in (launch.get("effective_env") or {}).items() if value is not None},
+        server_launch_environment(launch)[0],
     )
 
 
@@ -158,7 +163,7 @@ def _launch_envs(recipe: RecipeLaunch, benchmark: Mapping[str, Any], launch: Map
     ``benchmark.envs``, so they are the bottom layer a composing layer sees.
     """
     unset = set(launch.get("unset_env", []))
-    envs = {**recipe.env, **(benchmark.get("envs") or {}), **(launch.get("env") or {})}
+    envs = {**recipe.ran_env, **recipe.env, **(benchmark.get("envs") or {}), **(launch.get("env") or {})}
     return {name: value for name, value in envs.items() if name not in unset}
 
 

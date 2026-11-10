@@ -615,9 +615,12 @@ class _Feed:
     end: str
 
     def after(self, count: int) -> str:
-        """The cursor that resumes after the first ``count`` of the items."""
+        """The cursor that resumes after the first ``count`` of the items. A page cursor names the last item returned
+        before it, so where none was (no item of this feed and none of an earlier page) it is the base cursor itself."""
         if count >= len(self.items):
             return self.end
+        if not count and not self.skipped:
+            return self.base
         anchor = _fingerprint(self.items[count - 1]) if count else self.anchor
         return f"{_PAGE_CURSOR}{self.skipped + count}:{anchor}:{self.base}"
 

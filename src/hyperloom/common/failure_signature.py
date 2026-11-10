@@ -31,8 +31,8 @@ from hyperloom.common.outside_facts import (
 MISSING_MODEL_ARCH = "missing_model_arch"
 UNSUPPORTED_DTYPE = "unsupported_dtype"
 HIP_KERNEL_MISSING = "hip_kernel_missing"
-# A HIP call that failed while the program ran: a kernel faulted on an out-of-bounds address, a graph capture was
-# invalidated, a launch failed. The kernel was there and ran, so there is nothing to build; the line the log prints names
+# A HIP or HSA call that failed while the program ran: a kernel faulted on an out-of-bounds address (the ROCr queue abort
+# with an ``HSA_STATUS_ERROR_*`` status), a graph capture was invalidated, a launch failed. The kernel was there and ran, so there is nothing to build; the line the log prints names
 # the fault. Distinct from HIP_KERNEL_MISSING, whose evidence is a binary or a symbol that is absent.
 HIP_RUNTIME_ERROR = "hip_runtime_error"
 IMPORT_ERROR = "import_error"
@@ -192,7 +192,6 @@ _RULES: tuple[_Rule, ...] = (
             re.compile(HIP_NO_KERNEL_IMAGE),
             re.compile(HIP_NO_BINARY_FOR_GPU),
             re.compile(HIP_UNDEFINED_SYMBOL + r":\s*([A-Za-z0-9_:]+)"),
-            re.compile(HSA_STATUS_ERROR + r"[A-Za-z_]*"),
         ),
         confidence=0.85,
         symbol_from=_grp,
@@ -200,10 +199,15 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(
         # Every other ``hipError`` token (hipErrorIllegalAddress, hipErrorStreamCaptureInvalidated, ...) reports a call
         # that failed, not a kernel that is absent. It shares the ``rocm_hip`` bridge layer with ``hip_kernel_missing``,
-        # so the ladder and the enablement rung route both alike.
+        # so the ladder and the enablement rung route both alike. A failed HSA call is the same: the ROCr runtime's queue
+        # abort (``Callback: Queue 0x... aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION``) is a GPU
+        # fault while a kernel ran, so the kernel was there.
         kind=HIP_RUNTIME_ERROR,
         bridge_layer="rocm_hip",
-        patterns=(re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]*"),),
+        patterns=(
+            re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]*"),
+            re.compile(r"(" + HSA_STATUS_ERROR + r"[A-Z_]*)"),
+        ),
         confidence=0.85,
         symbol_from=_grp,
     ),
