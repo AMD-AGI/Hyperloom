@@ -14,8 +14,9 @@ prepends them to ``PATH`` inside the test, which runs after this fixture, so the
 
 The runner also reads who holds its cards from the kernel's list (:mod:`hyperloom.sandbox.card_occupancy`), and the
 card guard enforces by default: on a GPU host whose cards other work holds, every test that waits for a runner's
-signed result would get ``foreign_process_on_card`` instead. A conftest can point the test process at an idle machine
-of its own, but a runner is another process and reads the host's list. A test therefore starts its runner through
+signed result would get ``foreign_process_on_card`` instead, and a card pool or a lease built in the test process would
+find no free card. A conftest imports :func:`idle_card_list` as well to point the test process at an idle machine of
+its own, but a runner is another process and reads the host's list. A test therefore starts its runner through
 :data:`IDLE_CARDS_PYTHON` (or :func:`idle_cards_python`, for a template that names an interpreter): this module, run as
 ``python -m hyperloom.measure.tests.gpu_free_host -m <module> <args>``, points the kernel's list and ``/proc`` at an
 idle machine in a temporary directory and then runs ``<module>`` as ``python -m`` would.
@@ -61,6 +62,17 @@ def machine_without_readable_gpus(
     monkeypatch.setenv("PATH", f"{shadow}{os.pathsep}{os.environ.get('PATH', '')}")
     for name in _DEVICE_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def idle_card_list(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The kernel's list and ``/proc`` this process reads are those of an idle machine of the test's own (a test that
+    lists holders injects its own reader on top); a module with ``USES_REAL_GPUS = True`` reads the host's."""
+    if getattr(request.module, USES_REAL_GPUS_FLAG, False):
+        return
+    machine = KernelTree(tmp_path / "idle-machine")
+    monkeypatch.setattr(card_occupancy, "KFD_PATH", machine.kfd)
+    monkeypatch.setattr(card_occupancy, "PROC_PATH", machine.procfs)
 
 
 def idle_cards_python(directory: Path) -> str:
