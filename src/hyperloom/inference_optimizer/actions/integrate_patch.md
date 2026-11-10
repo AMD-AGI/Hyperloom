@@ -12,7 +12,7 @@ for this orchestration.
 `integrate_patch` is a **deterministic Python executor**, not an LLM
 sub-agent. It is the orchestrator's serving-lane-locked integration
 point — only this action is allowed to mutate
-`INFERENCEX_PATH` / `framework_source_roots`. Specialists produce
+`framework_source_roots`. Specialists produce
 patch *files*; this action produces *outcomes*.
 
 ## When to delegate
@@ -39,7 +39,7 @@ patch *files*; this action produces *outcomes*.
 | `specialist_task_id` | string   | yes      | Task id of the specialist whose worktree carries the patches. |
 | `patches`            | list[str]| no       | Explicit patch path list (relative to specialist workspace or absolute under `SESSION_DIR`). Defaults to `specialist_done.patches_written`. |
 | `config_changes`     | object   | no       | `env_var -> value` map layered onto the server-launch env before restart. Reverted with the patches on gate failure. |
-| `keep_threshold_pct` | float    | no       | KEEP threshold over baseline_tput; defaults to the session's decaying per-cycle bar (read from `SharedState`). |
+| `keep_threshold_pct` | float    | no       | KEEP threshold over baseline_tput. The session's decaying per-cycle bar (read from `SharedState`) is the floor: a higher finite value raises the bar, anything lower or non-numeric is replaced by it. |
 | `accuracy_baseline`  | float    | no       | Baseline accuracy score (0-1). Backfilled from `SharedState.baseline_accuracy` when omitted; `<= 0` skips the gate. |
 
 ## EMIT format
@@ -61,10 +61,26 @@ delegate{
    `patches_written` (when params.patches omitted).
 2. Acquire `server_lifecycle + workspace_mutation + benchmark_lane`
    triple-lock.
-3. `git apply -p1` each patch against the framework source roots
-   (`INFERENCEX_PATH` or `framework_source_roots[0]`). On conflict,
-   retry once with `git apply -3 -p1`. On second failure, mark the
-   patch as REVERT-immediate (record `apply_failed`).
+3. `git apply` each patch against the framework source roots
+   (`framework_source_roots[0]`), at the first `-p` level that checks
+   cleanly. On a git tree, a patch the strict apply refuses, and that is
+   not already in the tree, is merged onto HEAD, which carries every KEEP
+   so far: first `git apply -3` (strategy `three_way`), then both sides
+   of every conflict region whose merge base is empty (strategy
+   `union_disjoint`). A union must keep every line the patch adds and,
+   in a `.py` file, parse and define no module-level name twice unless
+   HEAD already does. A merged patch is benched like any other and listed
+   under `patches_merged`. A region where both sides changed the same
+   lines is declined, never resolved: the files the merge touched are
+   restored to HEAD and the round ends `apply_failed`, its `error`
+   carrying the strict apply error plus the merge steps. For
+   `perf_framework` / `perf_explore` lanes the framework phase then
+   re-authors the patch on the kept stack, within the authored-lane
+   retry cap. A non-git tree has no merge step: a patch that does not
+   apply ends the round `apply_failed`. The revert resets the tree to the
+   HEAD recorded before the attempt. When every patch is already in the
+   tree and the task changes nothing else, the action ends
+   `already_present` here: no restart, no benchmark.
 4. Layer `config_changes` onto the server-launch env.
 5. Stop the server this session launched, by the pid and process group it
    recorded; wait for VRAM to drain. No pattern-based kill runs.
@@ -72,7 +88,7 @@ delegate{
    health-check until ready (≤ 20min for large MoE models).
 7. Run the Magpie throughput benchmark + GSM8K accuracy eval, graded via
    the shared `_accuracy_gate.parse_eval_results(...)` +
-   `_accuracy_gate.accuracy_passed(...)` helpers.
+   `gain_math.accuracy_passed(...)` helpers.
 8. Decide:
    - KEEP — bench tput ≥ grading anchor * (1 + keep_threshold_pct/100) AND
      accuracy did not drop more than 0.05 absolute. Append the patch + config_changes to
@@ -86,17 +102,21 @@ delegate{
 
 ```
 {
-  "status":          "kept" | "reverted" | "apply_failed",
+  "status":          "kept" | "reverted" | "apply_failed" | "already_present",
   "output_throughput": <float | null>,
   "delta_pct":         <float | null>,
   "accuracy_pass":   <bool | null>,
   "patches_applied": ["patches/001_cuda_graph_fix.patch", ...],
+  "patches_merged":  [{"patch": "...", "strategy": "three_way" | "union_disjoint", "steps": ["..."]}],
   "config_changes_applied": {"VLLM_USE_AITER": "1"},
   "reason":          "<one-line summary>",
   "specialist_task_id": "<id>",
   "evidence":        {"bench_log": "...", "gate_log": "..."}
 }
 ```
+
+`patches_merged` is present only when a patch was merged onto the kept
+stack: one row per merged patch, naming its strategy and merge steps.
 
 ## Idempotency & resume
 
@@ -109,7 +129,9 @@ hash and `optimization_stack` is the authoritative ledger.
 
 | Symptom | Cause | Mitigation |
 |---|---|---|
-| `git apply` rejects | base HEAD drifted under specialist | reject patch, record `apply_failed`, REVERT path |
+| strict `git apply` rejects, hunks only displaced | an earlier KEEP moved the patch's context or inserted at the same anchor | merged onto HEAD (`three_way` or `union_disjoint`), listed under `patches_merged`; benched and graded as usual |
+| strict `git apply` rejects, hunks overlap a kept change | an earlier KEEP changed the same lines | `apply_failed` with the merge steps in `error`, touched files restored to HEAD; `perf_framework` / `perf_explore` patches re-authored on the kept stack |
+| every patch is already in the tree | the change landed upstream or in an earlier round | `already_present`, with the reverse check per patch under `already_present`; framework KB row `already_present` when the candidate carries an upstream PR identity |
 | server fails to start | broken patch | `git checkout` + restart prior config, mark REVERT |
 | accuracy drops >0.05 absolute | semantic regression | REVERT, record into pitfalls KB |
 | throughput unchanged within keep_threshold | no-op patch | REVERT, log low-confidence specialist for the gap |

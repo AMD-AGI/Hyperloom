@@ -9,25 +9,30 @@ import json
 import logging
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.coerce import (
+    text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_int as _int_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
+)
+
 from .event_fields import (
     analysis_detail as _analysis_detail,
-    as_dict as _as_dict,
-    as_list as _as_list,
     clip as _clip,
     failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
-    text_or_none as _text_or_none,
     worst_status as _worst_status,
 )
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink
-from .event_timeline import finish_event, open_event
+from .event_sink import EventSink
+from .event_timeline import EventHeader, finish_event, open_event
+from .sections import ROOFLINE_EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -84,15 +89,9 @@ _MAX_ROOFLINE_KERNELS = 512
 # individual times round to nothing.
 _MAX_PERFMODEL_OPS = 64
 
-# Every profile run row names why it ran, so a multi-attempt roofline can be read
-# without re-deriving the retry reason from log text.
+# Every profile run row names why it ran, so the initial profile and a compute-bound
+# re-profile can be told apart without log text.
 PROFILE_ATTEMPT_INITIAL = "initial"
-PROFILE_ATTEMPT_AFTER_EXCEPTION = "retry_after_exception"
-PROFILE_ATTEMPT_AFTER_BAD_RETURN = "retry_after_bad_return"
-PROFILE_ATTEMPT_AFTER_FAILURE = "retry_after_failure"
-PROFILE_ATTEMPT_AFTER_NO_TRACE = "retry_after_no_trace"
-PROFILE_ATTEMPT_AFTER_CAPTURE_ONLY = "retry_after_capture_only"
-PROFILE_ATTEMPT_AFTER_ZERO_OPS = "retry_after_zero_ops"
 PROFILE_ATTEMPT_COMPUTE_BOUND = "compute_bound_reprofile"
 
 ANALYSIS_ATTEMPT_INITIAL = "initial"
@@ -115,12 +114,6 @@ __all__ = [
     "EVENT_KIND",
     "EVENT_TYPE",
     "PRODUCER",
-    "PROFILE_ATTEMPT_AFTER_BAD_RETURN",
-    "PROFILE_ATTEMPT_AFTER_CAPTURE_ONLY",
-    "PROFILE_ATTEMPT_AFTER_EXCEPTION",
-    "PROFILE_ATTEMPT_AFTER_FAILURE",
-    "PROFILE_ATTEMPT_AFTER_NO_TRACE",
-    "PROFILE_ATTEMPT_AFTER_ZERO_OPS",
     "PROFILE_ATTEMPT_COMPUTE_BOUND",
     "PROFILE_ATTEMPT_INITIAL",
     "SECTION_ACTION",
@@ -130,11 +123,16 @@ __all__ = [
     "SECTION_PROFILE_RUN",
     "SUBSTEP_ANALYSIS",
     "SUBSTEP_PROFILE",
+    "AnalysisRunOutcome",
+    "ProfileRunOutcome",
+    "RooflineConclusion",
     "RooflineEventRecorder",
+    "RooflineRequest",
     "assemble_roofline_action",
     "assemble_roofline_ext",
     "make_roofline_recorder",
     "read_kernel_roofline",
+    "roofline_arm",
     "roofline_event_id",
 ]
 
@@ -146,6 +144,11 @@ def roofline_event_id(phase: str, macro_cycle: Any) -> str:
         ValueError: If either segment is malformed.
     """
     return event_id(phase, macro_cycle, EVENT_COMPONENT)
+
+
+def roofline_arm(reason: str) -> str:
+    """The configuration a roofline dispatched for ``reason`` measures."""
+    return "baseline" if reason == "prelude_initial" else "current_best"
 
 
 def _rank_of(path: str) -> str:
@@ -166,13 +169,9 @@ def _rank_of(path: str) -> str:
 def _kernel_roofline_row(entry: Mapping[str, Any]) -> dict[str, Any] | None:
     """Normalize one row of the analyzer's kernel-roofline table.
 
-    The TraceLens and bypass routes agree on the identity and cost fields and
-    diverge in the tail: bypass measures attainment against a real rocprof
-    ceiling (``roofline_attainment_pct`` / ``roofline_measured``) where
-    TraceLens has only its analytical model. Both spellings are kept, because
-    the absent one is itself the answer to "was this number measured". A row
-    carrying no kernel identity cannot be joined to anything and yields
-    ``None``.
+    ``roofline_source`` says whether a row's bound came from a model or is a
+    placeholder. A row carrying no kernel identity cannot be joined to anything
+    and yields ``None``.
     """
     kernel_id = _text_or_none(entry.get("kernel_id"))
     name = _text_or_none(entry.get("name"))
@@ -196,14 +195,11 @@ def _kernel_roofline_row(entry: Mapping[str, Any]) -> dict[str, Any] | None:
         "efficiency_percent": _float_or_none(entry.get("efficiency_percent")),
         "compute_utilization_pct": _float_or_none(entry.get("compute_utilization_pct")),
         "bandwidth_utilization_pct": _float_or_none(entry.get("bandwidth_utilization_pct")),
-        "roofline_attainment_pct": _float_or_none(entry.get("roofline_attainment_pct")),
         "roofline_name": _text_or_none(entry.get("roofline_name")),
         "roofline_source": str(entry.get("roofline_source") or ""),
-        "roofline_measured": bool(entry.get("roofline_measured")),
         "suggestion": _clip(entry.get("suggestion") or ""),
         "recommended_actions": [str(item) for item in _as_list(entry.get("recommended_actions"))],
         "reusable_native_kernel": bool(entry.get("reusable_native_kernel")),
-        "rocprof_roofline": _as_dict(entry.get("rocprof_roofline")) or None,
     }
 
 
@@ -276,8 +272,6 @@ def _snapshot_row(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "roofline_mem_ceiling_tok_per_sec": _float_or_none(snapshot.get("roofline_mem_ceiling_tok_per_sec")),
         "roofline_cmp_ceiling_tok_per_sec": _float_or_none(snapshot.get("roofline_cmp_ceiling_tok_per_sec")),
         "roofline_bound_kind": str(snapshot.get("roofline_bound_kind") or ""),
-        "e2e_mean_ms": _float_or_none(snapshot.get("e2e_mean_ms")),
-        "roofline_ideal_ms": _float_or_none(snapshot.get("roofline_ideal_ms")),
         "within_roofline_pct": _float_or_none(snapshot.get("within_roofline_pct")),
         "within_roofline_pct_uncapped": _float_or_none(snapshot.get("within_roofline_pct_uncapped")),
         "gap_to_roofline_pct": _float_or_none(snapshot.get("gap_to_roofline_pct")),
@@ -350,7 +344,7 @@ def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
     The certificate's own tables are per-rank, per-candidate and per-chunk, so their size follows the topology and
     they stay in the file ``certificate_path`` points at. What lands here is the fixed set of numbers a reader
     needs to judge trace quality without opening that file, taken from the rank the probe actually analysed. Every
-    ratio is accompanied by the terms it was computed from and by the scope it was computed over, because a
+    ratio is accompanied by the terms it was computed from and by whether the aggregation was truncated, because a
     coverage figure drawn from a truncated aggregation is a different measurement than one drawn from the whole
     trace.
     """
@@ -366,9 +360,8 @@ def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
     return {
         "rank_count_certified": len(ranks),
         "analyzed_rank": rank.get("rank"),
-        # Parse scope: what the numbers below were computed over.
+        # Parse state: what the numbers below were computed over.
         "event_total": parse.get("event_total"),
-        "aggregation_scope": parse.get("aggregation_scope"),
         "truncated": parse.get("truncated"),
         "truncation_reason": parse.get("truncation_reason"),
         # Attribution, with the terms of every ratio.
@@ -398,12 +391,9 @@ def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
         "capture_op_meta_coverage": capture.get("op_meta_coverage"),
         "capture_cpu_op_total": capture.get("cpu_op_total"),
         "capture_kernel_count": capture.get("kernel_count"),
-        # Which file the live resolver would open, which decides whether any of the above describes production.
+        # Role of the file the analysis reads.
         "selected_role": inventory.get("selected_role"),
-        "production_selected_role": inventory.get("production_selected_role"),
-        "production_would_analyze_split_chunk": inventory.get("production_would_analyze_split_chunk"),
         "file_count_by_role": _as_dict(inventory.get("file_count_by_role")),
-        "chunk_count_certified": len(_as_list(validate.get("chunk_level"))),
         "verdict_measures": measures,
     }
 
@@ -431,11 +421,6 @@ def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
         "blocking_reasons": [_clip(row) for row in _as_list(verdict.get("blocking_reasons"))],
         "warnings": [_clip(row) for row in _as_list(verdict.get("warnings"))],
         "severity": verdict.get("severity"),
-        "recommended_steady_state_mode": verdict.get("recommended_steady_state_mode"),
-        "recommended_splitter_mode": verdict.get("recommended_splitter_mode"),
-        "modes_that_would_fail": verdict.get("modes_that_would_fail"),
-        "steady_state_forecast": _as_dict(validate.get("steady_state_forecast")),
-        "hot_kernel_list_would_be_suppressed": verdict.get("hot_kernel_list_would_be_suppressed"),
         "thresholds_effective": _as_dict(verdict.get("thresholds_effective")),
         "trace_quality": _summarize_trace_quality(validate),
         # Where the unbounded per-rank / per-candidate / per-chunk tables live.
@@ -450,20 +435,91 @@ def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@dataclass(frozen=True)
+class RooflineRequest:
+    """The dispatched roofline action a recorder is bound to."""
+
+    task_id: str = ""
+    task_kind: str = ""
+    reason: str = ""
+    framework: str = ""
+    params: dict[str, Any] | None = None
+
+    def block(self) -> dict[str, Any]:
+        """The ``request`` block this action persists as."""
+        params = _as_dict(self.params)
+        # ``arm`` names the configuration the run measured, which only a roofline dispatch does.
+        kind = str(self.task_kind or "")
+        arm = "" if kind not in ("", EVENT_TYPE) else roofline_arm(str(self.reason or ""))
+        return {
+            "task_id": str(self.task_id or ""),
+            "task_kind": kind,
+            "reason": str(self.reason or ""),
+            "arm": arm,
+            "framework": str(self.framework or ""),
+            "workspace_path": str(params.get("workspace_path") or ""),
+        }
+
+
+@dataclass(frozen=True)
+class ProfileRunOutcome:
+    """How one profile attempt ended.
+
+    ``server_liveness`` is the post-attempt process-level probe. A run whose
+    trace exported completely and whose engine then died is indistinguishable
+    from a clean run by the result dict alone, so the row carries the process
+    outcome next to the wall clock rather than leaving it to be inferred.
+
+    ``instrumentation`` is which patchers ran on this attempt and what they
+    returned. It is stored on the run row rather than folded into ``validate``
+    because ``validate`` only exists once a trace was produced and certified,
+    and the attempts that never got that far are exactly the ones whose patch
+    state is in question.
+    """
+
+    status: str
+    disable_cuda_graph: bool
+    profile_result: dict[str, Any] | None = None
+    failure: dict[str, Any] | None = None
+    server_liveness: Mapping[str, Any] | None = None
+    instrumentation: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class AnalysisRunOutcome:
+    """How one trace-analysis attempt ended."""
+
+    status: str
+    trace_input: str
+    requested_steady_state_mode: str = ""
+    ta_result: dict[str, Any] | None = None
+    failure: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class RooflineConclusion:
+    """What a succeeded roofline action promoted.
+
+    ``kernel_attribution_degraded`` says that zero hot kernels are an
+    attribution artifact rather than a real absence, ``analysis_degraded``
+    that the analysis carries a degrading trace-health warning, and
+    ``snapshot`` is passed in rather than looked up because the recorder
+    holds no reference to session state.
+    """
+
+    snapshot_id: Any
+    hot_kernel_count: int
+    kernel_attribution_degraded: bool
+    cached: dict[str, Any] | None
+    trace_path: str
+    snapshot: Mapping[str, Any] | None = None
+    analysis_degraded: bool = False
+
+
 class RooflineEventRecorder:
     """Records one roofline action's facts into whichever event owns it."""
 
-    def __init__(
-        self,
-        sink: RecordSink,
-        *,
-        task_id: str = "",
-        task_kind: str = "",
-        reason: str = "",
-        framework: str = "",
-        params: dict[str, Any] | None = None,
-        owns_event: bool = True,
-    ):
+    def __init__(self, sink: EventSink, request: RooflineRequest, *, owns_event: bool = True):
         """Bind a recorder to one action inside one event."""
         self._sink = sink
         self._t0 = time.monotonic()
@@ -472,15 +528,13 @@ class RooflineEventRecorder:
         self._sequence: int | None = None
         self._closed = False
         self._substep = SUBSTEP_PROFILE
-        params = _as_dict(params)
-        # ``arm`` names the configuration the run measured, which only a roofline dispatch does.
-        kind = str(task_kind or "")
-        arm = (
-            ""
-            if kind not in ("", EVENT_TYPE)
-            else ("baseline" if str(reason or "") == "prelude_initial" else "current_best")
-        )
-        self._task_id = str(task_id or "")
+        # Per section, one (attempt_reason, start_time, start_monotonic) per attempt begun; an attempt's run index
+        # is its position here, so an index can only name an attempt that began.
+        self._run_starts: dict[str, list[tuple[str, str, float]]] = {
+            SECTION_PROFILE_RUN: [],
+            SECTION_ANALYSIS_RUN: [],
+        }
+        self._task_id = str(request.task_id or "")
         self._action_id = self._task_id or "unnamed"
         self._sink.record(
             SECTION_ACTION,
@@ -488,14 +542,7 @@ class RooflineEventRecorder:
                 "task_id": self._task_id,
                 "start_time": self._start_time,
                 "in_flight_substep": self._substep,
-                "request": {
-                    "task_id": self._task_id,
-                    "task_kind": kind,
-                    "reason": str(reason or ""),
-                    "arm": arm,
-                    "framework": str(framework or ""),
-                    "workspace_path": str(params.get("workspace_path") or ""),
-                },
+                "request": request.block(),
             },
             row_type=ROW_ACTION,
             natural_ids=self._action_id,
@@ -511,26 +558,22 @@ class RooflineEventRecorder:
         """str: The task id separating this action from others in its event."""
         return self._task_id
 
-    def _record_action(self, payload: Mapping[str, Any]) -> None:
-        """Update this action's own row."""
-        self._sink.record(SECTION_ACTION, payload, row_type=ROW_ACTION, natural_ids=self._action_id)
-
     # ---- lifecycle -------------------------------------------------------
 
-    def begin(self, *, max_profile_attempts: int) -> None:
-        """Record the retry budget and, when this action owns the event, open it."""
-        self._record_action({"max_profile_attempts": int(max_profile_attempts)})
+    def begin(self) -> None:
+        """Open the event when this action owns it."""
         if not self._owns_event:
             return
         self._sequence = open_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
+            EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
             event_section=SECTION_EVENT,
             producer=PRODUCER,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
             ext={"in_flight_substep": self._substep},
         )
+
+    def _record_action(self, payload: Mapping[str, Any]) -> None:
+        """Update this action's own row."""
+        self._sink.record(SECTION_ACTION, payload, row_type=ROW_ACTION, natural_ids=self._action_id)
 
     def record_preflight(self, payload: Mapping[str, Any]) -> None:
         """Record the conditions the action found before it profiled anything.
@@ -542,55 +585,55 @@ class RooflineEventRecorder:
         """
         self._record_action({"preflight": dict(payload)})
 
-    def record_profile_run(
-        self,
-        *,
-        run_index: int,
-        attempt_reason: str,
-        status: str,
-        started_at: str,
-        duration_sec: float | None,
-        disable_cuda_graph: bool,
-        profile_result: dict[str, Any] | None = None,
-        failure: dict[str, Any] | None = None,
-        server_liveness: Mapping[str, Any] | None = None,
-        instrumentation: Mapping[str, Any] | None = None,
-    ) -> None:
-        """Record one profile attempt.
+    def _begin_run(self, section: str, attempt_reason: str) -> int:
+        """Allocate the next run index in ``section`` and hold the attempt's start until it ends."""
+        starts = self._run_starts[section]
+        starts.append((str(attempt_reason), _now_iso(), time.monotonic()))
+        return len(starts)
 
-        ``server_liveness`` is the post-attempt process-level probe. A run whose trace exported completely and
-        whose engine then died is indistinguishable from a clean run by the result dict alone, so the row carries
-        the process outcome next to the wall clock rather than leaving it to be inferred.
-
-        ``instrumentation`` is which patchers ran on this attempt and what they returned. It is stored on the run
-        row rather than folded into ``validate`` because ``validate`` only exists once a trace was produced and
-        certified, and the attempts that never got that far are exactly the ones whose patch state is in question.
-        """
-        result = _as_dict(profile_result)
+    def _end_run(self, section: str, row_type: str, run_index: int, status: str, fields: Mapping[str, Any]) -> None:
+        """Write the row of an attempt that began, timed from its begin."""
+        attempt_reason, started_at, started_monotonic = self._run_starts[section][run_index - 1]
         self._sink.record(
-            SECTION_PROFILE_RUN,
+            section,
             {
                 "task_id": self._task_id,
-                "run_index": int(run_index),
+                "run_index": run_index,
                 "effective": False,
-                "attempt_reason": str(attempt_reason),
+                "attempt_reason": attempt_reason,
                 "status": str(status),
-                "start_time": str(started_at or ""),
+                "start_time": started_at,
                 "end_time": _now_iso(),
-                "duration_sec": duration_sec,
-                "disable_cuda_graph": bool(disable_cuda_graph),
-                "failure": failure,
-                "server_liveness": dict(server_liveness) if server_liveness else None,
-                "instrumentation": dict(instrumentation) if instrumentation else None,
-                "validate": _summarize_validate(result),
+                "duration_sec": round(time.monotonic() - started_monotonic, 3),
+                **fields,
             },
-            row_type=ROW_PROFILE_RUN,
-            natural_ids=(self._action_id, str(int(run_index))),
+            row_type=row_type,
+            natural_ids=(self._action_id, str(run_index)),
+        )
+
+    def begin_profile_run(self, *, attempt_reason: str) -> int:
+        """Start one profile attempt and return its run index; its row is written when it ends."""
+        return self._begin_run(SECTION_PROFILE_RUN, attempt_reason)
+
+    def end_profile_run(self, run_index: int, outcome: ProfileRunOutcome) -> None:
+        """Record how one profile attempt ended."""
+        self._end_run(
+            SECTION_PROFILE_RUN,
+            ROW_PROFILE_RUN,
+            run_index,
+            outcome.status,
+            {
+                "disable_cuda_graph": bool(outcome.disable_cuda_graph),
+                "failure": outcome.failure,
+                "server_liveness": dict(outcome.server_liveness) if outcome.server_liveness else None,
+                "instrumentation": dict(outcome.instrumentation) if outcome.instrumentation else None,
+                "validate": _summarize_validate(_as_dict(outcome.profile_result)),
+            },
         )
         # An action-level rollup of the per-run flag. Roofline does not fall back to eager on a capture failure,
         # so this only latches when the arm or the operator override asked for graph capture to be off -- which
         # matters downstream, because kernel shapes differ between eager and captured execution.
-        if disable_cuda_graph:
+        if outcome.disable_cuda_graph:
             self._record_action({"graph_capture_disabled": True})
 
     def adopt_profile_run(
@@ -628,44 +671,31 @@ class RooflineEventRecorder:
             }
         )
 
-    def record_analysis_run(
-        self,
-        *,
-        run_index: int,
-        attempt_reason: str,
-        status: str,
-        started_at: str,
-        duration_sec: float | None,
-        trace_input: str,
-        requested_steady_state_mode: str = "",
-        ta_result: dict[str, Any] | None = None,
-        failure: dict[str, Any] | None = None,
-    ) -> None:
-        """Record one trace-analysis attempt."""
-        result = _as_dict(ta_result)
+    def begin_analysis_run(self, *, attempt_reason: str) -> int:
+        """Start one trace-analysis attempt and return its run index; its row is written when it ends."""
+        return self._begin_run(SECTION_ANALYSIS_RUN, attempt_reason)
+
+    def end_analysis_run(self, run_index: int, outcome: AnalysisRunOutcome) -> None:
+        """Record how one trace-analysis attempt ended."""
+        result = _as_dict(outcome.ta_result)
         meta = _as_dict(result.get("analysis_meta"))
-        self._sink.record(
+        self._end_run(
             SECTION_ANALYSIS_RUN,
+            ROW_ANALYSIS_RUN,
+            run_index,
+            outcome.status,
             {
-                "task_id": self._task_id,
-                "run_index": int(run_index),
-                "effective": False,
-                "attempt_reason": str(attempt_reason),
-                "status": str(status),
-                "start_time": str(started_at or ""),
-                "end_time": _now_iso(),
-                "duration_sec": duration_sec,
                 "route": str(meta.get("route") or ""),
                 "tool": str(meta.get("tool") or ""),
-                "requested_steady_state_mode": str(requested_steady_state_mode or meta.get("steady_state_mode") or ""),
-                "trace_input": str(trace_input or ""),
+                "requested_steady_state_mode": str(
+                    outcome.requested_steady_state_mode or meta.get("steady_state_mode") or ""
+                ),
+                "trace_input": str(outcome.trace_input or ""),
                 "hot_kernel_count": len(
                     [row for row in _as_list(result.get("hot_kernels_top15") or result.get("hot_kernels")) if row]
                 ),
-                "failure": failure,
+                "failure": outcome.failure,
             },
-            row_type=ROW_ANALYSIS_RUN,
-            natural_ids=(self._action_id, str(int(run_index))),
         )
 
     def adopt_analysis_run(
@@ -704,26 +734,14 @@ class RooflineEventRecorder:
             }
         )
 
-    def finish_succeeded(
-        self,
-        *,
-        snapshot_id: Any,
-        hot_kernel_count: int,
-        kernel_attribution_degraded: bool,
-        cached: dict[str, Any] | None,
-        trace_path: str,
-        snapshot: Mapping[str, Any] | None = None,
-    ) -> None:
+    def finish_succeeded(self, conclusion: RooflineConclusion) -> None:
         """Close the action as succeeded and record the promoted artifacts.
 
         Also records the two things the run concluded: the snapshot's own
         numbers, and the per-kernel roofline table read back from the sidecar.
-        ``kernel_attribution_degraded`` says that zero hot kernels are an
-        attribution artifact rather than a real absence, and ``snapshot`` is
-        passed in rather than looked up because the recorder holds no reference
-        to session state.
         """
-        promoted = _as_dict(cached)
+        promoted = _as_dict(conclusion.cached)
+        snapshot = conclusion.snapshot
         roofline_path = str(promoted.get("kernel_roofline_path") or "")
         table, kernels = read_kernel_roofline(roofline_path)
         for rank, kernel in enumerate(kernels):
@@ -737,16 +755,18 @@ class RooflineEventRecorder:
                 # instead of interleaving them with the ones they replaced.
                 natural_ids=(self._action_id, f"{rank:04d}"),
             )
-        # Zero routable candidates is a completed roofline that cannot advance
-        # kernel work, which is a different operational state from a clean run.
+        # Zero routable candidates, or candidates from a degraded analysis, is a
+        # completed roofline in a different operational state from a clean run.
+        degraded = conclusion.kernel_attribution_degraded or conclusion.analysis_degraded
         self._close(
-            status="degraded" if kernel_attribution_degraded else "succeeded",
+            status="degraded" if degraded else "succeeded",
             payload={
                 "outcome": {
-                    "snapshot_id": _int_or_none(promoted.get("roofline_snapshot_id") or snapshot_id),
-                    "hot_kernel_count": int(hot_kernel_count),
-                    "kernel_attribution_degraded": bool(kernel_attribution_degraded),
-                    "profile_trace": str(trace_path or ""),
+                    "snapshot_id": _int_or_none(promoted.get("roofline_snapshot_id") or conclusion.snapshot_id),
+                    "hot_kernel_count": int(conclusion.hot_kernel_count),
+                    "kernel_attribution_degraded": bool(conclusion.kernel_attribution_degraded),
+                    "analysis_degraded": bool(conclusion.analysis_degraded),
+                    "profile_trace": str(conclusion.trace_path or ""),
                     "steady_state_trace": str(promoted.get("steady_state_trace") or ""),
                     "analysis_md_path": str(promoted.get("analysis_md_path") or ""),
                     "candidates_path": str(promoted.get("candidates_path") or ""),
@@ -808,19 +828,18 @@ class RooflineEventRecorder:
         )
         if not self._owns_event:
             return
-        from .assembler import roofline_event_parts
+        from .assembler import event_parts
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
-            ext, derived = assemble_roofline_ext(roofline_event_parts(self.event_id), event=self.event_id)
+            ext, derived = assemble_roofline_ext(
+                event_parts(ROOFLINE_EVENT_SECTIONS, event=self.event_id), event=self.event_id
+            )
             finish_event(
-                event_type=EVENT_TYPE,
-                event=self.event_id,
+                EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
                 status=derived or status,
                 ext=ext,
-                kind=EVENT_KIND,
-                start_time=self._start_time,
                 end_time=end_time,
             )
         except RECORDING_ERRORS as exc:
@@ -885,7 +904,6 @@ def assemble_roofline_actions(
                 "preflight": _as_dict(row.get("preflight")),
                 "profile": {
                     "attempt_count": len(profile_runs),
-                    "max_attempts": _int_or_none(row.get("max_profile_attempts")) or 0,
                     "effective_run_index": profile_index,
                     "recovered": bool(row.get("recovered")),
                     "graph_capture_disabled": bool(row.get("graph_capture_disabled")),
@@ -951,24 +969,12 @@ def _mark_effective(runs: list[dict[str, Any]], effective_index: int | None) -> 
 
 
 def make_roofline_recorder(
-    sink: RecordSink | None,
+    sink: EventSink | None,
+    request: RooflineRequest,
     *,
-    task_id: str = "",
-    task_kind: str = "",
-    reason: str = "",
-    framework: str = "",
-    params: dict[str, Any] | None = None,
     owns_event: bool = True,
 ) -> RooflineEventRecorder | None:
     """Build a recorder, or ``None`` when ``sink`` is absent."""
     if sink is None:
         return None
-    return RooflineEventRecorder(
-        sink,
-        task_id=task_id,
-        task_kind=task_kind,
-        reason=reason,
-        framework=framework,
-        params=params,
-        owns_event=owns_event,
-    )
+    return RooflineEventRecorder(sink, request, owns_event=owns_event)

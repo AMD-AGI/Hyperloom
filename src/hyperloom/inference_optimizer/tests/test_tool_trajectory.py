@@ -72,7 +72,7 @@ def test_reactor_tools_are_timed_from_use_to_result_under_their_request(tmp_path
 
 
 def test_input_summary_is_clipped_and_sized():
-    attributes = te.tool_attributes(name="Write", tool_use_id="t", tool_input={"content": "x" * 5000})
+    attributes = te.tool_attributes(te.ToolCall(name="Write", tool_use_id="t", tool_input={"content": "x" * 5000}))
     assert attributes["input_chars"] > 5000
     assert len(attributes["input_summary"]) <= 241
 
@@ -116,7 +116,7 @@ def test_specialist_stream_json_tools_pair_use_and_result(tmp_path):
         ],
     )
     with tt.trajectory_scope(session_dir=tmp_path, component="specialist", task_id="task-1", parent_span_id="task-1"):
-        assert te.record_stream_json_tools(log) == 3
+        te.record_stream_json_tools(log)
 
     search, bash, read = _tools(tmp_path)
     assert [r["attributes"]["name"] for r in (search, bash, read)] == ["WebSearch", "Bash", "Read"]
@@ -130,7 +130,8 @@ def test_specialist_stream_json_tools_pair_use_and_result(tmp_path):
 
 
 def test_specialist_tools_are_a_noop_outside_a_session(tmp_path):
-    assert te.record_stream_json_tools(tmp_path / "missing.log") == 0
+    te.record_stream_json_tools(tmp_path / "missing.log")
     log = tmp_path / "process.log"
     _write_log(log, [{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "a", "name": "X"}]}}])
-    assert te.record_stream_json_tools(log) == 0
+    te.record_stream_json_tools(log)
+    assert tt.load_events(tmp_path) == []

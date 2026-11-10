@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from ._dispatch_helpers import pump_until_settled
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 def _build_coord(
@@ -27,7 +28,7 @@ def _build_coord(
         MockTurn,
         ScriptedPlan,
     )
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     for _var in (
@@ -56,8 +57,7 @@ def _build_coord(
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        recipe_kb=None,
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
 
 
@@ -88,7 +88,6 @@ class _GpuProbe:
                 "new_findings": [],
                 "residual_questions": [],
             },
-            "turns_used": 1,
             "workspace": "",
             "transcript_path": "",
             "done_path": "",
@@ -104,7 +103,7 @@ def _enablement_params(coord):
     coord.shared_state.framework = "sglang"
     coord.shared_state.model_name = "some/model"
     log = "Model architecture 'FooBarForCausalLM' is not supported by this build"
-    params = coord._build_enablement_specialist_params(log)
+    params = coord.enablement_params.build_enablement_specialist_params(log)
     assert params is not None and params.get("enablement") is True
     return params
 
@@ -149,20 +148,22 @@ async def test_enablement_leases_whole_machine_when_capacity_zero(tmp_path, monk
     coord.sub.register_executor("specialist", probe)
 
     await coord.tasks.create_or_return_existing(
-        kind="specialist",
-        params={
-            "domain": "enablement_specialist",
-            "gap_canonical_id": "gap.enablement.test",
-            "enablement": True,
-            "needs_gpu": True,
-            "gpu_count": 4,
-        },
-        idempotency_key="fw-gpu-wholemachine",
-        requires_lanes=["gpu_research_lane"],
-        lease_ttl_sec=3600,
+        TaskSpec(
+            kind="specialist",
+            params={
+                "domain": "enablement_specialist",
+                "gap_canonical_id": "gap.enablement.test",
+                "enablement": True,
+                "needs_gpu": True,
+                "gpu_count": 4,
+            },
+            idempotency_key="fw-gpu-wholemachine",
+            requires_lanes=["gpu_research_lane"],
+            lease_ttl_sec=3600,
+        ),
     )
 
-    await pump_until_settled(coord)
+    await pump_until_settled(coord.dispatcher)
 
     assert probe.entries, "enablement GPU task never dispatched"
     tid = probe.entries[0]
@@ -177,7 +178,7 @@ async def test_enablement_leases_whole_machine_when_capacity_zero(tmp_path, monk
 async def test_gpu_research_lane_mutexes_serving_lanes(tmp_path, monkeypatch):
     """While a framework GPU task holds gpu_research_lane, the serving lanes (benchmark / profile / server_lifecycle) cannot be acquired."""
     coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=0)
-    held = await coord.locks.try_acquire_many(
+    held = await coord.locks.acquire_many(
         ["gpu_research_lane"],
         holder_id="framework-holder",
         task_id="framework-holder",
@@ -187,7 +188,7 @@ async def test_gpu_research_lane_mutexes_serving_lanes(tmp_path, monkeypatch):
     assert held is not None
     try:
         for serving_lane in ("benchmark_lane", "profile_lane", "server_lifecycle"):
-            blocked = await coord.locks.try_acquire_many(
+            blocked = await coord.locks.acquire_many(
                 [serving_lane],
                 holder_id="serving-holder",
                 task_id="serving-holder",
@@ -196,7 +197,7 @@ async def test_gpu_research_lane_mutexes_serving_lanes(tmp_path, monkeypatch):
             )
             assert blocked is None, f"{serving_lane} was acquirable while gpu_research_lane held"
         # A second GPU task is also blocked (cap-1 / strictly serial).
-        second = await coord.locks.try_acquire_many(
+        second = await coord.locks.acquire_many(
             ["gpu_research_lane"],
             holder_id="framework-holder-2",
             task_id="framework-holder-2",
@@ -219,19 +220,21 @@ async def test_explore_gpu_specialist_still_gated_by_capacity(tmp_path, monkeypa
     coord.sub.register_executor("specialist", probe)
 
     await coord.tasks.create_or_return_existing(
-        kind="specialist",
-        params={
-            "domain": "serving_specialist",
-            "gap_canonical_id": "gap.explore.gpu",
-            "needs_gpu": True,
-            "gpu_count": 1,
-        },
-        idempotency_key="explore-gpu-blocked",
-        requires_lanes=["research_lane", "gpu_research_lane"],
-        lease_ttl_sec=3600,
+        TaskSpec(
+            kind="specialist",
+            params={
+                "domain": "serving_specialist",
+                "gap_canonical_id": "gap.explore.gpu",
+                "needs_gpu": True,
+                "gpu_count": 1,
+            },
+            idempotency_key="explore-gpu-blocked",
+            requires_lanes=["research_lane", "gpu_research_lane"],
+            lease_ttl_sec=3600,
+        ),
     )
 
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
     # Carved pool is empty (capacity=0) → no lease → task stays queued, unrun.
     assert not probe.entries
@@ -248,19 +251,21 @@ async def test_explore_gpu_specialist_uses_carved_pool(tmp_path, monkeypatch):
     coord.sub.register_executor("specialist", probe)
 
     await coord.tasks.create_or_return_existing(
-        kind="specialist",
-        params={
-            "domain": "serving_specialist",
-            "gap_canonical_id": "gap.explore.gpu2",
-            "needs_gpu": True,
-            "gpu_count": 1,
-        },
-        idempotency_key="explore-gpu-carved",
-        requires_lanes=["research_lane", "gpu_research_lane"],
-        lease_ttl_sec=3600,
+        TaskSpec(
+            kind="specialist",
+            params={
+                "domain": "serving_specialist",
+                "gap_canonical_id": "gap.explore.gpu2",
+                "needs_gpu": True,
+                "gpu_count": 1,
+            },
+            idempotency_key="explore-gpu-carved",
+            requires_lanes=["research_lane", "gpu_research_lane"],
+            lease_ttl_sec=3600,
+        ),
     )
 
-    await pump_until_settled(coord)
+    await pump_until_settled(coord.dispatcher)
 
     assert probe.entries
     assert probe.gpu_ids_by_task[probe.entries[0]] == [0]
@@ -280,21 +285,23 @@ async def test_bench_specialist_leases_whole_machine_when_serving_owns_node(tmp_
     coord.sub.register_executor("specialist", probe)
 
     await coord.tasks.create_or_return_existing(
-        kind="specialist",
-        params={
-            "scope": "freeform",
-            "task_description": "start a TP-sharded server and rebench a patch",
-            "mode": "patch",
-            "bench": True,
-            "needs_gpu": True,
-            # gpu_count omitted → defaults to serving TP (floored to 4).
-        },
-        idempotency_key="explore-bench-wholemachine",
-        requires_lanes=["research_lane", "gpu_research_lane", "benchmark_lane"],
-        lease_ttl_sec=3600,
+        TaskSpec(
+            kind="specialist",
+            params={
+                "scope": "freeform",
+                "task_description": "start a TP-sharded server and rebench a patch",
+                "mode": "patch",
+                "bench": True,
+                "needs_gpu": True,
+                # gpu_count omitted → defaults to serving TP (floored to 4).
+            },
+            idempotency_key="explore-bench-wholemachine",
+            requires_lanes=["research_lane", "gpu_research_lane", "benchmark_lane"],
+            lease_ttl_sec=3600,
+        ),
     )
 
-    await pump_until_settled(coord)
+    await pump_until_settled(coord.dispatcher)
 
     assert probe.entries, "bench specialist never dispatched"
     tid = probe.entries[0]
@@ -318,21 +325,23 @@ async def test_non_bench_gpu_probe_still_uses_carved_pool(tmp_path, monkeypatch)
     coord.sub.register_executor("specialist", probe)
 
     await coord.tasks.create_or_return_existing(
-        kind="specialist",
-        params={
-            "scope": "freeform",
-            "task_description": "microbench the decode attention kernel",
-            "mode": "patch",
-            "bench": False,
-            "needs_gpu": True,
-            "gpu_count": 1,
-        },
-        idempotency_key="explore-nonbench-carved",
-        requires_lanes=["research_lane", "gpu_research_lane"],
-        lease_ttl_sec=3600,
+        TaskSpec(
+            kind="specialist",
+            params={
+                "scope": "freeform",
+                "task_description": "microbench the decode attention kernel",
+                "mode": "patch",
+                "bench": False,
+                "needs_gpu": True,
+                "gpu_count": 1,
+            },
+            idempotency_key="explore-nonbench-carved",
+            requires_lanes=["research_lane", "gpu_research_lane"],
+            lease_ttl_sec=3600,
+        ),
     )
 
-    await pump_until_settled(coord)
+    await pump_until_settled(coord.dispatcher)
 
     assert probe.entries
     # First card of the carved (serving-disjoint) pool, not card 0.
@@ -356,19 +365,21 @@ async def test_serving_priority_defers_gpu_specialist_and_releases_lane(tmp_path
     coord.sub.register_executor("specialist", probe)
 
     await coord.tasks.create_or_return_existing(
-        kind="specialist",
-        params={
-            "scope": "freeform",
-            "task_description": "probe a kernel while serving is active",
-            "needs_gpu": True,
-            "gpu_count": 1,
-        },
-        idempotency_key="serving-priority-defer",
-        requires_lanes=["research_lane", "gpu_research_lane"],
-        lease_ttl_sec=3600,
+        TaskSpec(
+            kind="specialist",
+            params={
+                "scope": "freeform",
+                "task_description": "probe a kernel while serving is active",
+                "needs_gpu": True,
+                "gpu_count": 1,
+            },
+            idempotency_key="serving-priority-defer",
+            requires_lanes=["research_lane", "gpu_research_lane"],
+            lease_ttl_sec=3600,
+        ),
     )
 
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
     # Executor must NOT have run — the task should still be queued.
     assert not probe.entries, "executor must not run while serving slot is busy"
@@ -405,19 +416,21 @@ async def test_serving_priority_defers_on_second_probe_racing_admit(tmp_path, mo
     coord.sub.register_executor("specialist", probe)
 
     await coord.tasks.create_or_return_existing(
-        kind="specialist",
-        params={
-            "scope": "freeform",
-            "task_description": "probe right as serving started",
-            "needs_gpu": True,
-            "gpu_count": 1,
-        },
-        idempotency_key="serving-priority-race",
-        requires_lanes=["research_lane", "gpu_research_lane"],
-        lease_ttl_sec=3600,
+        TaskSpec(
+            kind="specialist",
+            params={
+                "scope": "freeform",
+                "task_description": "probe right as serving started",
+                "needs_gpu": True,
+                "gpu_count": 1,
+            },
+            idempotency_key="serving-priority-race",
+            requires_lanes=["research_lane", "gpu_research_lane"],
+            lease_ttl_sec=3600,
+        ),
     )
 
-    await coord._pump_dispatcher_once()
+    await coord.dispatcher.pump_dispatcher_once()
 
     # The per-task probe must have been called at least once.
     assert busy_calls, "serving_slot_busy must be called at admit time"
@@ -446,19 +459,21 @@ async def test_serving_priority_admits_gpu_specialist_when_slot_free(tmp_path, m
     coord.sub.register_executor("specialist", probe)
 
     await coord.tasks.create_or_return_existing(
-        kind="specialist",
-        params={
-            "scope": "freeform",
-            "task_description": "probe a kernel while slot is free",
-            "needs_gpu": True,
-            "gpu_count": 1,
-        },
-        idempotency_key="serving-priority-free",
-        requires_lanes=["research_lane", "gpu_research_lane"],
-        lease_ttl_sec=3600,
+        TaskSpec(
+            kind="specialist",
+            params={
+                "scope": "freeform",
+                "task_description": "probe a kernel while slot is free",
+                "needs_gpu": True,
+                "gpu_count": 1,
+            },
+            idempotency_key="serving-priority-free",
+            requires_lanes=["research_lane", "gpu_research_lane"],
+            lease_ttl_sec=3600,
+        ),
     )
 
-    await pump_until_settled(coord)
+    await pump_until_settled(coord.dispatcher)
 
     assert probe.entries, "executor must run when serving slot is free"
     assert not await coord.tasks.queued()

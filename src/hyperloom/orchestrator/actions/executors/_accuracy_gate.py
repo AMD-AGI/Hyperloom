@@ -16,22 +16,20 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.env import env_flag, is_truthy
-from hyperloom.common.io import safe_mtime
+from hyperloom.common.gain_math import (
+    ACCURACY_METRICS,
+    AGENTX_ERROR_RATE_THRESHOLD_PCT,
+    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+    accuracy_meets_floor,
+    accuracy_passed,
+    finite_score,
+)
+from hyperloom_common.coerce import optional_positive_float
+from hyperloom_common.env import env_flag, is_truthy
+from hyperloom_common.io import safe_mtime
 from hyperloom.common.perf_metric import is_agentx_mode
 
 log = logging.getLogger(__name__)
-
-ACCURACY_THRESHOLD = 0.05  # allowed deviation
-
-# Upstream rejects an AgentX submission whose error rate over completed requests exceeds 10% (InferenceX
-# ``validate_agentic_result.py``). A percentage because that is aiperf's unit: ``RequestErrorRateMetric`` is declared
-# PERCENT and derives ``100.0 * errors / total``.
-AGENTX_ERROR_RATE_THRESHOLD_PCT = 10.0
-
-# Shared accuracy floor, used by BOTH the baseline eval-failure trigger and the enablement KEEP gate so the two never
-# diverge.
-DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.5
 
 # Enablement admission, selected by the ``--enablement`` CLI flag.
 ENABLEMENT_MODE_OFF = "off"
@@ -89,7 +87,7 @@ def materialized_run_eval_disabled(config_path: Path | str) -> bool:
     return not is_truthy(envs.get("RUN_EVAL"), default=True)
 
 
-def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: str = "") -> bool:
+def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: str = "") -> None:
     """Halt the run when the baseline accuracy test produced no result.
 
     ``cause`` names what actually went wrong, for the callers that can establish it.
@@ -97,18 +95,12 @@ def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: st
     nobody can explain *is* a broken baseline setup -- but asserting that next to an
     identified cause would tell the operator the opposite of what the caller just found.
     """
-    if shared_state is None:
-        return False
-    setter = getattr(shared_state, "set_stop_reason", None)
-    if not callable(setter):
-        return False
     log.warning(
         "baseline accuracy test produced no result (%s); stopping run (%s)",
         context,
         cause or "broken baseline setup",
     )
-    setter(BASELINE_ACCURACY_STOP_REASON)
-    return True
+    shared_state.set_stop_reason(BASELINE_ACCURACY_STOP_REASON)
 
 
 def require_kernel_accuracy_default() -> bool:
@@ -129,30 +121,12 @@ def launch_enablement_allowed(shared_state: Any) -> bool:
 
 def eval_enablement_allowed(shared_state: Any) -> bool:
     """Whether a baseline accuracy-eval failure may route into enablement."""
-    if bool(getattr(shared_state, "eval_disabled", False)):
-        return False
     return resolve_enablement_mode(shared_state) in (ENABLEMENT_MODE_EVAL, ENABLEMENT_MODE_ALL)
-
-
-def _finite_score(score: Any) -> float | None:
-    """Return ``score`` as a finite float, or ``None`` when unusable."""
-    if isinstance(score, bool) or not isinstance(score, (int, float)):
-        return None
-    val = float(score)
-    return val if math.isfinite(val) else None
-
-
-def accuracy_meets_floor(score: Any, floor: float) -> bool:
-    """True only when ``score`` is finite, strictly positive and ``>= floor``."""
-    val = _finite_score(score)
-    if val is None or val <= 0.0:
-        return False
-    return val >= floor
 
 
 def classify_accuracy_failure(score: Any, floor: float) -> str | None:
     """Classify an accuracy verdict; ``None`` means it passes the floor."""
-    val = _finite_score(score)
+    val = finite_score(score)
     if val is None:
         return EVAL_KIND_ACCURACY_UNAVAILABLE
     if val <= 0.0 or val < floor:
@@ -165,13 +139,11 @@ def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, s
     if not config_path:
         return {}
     try:
-        import yaml as _yaml
-
         p = Path(config_path)
         if not p.is_file():
             return {}
-        data = _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    except Exception:  # noqa: BLE001 — best-effort
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError, yaml.YAMLError):
         return {}
 
     bench = data.get("benchmark") or {}
@@ -216,8 +188,6 @@ def eval_contract_fingerprint(
     config_path: str | Path | None,
     framework: str | None = None,
     model: str | None = None,
-    task: str | None = None,
-    metric: str | None = None,
 ) -> str:
     """Short stable digest of the eval contract (workload + eval definition)."""
     contract = _extract_eval_contract_fields(config_path)
@@ -339,6 +309,14 @@ def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
 
 def _latest_agentx_result(workspace: Path | str) -> dict[str, Any] | None:
     """The newest ``inferencex_result.json`` under *workspace*, or None."""
+    from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
+    from hyperloom.inference_optimizer.agentx.report import read_agentx_report
+
+    native = read_agentx_report(Path(workspace))
+    if native is not None:
+        return native
+    if is_magpie_agentx(configured_benchmark()):
+        return None
     results = [Path(f) for f in glob.glob(str(Path(workspace) / "**" / "inferencex_result.json"), recursive=True)]
     if not results:
         return None
@@ -406,6 +384,37 @@ def quality_gate_passed(
     return True
 
 
+def _agentx_accuracy_result(workspace: Path) -> dict[str, Any]:
+    """Grade an AgentX run on the request error rate upstream gates a submission on.
+
+    Fails closed like the scriptable gate: a run that reported no rate is not comparable, and treating that as a
+    pass is how an incomparable measurement reaches the leaderboard set.
+    """
+    rate = parse_agentx_error_rate(workspace)
+    passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
+    log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
+
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+
+    if not is_mlperf_backend():
+        return {
+            "accuracy": 1.0 if passed else 0.0,
+            "task": "agentx_error_rate",
+            "metric": "request_error_rate",
+            "error_rate": rate,
+        }
+    # The harness scores every smoke run inline, so each KEEP is gated on that score against the baseline's, the
+    # same way lm-eval accuracy is. Over the error-rate ceiling, an unscored turn or no scores.json is a drop
+    # outright: 0.0, not None, which a lane without a required gate reads as "no eval ran" and skips.
+    score = _mlperf_inline_accuracy(_latest_agentx_result(workspace)) if passed else None
+    return {
+        "accuracy": 0.0 if score is None else score,
+        "task": "mlperf_agentic_inline",
+        "metric": "score",
+        "error_rate": rate,
+    }
+
+
 def parse_eval_results(
     workspace: Path | str,
     framework: str | None = None,
@@ -418,34 +427,9 @@ def parse_eval_results(
 
     scriptable = framework_registry.is_scriptable(framework)
 
-    # AgentX has no lm-eval; its correctness signal is the error rate upstream
-    # gates a submission on. Fails closed like the scriptable gate below: a run
-    # that reported no rate is not comparable, and treating that as a pass is
-    # how an incomparable measurement reaches the leaderboard set.
+    # AgentX has no lm-eval; its correctness signal is the request error rate.
     if is_agentx_mode(benchmark_mode):
-        rate = parse_agentx_error_rate(workspace)
-        passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
-        log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
-        from hyperloom.common.agentx_workload import is_mlperf_backend
-
-        if is_mlperf_backend():
-            # The harness scores every smoke run inline, so each KEEP is gated on that score against the
-            # baseline's, the same way lm-eval accuracy is. Over the error-rate ceiling, an unscored turn or no
-            # scores.json is a drop outright: 0.0, not None, which a lane without a required gate reads as
-            # "no eval ran" and skips.
-            score = _mlperf_inline_accuracy(_latest_agentx_result(workspace)) if passed else None
-            return {
-                "accuracy": 0.0 if score is None else score,
-                "task": "mlperf_agentic_inline",
-                "metric": "score",
-                "error_rate": rate,
-            }
-        return {
-            "accuracy": 1.0 if passed else 0.0,
-            "task": "agentx_error_rate",
-            "metric": "request_error_rate",
-            "error_rate": rate,
-        }
+        return _agentx_accuracy_result(workspace)
 
     # Scriptable quality gate first: map passed->1.0 / fail->0.0.
     qg_out = parse_quality_gate(workspace)
@@ -479,6 +463,11 @@ def parse_eval_results(
             "error": qg_out.get("error", "no quality_gate"),
         }
 
+    return _lm_eval_accuracy_result(workspace)
+
+
+def _lm_eval_accuracy_result(workspace: Path) -> dict[str, Any]:
+    """Read the accuracy score from the latest lm-eval results*.json under ``workspace``."""
     search_paths = [
         workspace / "eval_*" / "**" / "results*.json",
         workspace / "**" / "results*.json",
@@ -501,7 +490,7 @@ def parse_eval_results(
 
     results = data.get("results", {})
     for task_name, metrics in results.items():
-        for key in ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none"):
+        for key in ACCURACY_METRICS:
             if key in metrics:
                 score = metrics[key]
                 if isinstance(score, (int, float)):
@@ -511,6 +500,8 @@ def parse_eval_results(
                         "task": task_name,
                         "metric": key,
                         "source_file": str(latest),
+                        # lm-eval's own wall-clock for the run; it ran inside the round's post-ready interval.
+                        "eval_runtime_sec": optional_positive_float(data.get("total_evaluation_time_seconds")),
                     }
 
     return {"accuracy": None, "error": f"no recognized metric in {latest}"}
@@ -548,21 +539,127 @@ def eval_probe_summary(probe: dict[str, Any] | None) -> str:
     )
 
 
-def accuracy_passed(
-    baseline_accuracy: float,
-    new_accuracy: float,
-    threshold: float = ACCURACY_THRESHOLD,
-) -> bool:
-    """Return True if accuracy drop is within tolerance."""
-    if baseline_accuracy <= 0:
-        # No baseline recorded; skip gate.
-        return True
-    drop = baseline_accuracy - new_accuracy
-    return drop <= threshold
+def grade_accuracy(
+    result_dir: str,
+    baseline_accuracy: Any,
+    framework: str | None = None,
+    benchmark_mode: str = "",
+) -> bool | None:
+    """Grade a bench's accuracy against the baseline.
+
+    With a recorded baseline the measured drop is enforced; without one
+    (or no eval result) the check is skipped (``None``) and warned loudly.
+    For scriptable frameworks (xDiT) ``parse_eval_results`` fails closed on
+    a missing quality gate instead of falling back to GSM8K.
+    """
+    # Accept numeric strings in addition to int/float; non-numeric / missing
+    # values fall back to 0.0 (skip).
+    try:
+        baseline_value = float(baseline_accuracy)
+    except (TypeError, ValueError):
+        baseline_value = 0.0
+    eval_results = parse_eval_results(result_dir, framework=framework, benchmark_mode=benchmark_mode)
+    new_accuracy = eval_results.get("accuracy")
+    if new_accuracy is not None and baseline_value > 0:
+        return accuracy_passed(baseline_value, float(new_accuracy))
+    if baseline_value <= 0:
+        log.warning(
+            "integrate_patch: no baseline accuracy; accuracy gate skipped "
+            "(throughput-only KEEP). Accuracy regressions will not be caught.",
+        )
+    else:
+        log.warning("integrate_patch: variant produced no accuracy result; gate skipped")
+    return None
+
+
+def is_eval_origin(params: dict[str, Any]) -> bool:
+    """Whether the enablement candidate came from the eval gate, not the boot gate."""
+    return str(params.get("enablement_origin") or "") == "eval"
+
+
+def framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Force ``RUN_EVAL=true`` for framework-authored source patches.
+
+    Two independent triggers:
+
+    * **Eval-origin enablement**: force ``RUN_EVAL=true`` so ``_bench_patch``
+      can obtain a raw accuracy for the runnable gate, which fails closed
+      without one. A boot-origin candidate is only ever provisional on a
+      missing accuracy, so it inherits the session's contract instead.
+    * **Perf framework authoring**: force only when a comparable baseline
+      accuracy exists (``accuracy_baseline > 0``); otherwise leave the
+      candidate's ``RUN_EVAL`` to the materializer's default handling.
+
+    A plain configuration integrate_patch is untouched (returns ``None``).
+
+    Args:
+        params: The integrate_patch task params.
+
+    Returns:
+        ``{"RUN_EVAL": "true"}`` for eval-origin enablement patches or for
+        framework-authored perf patches with a positive baseline accuracy
+        to compare against; else ``None``.
+    """
+    if bool(params.get("enablement")):
+        return {"RUN_EVAL": "true"} if is_eval_origin(params) else None
+    fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
+    try:
+        baseline = float(params.get("accuracy_baseline") or 0.0)
+    except (TypeError, ValueError):
+        baseline = 0.0
+    return {"RUN_EVAL": "true"} if (fw_authored and baseline > 0) else None
+
+
+def enablement_correctness(
+    params: dict[str, Any],
+    gate_evidence: dict[str, Any],
+) -> tuple[bool | None, dict[str, Any]]:
+    """Judge the candidate's accuracy against the floor its origin demands.
+
+    Returns:
+        ``(correctness_ok, eval_provenance)``. ``correctness_ok`` is ``None``
+        only for a boot-origin round with no score at all, which claimed
+        nothing about accuracy; every other absence fails closed.
+    """
+    enablement_accuracy = gate_evidence.get("enablement_accuracy")
+    param_floor = params.get("enablement_accuracy_floor")
+    floor = float(param_floor) if isinstance(param_floor, (int, float)) else DEFAULT_ENABLEMENT_ACCURACY_FLOOR
+    eval_origin = is_eval_origin(params)
+    accuracy_kind = classify_accuracy_failure(enablement_accuracy, floor)
+    correctness_ok: bool | None
+    if enablement_accuracy is None:
+        # Truly absent: eval-origin fails closed; boot-origin stays provisional.
+        correctness_ok = False if eval_origin else None
+    else:
+        # Present but below floor / non-positive / non-finite is a refusal.
+        correctness_ok = accuracy_meets_floor(enablement_accuracy, floor)
+    # eval-origin only: a score with no task/metric did not come from a real
+    # eval, so it cannot clear the gate. Both keys are read from the
+    # candidate's own run, stamped beside the accuracy being judged, and not
+    # from a stored contract fingerprint: RUN_EVAL is itself a hashed contract
+    # field, so an eval-less re-baseline would change that digest and veto
+    # every later candidate without ever consulting its accuracy.
+    if (
+        eval_origin
+        and correctness_ok
+        and not (gate_evidence.get("enablement_accuracy_task") and gate_evidence.get("enablement_accuracy_metric"))
+    ):
+        correctness_ok = False
+        log.warning(
+            "integrate_patch: eval-origin accuracy %s carries no task/metric; reverting",
+            enablement_accuracy,
+        )
+    return correctness_ok, {
+        "enablement_origin": str(params.get("enablement_origin") or ""),
+        "enablement_observed_accuracy": enablement_accuracy,
+        "enablement_accuracy_floor": floor,
+        "accuracy_task": gate_evidence.get("enablement_accuracy_task") or "",
+        "accuracy_metric": gate_evidence.get("enablement_accuracy_metric") or "",
+        "enablement_eval_failure_kind": accuracy_kind or "",
+    }
 
 
 __all__ = [
-    "ACCURACY_THRESHOLD",
     "BASELINE_ACCURACY_STOP_REASON",
     "BASELINE_EVAL_ACCURACY_FLOOR_KEY",
     "BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY",
@@ -570,7 +667,6 @@ __all__ = [
     "BASELINE_EVAL_FAILED_KEY",
     "BASELINE_EVAL_FAILURE_KIND_KEY",
     "BASELINE_EVAL_OBSERVED_ACCURACY_KEY",
-    "DEFAULT_ENABLEMENT_ACCURACY_FLOOR",
     "ENABLEMENT_MODES",
     "ENABLEMENT_MODE_ALL",
     "ENABLEMENT_REVALIDATION_REASON",
@@ -585,12 +681,14 @@ __all__ = [
     "EVAL_PROBE_FILENAME",
     "_extract_eval_contract_fields",
     "accuracy_keep_block",
-    "accuracy_meets_floor",
-    "accuracy_passed",
     "classify_accuracy_failure",
+    "enablement_correctness",
     "eval_contract_fingerprint",
     "eval_enablement_allowed",
     "eval_probe_summary",
+    "framework_run_eval_envs",
+    "grade_accuracy",
+    "is_eval_origin",
     "launch_enablement_allowed",
     "parse_eval_results",
     "read_eval_probe",

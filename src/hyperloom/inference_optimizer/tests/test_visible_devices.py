@@ -21,6 +21,7 @@ from hyperloom.common.visible_devices import (
     ROCR_LEVEL_VARS,
     VISIBLE_DEVICE_VARS,
     _UNCOUNTED_VISIBLE_DEVICE_VARS,
+    detect_gpu_count,
     effective_mask_tokens,
     is_rocr_level,
     mask_tokens,
@@ -127,3 +128,11 @@ def test_parse_device_list_agrees_with_effective_tokens() -> None:
         tokens = effective_mask_tokens(raw)
         assert len(ids) <= len(tokens)
         assert ids == [int(t) for t in tokens if t.lstrip("-").isdigit()]
+
+
+@pytest.mark.parametrize(("raw", "count"), [("3,3,2", 2), ("0;1", 2), ("-1", 0), (",,", 0)])
+def test_detect_gpu_count_counts_the_effective_mask(monkeypatch: pytest.MonkeyPatch, raw: str, count: int) -> None:
+    """A set mask is counted from its effective devices and never falls through to a later mask or rocm-smi."""
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", raw)
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")
+    assert detect_gpu_count() == count

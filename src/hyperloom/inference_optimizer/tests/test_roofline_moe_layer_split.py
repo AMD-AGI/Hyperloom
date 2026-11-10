@@ -99,7 +99,9 @@ def _flash_meta(**over) -> rc.ModelMeta:
 
 def _breakdown(meta):
     return rc.compute_roofline_from_perfmodel(
-        meta=meta, gpu_type="mi355x", concurrency=8, isl=1024, osl=128, num_gpus=1
+        meta=meta,
+        target=rc.ComputeTarget(gpu_type="mi355x", num_gpus=1, precision_tag="bf16"),
+        shape=rc.DecodeShape(isl=1024, osl=128, concurrency=8),
     )
 
 

@@ -27,10 +27,6 @@ def test_targeted_build_action_round_trip():
         repo_url="https://github.com/ROCm/aiter",
         ref="v0.1.0",
         gpu_arch="gfx950",
-        max_jobs=8,
-        build_command=("python", "setup.py", "develop"),
-        build_budget_sec=2400,
-        envs={"AITER_REBUILD": "1"},
         attempt_root="/s/enablement/builds/a1",
     )
     assert TargetedBuildAction.from_state(a.to_state()) == a
@@ -40,26 +36,11 @@ def test_targeted_build_action_defaults():
     b = TargetedBuildAction.from_state({"framework": "VLLM", "gap_id": "g"})
     assert b.framework == "vllm"
     assert b.component == "aiter"  # invalid/absent coerced
-    assert b.torch_constraint_mode == "constraint_file"
-    assert b.build_command == ()
-    assert b.max_jobs == 0
 
 
 def test_targeted_build_action_invalid_component_coerced():
     b = TargetedBuildAction.from_state({"framework": "vllm", "component": "bogus"})
     assert b.component == "aiter"
-
-
-def test_targeted_build_action_invalid_torch_constraint_mode_coerced():
-    """An unknown torch_constraint_mode falls back to the constraint_file default."""
-    b = TargetedBuildAction.from_state({"framework": "vllm", "torch_constraint_mode": "bogus_mode"})
-    assert b.torch_constraint_mode == "constraint_file"
-
-
-def test_targeted_build_action_invalid_ints_coerced():
-    b = TargetedBuildAction.from_state({"framework": "vllm", "max_jobs": "x", "build_budget_sec": None})
-    assert b.max_jobs == 0
-    assert b.build_budget_sec == 0
 
 
 def test_targeted_build_action_from_none():
@@ -117,8 +98,8 @@ def _action(**kw):
 
 
 def test_novelty_key_repeat_is_equal():
-    a = _action(ref="v1", gpu_arch="gfx950", build_command=("make",))
-    b = _action(ref="v1", gpu_arch="gfx950", build_command=("make",), reason="differs but irrelevant")
+    a = _action(ref="v1", gpu_arch="gfx950")
+    b = _action(ref="v1", gpu_arch="gfx950", reason="differs but irrelevant")
     assert build_novelty_key(a) == build_novelty_key(b)
 
 
@@ -128,12 +109,10 @@ def test_novelty_key_novel_ref_differs():
     assert build_novelty_key(a) != build_novelty_key(b)
 
 
-def test_novelty_key_novel_arch_and_command_differ():
-    a = _action(ref="v1", gpu_arch="gfx942", build_command=("make",))
-    b = _action(ref="v1", gpu_arch="gfx950", build_command=("make",))
-    c = _action(ref="v1", gpu_arch="gfx942", build_command=("ninja",))
+def test_novelty_key_novel_arch_differs():
+    a = _action(ref="v1", gpu_arch="gfx942")
+    b = _action(ref="v1", gpu_arch="gfx950")
     assert build_novelty_key(a) != build_novelty_key(b)
-    assert build_novelty_key(a) != build_novelty_key(c)
 
 
 def test_novelty_key_novel_repo_and_capability_differ():

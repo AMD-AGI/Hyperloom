@@ -1,0 +1,699 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyperloom.amd.com/contracts/measurement_spec.v1.schema.json",
+  "title": "MeasurementSpec v1",
+  "description": "The instruction sheet the application writes to /in/spec.json of an authoritative sandbox.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "request_id",
+    "kind",
+    "meta",
+    "hardware",
+    "image",
+    "config",
+    "attachments",
+    "process_env",
+    "platform_env",
+    "unset_envs",
+    "tools",
+    "environment",
+    "model_hashes",
+    "procedure",
+    "outputs"
+  ],
+  "properties": {
+    "schema": {
+      "const": "hyperloom.measurement-spec/v1"
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "enum": [
+        "test",
+        "profile",
+        "accuracy",
+        "repro"
+      ]
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "purpose",
+        "branch_id",
+        "parent_commit"
+      ],
+      "properties": {
+        "purpose": {
+          "enum": [
+            "baseline",
+            "health",
+            "explore",
+            "confirm",
+            "integration",
+            "profile",
+            "accuracy",
+            "repro",
+            "final"
+          ]
+        },
+        "priority": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 4
+        },
+        "branch_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parent_commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retest_of": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "purpose": {
+                "const": "confirm"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "retest_of"
+            ],
+            "properties": {
+              "retest_of": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "retest_of": {
+                "type": [
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gpu_type",
+        "gpu_count"
+      ],
+      "properties": {
+        "gpu_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gpu_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "power_cap_w": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "partition_mode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "digest"
+      ],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "config": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "yaml",
+          "sha256"
+        ],
+        "properties": {
+          "yaml": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "blob",
+          "manifest_sha256"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "kind": {
+            "enum": [
+              "file",
+              "dir"
+            ]
+          },
+          "blob": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "manifest_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "process_env": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "platform_env": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "HSA_ENABLE_SDMA",
+          "NCCL_CHECKS_DISABLE",
+          "NCCL_CROSS_NIC",
+          "NCCL_IB_TIMEOUT",
+          "NCCL_IB_RETRY_CNT",
+          "NCCL_IB_QPS_PER_CONNECTION",
+          "NCCL_IB_SL"
+        ]
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "unset_envs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "magpie",
+        "inferencex"
+      ],
+      "properties": {
+        "magpie": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commit"
+          ],
+          "properties": {
+            "commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+            }
+          }
+        },
+        "inferencex": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commit"
+          ],
+          "properties": {
+            "commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+            }
+          }
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "roots",
+        "blob_root"
+      ],
+      "properties": {
+        "roots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "kind",
+              "import_name",
+              "dist",
+              "entries"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+              },
+              "kind": {
+                "enum": [
+                  "package",
+                  "runtime"
+                ]
+              },
+              "import_name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "dist": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "version"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "version": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "entries": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "path",
+                        "op",
+                        "blob",
+                        "mode"
+                      ],
+                      "properties": {
+                        "path": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^(?!/)(?!.*\\\\)(?!.*(^|/)(\\.|\\.\\.|)(/|$))[^\\x00]+$"
+                        },
+                        "op": {
+                          "const": "upsert"
+                        },
+                        "blob": {
+                          "type": "string",
+                          "pattern": "^sha256:[0-9a-f]{64}$"
+                        },
+                        "mode": {
+                          "type": "string",
+                          "pattern": "^0[0-7]{3}$"
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "path",
+                        "op"
+                      ],
+                      "properties": {
+                        "path": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^(?!/)(?!.*\\\\)(?!.*(^|/)(\\.|\\.\\.|)(/|$))[^\\x00]+$"
+                        },
+                        "op": {
+                          "const": "delete"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "snapshot",
+                "manifest_sha256"
+              ],
+              "properties": {
+                "snapshot": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "manifest_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              }
+            }
+          ]
+        },
+        "blob_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "builds": {
+          "type": "array",
+          "description": "The ready native build of each runtime root, one each; absent from a sheet with no runtime root.",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "root_id",
+              "key",
+              "manifest_sha256"
+            ],
+            "properties": {
+              "root_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+              },
+              "key": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "manifest_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "model_hashes": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^(?!/)(?!.*\\\\)(?!.*(^|/)(\\.|\\.\\.|)(/|$))[^\\x00]+$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "procedure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prep",
+        "benchmark_backend",
+        "rounds",
+        "accuracy",
+        "timeout_sec",
+        "silence_timeout_sec",
+        "deadline_unix"
+      ],
+      "properties": {
+        "prep": {
+          "enum": [
+            "grid",
+            "conc_sweep"
+          ]
+        },
+        "benchmark_backend": {
+          "enum": [
+            "magpie",
+            "bypass"
+          ]
+        },
+        "rounds": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "warmup",
+            "measure"
+          ],
+          "properties": {
+            "warmup": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "measure": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "accuracy": {
+          "type": "boolean"
+        },
+        "timeout_sec": {
+          "type": "number",
+          "minimum": 1
+        },
+        "silence_timeout_sec": {
+          "type": "number",
+          "minimum": 1
+        },
+        "deadline_unix": {
+          "type": "number",
+          "minimum": 0
+        },
+        "decode_pass": {
+          "type": "boolean",
+          "description": "Removed: read and ignored, so a sheet written while the greedy decode pass existed still parses."
+        },
+        "short_prompts": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The short-prompt consistency check the runner runs after the test's rounds: the test's own server answers a staged set of short prompts greedily; the check boots no server. Absent when the test runs none.",
+          "required": [
+            "prompt_set",
+            "prompts_sha256",
+            "max_new_tokens",
+            "phase_cap_sec",
+            "trigger"
+          ],
+          "properties": {
+            "prompt_set": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            "prompts_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "max_new_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            },
+            "phase_cap_sec": {
+              "type": "number",
+              "minimum": 1
+            },
+            "trigger": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "recipe": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "parent_recipe": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        },
+        "long_context": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The long-context check the runner runs after the test's rounds: the test's own server answers a staged set of long synthetic prompts greedily; the check boots no server. Absent when the test runs none.",
+          "required": [
+            "prompt_set",
+            "prompts_sha256",
+            "length",
+            "max_new_tokens",
+            "concurrency",
+            "phase_cap_sec",
+            "trigger"
+          ],
+          "properties": {
+            "prompt_set": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            "prompts_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 2097152
+            },
+            "max_new_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 128
+            },
+            "concurrency": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            },
+            "phase_cap_sec": {
+              "type": "number",
+              "minimum": 1
+            },
+            "trigger": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            }
+          }
+        }
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result_dir"
+      ],
+      "properties": {
+        "result_dir": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*(^|/)(\\.|\\.\\.|)(/|$))[^\\x00]+$"
+        },
+        "max_total_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "procedure": {
+            "properties": {
+              "prep": {
+                "const": "grid"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "config": {
+            "maxItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "accuracy"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "procedure": {
+            "properties": {
+              "accuracy": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

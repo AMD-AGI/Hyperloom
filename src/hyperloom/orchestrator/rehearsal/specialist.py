@@ -6,12 +6,13 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from hyperloom.orchestrator.rehearsal.clock import VirtualClock
-from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessResult
+from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn, SpecialistSubprocessResult
 
 __all__ = ["CRASHED", "COMPLETED", "EMPTY", "HUNG", "ScriptedSpecialist", "SpecialistStep"]
 
@@ -80,40 +81,26 @@ class ScriptedSpecialist:
         steps: The dispatches to serve, in order.
         clock: The clock each step's duration is charged to.
         task_ids: Every task id that asked for a step, in order.
-        workspaces: Every workspace it wrote into, in order.
     """
 
     steps: tuple[SpecialistStep, ...]
     clock: VirtualClock = field(default_factory=VirtualClock)
     task_ids: list[str] = field(default_factory=list)
-    workspaces: list[Path] = field(default_factory=list)
 
     @property
     def served(self) -> int:
         """int: How many dispatches have been answered."""
         return len(self.task_ids)
 
-    @property
-    def retried(self) -> bool:
-        """bool: Whether a later dispatch arrived under a task id no earlier one used."""
-        return len(set(self.task_ids)) > 1
-
-    async def run(
-        self,
-        *,
-        task_id: str,
-        workspace: Path,
-        worktree: Path | None = None,
-        **_ignored: Any,
-    ) -> SpecialistSubprocessResult:
-        """Play the next step into ``workspace`` and report it.
+    async def run(self, request: SpecialistSpawn) -> SpecialistSubprocessResult:
+        """Play the next step into the request's workspace and report it.
 
         Args:
-            task_id: The dispatching task's id, kept so a retry is visible.
-            workspace: ``runs/specialist/<task_id>/``, where the step writes.
-            worktree: The per-task worktree; the done-file goes there when there
-                is one, matching where the runner looks first.
-            **_ignored: The rest of the dispatch surface, unused here.
+            request: The dispatch the runner would hand the real dispatcher. Only
+                its task id (kept so a retry is visible), its workspace
+                (``runs/specialist/<task_id>/``, where the step writes) and its
+                worktree (where the done-file goes when there is one, matching
+                where the runner looks first) are used.
 
         Returns:
             SpecialistSubprocessResult: The step's outcome.
@@ -121,24 +108,21 @@ class ScriptedSpecialist:
         Raises:
             IndexError: When the script has no step left for this dispatch.
         """
+        task_id, workspace, worktree = request.task_id, Path(request.workspace), request.worktree
         if self.served >= len(self.steps):
             raise IndexError(
                 f"scripted specialist has {len(self.steps)} steps; dispatch {self.served + 1} was requested"
             )
         step = self.steps[self.served]
         self.task_ids.append(task_id)
-        self.workspaces.append(Path(workspace))
 
         workspace.mkdir(parents=True, exist_ok=True)
         process_log = workspace / "process.log"
         process_log.write_text("\n".join(step.transcript) + ("\n" if step.transcript else ""), encoding="utf-8")
-        # A missing heartbeat is the only difference a liveness consumer can see
-        # between a specialist that is thinking and one that has stopped.
-        if step.outcome != HUNG:
-            (workspace / "heartbeat.json").write_text(
-                json.dumps({"task_id": task_id, "status": "running"}) + "\n",
-                encoding="utf-8",
-            )
+        # A silent log is the only difference a liveness consumer can see between a specialist that is thinking
+        # and one that has stopped.
+        if step.outcome == HUNG:
+            os.utime(process_log, (0, 0))
 
         done_root = worktree if worktree is not None else workspace
         payload: dict[str, Any] | None = None
@@ -159,7 +143,6 @@ class ScriptedSpecialist:
 
         elapsed = _HUNG_ELAPSED_SEC if step.outcome == HUNG else step.duration_sec
         self.clock.advance(elapsed)
-        self.clock.mark(f"specialist:{step.name or step.outcome}:{task_id}")
         return SpecialistSubprocessResult(
             done_payload=payload,
             exit_code=step.exit_code if step.exit_code is not None else _exit_code_for(step.outcome),

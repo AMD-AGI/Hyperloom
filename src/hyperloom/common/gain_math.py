@@ -1,14 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Throughput percentage-gain helpers (``gain_math``). Stdlib-only."""
+"""The bars a candidate is accepted by: throughput percentage gains, and the accuracy bars a baseline and a candidate
+are judged against with the two checks that apply them. Stdlib-only."""
 
 from __future__ import annotations
 
+import math
+import statistics
 from typing import Any
 
-from hyperloom.common.coerce import to_float
-from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_TOTAL, graded_axes_of, holds_within_band
+from hyperloom_common.coerce import to_float
+from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
+    GRADED_TOTAL,
+    VERDICT_REVERT,
+    GradedComparison,
+    graded_axes_of,
+    holds_within_band,
+)
 
 
 def gain_pct(new: float | None, base: float) -> float | None:
@@ -17,6 +27,22 @@ def gain_pct(new: float | None, base: float) -> float | None:
     if coerced is None or coerced <= 0 or base <= 0:
         return None
     return (coerced - base) / base * 100.0
+
+
+def graded_gate_row(graded: GradedComparison, keep_threshold_pct: float, reason: str) -> dict[str, Any]:
+    """The gate row an attempt records for a graded verdict: the veto, the graded axes, or the output threshold.
+
+    The anchor is the reference; the floor the candidate has to clear belongs to the gate, as the tolerance does for
+    accuracy. A degraded pair fails the graded axes it could not supply.
+    """
+    on_axes = graded.graded_on_intvty or bool(graded.degrade_reason)
+    return {
+        "gate": graded.vetoed_by or ("graded_axes" if on_axes else "keep_threshold"),
+        "passed": False if graded.degrade_reason else graded.verdict != VERDICT_REVERT,
+        "observed": graded.candidate if graded.graded_on_intvty else gain_pct(graded.candidate, graded.reference),
+        "threshold": graded.reference if graded.graded_on_intvty else keep_threshold_pct,
+        "reason": reason,
+    }
 
 
 def gain_pct_or_zero(new: float, base: float) -> float:
@@ -50,19 +76,9 @@ def conc_pair_comparison(
     """
     # The guard belongs to the interactivity objective; on the output axis there is no second axis to hold.
     guard_axis = GRADED_TOTAL if metric_key == GRADED_INTVTY else ""
-
-    def _norm_conc(p: dict[str, Any]) -> int | float | str:
-        raw = p.get("conc")
-        if isinstance(raw, bool):
-            return int(raw)
-        return raw  # type: ignore[return-value]
-
-    by_conc_b = {_norm_conc(p): p for p in baseline_points}
-    by_conc_o = {_norm_conc(p): p for p in optimized_points}
+    by_conc_b = {p.get("conc"): p for p in baseline_points}
+    by_conc_o = {p.get("conc"): p for p in optimized_points}
     rows: list[dict[str, Any]] = []
-    speedups: list[float] = []
-    successful_pairs = 0
-    failed_pairs = 0
     for c in sorted(
         set(by_conc_b) | set(by_conc_o), key=lambda x: (0, x) if isinstance(x, (int, float)) else (1, str(x))
     ):
@@ -70,21 +86,13 @@ def conc_pair_comparison(
         o = by_conc_o.get(c) or {}
         bt = to_float(b.get(metric_key))
         ot = to_float(o.get(metric_key))
-        speedup: float | None = None
-        delta_pct: float | None = None
-        if bt is not None and bt > 0 and ot is not None and ot > 0:
-            speedup = ot / bt
-            delta_pct = (speedup - 1.0) * 100.0
-            speedups.append(speedup)
-            successful_pairs += 1
-        else:
-            failed_pairs += 1
+        speedup = ot / bt if bt is not None and bt > 0 and ot is not None and ot > 0 else None
         # ``graded_axes_of`` is what normalises the sweep's ``total_token_throughput`` onto GRADED_TOTAL, so the
         # guard cannot read a differently-named axis as an absent one.
-        base_axes = graded_axes_of(b) if guard_axis else {}
-        opt_axes = graded_axes_of(o) if guard_axis else {}
+        base_axes = graded_axes_of(b)
+        opt_axes = graded_axes_of(o)
         guard_holds: bool | None = None
-        if guard_axis and base_axes.get(guard_axis) and opt_axes.get(guard_axis):
+        if base_axes.get(guard_axis) and opt_axes.get(guard_axis):
             guard_holds = holds_within_band(opt_axes, base_axes, guard_axis, noise_pct=guard_noise_pct)
         rows.append(
             {
@@ -94,54 +102,98 @@ def conc_pair_comparison(
                 "baseline_value": bt,
                 "optimized_value": ot,
                 "speedup": speedup,
-                "delta_pct": delta_pct,
+                "delta_pct": None if speedup is None else (speedup - 1.0) * 100.0,
                 "baseline_status": b.get("status"),
                 "optimized_status": o.get("status"),
                 # The guard axis beside the objective, so the frontier this rung sits on is readable rather than
                 # only the one number it was ranked by. Null off the interactivity objective, and null when a side
                 # did not measure the axis -- which is not the same as a rung that measured it and fell outside.
-                "baseline_guard": base_axes.get(guard_axis) if guard_axis else None,
-                "optimized_guard": opt_axes.get(guard_axis) if guard_axis else None,
+                "baseline_guard": base_axes.get(guard_axis),
+                "optimized_guard": opt_axes.get(guard_axis),
                 "guard_holds": guard_holds,
             }
         )
+    paired = [r for r in rows if r["speedup"] is not None]
     summary: dict[str, Any] = {
         "metric": metric_key,
         # The axis held beside the objective, empty off the interactivity objective. Named here so a reader of
         # ``best_conc_guard_holds`` does not have to infer which axis the verdict is about.
         "guard_axis": guard_axis,
-        "successful_pairs": successful_pairs,
-        "failed_pairs": failed_pairs,
-        "best_conc": None,
-        "best_speedup": None,
-        "best_conc_guard_holds": None,
-        "median_speedup": None,
-        "mean_speedup": None,
+        "successful_pairs": len(paired),
+        "failed_pairs": len(rows) - len(paired),
+        **dict.fromkeys(("best_conc", "best_speedup", "best_conc_guard_holds", "median_speedup", "mean_speedup")),
     }
-    if speedups:
-        best_idx, best_val = max(
-            ((i, r["speedup"]) for i, r in enumerate(rows) if isinstance(r.get("speedup"), float)),
-            key=lambda x: x[1],
-        )
-        sorted_sp = sorted(speedups)
-        n = len(sorted_sp)
-        median = sorted_sp[n // 2] if n % 2 == 1 else 0.5 * (sorted_sp[n // 2 - 1] + sorted_sp[n // 2])
+    if paired:
+        best = max(paired, key=lambda r: r["speedup"])
+        speedups = [r["speedup"] for r in paired]
         summary.update(
             {
-                "best_conc": rows[best_idx]["conc"],
-                "best_speedup": round(best_val, 4),
+                "best_conc": best["conc"],
+                "best_speedup": round(best["speedup"], 4),
                 # The headline rung is the best on the objective alone. Whether the session's own KEEP rule would
                 # have accepted it is a second fact, and the two disagreeing is worth seeing rather than resolving.
-                "best_conc_guard_holds": rows[best_idx]["guard_holds"],
-                "median_speedup": round(median, 4),
+                "best_conc_guard_holds": best["guard_holds"],
+                "median_speedup": round(statistics.median(speedups), 4),
                 "mean_speedup": round(sum(speedups) / len(speedups), 4),
             }
         )
     return rows, summary
 
 
+ACCURACY_THRESHOLD = 0.05  # allowed deviation
+
+# Upstream rejects an AgentX submission whose error rate over completed requests exceeds 10% (InferenceX
+# ``validate_agentic_result.py``). A percentage because that is aiperf's unit: ``RequestErrorRateMetric`` is declared
+# PERCENT and derives ``100.0 * errors / total``.
+AGENTX_ERROR_RATE_THRESHOLD_PCT = 10.0
+
+# Shared accuracy floor, used by BOTH the baseline eval-failure trigger and the enablement KEEP gate so the two never
+# diverge.
+DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.5
+
+# The lm-eval metrics an eval score is read from, most preferred first; the thresholds above were set on these scores,
+# and the first task that reports one of them gives the score.
+ACCURACY_METRICS = ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none")
+
+
+def finite_score(score: Any) -> float | None:
+    """Return ``score`` as a finite float, or ``None`` when unusable."""
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    val = float(score)
+    return val if math.isfinite(val) else None
+
+
+def accuracy_meets_floor(score: Any, floor: float) -> bool:
+    """True only when ``score`` is finite, strictly positive and ``>= floor``."""
+    val = finite_score(score)
+    if val is None or val <= 0.0:
+        return False
+    return val >= floor
+
+
+def accuracy_passed(
+    baseline_accuracy: float,
+    new_accuracy: float,
+    threshold: float = ACCURACY_THRESHOLD,
+) -> bool:
+    """Return True if accuracy drop is within tolerance."""
+    if baseline_accuracy <= 0:
+        # No baseline recorded; skip gate.
+        return True
+    drop = baseline_accuracy - new_accuracy
+    return drop <= threshold
+
+
 __all__ = [
+    "ACCURACY_METRICS",
+    "ACCURACY_THRESHOLD",
+    "AGENTX_ERROR_RATE_THRESHOLD_PCT",
+    "DEFAULT_ENABLEMENT_ACCURACY_FLOOR",
+    "accuracy_meets_floor",
+    "accuracy_passed",
     "conc_pair_comparison",
+    "finite_score",
     "gain_pct",
     "gain_pct_or_zero",
     "incremental_gain_pct",

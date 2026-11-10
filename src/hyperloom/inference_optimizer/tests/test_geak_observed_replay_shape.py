@@ -16,7 +16,7 @@ derived from the canonical result rather than hardcoded corpus percentiles.
 
 import json
 
-from hyperloom.orchestrator.phases.kernel import KernelPhase
+from .conftest import make_coordinator
 
 
 def _result(dirpath, *, tput, completed, tin, tout):
@@ -35,9 +35,7 @@ def _result(dirpath, *, tput, completed, tin, tout):
 
 
 def _coord(tmp_path):
-    phase = KernelPhase.__new__(KernelPhase)
-    phase.session_dir = tmp_path
-    return phase
+    return make_coordinator(tmp_path).phase_kernel
 
 
 def test_shape_is_derived_from_the_measured_baseline(tmp_path):
@@ -112,9 +110,7 @@ def test_an_ancestor_named_like_geak_does_not_exclude_a_real_baseline(tmp_path):
         tin=86_590_710,
         tout=615_152,
     )
-    phase = KernelPhase.__new__(KernelPhase)
-    phase.session_dir = session
-    got = phase._observed_replay_shape(168.99)
+    got = _coord(session)._observed_replay_shape(168.99)
     assert got["observed_isl"] == 112_019
     assert got["observed_requests"] == 773
 

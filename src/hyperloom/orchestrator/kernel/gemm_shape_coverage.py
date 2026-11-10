@@ -8,9 +8,10 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
-from hyperloom.common.env import is_truthy
+from hyperloom_common.env import is_truthy
+from kernelforge.workflows.gemm_tune import moe_tuple
 
 # Emitted by aiter on every tuned-config lookup miss, naming the table consulted.
 _AITER_SHAPE_MISS_RE = re.compile(
@@ -117,7 +118,6 @@ def align_shapes_to_aiter_keys(
     shapes: Iterable[Shape],
     *,
     max_shapes: int = 64,
-    max_m: int = 0,
 ) -> tuple[list[Shape], dict[str, Any]]:
     """Re-key observed shapes onto the M values aiter will actually look up."""
     observed = sorted({(int(m), int(n), int(k)) for m, n, k in shapes if min(m, n, k) > 0})
@@ -125,23 +125,22 @@ def align_shapes_to_aiter_keys(
         return [], {"observed": 0, "aligned": 0, "dropped": 0, "unchanged": True}
 
     nk_pairs = sorted({(n, k) for _m, n, k in observed})
-    ladder = _pow2_ladder(max(max(m for m, _, _ in observed), int(max_m or 0)))
+    ladder = _pow2_ladder(max(m for m, _, _ in observed))
 
     ladder_rows = {(m, n, k) for n, k in nk_pairs for m in ladder}
     fine_rows = {(aiter_padded_m_fine(m), n, k) for m, n, k in observed} - ladder_rows
 
     budget = max(len(nk_pairs), int(max_shapes))
     kept = set(ladder_rows)
-    if len(kept) > budget:
-        # Drop the smallest rungs first, but never leave an (N, K) with no row.
-        for m in ladder:
+    # The budget is at least one row per (N, K), so the break fires before the
+    # last rung and no (N, K) is left without a row.
+    for m in ladder:
+        if len(kept) <= budget:
+            break
+        for n, k in nk_pairs:
             if len(kept) <= budget:
                 break
-            for n, k in nk_pairs:
-                if len(kept) <= budget:
-                    break
-                if len([1 for _m, _n, _k in kept if (_n, _k) == (n, k)]) > 1:
-                    kept.discard((m, n, k))
+            kept.discard((m, n, k))
     for shape in sorted(fine_rows, key=lambda s: s[0], reverse=True):
         if len(kept) >= budget:
             break
@@ -192,6 +191,92 @@ def write_shapes_json(shapes: Iterable[Shape], destination: Path) -> str:
     return str(destination)
 
 
+# TraceLens has spelled the tensor separator <br>, <br/> and <BR/> over time.
+_BR_SPLIT_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
+# Tolerate whitespace after the comma ("(1024, 5120)") and any leading token before the tuple.
+_TRACED_DIMS_RE = re.compile(r"\((\d+)\s*,\s*(\d+)\)")
+# TraceLens renders the dtype right after the dims: "(64,3072) fp8"; dots keep "torch.float8_e4m3fn" whole.
+_TRACED_DTYPE_RE = re.compile(r"\)\s*([A-Za-z][A-Za-z0-9_.]*)")
+
+
+def canonical_dtype(raw: str) -> str:
+    """Fold a precision name or traced dtype token onto one canonical family.
+
+    Both sides of the comparison spell the same dtype many ways: a tuning
+    precision arrives as ``fp8`` / ``mxfp4``, while TraceLens renders whatever
+    the framework reported -- ``fp8_e4m3``, ``e4m3fnuz``, ``fp4x2``,
+    ``torch.float16``. Matching the raw strings drops shapes that do belong to
+    the tuned precision, so both are folded onto a family first.
+
+    Returns "" for anything unrecognised, which callers treat as "do not scope".
+    """
+    token = str(raw or "").strip().lower().removeprefix("torch.")
+    if not token:
+        return ""
+    if token.startswith(("fp4", "mxfp4", "float4")) or "e2m1" in token:
+        return "fp4"
+    if token.startswith(("fp8", "float8")) or token == "f8" or "e4m3" in token or "e5m2" in token:
+        return "fp8"
+    if token.startswith(("bf16", "bfloat16")) or token == "b16":
+        return "bf16"
+    if token.startswith(("fp16", "float16")) or token in {"f16", "half"}:
+        return "fp16"
+    return ""
+
+
+def _traced_mnk(a_text: str, b_text: str, wanted_dtype: str) -> Shape | None:
+    """Derive (M, N, K) from the A ``(M,K)`` and B tensor texts."""
+    if wanted_dtype:
+        found = _TRACED_DTYPE_RE.search(a_text)
+        if not found or canonical_dtype(found.group(1)) != wanted_dtype:
+            return None
+    m0 = _TRACED_DIMS_RE.search(a_text)
+    m1 = _TRACED_DIMS_RE.search(b_text)
+    if not m0 or not m1:
+        return None
+    M, K = int(m0.group(1)), int(m0.group(2))
+    b0, b1 = int(m1.group(1)), int(m1.group(2))
+    # B is stored either (N,K) or (K,N); pick the orientation whose
+    # contracted dim matches K, else keep the legacy first-dim reading.
+    N = b0 if b1 == K else (b1 if b0 == K else b0)
+    # ``N == 1`` is a matrix-vector head (e.g. a scalar projection), not a
+    # tunable GEMM tile; it would otherwise sort first on call count and
+    # burn a tuning slot.
+    return (M, N, K) if min(M, K) > 0 and N > 1 else None
+
+
+def traced_gemm_shapes(kernel: Mapping[str, Any], *, precision: str = "") -> list[tuple[Shape, int]]:
+    """Return ``(M, N, K)`` with its call count for one ``kernel_candidates.json`` GEMM row.
+
+    ``precision`` scopes the result to one traced dtype family; empty keeps every dtype.
+    """
+    if "gemm" not in str(kernel.get("name", "")).lower():
+        return []
+    input_shapes = kernel.get("input_shapes", [])
+    if not isinstance(input_shapes, list):
+        return []
+    wanted_dtype = canonical_dtype(precision)
+    entries = [e for e in input_shapes if isinstance(e, dict) and e.get("shape")]
+
+    # Legacy format: one entry carries every tensor, "<br>"-joined.
+    joined: list[tuple[Shape, int]] = []
+    matched_joined = False
+    for entry in entries:
+        parts = [p.strip() for p in _BR_SPLIT_RE.split(str(entry["shape"])) if p.strip()]
+        if len(parts) < 2:
+            continue
+        matched_joined = True
+        key = _traced_mnk(parts[0], parts[1], wanted_dtype)
+        if key is not None:
+            joined.append((key, int(entry.get("call_num") or 0)))
+    if matched_joined or len(entries) < 2:
+        return joined
+
+    # Current format: one entry per tensor, so A and B are the first two.
+    key = _traced_mnk(str(entries[0]["shape"]), str(entries[1]["shape"]), wanted_dtype)
+    return [] if key is None else [(key, max(int(e.get("call_num") or 0) for e in entries[:2]))]
+
+
 def parse_aiter_shape_lookups(log_text: str) -> tuple[set[Shape], set[Shape]]:
     """Return the ``(missed, hit)`` GEMM shapes aiter reported in a server log."""
     missed = {(int(m), int(n), int(k)) for m, n, k, _table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
@@ -216,26 +301,6 @@ def parse_aiter_shape_lookups_for_tables(
         if Path(table).name in wanted
     }
     return missed, hit
-
-
-def _split_fmoe_tuple(raw: str) -> list[str]:
-    """Split a fused-MoE dispatch tuple, respecting single-quoted fields."""
-    parts: list[str] = []
-    current: list[str] = []
-    in_quote = False
-    for ch in raw:
-        if ch == "'":
-            in_quote = not in_quote
-            continue
-        if ch == "," and not in_quote:
-            parts.append("".join(current).strip())
-            current = []
-            continue
-        current.append(ch)
-    tail = "".join(current).strip()
-    if tail:
-        parts.append(tail)
-    return parts
 
 
 def _normalize_fmoe_q_dtype(value: str) -> str:
@@ -322,7 +387,7 @@ def _parse_fused_moe_dispatch_line(line: str) -> dict[str, str] | None:
         kernel_name1 = kn_match.group("kn1")
         kernel_name2 = kn_match.group("kn2")
 
-    record = _fmoe_dispatch_record(_split_fmoe_tuple(keys_raw))
+    record = _fmoe_dispatch_record(moe_tuple(keys_raw))
     if record is None:
         return None
     record["descriptor"] = descriptor
@@ -379,9 +444,6 @@ def resolve_fmoe_candidate_csv(path: str | Path) -> Path | None:
     return resolved
 
 
-FMOE_INTEGRATE_RUN = "integrate-gemm_tune_fmoe_ck"
-
-
 def log_has_fused_moe_activity(log_text: str) -> bool:
     """Return True when server.log shows fused-MoE activity we might parse."""
     text = log_text or ""
@@ -401,20 +463,14 @@ def _safe_mtime(path: Path) -> float:
         return 0.0
 
 
-def integrate_server_logs(
-    session_dir: Path,
-    integrate_name: str = FMOE_INTEGRATE_RUN,
-) -> list[Path]:
+def integrate_server_logs(session_dir: Path, integrate_name: str) -> list[Path]:
     """Server logs for one integrate run, retries included, oldest first."""
     parent = session_dir / "runs" / "integrate"
     run_dirs = [parent / integrate_name, *sorted(parent.glob(f"{integrate_name}-*"))]
     return sorted((log_path for run_dir in run_dirs for log_path in run_dir.rglob("server.log")), key=_safe_mtime)
 
 
-def read_latest_integrate_server_log(
-    session_dir: Path,
-    integrate_name: str = FMOE_INTEGRATE_RUN,
-) -> tuple[Path, str] | None:
+def read_latest_integrate_server_log(session_dir: Path, integrate_name: str) -> tuple[Path, str] | None:
     """Return the newest ``server.log`` under an integrate run, if readable."""
     logs = integrate_server_logs(session_dir, integrate_name)
     if not logs:
@@ -456,13 +512,6 @@ def tuned_fmoe_csv_rows(path: str | Path) -> list[dict[str, str]]:
     return out
 
 
-def _fmoe_candidate_row_for_dispatch(
-    record: dict[str, str],
-    candidate_rows: dict[FmoeDispatchKey, dict[str, str]],
-) -> dict[str, str] | None:
-    return candidate_rows.get(fmoe_dispatch_lookup_key(record))
-
-
 def fmoe_tuned_config_coverage(
     candidate_rows: Iterable[dict[str, str]],
     requested_dispatches: Iterable[dict[str, str]],
@@ -486,7 +535,7 @@ def fmoe_tuned_config_coverage(
             default_count += 1
             uncovered.append(record)
             continue
-        row = _fmoe_candidate_row_for_dispatch(record, by_key)
+        row = by_key.get(fmoe_dispatch_lookup_key(record))
         if row is None:
             uncovered.append(record)
             continue

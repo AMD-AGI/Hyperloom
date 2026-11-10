@@ -13,13 +13,20 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_GEAK, make_kernel_recorder
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
+    ROUTE_GEAK,
+    make_kernel_recorder,
+    record_geak_attempts,
+)
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelExit
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.coordinator_helpers import _geak_overlay_digest
+from hyperloom.orchestrator.kernel.geak_config import _geak_overlay_digest
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
+
+from ._geak_helpers import resume_pending, set_resume_pending
 
 
 def integrated_count(ext: dict) -> int:
@@ -39,7 +46,7 @@ def promotion(tmp_path, monkeypatch, request):
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "2")
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
-    coord.bus = SimpleNamespace(append_and_seq=AsyncMock())
+    coord.bus = SimpleNamespace(append_and_seq=AsyncMock(), record_observation=AsyncMock())
     coord.shared_state = SharedState(
         framework="sglang",
         benchmark_mode="synthetic",
@@ -90,7 +97,7 @@ def promotion(tmp_path, monkeypatch, request):
         assert recorder is not None
         if request.node.get_closest_marker("asyncio") is None:
             recorder.begin(tput_before=110.0)
-        coord._kernel_timeline_recorder = recorder
+        coord.phase_kernel._kernel_timeline_recorder = recorder
         yield coord, result, recorder
 
 
@@ -100,7 +107,7 @@ def rebench_task(result):
         kind="explore",
         state="succeeded",
         params={
-            "source": "resume_stack_revalidate",
+            "source": "stack_revalidate",
             "geak_fallback": True,
             "expected_cfg_hash": "candidate",
             "expected_overlay": result["final_overlay"],
@@ -133,8 +140,8 @@ async def test_geak_acceptance_requires_native_retention(
     result["duration_seconds"] = 900.0
     result["request_error_rate"] = 0.0
     state.geak_result = deepcopy(result)
-    coord._record_geak_candidate(result)
-    state.resume_pending_revalidation = True
+    coord.phase_kernel._record_geak_candidate(result)
+    set_resume_pending(state, True)
     before_best = deepcopy(state.current_best)
     before_stack = deepcopy(state.optimization_stack)
     before_gain = state.cumulative_gain_validated
@@ -161,21 +168,21 @@ async def test_geak_acceptance_requires_native_retention(
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", replay)
     if lane == "direct":
-        returned = coord._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=True)
+        returned = coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=True)
         assert returned is accepted
     elif lane == "2a":
-        returned = await coord._validate_geak_via_geak_harness(reason="retention regression")
+        returned = await coord.writeback.validate_geak_via_geak_harness(reason="retention regression")
         assert returned["validated"] is accepted
         assert len(sweep_calls) == 1
     else:
-        await coord._promote_to_shared_state(
+        await coord.writeback.promote_to_shared_state(
             "explore",
             {"output_throughput": 120.0, "best_variant": measurement, "winners": []},
             task=rebench_task(result),
         )
         assert not sweep_calls, "A conclusive retention veto must not trigger another harness"
     assert not state.geak_pending
-    assert state.resume_pending_revalidation is (not accepted)
+    assert resume_pending(state) is (not accepted)
     if accepted:
         assert state.current_best["tput"] == 120.0
         assert state.current_best["final_overlay"] == result["final_overlay"]
@@ -195,7 +202,7 @@ async def test_geak_acceptance_requires_native_retention(
             "graded_comparison_rejected",
             "rebench_did_not_beat_current_best",
         }
-    recorder.finish(tput_after=state.current_best["tput"])
+    recorder.finish(KernelExit(tput_after=state.current_best["tput"]))
     if lane == "2b":
         event = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
         rebench = event["ext"]["rebench"]
@@ -214,8 +221,8 @@ async def test_fallback_rejection_is_conclusive_and_not_validated(promotion, mon
     recorder.begin(tput_before=110.0)
     state = coord.shared_state
     state.geak_result = deepcopy(result)
-    coord._record_geak_candidate(result)
-    state.resume_pending_revalidation = True
+    coord.phase_kernel._record_geak_candidate(result)
+    set_resume_pending(state, True)
     before = deepcopy(state.current_best)
     before_gain = state.cumulative_gain_validated
 
@@ -224,13 +231,13 @@ async def test_fallback_rejection_is_conclusive_and_not_validated(promotion, mon
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", replay)
     if via_orchestrator:
-        await coord._promote_to_shared_state(
+        await coord.writeback.promote_to_shared_state(
             "explore",
             {"output_throughput": 120.0, "best_variant": {"fingerprint": "different"}, "winners": []},
             task=rebench_task(result),
         )
     else:
-        returned = await coord._validate_geak_via_geak_harness(reason="retention regression")
+        returned = await coord.writeback.validate_geak_via_geak_harness(reason="retention regression")
         assert returned == {
             "validated": False,
             "status": "no_promote",
@@ -240,7 +247,7 @@ async def test_fallback_rejection_is_conclusive_and_not_validated(promotion, mon
     assert state.cumulative_gain_validated == before_gain
     assert not state.kernel_integrate_attempts
     assert not state.geak_pending
-    assert state.resume_pending_revalidation
+    assert resume_pending(state)
     assert state.geak_result["revalidation_status"] == "no_promote"
     assert state.geak_result["final_validation"]["decision"] == "REJECTED"
 
@@ -272,7 +279,7 @@ def test_geak_promotion_retains_fresh_launch_controls(promotion, effective_flags
         },
     }
 
-    assert coord._promote_geak_from_candidate(
+    assert coord.phase_kernel.promote_geak_from_candidate(
         result, measured_tput=120.0, measurement_provenance=measurement, overlay_loaded=False
     )
     state.save(coord.session_dir)
@@ -309,36 +316,37 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
     result["kernel_journey_path"] = _journey_with_validated_keeps(coord.session_dir, [1.5])
     journey = json.loads(Path(result["kernel_journey_path"]).read_text())
     state.geak_result = deepcopy(result)
-    coord._record_geak_kernel_journey(result)
-    coord._record_geak_candidate(result)
+    coord.phase_kernel._record_geak_kernel_journey(result)
+    coord.phase_kernel._record_geak_candidate(result)
     assert state.geak_pending["self_reported_gain_pct"] == 50.0
     before = event_parts(EVENT_SECTIONS)[SECTION_GEAK_ATTEMPT][0]["e2e"]
     assert before["decision"] == "KEEP"
     assert before["validated"] is True
     assert before["integrated"] is True
-    assert before["e2e_gain_pct"] == 50.0
+    assert before["e2e_gain_pct"] is None
+    assert before["self_reported_e2e_gain_pct"] == 50.0
     if journey_missing:
         Path(result["kernel_journey_path"]).unlink()
     if closed:
-        recorder.finish(tput_after=110.0)
+        recorder.finish(KernelExit(tput_after=110.0))
 
     async def fresh_replay(**_kwargs):
         return {"status": "succeeded", "promotion_measurement": {"output_throughput": 150.0, "accuracy": 0.1}}
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", fresh_replay)
     if through_recheck:
-        await coord._promote_to_shared_state(
+        await coord.writeback.promote_to_shared_state(
             "explore",
             {"status": "succeeded", "output_throughput": None, "winners": []},
             task=rebench_task(result),
         )
     else:
-        await coord._validate_geak_via_geak_harness(reason="native_recheck_unavailable")
+        await coord.writeback.validate_geak_via_geak_harness(reason="native_recheck_unavailable")
     assert state.current_best["tput"] == 110.0
     assert state.geak_pending == {}
     assert state.geak_result["revalidation_status"] == "no_promote"
     assert not state.kernel_integrate_attempts
-    recorder.finish(tput_after=110.0)
+    recorder.finish(KernelExit(tput_after=110.0))
     event = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
     assert event["ext"]["outcome"]["delivered"] == []
     assert event["ext"]["geak"]["rebench"]["final_status"] == "no_promote"
@@ -351,7 +359,7 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
     assert integrated_count(event["ext"]) == 0
     restored = make_kernel_recorder(macro_cycle=0, route=ROUTE_GEAK, resumed=True)
     assert restored is not None
-    restored.record_geak_attempts(journey)
+    record_geak_attempts(event=restored.event_id, journey=journey)
     refreshed = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
     assert integrated_count(refreshed["ext"]) == 0
     assert settled_e2e(refreshed["ext"])["decision"] == "REVERT"
@@ -361,9 +369,9 @@ def test_geak_complete_config_survives_direct_promotion(promotion):
     coord, result, recorder = promotion
     coord.shared_state.current_best["extra_server_args"] = "--disable-radix-cache"
     result["accepted_config"] = {"flags": "", "env_map": {}, "args_mode": "replace"}
-    coord._record_geak_candidate({**result, "final_throughput_tok_s": 120.0})
+    coord.phase_kernel._record_geak_candidate({**result, "final_throughput_tok_s": 120.0})
     assert coord.shared_state.geak_pending["args_mode"] == "replace"
-    assert coord._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
+    assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
     assert coord.shared_state.current_best["extra_server_args"] == ""
     assert coord.shared_state.current_best["args_mode"] == "replace"
 
@@ -377,10 +385,12 @@ def test_geak_replay_without_launch_fields_preserves_stack_controls(promotion, a
         extra_envs={"SGLANG_AITER_MLA_PERSIST": "3"},
         args_mode="replace",
         remove_args=["--disable-radix-cache"],
-        unset_envs=["SGLANG_AITER_MLA_PERSIST"],
+        # A name the snapshot's own ``extra_envs`` does not set: an unset of a key the snapshot asserts is no delta
+        # against that snapshot, so it is not carried.
+        unset_envs=["SGLANG_MOE_PADDING"],
     )
     result["accepted_config"] = {"flags": "--mem-fraction-static 0.95", "env_map": {}, "args_mode": accepted_mode}
-    assert coord._promote_geak_from_candidate(
+    assert coord.phase_kernel.promote_geak_from_candidate(
         result, measured_tput=120.0, measurement_provenance={"accuracy": 0.9}, overlay_loaded=False
     )
     best = state.current_best
@@ -391,7 +401,7 @@ def test_geak_replay_without_launch_fields_preserves_stack_controls(promotion, a
     )
     assert best["extra_server_args"] == expected
     assert best["args_mode"] == "replace"
-    assert best["unset_envs"] == ["SGLANG_AITER_MLA_PERSIST"]
+    assert best["unset_envs"] == ["SGLANG_MOE_PADDING"]
     assert best["extra_envs"] == {"SGLANG_AITER_MLA_PERSIST": "3"}
 
 
@@ -402,7 +412,7 @@ def test_geak_replay_removal_retains_other_inherited_flags(promotion):
     coord.shared_state.baseline_config_path = str(recipe)
     coord.shared_state.current_best["extra_server_args"] = "--chunked-prefill-size 1024"
     result["accepted_config"] = {"remove_args": ["--disable-radix-cache"]}
-    assert coord._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
+    assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
     best = coord.shared_state.current_best
     assert best["extra_server_args"] == "--mem-fraction-static 0.7 --chunked-prefill-size 1024"
     assert best["args_mode"] == "replace"
@@ -419,7 +429,7 @@ def test_complete_geak_return_distinguishes_omitted_and_empty_removals(promotion
     }
     if returned_removals is not None:
         result["accepted_config"]["remove_args"] = returned_removals
-    assert coord._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
+    assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
     best = coord.shared_state.current_best
     removed = returned_removals != []
     assert best["extra_server_args"] == (
@@ -451,7 +461,7 @@ def test_legacy_readdition_survives_retention_and_rematerialization(promotion, e
     result["accepted_config"] = {"flags": readded, "env_map": {}}
     if explicit_append:
         result["accepted_config"]["args_mode"] = "append"
-    assert coord._promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
+    assert coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=120.0, overlay_loaded=False)
     state.save(coord.session_dir)
     best = SharedState.load_or_init(coord.session_dir).current_best
     assert canonical_fingerprint(best["extra_server_args"], {}) == canonical_fingerprint(
@@ -468,3 +478,22 @@ def test_legacy_readdition_survives_retention_and_rematerialization(promotion, e
         )
         == best["extra_server_args"]
     )
+
+
+@pytest.mark.parametrize(("power_w", "promoted"), [(650.0, True), (812.0, False), (None, False)])
+def test_geak_promotion_honours_the_power_budget(promotion, power_w, promoted):
+    """The replay's measured-phase power reaches the lift, so GEAK is judged on it instead of always refused."""
+    coord, result, _ = promotion
+    coord.shared_state.power_budget_w = 700.0
+    measurement = {"output_throughput": 120.0, "fingerprint": "geak-power"}
+    if power_w is not None:
+        measurement["gpu_power_by_gpu_w"] = {"4": power_w}
+
+    assert (
+        coord.phase_kernel.promote_geak_from_candidate(
+            result, measured_tput=120.0, measurement_provenance=measurement, overlay_loaded=False
+        )
+        is promoted
+    )
+    if promoted:
+        assert coord.shared_state.current_best["gpu_power_by_gpu_w"] == {"4": power_w}

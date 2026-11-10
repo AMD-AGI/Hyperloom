@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import http.client
 import os
 import time
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -27,20 +29,82 @@ def resolve_inferencex_root(bench: dict[str, Any]) -> str:
     )
 
 
+@dataclass(frozen=True)
+class ServerSpec:
+    """What a bypass server is launched with; ``profile_dir`` enables the torch profiler."""
+
+    framework: str
+    model: str
+    tp: int
+    port: int
+    max_model_len: int | None = None
+    profile_dir: str | None = None
+
+
+def _vllm_server_command(spec: ServerSpec, extra_args: list[str], *, framework_python: str) -> list[str]:
+    """Build the vLLM server launch argv, with the torch profiler when ``spec.profile_dir`` is set."""
+    if framework_python:
+        cmd = [
+            framework_python,
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            spec.model,
+            "--port",
+            str(spec.port),
+            "--tensor-parallel-size",
+            str(spec.tp),
+            "--trust-remote-code",
+        ]
+    else:
+        cmd = [
+            "vllm",
+            "serve",
+            spec.model,
+            "--port",
+            str(spec.port),
+            "--tensor-parallel-size",
+            str(spec.tp),
+            "--trust-remote-code",
+        ]
+    if spec.max_model_len:
+        cmd += ["--max-model-len", str(spec.max_model_len)]
+    if not spec.profile_dir:
+        return cmd + list(extra_args)
+    # vLLM enables the torch profiler via --profiler-config (the legacy VLLM_TORCH_PROFILER_DIR env is
+    # ignored), without which /start_profile returns 404 and no trace is written.
+    #
+    # Last, after extra_args, the way Magpie's launcher orders its own: EXTRA_VLLM_ARGS has to carry a
+    # torch_profiler_dir for the argv preflight to accept the profile bounds beside it -- ProfilerConfig
+    # refuses `profiler=torch` without one -- and that value is a placeholder standing in for whatever the
+    # launcher computes. Emitting it first would let the placeholder win vLLM's last-wins dotted-flag merge
+    # and send the trace somewhere this backend's discovery never looks.
+    return (
+        cmd
+        + list(extra_args)
+        + [
+            "--profiler-config.profiler",
+            "torch",
+            "--profiler-config.torch_profiler_dir",
+            spec.profile_dir,
+        ]
+    )
+
+
 def build_server_command(
-    *,
-    framework: str,
-    model: str,
-    tp: int,
-    port: int,
-    max_model_len: int | None,
+    spec: ServerSpec,
     extra_args: list[str],
-    profile_dir: str | None,
+    *,
     python_exe: str = "python3",
     framework_python: str = "",
 ) -> list[str]:
     """Build the per-framework server launch argv."""
-    fw = framework.lower()
+    model = spec.model
+    tp = spec.tp
+    port = spec.port
+    max_model_len = spec.max_model_len
+    profile_dir = spec.profile_dir
+    fw = spec.framework.lower()
     interp = framework_python or python_exe
     if fw == "sglang":
         cmd = [
@@ -59,52 +123,7 @@ def build_server_command(
         ]
         return cmd + list(extra_args)
     if fw == "vllm":
-        if framework_python:
-            cmd = [
-                framework_python,
-                "-m",
-                "vllm.entrypoints.openai.api_server",
-                "--model",
-                model,
-                "--port",
-                str(port),
-                "--tensor-parallel-size",
-                str(tp),
-                "--trust-remote-code",
-            ]
-        else:
-            cmd = [
-                "vllm",
-                "serve",
-                model,
-                "--port",
-                str(port),
-                "--tensor-parallel-size",
-                str(tp),
-                "--trust-remote-code",
-            ]
-        if max_model_len:
-            cmd += ["--max-model-len", str(max_model_len)]
-        if not profile_dir:
-            return cmd + list(extra_args)
-        # vLLM enables the torch profiler via --profiler-config (the legacy VLLM_TORCH_PROFILER_DIR env is
-        # ignored), without which /start_profile returns 404 and no trace is written.
-        #
-        # Last, after extra_args, the way Magpie's launcher orders its own: EXTRA_VLLM_ARGS has to carry a
-        # torch_profiler_dir for the argv preflight to accept the profile bounds beside it -- ProfilerConfig
-        # refuses `profiler=torch` without one -- and that value is a placeholder standing in for whatever the
-        # launcher computes. Emitting it first would let the placeholder win vLLM's last-wins dotted-flag merge
-        # and send the trace somewhere this backend's discovery never looks.
-        return (
-            cmd
-            + list(extra_args)
-            + [
-                "--profiler-config.profiler",
-                "torch",
-                "--profiler-config.torch_profiler_dir",
-                profile_dir,
-            ]
-        )
+        return _vllm_server_command(spec, extra_args, framework_python=framework_python)
     if fw == "atom":
         cmd = [
             interp,
@@ -122,49 +141,58 @@ def build_server_command(
         if profile_dir:
             cmd += ["--torch-profiler-dir", profile_dir]
         return cmd + list(extra_args)
-    raise ValueError(f"no server launcher for framework={framework!r}")
+    raise ValueError(f"no server launcher for framework={spec.framework!r}")
 
 
-def build_client_command(
-    *,
-    inferencex_root: str,
-    python_exe: str,
-    model: str,
-    base_url: str,
-    isl: int,
-    osl: int,
-    conc: int,
-    random_range_ratio: float,
-    result_dir: str,
-    result_filename: str,
-    num_prompts: int | None = None,
-    num_warmups: int | None = None,
-    profile: bool = False,
-    trust_remote_code: bool = False,
-) -> list[str]:
+@dataclass(frozen=True)
+class ClientRun:
+    """One InferenceX ``benchmark_serving.py`` run: its checkout and interpreter, target, load and result dir.
+
+    The result is written to ``<result_dir>/inferencex_result.json``.
+    """
+
+    inferencex_root: str
+    python_exe: str
+    model: str
+    base_url: str
+    isl: int
+    osl: int
+    conc: int
+    random_range_ratio: float
+    result_dir: str
+    num_prompts: int | None = None
+    num_warmups: int | None = None
+    profile: bool = False
+    trust_remote_code: bool = False
+    # Prompt-sampling seed; ``None`` keeps the client's own default.
+    seed: int | None = None
+
+
+def build_client_command(run: ClientRun) -> list[str]:
     """Build the InferenceX benchmark client argv."""
-    bench_py = str(Path(inferencex_root) / "utils" / "bench_serving" / "benchmark_serving.py")
-    prompts = num_prompts if num_prompts is not None else (conc if profile else conc * 10)
-    warmups = num_warmups if num_warmups is not None else 2 * conc
+    conc = run.conc
+    bench_py = str(Path(run.inferencex_root) / "utils" / "bench_serving" / "benchmark_serving.py")
+    prompts = run.num_prompts if run.num_prompts is not None else (conc if run.profile else conc * 10)
+    warmups = run.num_warmups if run.num_warmups is not None else 2 * conc
     cmd = [
-        python_exe,
+        run.python_exe,
         bench_py,
         "--model",
-        model,
+        run.model,
         "--backend",
         "vllm",
         "--base-url",
-        base_url,
+        run.base_url,
         "--endpoint",
         "/v1/completions",
         "--dataset-name",
         "random",
         "--random-input-len",
-        str(isl),
+        str(run.isl),
         "--random-output-len",
-        str(osl),
+        str(run.osl),
         "--random-range-ratio",
-        str(random_range_ratio),
+        str(run.random_range_ratio),
         "--num-prompts",
         str(prompts),
         "--max-concurrency",
@@ -178,52 +206,67 @@ def build_client_command(
         "--percentile-metrics",
         "ttft,tpot,itl,e2el",
         "--result-dir",
-        result_dir,
+        run.result_dir,
         "--result-filename",
-        f"{result_filename}.json",
+        "inferencex_result.json",
     ]
-    if profile:
+    if run.profile:
         cmd.append("--profile")
-    if trust_remote_code:
+    if run.trust_remote_code:
         cmd.append("--trust-remote-code")
+    if run.seed is not None:
+        cmd += ["--seed", str(run.seed)]
     return cmd
 
 
-def build_eval_command(
-    *,
-    python_exe: str,
-    model: str,
-    base_url: str,
-    conc: int,
-    out_dir: str,
-    tasks: str = "gsm8k",
-    batch_size: str = "auto",
-    limit: str | None = None,
-) -> list[str]:
+@dataclass(frozen=True)
+class EvalRun:
+    """One lm-eval accuracy pass against an OpenAI-compatible endpoint."""
+
+    python_exe: str
+    model: str
+    base_url: str
+    conc: int
+    out_dir: str
+    tasks: str = "gsm8k"
+    limit: str | None = None
+
+
+def build_eval_command(run: EvalRun) -> list[str]:
     """Build the lm-eval argv targeting an OpenAI-compatible endpoint."""
-    completions_url = f"{base_url.rstrip('/')}/v1/completions"
+    completions_url = f"{run.base_url.rstrip('/')}/v1/completions"
     model_args = (
-        f"model={model},base_url={completions_url},num_concurrent={conc},"
+        f"model={run.model},base_url={completions_url},num_concurrent={run.conc},"
         "tokenizer_backend=huggingface,trust_remote_code=true"
     )
     cmd = [
-        python_exe,
+        run.python_exe,
         "-m",
         "lm_eval",
         "--model",
         "local-completions",
         "--tasks",
-        tasks,
+        run.tasks,
         "--model_args",
         model_args,
         "--batch_size",
-        batch_size,
+        "auto",
         "--output_path",
-        out_dir,
+        run.out_dir,
     ]
-    if limit:
-        cmd += ["--limit", limit]
+    if run.limit:
+        cmd += ["--limit", run.limit]
     return cmd
+
+
+# Interval between readiness probes.
+_HEALTH_POLL_S = 2.0
+
+
+def _probe_health(url: str) -> int:
+    """Return the HTTP status ``url`` answers with."""
+    with urllib.request.urlopen(url, timeout=5) as resp:  # nosec B310 - fixed local health probe
+        return int(getattr(resp, "status", 0) or resp.getcode())
 
 
 def wait_for_server_ready(
@@ -231,46 +274,31 @@ def wait_for_server_ready(
     *,
     timeout_s: float,
     server_exited: Callable[[], bool],
-    poll_s: float = 2.0,
-    probe: Callable[[str], int] | None = None,
-    sleep: Callable[[float], None] = time.sleep,
-    now: Callable[[], float] = time.monotonic,
 ) -> bool:
     """Poll ``<base_url>/health`` until ready or timeout."""
     health_url = f"{base_url.rstrip('/')}/health"
-
-    def _default_probe(url: str) -> int:
-        with urllib.request.urlopen(url, timeout=5) as resp:  # nosec B310 - fixed local health probe
-            return int(getattr(resp, "status", 0) or resp.getcode())
-
-    do_probe = probe or _default_probe
-    deadline = now() + timeout_s
-    while now() < deadline:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
         try:
-            if do_probe(health_url) == 200:
+            if _probe_health(health_url) == 200:
                 return True
-        except Exception:  # noqa: BLE001 - not-ready yet; keep polling
-            pass
+        except (OSError, http.client.HTTPException, ValueError):
+            pass  # not answering yet; keep polling until the deadline
         # Checked after the probe, so a server that answered and exited in the
         # same breath is still credited with having come up.
         if server_exited():
             return False
-        sleep(poll_s)
+        time.sleep(_HEALTH_POLL_S)
     return False
 
 
-# --- server_lifecycle pid/meta helpers ------------------------------------- Filenames match Hyperloom's
-# teardown_lifecycle_server convention so a persistent bypass server can be reused across processes and torn down by
-# either side: <pid_dir>/<framework>_<port>.pid ("<pid> <pgid>") + .json meta.
-
-
-def lifecycle_pid_file(pid_dir: str, framework: str, port: int) -> Path:
-    """Return the pid file path for a persistent server."""
+def lifecycle_pid_file(pid_dir: Path | str, framework: str, port: int) -> Path:
+    """Return the pid file Magpie's reuse protocol keeps for a persistent server."""
     return Path(pid_dir) / f"{framework}_{port}.pid"
 
 
-def lifecycle_meta_file(pid_dir: str, framework: str, port: int) -> Path:
-    """Return the meta file path for a persistent server."""
+def lifecycle_meta_file(pid_dir: Path | str, framework: str, port: int) -> Path:
+    """Return the meta file Magpie's reuse protocol keeps for a persistent server."""
     return Path(pid_dir) / f"{framework}_{port}.json"
 
 
@@ -281,28 +309,33 @@ def lifecycle_files_present(pid_dir: str, framework: str, port: int) -> bool:
     )
 
 
-def write_lifecycle_files(
-    *,
-    pid_dir: str,
-    framework: str,
-    port: int,
-    pid: int,
-    pgid: int,
-    model: str,
-) -> None:
+@dataclass(frozen=True)
+class LifecycleRecord:
+    """The persistent server a lifecycle pid/meta pair records."""
+
+    framework: str
+    port: int
+    pid: int
+    pgid: int
+    model: str
+
+
+def write_lifecycle_files(pid_dir: str, record: LifecycleRecord) -> None:
     """Persist pid + meta for a lifecycle server (Hyperloom-compatible)."""
     import json as _json
 
+    framework = record.framework
+    port = record.port
     Path(pid_dir).mkdir(parents=True, exist_ok=True)
-    lifecycle_pid_file(pid_dir, framework, port).write_text(f"{pid} {pgid}\n", encoding="utf-8")
+    lifecycle_pid_file(pid_dir, framework, port).write_text(f"{record.pid} {record.pgid}\n", encoding="utf-8")
     lifecycle_meta_file(pid_dir, framework, port).write_text(
         _json.dumps(
             {
-                "pid": pid,
-                "pgid": pgid,
+                "pid": record.pid,
+                "pgid": record.pgid,
                 "framework": framework,
                 "port": port,
-                "model": model,
+                "model": record.model,
                 "base_url": f"http://127.0.0.1:{port}",
             }
         ),
@@ -310,38 +343,9 @@ def write_lifecycle_files(
     )
 
 
-def server_health_ok(base_url: str, *, probe: Callable[[str], int] | None = None) -> bool:
+def server_health_ok(base_url: str) -> bool:
     """One-shot health probe (no polling); True iff /health returns 200."""
-    health_url = f"{base_url.rstrip('/')}/health"
-
-    def _default_probe(url: str) -> int:
-        with urllib.request.urlopen(url, timeout=5) as resp:  # nosec B310 - fixed local health probe
-            return int(getattr(resp, "status", 0) or resp.getcode())
-
-    do_probe = probe or _default_probe
     try:
-        return do_probe(health_url) == 200
-    except Exception:  # noqa: BLE001
+        return _probe_health(f"{base_url.rstrip('/')}/health") == 200
+    except (OSError, http.client.HTTPException, ValueError):
         return False
-
-
-def _json_post(url: str, payload: dict[str, Any], timeout_s: float) -> Any:
-    """POST ``payload`` as JSON and return the decoded body."""
-    import json as _json
-
-    request = urllib.request.Request(  # nosec B310 - fixed local serving endpoint
-        url,
-        data=_json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=timeout_s) as resp:  # nosec B310
-        return _json.loads(resp.read().decode("utf-8", "replace"))
-
-
-def _json_get(url: str, timeout_s: float) -> Any:
-    """GET ``url`` and return the decoded JSON body."""
-    import json as _json
-
-    with urllib.request.urlopen(url, timeout=timeout_s) as resp:  # nosec B310
-        return _json.loads(resp.read().decode("utf-8", "replace"))

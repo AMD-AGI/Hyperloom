@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.session_paths import trajectory_dir
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 from hyperloom.inference_optimizer.trace import trajectory_projection as trajmap
@@ -68,7 +68,7 @@ def test_unknown_vocabulary_is_rejected(tmp_path):
         with pytest.raises(tt.TrajectoryRowError):
             tt.record_event("not-an-event")
         with pytest.raises(tt.TrajectoryRowError):
-            tt.record_event(tt.EVENT_SESSION, status="done")
+            tt.record_event(tt.EVENT_SESSION, span=tt.EventSpan(status="done"))
         with pytest.raises(tt.TrajectoryRowError):
             tt.record_event(tt.EVENT_SESSION, component="nobody")
 
@@ -104,7 +104,7 @@ def test_span_records_failure_and_cancellation(tmp_path):
                 raise RuntimeError("boom")
         with pytest.raises(asyncio.CancelledError):
             with tt.trajectory_span(tt.EVENT_SESSION):
-                raise asyncio.CancelledError()
+                raise asyncio.CancelledError
     closed = [r for r in _rows(tmp_path) if r["status"] in tt.TERMINAL_STATUSES]
     assert [r["status"] for r in closed] == [tt.STATUS_FAILED, tt.STATUS_CANCELLED]
     assert closed[0]["attributes"] == {"error_type": "RuntimeError", "error_message": "boom"}
@@ -185,7 +185,7 @@ def test_flush_projects_spans_only_and_resumes_the_shard_cursor(tmp_path, monkey
     assert [s.kwargs["name"] for s in first.spans if s.kwargs.get("metadata", {}).get("kind") == "trajectory"] == [
         "session"
     ]
-    assert lfe.read_receipt(sd)["trajectory_rows_sent"] == {"1-a.jsonl": 2}
+    assert lfe.read_receipt(sd)["rows_sent"] == {"reports/trace/trajectory/1-a.jsonl": 2}
 
     _write_shard(sd, "1-a.jsonl", [_row(span_id="s2", attributes={"name": "later"})])
     second = _FakeClient()
@@ -194,7 +194,35 @@ def test_flush_projects_spans_only_and_resumes_the_shard_cursor(tmp_path, monkey
     lfe.LangfuseEmitter(sd).flush_session()
     projected = [s.kwargs["name"] for s in second.spans if s.kwargs.get("metadata", {}).get("kind") == "trajectory"]
     assert projected == ["session:later"]
-    assert lfe.read_receipt(sd)["trajectory_rows_sent"] == {"1-a.jsonl": 3}
+    assert lfe.read_receipt(sd)["rows_sent"] == {"reports/trace/trajectory/1-a.jsonl": 3}
+
+
+def test_a_released_receipt_still_resumes_its_trajectory_shards(tmp_path, monkeypatch):
+    """v1.1.3 persists the trajectory cursors as ``trajectory_rows_sent``; a resumed leg must not re-push them."""
+    _enable_env(monkeypatch)
+    sd = tmp_path / "SID"
+    _write_manifest(sd)
+    _write_shard(
+        sd,
+        "1-a.jsonl",
+        [
+            _row(status=tt.STATUS_STARTED),
+            _row(status=tt.STATUS_COMPLETED),
+            _row(span_id="s2", attributes={"name": "later"}),
+        ],
+    )
+    released = {"trajectory_rows_sent": {"1-a.jsonl": 2}}
+    (sd / "reports" / "trace" / "langfuse_receipt.json").write_text(json.dumps(released), encoding="utf-8")
+
+    client = _FakeClient()
+    _install_fake_sdk(monkeypatch, client)
+    lfe.LangfuseEmitter(sd).flush_session()
+
+    projected = [s.kwargs["name"] for s in client.spans if s.kwargs.get("metadata", {}).get("kind") == "trajectory"]
+    assert projected == ["session:later"]
+    receipt = lfe.read_receipt(sd)
+    assert receipt["rows_sent"] == {"reports/trace/trajectory/1-a.jsonl": 3}
+    assert "trajectory_rows_sent" not in receipt
 
 
 def test_a_repeat_flush_ships_the_trajectory_tail_the_close_flush_preceded(tmp_path, monkeypatch):
@@ -223,11 +251,10 @@ def test_a_repeat_flush_ships_the_trajectory_tail_the_close_flush_preceded(tmp_p
     assert [s.kwargs["name"] for s in projected] == ["session:tail", "session"]
     assert client.flushed == flushed + 1
     assert all(s.ended for s in client.spans)
-    assert lfe.read_receipt(sd)["trajectory_rows_sent"] == {"1-a.jsonl": 3}
+    assert lfe.read_receipt(sd)["rows_sent"] == {"reports/trace/trajectory/1-a.jsonl": 3}
 
     emitter.flush_session()
     assert len([s for s in client.spans if s.kwargs.get("metadata", {}).get("kind") == "trajectory"]) == 2
-    assert client.flushed == flushed + 1
 
 
 def _heartbeat() -> Intent:
@@ -242,7 +269,7 @@ async def test_coordinator_run_is_one_session_span(session_dir):
         backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(silent, name="c")},
     )
     try:
-        assert await c.run(max_ticks=2) == "max_ticks"
+        assert await c.run(options=RunOptions(max_ticks=2)) == "max_ticks"
     finally:
         await c.stop()
     sessions = [r for r in _rows(session_dir) if r["event_type"] == tt.EVENT_SESSION]

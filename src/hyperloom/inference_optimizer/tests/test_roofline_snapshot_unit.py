@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from hyperloom.inference_optimizer import roofline_snapshot as rs
+from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
 
 
 _EXEC_MD = """\
@@ -60,6 +63,105 @@ def test_extract_workload_summary_full(tmp_path):
     assert out["idle_pct"] == 12.0
     assert out["comm_pct"] == 3.2
     assert out["top_bottleneck"] == "MoE_fused"
+    assert out["memcpy_pct"] is None
+
+
+_GPU_TIMELINE_CSV = """\
+type,time ms,percent
+computation_time,1295.08,96.05
+exposed_comm_time,0.0,0.0
+exposed_memcpy_time,0.24,0.0179
+total_memcpy_time,0.74,0.0550
+"""
+
+
+def _write_tracelens(tmp_path, timeline=_GPU_TIMELINE_CSV):
+    md = tmp_path / "analysis.md"
+    md.write_text(_EXEC_MD, encoding="utf-8")
+    csvs = tmp_path / "perf_report_csvs"
+    csvs.mkdir()
+    (csvs / "gpu_timeline.csv").write_text(timeline, encoding="utf-8")
+    return md
+
+
+def test_extract_workload_summary_reads_exposed_memcpy(tmp_path):
+    assert rs.extract_workload_summary(_write_tracelens(tmp_path))["memcpy_pct"] == 0.02
+
+
+def test_extract_workload_summary_reads_analysis_json(tmp_path):
+    _write_tracelens(tmp_path)
+    report = tmp_path / "analysis.json"
+    report.write_text(
+        json.dumps(
+            {
+                "executive_summary": {
+                    "metrics": {"compute_pct": 61.25, "idle_pct": 8.5, "exposed_communication_pct": 5e-05}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = rs.extract_workload_summary(report)
+    assert out == {
+        "compute_pct": 61.25,
+        "idle_pct": 8.5,
+        "comm_pct": 5e-05,
+        "memcpy_pct": 0.02,
+        "top_bottleneck": None,
+    }
+
+
+def test_analysis_json_names_top_bottleneck_and_top_kernel(tmp_path):
+    member = {"kernel_name": ["Cijk_gemm_a"], "pct_e2e": 40.0, "efficiency_percent": 65.0, "bound": "compute"}
+    other = {"kernel_name": ["norm_b"], "pct_e2e": 5.0, "efficiency_percent": None, "bound": None}
+    report = tmp_path / "analysis.json"
+    report.write_text(
+        json.dumps(
+            {
+                "top_operations": [{"rank": 1, "category": "gemm"}, {"rank": 2, "category": "norm"}],
+                "compute_optimizations": [
+                    {"operation": "op_b", "members": [other]},
+                    {"operation": "op_a", "members": [member]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    # The agent route writes category_data/ beside analysis.json but passes analysis.md; the suffix decides.
+    (tmp_path / "category_data").mkdir()
+
+    assert rs.extract_workload_summary(report)["top_bottleneck"] == "gemm"
+    assert rs.extract_top_kernel(report) == {
+        "name": "op_a",
+        "gpu_pct": 40.0,
+        "efficiency_pct": 65.0,
+        "bound_type": "compute",
+    }
+
+
+def test_analysis_json_top_kernel_of_a_task_with_no_operation_is_named_by_its_device_symbol(tmp_path):
+    member = {
+        "kernel_name": ["Cijk_gemm_a", "Cijk_gemm_a_tail"],
+        "pct_e2e": 40.0,
+        "efficiency_percent": 65.0,
+        "bound": "compute",
+    }
+    report = tmp_path / "analysis.json"
+    report.write_text(json.dumps({"compute_optimizations": [{"operation": "", "members": [member]}]}), encoding="utf-8")
+
+    assert rs.extract_top_kernel(report)["name"] == "Cijk_gemm_a"
+
+
+def test_extract_workload_summary_memcpy_none_without_row(tmp_path):
+    md = _write_tracelens(tmp_path, timeline="type,time ms,percent\ncomputation_time,1.0,90.0\n")
+    assert rs.extract_workload_summary(md)["memcpy_pct"] is None
+
+
+def test_profiler_digest_reports_memcpy(tmp_path):
+    snap = rs.build_roofline_snapshot(snapshot_id=1, ts="t1", analysis_md_path=str(_write_tracelens(tmp_path)))
+    first = rs.build_profiler_digest([snap], None).splitlines()[0]
+    assert snap["memcpy_pct"] == 0.02
+    assert first == "bound_kind=unknown  compute=70.5%  idle=12.0%  comm=3.2%  memcpy=0.0%"
 
 
 # ---- extract_top_kernel ----
@@ -116,21 +218,22 @@ def test_extract_top_kernel_unnamed_returns_none(tmp_path):
     assert rs.extract_top_kernel(md) is None
 
 
-# ---- _compute_within_and_gap ----
+# ---- within_roofline_pct / _clamp_within ----
 
 
-def test_compute_within_and_gap():
-    assert rs._compute_within_and_gap(peak=0, achieved=10) == (None, None)
-    within, gap = rs._compute_within_and_gap(peak=100, achieved=80)
-    assert within == 80.0
-    assert gap == 20.0
+def test_within_roofline_pct():
+    assert rs.within_roofline_pct(peak=0, achieved=10) is None
+    assert rs.within_roofline_pct(peak=100, achieved=80) == 80.0
 
 
-def test_compute_within_and_gap_clamps_overshoot():
+def test_clamp_within_splits_ratio_and_gap():
+    assert rs._clamp_within(None) == (None, None)
+    assert rs._clamp_within(80.0) == (80.0, 20.0)
+
+
+def test_clamp_within_caps_overshoot():
     """Beating the modelled ceiling caps ``within`` instead of reporting a negative gap."""
-    within, gap = rs._compute_within_and_gap(peak=100, achieved=120)
-    assert within == 100.0
-    assert gap == 0.0
+    assert rs._clamp_within(rs.within_roofline_pct(peak=100, achieved=120)) == (100.0, 0.0)
 
 
 def test_build_roofline_snapshot_reports_ceiling_overshoot():
@@ -138,8 +241,12 @@ def test_build_roofline_snapshot_reports_ceiling_overshoot():
         snapshot_id=1,
         ts="t0",
         analysis_md_path="",
-        theoretical_peak_tok_per_sec=100.0,
-        achieved_tok_per_sec=130.0,
+        reading=rs.RooflineReading(
+            ceiling=RooflineBreakdown(
+                mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=100.0, bound_kind="unknown"
+            ),
+            achieved_tok_per_sec=130.0,
+        ),
     )
     assert snap["within_roofline_pct"] == 100.0
     assert snap["gap_to_roofline_pct"] == 0.0
@@ -178,8 +285,12 @@ def test_build_roofline_snapshot_no_analysis():
         snapshot_id=1,
         ts="t0",
         analysis_md_path="",
-        theoretical_peak_tok_per_sec=100.0,
-        achieved_tok_per_sec=80.0,
+        reading=rs.RooflineReading(
+            ceiling=RooflineBreakdown(
+                mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=100.0, bound_kind="unknown"
+            ),
+            achieved_tok_per_sec=80.0,
+        ),
     )
     assert snap["within_roofline_pct"] == 80.0
     assert snap["theoretical_peak_tok_per_sec"] == 100.0
@@ -192,10 +303,13 @@ def test_build_roofline_snapshot_diffusion_unit():
         snapshot_id=1,
         ts="t0",
         analysis_md_path="",
-        theoretical_peak_tok_per_sec=31.5,
-        achieved_tok_per_sec=0.156,
-        bound_kind="memory",
-        throughput_unit="img/s",
+        reading=rs.RooflineReading(
+            ceiling=RooflineBreakdown(
+                mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=31.5, bound_kind="memory"
+            ),
+            achieved_tok_per_sec=0.156,
+            throughput_unit="img/s",
+        ),
     )
     assert snap["throughput_unit"] == "img/s"
     assert snap["roofline_bound_kind"] == "memory"
@@ -203,7 +317,15 @@ def test_build_roofline_snapshot_diffusion_unit():
 
 def test_build_roofline_snapshot_empty_unit_defaults_tok_s():
     snap = rs.build_roofline_snapshot(
-        snapshot_id=1, ts="t0", analysis_md_path="", theoretical_peak_tok_per_sec=10.0, throughput_unit=""
+        snapshot_id=1,
+        ts="t0",
+        analysis_md_path="",
+        reading=rs.RooflineReading(
+            ceiling=RooflineBreakdown(
+                mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=10.0, bound_kind="unknown"
+            ),
+            throughput_unit="",
+        ),
     )
     assert snap["throughput_unit"] == "tok/s"
 
@@ -265,10 +387,8 @@ def test_ceilings_comparable_detects_moved_ceiling():
     same = {"theoretical_peak_tok_per_sec": 1000.0}
     close = {"theoretical_peak_tok_per_sec": 1005.0}
     moved = {"theoretical_peak_tok_per_sec": 1400.0}
-    other_unit = {"roofline_ideal_ms": 12.0}
     assert rs.ceilings_comparable(same, close) is True
     assert rs.ceilings_comparable(same, moved) is False
-    assert rs.ceilings_comparable(same, other_unit) is False
     # No ceiling on one side: nothing was derived from it.
     assert rs.ceilings_comparable(same, {}) is True
 
@@ -330,9 +450,23 @@ def test_format_table_single_snapshot():
     }
     lines = rs.format_roofline_metrics_table(cmp)
     body = "\n".join(lines)
-    assert "Theoretical peak" in body
     assert "| Compute % | 70.0% |" in body
     assert "`k`" in body
+
+
+@pytest.mark.parametrize(
+    ("bound_kind", "unit", "named", "absent"),
+    [
+        ("memory", "tok/s", "memory-roofline ceiling", "compute-roofline"),
+        ("compute", "img/s", "compute-roofline ceiling", "memory-roofline"),
+    ],
+)
+def test_format_table_ceiling_note_follows_the_bound_kind_and_unit(bound_kind, unit, named, absent):
+    snap = {"roofline_bound_kind": bound_kind, "throughput_unit": unit, "theoretical_peak_tok_per_sec": 2.0}
+    body = "\n".join(rs.format_roofline_metrics_table({"mode": "single_snapshot", "baseline": snap}))
+    assert named in body
+    assert f"({unit})" in body
+    assert absent not in body
 
 
 def test_format_table_before_after():

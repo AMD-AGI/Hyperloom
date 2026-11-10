@@ -57,30 +57,10 @@ def test_slugify_safe_pure_ascii_passes_through():
     assert slugify_safe("MLA FP8 torch.compile incompat") == "mla-fp8-torch-compile-incompat"
 
 
-def test_slugify_safe_uses_translate_fn_for_non_ascii():
-    out = slugify_safe(
-        "FA3 cräshes ön H100 — übër",
-        translate_fn=lambda t: "fa3 h100 crash",
-    )
-    assert out == "fa3-h100-crash"
-
-
-def test_slugify_safe_fallback_prefix_when_no_translator():
+def test_slugify_safe_fallback_prefix_for_non_ascii():
     out = slugify_safe("FA3 cräshes ön H100 — übër")
     assert out.startswith("auto-")
     assert len(out.split("-", 1)[1]) == 8
-
-
-def test_slugify_safe_fallback_when_translator_raises():
-    def bad_translate(_):
-        raise RuntimeError("translation service unavailable")
-
-    out = slugify_safe(
-        "FA3 cräshes ön H100 — übër",
-        translate_fn=bad_translate,
-        fallback_prefix="critic",
-    )
-    assert out.startswith("critic-")
 
 
 def test_slugify_safe_idempotent_for_same_non_ascii_input():

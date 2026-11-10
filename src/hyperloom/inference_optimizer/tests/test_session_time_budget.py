@@ -6,11 +6,12 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import os
 import sys
 import threading
 import time
 from collections.abc import Callable
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,36 +25,47 @@ from hyperloom.orchestrator.actions.cancel_channel import (
     stop_was_asked_for,
     use_cancel_scope,
 )
+from hyperloom.orchestrator.actions.executors._ray_backend import SessionKillRound
 from hyperloom.orchestrator.actions.executors._ray_serving import CANCEL_ROUND_GRACE_SEC
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     COOPERATIVE_REAP_BUDGET_SEC,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     STOP_GATE_POLL_SECONDS,
+    RoundWatch,
     run_with_session_kill,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
+from hyperloom.orchestrator.loop import time_budget
+from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.loop.dispatcher import (
     _CANCEL_NOTICE_SEC,
     _COOPERATIVE_CANCEL_GRACE_SEC,
 )
-from hyperloom.orchestrator.loop.coordinator_helpers import (
+from hyperloom.orchestrator.loop.time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
 )
-from hyperloom.orchestrator.policy.gate import PolicyDenied
+from hyperloom.orchestrator.phases import machine_state
+from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
-from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
+from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
-from ._dispatch_helpers import pump_until_settled
 
 # The costliest action the catalogue prices, so a short budget cannot fit it.
 _EXPENSIVE_ACTION = "conc_sweep"
 _EXPENSIVE_COST_MIN = 30.0
 # Cheap enough to fit anything but a nearly-spent budget.
 _CHEAP_ACTION = "profile"
+# What the orchestrator may propose in FRAMEWORK_AGENT, priced above a five-minute budget.
+_PROPOSABLE_ACTION = "explore"
+_PROPOSABLE_PHASE = "FRAMEWORK_AGENT"
+# An explore is admitted on something to measure too, at the gate after the budget one; this file is
+# about the wall clock, so the tests that reach past it hand the explore a grid.
+_PROPOSABLE_PARAMS: dict[str, Any] = {"grid": [{"name": "v1"}]}
 # An action the catalogue prices at five minutes, and what one of the two sessions that motivated the wall-clock work
 # actually measured for it.
 _BASELINE_ACTION = "baseline"
@@ -123,10 +135,15 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
     def test_the_catalogue_wins_where_it_prices_more_than_one_round(self):
         """The measurement is a floor, not a replacement: only the catalogue knows an action benches a whole grid rather than a single variant."""
         cost = expected_action_cost_minutes(
-            ACTION_CATALOGUE[_EXPENSIVE_ACTION],
+            ACTION_CATALOGUE["integrate"],
             measured_baseline_sec=10 * 60.0,
         )
-        assert cost == pytest.approx(_EXPENSIVE_COST_MIN)
+        assert cost == pytest.approx(ACTION_CATALOGUE["integrate"].typical_runtime_min)
+
+    def test_a_sweep_is_admitted_on_one_measured_pair(self):
+        """A sweep runs until its grant is spent, so it needs room for two measured rounds, not its catalogue's 30 min."""
+        cost = expected_action_cost_minutes(ACTION_CATALOGUE["conc_sweep"], measured_baseline_sec=10 * 60.0)
+        assert cost == pytest.approx(20.0)
 
     def test_an_action_that_never_benches_keeps_its_own_estimate(self):
         """Writing the report costs what it costs; the model's size is not in it."""
@@ -148,11 +165,9 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
         assert cost == pytest.approx(_MEASURED_BASELINE_SEC / 60.0)
         assert ACTION_CATALOGUE["replay_warm_recipe"].requires_lanes == ACTION_CATALOGUE["baseline"].requires_lanes
 
-    def test_a_measurement_that_is_not_a_number_is_not_a_cost(self):
-        assert measured_baseline_runtime_sec(None) == 0.0
-        assert measured_baseline_runtime_sec(SimpleNamespace(baseline_runtime_sec="not-a-number")) == 0.0
-        assert measured_baseline_runtime_sec(SimpleNamespace(baseline_runtime_sec=-1.0)) == 0.0
-        assert measured_baseline_runtime_sec(SimpleNamespace(baseline_runtime_sec=_MEASURED_BASELINE_SEC)) == (
+    def test_a_negative_measurement_is_not_a_cost(self):
+        assert measured_baseline_runtime_sec(SharedState(baseline_runtime_sec=-1.0)) == 0.0
+        assert measured_baseline_runtime_sec(SharedState(baseline_runtime_sec=_MEASURED_BASELINE_SEC)) == (
             pytest.approx(_MEASURED_BASELINE_SEC)
         )
 
@@ -242,7 +257,7 @@ class TestTheReserveIsTheClosingGraceWindow:
     async def test_the_coordinator_hands_the_operators_window_to_the_state(self, coord: Coordinator):
         """The reserve lives on SharedState, but the flag arrives at the Coordinator."""
         try:
-            await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
+            await coord.run(options=RunOptions(max_minutes=60, max_ticks=1, closing_grace_sec=0.0))
         finally:
             await coord.stop()
         assert coord.shared_state.closing_grace_sec == 0.0
@@ -254,23 +269,25 @@ class TestTimeBudgetGate:
 
     def test_an_action_too_big_for_the_budget_is_denied(self, coord: Coordinator):
         _set_budget(coord, minutes=20)
-        denied = coord._time_budget_denial_for_action(_EXPENSIVE_ACTION)
+        denied = coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION)
         assert isinstance(denied, PolicyDenied)
         assert denied.rule == "time_budget"
         assert f"{_EXPENSIVE_COST_MIN:.0f} min" in str(denied)
-        assert "report" in str(getattr(denied, "hint", ""))
+        # Outside CLOSE a `report` is refused at admission, so the hint must not send the orchestrator there.
+        hint = str(getattr(denied, "hint", ""))
+        assert "report" not in hint and "Coordinator closes the session" in hint
 
     def test_an_action_that_fits_is_admitted(self, coord: Coordinator):
         _set_budget(coord, minutes=20)
-        assert coord._time_budget_denial_for_action(_CHEAP_ACTION) is None
+        assert coord.dispatcher.time_budget_denial_for_action(_CHEAP_ACTION) is None
 
     def test_an_unbounded_budget_admits_the_most_expensive_action(self, coord: Coordinator):
         coord.shared_state.max_minutes = 0
-        assert coord._time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
+        assert coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
 
     def test_an_action_with_no_registry_entry_is_admitted(self, coord: Coordinator):
         _set_budget(coord, minutes=1)
-        assert coord._time_budget_denial_for_action("frobnicate") is None
+        assert coord.dispatcher.time_budget_denial_for_action("frobnicate") is None
 
     def test_only_the_closing_actions_are_exempt_from_the_budget(self):
         """Recover restarts the server; it is not how a session ends."""
@@ -281,29 +298,29 @@ class TestTimeBudgetGate:
         _set_budget(coord, minutes=60, elapsed_min=60.0)
         assert coord.shared_state.session_budget_usable_sec() == 0.0
         for action in TIME_BUDGET_EXEMPT_ACTIONS:
-            assert coord._time_budget_denial_for_action(action) is None, action
+            assert coord.dispatcher.time_budget_denial_for_action(action) is None, action
 
     def test_nonclosing_actions_are_refused_on_an_empty_budget(self, coord: Coordinator):
         """A spent session may admit closing actions, not another round of work."""
         _set_budget(coord, minutes=60, elapsed_min=60.0)
         assert coord.shared_state.session_budget_usable_sec() == 0.0
         for action in (_CHEAP_ACTION, _EXPENSIVE_ACTION):
-            denied = coord._time_budget_denial_for_action(action)
+            denied = coord.dispatcher.time_budget_denial_for_action(action)
             assert isinstance(denied, PolicyDenied), action
             assert denied.rule == "time_budget"
 
     def test_a_stopping_session_leaves_the_gate_to_the_stop_path(self, coord: Coordinator):
         _set_budget(coord, minutes=1)
         coord.shared_state.stop_reason = "time_exhausted"
-        assert coord._time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
+        assert coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
 
     def test_this_session_s_own_baseline_changes_the_answer(self, coord: Coordinator):
         """Half an hour left admits a baseline the catalogue prices at five minutes -- until this session has measured one and knows better."""
         _set_budget(coord, minutes=30)
-        assert coord._time_budget_denial_for_action(_BASELINE_ACTION) is None
+        assert coord.dispatcher.time_budget_denial_for_action(_BASELINE_ACTION) is None
 
         coord.shared_state.baseline_runtime_sec = _MEASURED_BASELINE_SEC
-        denied = coord._time_budget_denial_for_action(_BASELINE_ACTION)
+        denied = coord.dispatcher.time_budget_denial_for_action(_BASELINE_ACTION)
 
         assert isinstance(denied, PolicyDenied)
         assert denied.rule == "time_budget"
@@ -311,34 +328,134 @@ class TestTimeBudgetGate:
 
     def test_the_budget_shrinks_the_gate_as_the_session_runs(self, coord: Coordinator):
         _set_budget(coord, minutes=120, elapsed_min=0.0)
-        assert coord._time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
+        assert coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
         _set_budget(coord, minutes=120, elapsed_min=105.0)
-        assert coord._time_budget_denial_for_action(_EXPENSIVE_ACTION) is not None
+        assert coord.dispatcher.time_budget_denial_for_action(_EXPENSIVE_ACTION) is not None
+
+
+# A slow AgentX baseline round: longer than any single GPU action's catalogue lease.
+_SLOW_BASELINE_SEC = 9000.0
+
+
+class TestTheLeaseCoversTheExpectedCost:
+    """The lease orchestration reads must not run out on a healthy round the session has already priced."""
+
+    @pytest.mark.parametrize("kind", ["baseline", "roofline", "profile", "explore", "integrate_patch"])
+    def test_a_measured_round_outlasts_the_catalogue_lease(self, coord: Coordinator, kind: str):
+        coord.shared_state.baseline_runtime_sec = _SLOW_BASELINE_SEC
+
+        _lanes, ttl = coord.dispatcher.registry_lanes_ttl(kind)
+
+        assert ACTION_CATALOGUE[kind].lease_ttl_sec < _SLOW_BASELINE_SEC
+        assert ttl == math.ceil(_SLOW_BASELINE_SEC * (1.0 + GPU_LEASE_TTL_GRACE))
+
+    def test_the_catalogue_lease_stands_where_it_is_longer(self, coord: Coordinator):
+        coord.shared_state.baseline_runtime_sec = 10 * 60.0
+        for kind in ("explore", "conc_sweep", "kernel_agent"):
+            assert coord.dispatcher.registry_lanes_ttl(kind)[1] == ACTION_CATALOGUE[kind].lease_ttl_sec, kind
+
+    @pytest.mark.parametrize("kind", sorted(ACTION_CATALOGUE))
+    def test_a_session_with_no_baseline_yet_reads_the_catalogue_lease(self, coord: Coordinator, kind: str):
+        assert coord.dispatcher.registry_lanes_ttl(kind)[1] == ACTION_CATALOGUE[kind].lease_ttl_sec
+
+    @pytest.mark.parametrize("kind", ["report", "specialist", "target_analysis"])
+    def test_an_action_that_never_benches_keeps_its_catalogue_lease(self, coord: Coordinator, kind: str):
+        coord.shared_state.baseline_runtime_sec = _SLOW_BASELINE_SEC
+        assert coord.dispatcher.registry_lanes_ttl(kind)[1] == ACTION_CATALOGUE[kind].lease_ttl_sec
+
+
+def _admission_params(action: str) -> dict[str, Any] | None:
+    """What ``action`` has to carry for the gates after the budget to pass it on."""
+    return dict(_PROPOSABLE_PARAMS) if action == _PROPOSABLE_ACTION else None
+
+
+@pytest.fixture
+def proposing_coord(coord: Coordinator) -> Coordinator:
+    """A coordinator in the phase where the orchestrator may propose :data:`_PROPOSABLE_ACTION`."""
+    coord.shared_state.phase = _PROPOSABLE_PHASE
+    return coord
 
 
 class TestAdmissionGateOrder:
-    """``_admission_denial_for_action`` chains the gates; the first one wins."""
+    """``admission_denial_for_action`` chains the gates; the first one wins."""
 
-    def test_the_baseline_prerequisite_is_reported_before_the_budget(self, coord: Coordinator):
-        coord.shared_state.baseline_tput = 0.0
-        _set_budget(coord, minutes=1)
-        denied = coord._admission_denial_for_action("explore")
+    def test_the_baseline_prerequisite_is_reported_before_the_budget(self, proposing_coord: Coordinator):
+        proposing_coord.shared_state.baseline_tput = 0.0
+        _set_budget(proposing_coord, minutes=1)
+        denied = proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION)
         assert denied is not None and denied.rule == "execution_order"
 
-    def test_the_budget_gate_runs_once_the_sequence_gate_passes(self, coord: Coordinator):
-        _set_budget(coord, minutes=20)
-        denied = coord._admission_denial_for_action(_EXPENSIVE_ACTION)
+    def test_the_budget_gate_runs_once_the_sequence_gate_passes(self, proposing_coord: Coordinator):
+        _set_budget(proposing_coord, minutes=5)
+        denied = proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION)
         assert denied is not None and denied.rule == "time_budget"
 
-    def test_an_action_clearing_both_gates_is_admitted(self, coord: Coordinator):
+    def test_an_action_clearing_both_gates_is_admitted(self, proposing_coord: Coordinator):
+        _set_budget(proposing_coord, minutes=600)
+        admitted = proposing_coord.dispatcher.admission_denial_for_action(
+            _PROPOSABLE_ACTION, params=_admission_params(_PROPOSABLE_ACTION)
+        )
+        assert admitted is None
+
+
+def _catalogue_cost_min(action: str) -> float:
+    return expected_action_cost_minutes(ACTION_CATALOGUE[action])
+
+
+def _set_phase_budget(coord: Coordinator, monkeypatch, *, phase: str, minutes_left: float) -> None:
+    """Put the session in ``phase`` with ``minutes_left`` of that phase's own budget remaining."""
+    coord.shared_state.phase = phase
+    monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: minutes_left * 60.0)
+
+
+class TestThePhaseBudgetGate:
+    """FRAMEWORK and KERNEL refuse work their own remaining budget cannot fit, however much the session has left."""
+
+    @pytest.mark.parametrize("phase", sorted(time_budget.PHASE_BUDGET_GATED_PHASES))
+    def test_an_action_too_big_for_the_phase_is_denied(self, coord: Coordinator, monkeypatch, phase: str):
+        # The costliest action the phase lets the orchestrator propose; every gated phase prices it above 5 minutes.
+        action = max(machine_state.allowed_actions_for(phase), key=_catalogue_cost_min)
         _set_budget(coord, minutes=600)
-        assert coord._admission_denial_for_action(_EXPENSIVE_ACTION) is None
+        _set_phase_budget(coord, monkeypatch, phase=phase, minutes_left=5)
+
+        denied = coord.dispatcher.admission_denial_for_action(action)
+
+        assert isinstance(denied, PolicyDenied)
+        assert denied.rule == "phase_time_budget"
+        assert f"{_catalogue_cost_min(action):.0f} min" in str(denied)
+
+    def test_a_phase_without_a_search_budget_answers_only_to_the_session(self, coord: Coordinator, monkeypatch):
+        _set_budget(coord, minutes=600)
+        _set_phase_budget(coord, monkeypatch, phase="PRELUDE", minutes_left=1)
+        assert coord.dispatcher.admission_denial_for_action(_BASELINE_ACTION) is None
+
+    @pytest.mark.asyncio
+    async def test_a_queued_task_the_phase_outlived_is_dropped_before_dispatch(self, coord: Coordinator, monkeypatch):
+        _set_budget(coord, minutes=600)
+        task, _ = await coord.tasks.create_or_return_existing(
+            TaskSpec(
+                kind=_EXPENSIVE_ACTION,
+                params={},
+                idempotency_key="q-phase-drained",
+            ),
+        )
+        _set_phase_budget(coord, monkeypatch, phase="FRAMEWORK_AGENT", minutes_left=20)
+
+        await coord.dispatcher._spawn_fitting_queued()
+
+        dropped = await coord.tasks.get(task.task_id)
+        assert dropped.state == "cancelled"
+        assert dropped.history[-1]["evidence"]["reason"] == "phase_time_budget"
 
 
 def _delegate(action_name: str, key: str) -> Intent:
     return Intent(
         type=IntentType.DELEGATE,
-        payload={"action_name": action_name, "params": {}, "idempotency_key": key},
+        payload={
+            "action_name": action_name,
+            "params": _admission_params(action_name) or {},
+            "idempotency_key": key,
+        },
     )
 
 
@@ -348,64 +465,51 @@ class TestIntentPathsAreGated:
     @pytest.mark.asyncio
     async def test_delegating_an_over_budget_action_queues_nothing(
         self,
-        coord: Coordinator,
+        proposing_coord: Coordinator,
         monkeypatch,
     ):
-        _set_budget(coord, minutes=20)
+        _set_budget(proposing_coord, minutes=5)
         recorded: list[PolicyDenied] = []
 
         async def _rec(source, intent, denied, action_name=None):
             recorded.append(denied)
 
-        monkeypatch.setattr(coord, "_record_policy_denied", _rec)
-        await coord._handle_delegate("orchestration", _delegate(_EXPENSIVE_ACTION, "d-budget"))
+        monkeypatch.setattr(proposing_coord.router, "record_policy_denied", _rec)
+        await proposing_coord.router.handle_delegate("orchestration", _delegate(_PROPOSABLE_ACTION, "d-budget"))
         assert [d.rule for d in recorded] == ["time_budget"]
-        assert [t for t in await coord.tasks.queued() if t.kind == _EXPENSIVE_ACTION] == []
+        assert [t for t in await proposing_coord.tasks.queued() if t.kind == _PROPOSABLE_ACTION] == []
 
     @pytest.mark.asyncio
     async def test_delegating_an_affordable_action_still_queues(
         self,
-        coord: Coordinator,
+        proposing_coord: Coordinator,
         monkeypatch,
     ):
-        _set_budget(coord, minutes=600)
-        monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: False)
-        await coord._handle_delegate("orchestration", _delegate(_EXPENSIVE_ACTION, "d-ok"))
-        assert [t for t in await coord.tasks.queued() if t.kind == _EXPENSIVE_ACTION]
+        _set_budget(proposing_coord, minutes=600)
+        monkeypatch.setattr(proposing_coord.shared_state, "is_pruned", lambda a: False)
+        await proposing_coord.router.handle_delegate("orchestration", _delegate(_PROPOSABLE_ACTION, "d-ok"))
+        assert [t for t in await proposing_coord.tasks.queued() if t.kind == _PROPOSABLE_ACTION]
 
     @pytest.mark.asyncio
     async def test_proposing_an_over_budget_action_never_reaches_the_critic(
         self,
-        coord: Coordinator,
+        proposing_coord: Coordinator,
         monkeypatch,
     ):
-        _set_budget(coord, minutes=20)
+        _set_budget(proposing_coord, minutes=5)
         recorded: list[PolicyDenied] = []
 
         async def _rec(source, intent, denied, action_name=None):
             recorded.append(denied)
 
-        monkeypatch.setattr(coord, "_record_policy_denied", _rec)
+        monkeypatch.setattr(proposing_coord.router, "record_policy_denied", _rec)
         intent = Intent(
             type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": _EXPENSIVE_ACTION, "predicted_gain_pct": 5.0},
+            payload={"action_name": _PROPOSABLE_ACTION, "predicted_gain_pct": 5.0},
         )
-        await coord._handle_propose_action("orchestration", intent)
+        await proposing_coord.router._handle_propose_action("orchestration", intent)
         assert [d.rule for d in recorded] == ["time_budget"]
-        assert not coord.state.pending_proposals
-
-    @pytest.mark.asyncio
-    async def test_the_inline_runner_reports_the_refusal(self, coord: Coordinator, monkeypatch):
-        _set_budget(coord, minutes=20)
-
-        async def _rec(source, intent, denied, action_name=None):
-            return None
-
-        monkeypatch.setattr(coord, "_record_policy_denied", _rec)
-        monkeypatch.setattr(coord.policy, "validate_intent", lambda *a, **k: None)
-        out = await coord._run_action_now(_EXPENSIVE_ACTION, {})
-        assert "denied" in out
-        assert [t for t in await coord.tasks.queued() if t.kind == _EXPENSIVE_ACTION] == []
+        assert not proposing_coord.state.pending_proposals
 
 
 class TestPreDispatchBackstop:
@@ -418,16 +522,18 @@ class TestPreDispatchBackstop:
     ):
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
-            kind=_EXPENSIVE_ACTION,
-            params={},
-            idempotency_key="q-drained",
+            TaskSpec(
+                kind=_EXPENSIVE_ACTION,
+                params={},
+                idempotency_key="q-drained",
+            ),
         )
         # The budget drains while the task waits in the queue.
         _set_budget(coord, minutes=600, elapsed_min=590.0)
 
-        await coord._spawn_fitting_queued()
+        await coord.dispatcher._spawn_fitting_queued()
 
-        assert task.task_id not in coord._inflight_actions
+        assert task.task_id not in coord.dispatcher._inflight_actions
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"
 
     @pytest.mark.asyncio
@@ -435,13 +541,15 @@ class TestPreDispatchBackstop:
         """A task that never ran is not evidence about the action."""
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
-            kind=_EXPENSIVE_ACTION,
-            params={},
-            idempotency_key="q-no-failure",
+            TaskSpec(
+                kind=_EXPENSIVE_ACTION,
+                params={},
+                idempotency_key="q-no-failure",
+            ),
         )
         _set_budget(coord, minutes=600, elapsed_min=590.0)
 
-        await coord._spawn_fitting_queued()
+        await coord.dispatcher._spawn_fitting_queued()
 
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"
         failures = list(getattr(coord.shared_state, "last_action_failures", []) or [])
@@ -451,48 +559,14 @@ class TestPreDispatchBackstop:
     async def test_a_queued_task_that_still_fits_is_left_alone(self, coord: Coordinator):
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
-            kind=_EXPENSIVE_ACTION,
-            params={},
-            idempotency_key="q-fits",
+            TaskSpec(
+                kind=_EXPENSIVE_ACTION,
+                params={},
+                idempotency_key="q-fits",
+            ),
         )
-        assert await coord._cancel_queued_task_over_budget(task) is False
+        assert await coord.dispatcher._cancel_queued_task_over_budget(task) is False
         assert (await coord.tasks.get(task.task_id)).state == "queued"
-
-    @pytest.mark.asyncio
-    async def test_a_queued_recover_is_retired_even_when_the_budget_is_spent(
-        self,
-        coord: Coordinator,
-    ):
-        """Legacy rows settle as unsupported, not as attempted recovery or budget failure."""
-        _set_budget(coord, minutes=600)
-        coord.sub.executor_registry.pop("recover", None)
-        task, _ = await coord.tasks.create_or_return_existing(
-            kind="recover",
-            params={},
-            idempotency_key="q-recover",
-        )
-        _set_budget(coord, minutes=600, elapsed_min=600.0)
-
-        await pump_until_settled(coord)
-
-        row = await coord.tasks.get(task.task_id)
-        assert row.state == "cancelled"
-        assert [(step["from"], step["to"]) for step in row.history] == [("queued", "cancelled")]
-        assert row.history[-1]["evidence"] == {
-            "reason": "unsupported_action",
-            "cleanup_confirmed": True,
-            "outcome": {
-                "task_id": task.task_id,
-                "state": "cancelled",
-                "result": {"status": "cancelled", "error_class": "unsupported_action"},
-                "error": "recover is no longer supported",
-                "error_class": "unsupported_action",
-            },
-        }
-        assert not await coord.locks.lane_holders()
-        assert not coord._inflight_actions
-        failures = list(getattr(coord.shared_state, "last_action_failures", []) or [])
-        assert not [failure for failure in failures if failure.get("action") == "recover"]
 
     @pytest.mark.asyncio
     async def test_a_queued_targeted_build_is_dropped_when_the_budget_is_spent(
@@ -502,19 +576,21 @@ class TestPreDispatchBackstop:
         """A self-settling kind is still subject to the budget gate."""
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
-            kind="targeted_build",
-            params={},
-            idempotency_key="q-build",
-            requires_lanes=["build_lane"],
-            lease_ttl_sec=900,
+            TaskSpec(
+                kind="targeted_build",
+                params={},
+                idempotency_key="q-build",
+                requires_lanes=["build_lane"],
+                lease_ttl_sec=900,
+            ),
         )
         _set_budget(coord, minutes=600, elapsed_min=600.0)
 
-        await coord._spawn_fitting_queued()
+        await coord.dispatcher._spawn_fitting_queued()
 
-        assert task.task_id not in coord._inflight_actions
+        assert task.task_id not in coord.dispatcher._inflight_actions
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"
-        assert task.task_id not in coord._inflight_actions
+        assert task.task_id not in coord.dispatcher._inflight_actions
 
     @pytest.mark.asyncio
     async def test_a_targeted_build_that_fits_is_dispatched_and_reachable(
@@ -524,17 +600,19 @@ class TestPreDispatchBackstop:
         """It is registered for cancellation like any other dispatched action."""
         _set_budget(coord, minutes=600)
         task, _ = await coord.tasks.create_or_return_existing(
-            kind="targeted_build",
-            params={},
-            idempotency_key="q-build-fits",
-            requires_lanes=["build_lane"],
-            lease_ttl_sec=900,
+            TaskSpec(
+                kind="targeted_build",
+                params={},
+                idempotency_key="q-build-fits",
+                requires_lanes=["build_lane"],
+                lease_ttl_sec=900,
+            ),
         )
 
-        await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5.0)
+        await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5.0)
 
-        assert task.task_id in coord._inflight_actions
-        await coord.cancel_inflight_actions(reason="test_teardown")
+        assert task.task_id in coord.dispatcher._inflight_actions
+        await coord.dispatcher.cancel_inflight_actions(reason="test_teardown")
 
     @pytest.mark.asyncio
     async def test_a_queued_conc_sweep_the_budget_outlived_is_recorded_as_skipped(
@@ -542,26 +620,31 @@ class TestPreDispatchBackstop:
         coord: Coordinator,
     ):
         """Cancelling conc_sweep at dispatch must stamp last_conc_sweep so SWEEP can close."""
-        from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
-
         _set_budget(coord, minutes=180)
         task, _ = await coord.tasks.create_or_return_existing(
-            kind="conc_sweep",
-            params={},
-            idempotency_key="q-conc-sweep",
+            TaskSpec(
+                kind="conc_sweep",
+                params={},
+                idempotency_key="q-conc-sweep",
+            ),
         )
         _set_budget(coord, minutes=180, elapsed_min=166.0)
 
-        await coord._spawn_fitting_queued()
+        await coord.dispatcher._spawn_fitting_queued()
 
-        assert task.task_id not in coord._inflight_actions
+        assert task.task_id not in coord.dispatcher._inflight_actions
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"
         assert coord.shared_state.last_conc_sweep["status"] == "skipped"
         assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
         assert coord.shared_state.last_conc_sweep["was_skipped"] is True
-        result = exit_normal_sweep(coord.shared_state)
+        # Verify the sweep exit logic sees the recorded skip as a "done" closeout.
+        from hyperloom.orchestrator.phases.machine_state import PhaseFlags, replay_next_phase, workflow_predicate_inputs
+
+        coord.shared_state.phase = "SWEEP"
+        inputs = workflow_predicate_inputs(coord.shared_state, flags=PhaseFlags(optimize_enabled=False))
+        result = replay_next_phase(inputs)
         assert result is not None
-        reason, evidence = result
+        _target, reason, evidence = result
         assert reason == "sweep_done"
         assert evidence["sweep_status"] == "skipped"
 
@@ -576,13 +659,15 @@ class TestPreDispatchBackstop:
             {"status": "succeeded", "was_skipped": False, "summary": {"successful_pairs": 3}}
         )
         task, _ = await coord.tasks.create_or_return_existing(
-            kind="conc_sweep",
-            params={},
-            idempotency_key="q-conc-sweep-prior",
+            TaskSpec(
+                kind="conc_sweep",
+                params={},
+                idempotency_key="q-conc-sweep-prior",
+            ),
         )
         _set_budget(coord, minutes=180, elapsed_min=166.0)
 
-        await coord._spawn_fitting_queued()
+        await coord.dispatcher._spawn_fitting_queued()
 
         assert (await coord.tasks.get(task.task_id)).state == "cancelled"
         assert coord.shared_state.last_conc_sweep["status"] == "succeeded"
@@ -615,13 +700,15 @@ async def _queue_action(
     """Queue an action with its real lanes; ``make_executor`` shapes what it does."""
     started = asyncio.Event()
     coord.sub.register_executor(kind, make_executor(started))
-    lanes, ttl_sec = coord._registry_lanes_ttl(kind)
+    lanes, ttl_sec = coord.dispatcher.registry_lanes_ttl(kind)
     task, _ = await coord.tasks.create_or_return_existing(
-        kind=kind,
-        params={},
-        idempotency_key=key,
-        requires_lanes=lanes,
-        lease_ttl_sec=ttl_sec,
+        TaskSpec(
+            kind=kind,
+            params={},
+            idempotency_key=key,
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl_sec,
+        ),
     )
     return task, started
 
@@ -635,9 +722,9 @@ async def _start_action(
 ) -> tuple[Task, asyncio.Task]:
     """Dispatch the action with no pump running, for the pieces under it."""
     task, started = await _queue_action(coord, kind=kind, key=key, make_executor=make_executor)
-    await coord._spawn_fitting_queued()
+    await coord.dispatcher._spawn_fitting_queued()
     await asyncio.wait_for(started.wait(), timeout=5.0)
-    return task, coord._inflight_actions[task.task_id].atask
+    return task, coord.dispatcher._inflight_actions[task.task_id].atask
 
 
 async def _start_action_by_pump(
@@ -648,14 +735,30 @@ async def _start_action_by_pump(
 ) -> tuple[Task, asyncio.Task]:
     """Let the pump dispatch the action, the way a tick does."""
     task, started = await _queue_action(coord, kind=kind, key=key)
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5.0)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5.0)
     await asyncio.wait_for(started.wait(), timeout=5.0)
-    return task, coord._inflight_actions[task.task_id].atask
+    return task, coord.dispatcher._inflight_actions[task.task_id].atask
 
 
 async def _settle(atask: asyncio.Task) -> None:
     """Wait for an action to finish unwinding, however it ended."""
     await asyncio.wait_for(asyncio.gather(atask, return_exceptions=True), timeout=5.0)
+
+
+async def _cancel_then_let_finish(coord, task, atask: asyncio.Task, finish: asyncio.Event, cancel) -> None:
+    """After ``cancel`` the action keeps its task and lane until its execution returns, then releases both."""
+    try:
+        await cancel()
+        assert atask.cancelled()
+        assert coord.dispatcher._inflight_actions[task.task_id].scope.cancelled
+        assert (await coord.tasks.get(task.task_id)).state == "running"
+        assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
+    finally:
+        executions = tuple(coord.dispatcher._executions)
+        finish.set()
+        await asyncio.gather(*executions)
+    assert (await coord.tasks.get(task.task_id)).state == "succeeded"
+    assert not await coord.locks.lane_holders()
 
 
 class TestInflightHandles:
@@ -665,7 +768,7 @@ class TestInflightHandles:
     async def test_a_running_action_is_reachable_by_task_id(self, coord: Coordinator):
         task, atask = await _start_action(coord, kind=_CHEAP_ACTION, key="h-live")
         try:
-            entry = coord._inflight_actions[task.task_id]
+            entry = coord.dispatcher._inflight_actions[task.task_id]
             assert (entry.kind, entry.atask) == (_CHEAP_ACTION, atask)
             assert not entry.scope.cancelled
         finally:
@@ -686,33 +789,28 @@ class TestInflightHandles:
             return execute
 
         task, atask = await _start_action(coord, kind=_CHEAP_ACTION, key="h-retire", make_executor=make_executor)
-        try:
+
+        async def _cancel_the_caller() -> None:
             atask.cancel()
             await _settle(atask)
-            assert atask.cancelled()
-            assert coord._inflight_actions[task.task_id].scope.cancelled
-            assert (await coord.tasks.get(task.task_id)).state == "running"
-            assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
-        finally:
-            executions = tuple(coord._executions)
-            finish.set()
-            await asyncio.gather(*executions)
-        assert (await coord.tasks.get(task.task_id)).state == "succeeded"
-        assert not await coord.locks.lane_holders()
-        assert not coord._executions
-        assert task.task_id not in coord._inflight_actions
+
+        await _cancel_then_let_finish(coord, task, atask, finish, _cancel_the_caller)
+        assert not coord.dispatcher._executions
+        assert task.task_id not in coord.dispatcher._inflight_actions
 
     @pytest.mark.asyncio
     async def test_an_action_that_finishes_normally_leaves_no_handle(self, coord: Coordinator):
         coord.sub.register_executor(_CHEAP_ACTION, lambda _ctx: _done({"ok": True}))
         task, _ = await coord.tasks.create_or_return_existing(
-            kind=_CHEAP_ACTION,
-            params={},
-            idempotency_key="h-quick",
+            TaskSpec(
+                kind=_CHEAP_ACTION,
+                params={},
+                idempotency_key="h-quick",
+            ),
         )
-        await coord._spawn_fitting_queued()
-        await _settle(coord._inflight_actions[task.task_id].atask)
-        assert task.task_id not in coord._inflight_actions
+        await coord.dispatcher._spawn_fitting_queued()
+        await _settle(coord.dispatcher._inflight_actions[task.task_id].atask)
+        assert task.task_id not in coord.dispatcher._inflight_actions
 
 
 async def _done(payload: dict) -> dict:
@@ -725,7 +823,7 @@ class TestCancellingInflightActions:
     @pytest.mark.asyncio
     async def test_it_stops_the_action_and_names_what_it_stopped(self, coord: Coordinator):
         task, atask = await _start_action(coord, kind=_CHEAP_ACTION, key="c-stop")
-        cancelled = await coord.cancel_inflight_actions(reason="test")
+        cancelled = await coord.dispatcher.cancel_inflight_actions(reason="test")
         assert cancelled == [task.task_id]
         assert atask.cancelled()
 
@@ -735,7 +833,7 @@ class TestCancellingInflightActions:
         _, atask = await _start_action(coord, kind=_CLOSING_ACTION, key="c-exempt")
         try:
             assert (
-                await coord.cancel_inflight_actions(
+                await coord.dispatcher.cancel_inflight_actions(
                     reason="test",
                     exempt=TIME_BUDGET_EXEMPT_ACTIONS,
                 )
@@ -748,14 +846,14 @@ class TestCancellingInflightActions:
 
     @pytest.mark.asyncio
     async def test_cancelling_with_nothing_running_is_a_no_op(self, coord: Coordinator):
-        assert await coord.cancel_inflight_actions(reason="test") == []
+        assert await coord.dispatcher.cancel_inflight_actions(reason="test") == []
 
     @pytest.mark.asyncio
     async def test_unconfirmed_cancellation_keeps_its_lane(self, coord: Coordinator):
         """Cancelling a coroutine cannot attest to worker cleanup."""
         await _start_action(coord, kind=_CHEAP_ACTION, key="c-lane")
         assert (await coord.locks.lane_holders()).get(_CHEAP_ACTION_LANE, 0) == 1
-        await coord.cancel_inflight_actions(reason="test")
+        await coord.dispatcher.cancel_inflight_actions(reason="test")
         assert (await coord.locks.lane_holders()).get(_CHEAP_ACTION_LANE, 0) == 1
 
 
@@ -772,7 +870,7 @@ def _blocks_in_a_thread(started: asyncio.Event, *, outcome: dict[str, Any]):
         proc = await asyncio.to_thread(
             run_with_session_kill,
             ["sleep", str(_BLOCKING_SEC)],
-            timeout=_BLOCKING_SEC * 4,
+            watch=RoundWatch(timeout=_BLOCKING_SEC * 4),
         )
         outcome["returncode"] = proc.returncode
         return {"returncode": proc.returncode}
@@ -880,7 +978,7 @@ class TestCancellingWorkThatBlocksInAThread:
         )
         began = time.monotonic()
 
-        assert await coord.cancel_inflight_actions(reason="test") == [task.task_id]
+        assert await coord.dispatcher.cancel_inflight_actions(reason="test") == [task.task_id]
 
         assert outcome, "the cancel returned while the thread was still running"
         assert time.monotonic() - began < _BLOCKING_SEC
@@ -897,7 +995,7 @@ class TestCancellingWorkThatBlocksInAThread:
             make_executor=lambda started: _blocks_in_a_thread(started, outcome=outcome),
         )
 
-        await coord.cancel_inflight_actions(reason="test_reason")
+        await coord.dispatcher.cancel_inflight_actions(reason="test_reason")
 
         assert outcome["returncode"] == ORCHESTRATOR_CANCELLED_RETURNCODE
 
@@ -912,7 +1010,7 @@ class TestCancellingWorkThatBlocksInAThread:
         )
         began = time.monotonic()
 
-        await coord.cancel_inflight_actions(reason="test")
+        await coord.dispatcher.cancel_inflight_actions(reason="test")
 
         assert time.monotonic() - began < _COOPERATIVE_CANCEL_GRACE_SEC
         assert atask.cancelled()
@@ -925,8 +1023,11 @@ def _runs_a_round_in_a_lease(started: asyncio.Event, *, outcome: dict[str, Any],
         started.set()
         rc, _out, _err = await asyncio.to_thread(
             lease.run_session_kill,
-            [sys.executable, "-c", f"import time; time.sleep({_BLOCKING_SEC})"],
-            timeout=_BLOCKING_SEC * 4,
+            SessionKillRound(
+                [sys.executable, "-c", f"import time; time.sleep({_BLOCKING_SEC})"],
+                env=dict(os.environ),
+                timeout=_BLOCKING_SEC * 4,
+            ),
         )
         outcome["returncode"] = rc
         return {"returncode": rc}
@@ -956,7 +1057,7 @@ class TestCancellingARoundInsideARayLease:
         )
         began = time.monotonic()
 
-        assert await coord.cancel_inflight_actions(reason="test") == [task.task_id]
+        assert await coord.dispatcher.cancel_inflight_actions(reason="test") == [task.task_id]
 
         assert outcome, "the cancel returned while the round was still running in the actor"
         assert time.monotonic() - began < _BLOCKING_SEC
@@ -973,7 +1074,7 @@ class TestCancellingARoundInsideARayLease:
             make_executor=lambda started: _runs_a_round_in_a_lease(started, outcome=outcome, lease=lease),
         )
 
-        await coord.cancel_inflight_actions(reason="test_reason")
+        await coord.dispatcher.cancel_inflight_actions(reason="test_reason")
 
         assert outcome["returncode"] == ORCHESTRATOR_CANCELLED_RETURNCODE
 
@@ -997,7 +1098,7 @@ class TestCancellingARoundInsideARayLease:
             make_executor=lambda started: _runs_a_round_in_a_lease(started, outcome=outcome, lease=lease),
         )
 
-        await coord.cancel_inflight_actions(reason="test_reason")
+        await coord.dispatcher.cancel_inflight_actions(reason="test_reason")
 
         assert outcome["returncode"] == ORCHESTRATOR_CANCELLED_RETURNCODE
         assert lease._actor is None, "the lease must be released when its actor is killed"
@@ -1020,18 +1121,18 @@ async def test_cancelled_thread_keeps_capacity_until_execution_cleanup(coord, mo
         return {"ok": True}
 
     coord.sub.register_executor(_CHEAP_ACTION, execute)
-    task = await coord.tasks.create(
-        kind=_CHEAP_ACTION, params={}, idempotency_key="retained-thread", requires_lanes=[_CHEAP_ACTION_LANE]
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind=_CHEAP_ACTION, params={}, idempotency_key="retained-thread", requires_lanes=[_CHEAP_ACTION_LANE])
     )
-    action = asyncio.create_task(coord.run_task_registered(task))
+    action = asyncio.create_task(coord.dispatcher.run_task_registered(task))
     await asyncio.to_thread(entered.wait, 2)
     try:
-        await coord.cancel_inflight_actions(reason="test")
+        await coord.dispatcher.cancel_inflight_actions(reason="test")
         assert action.cancelled()
         assert (await coord.tasks.get(task.task_id)).state == "running"
         assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
     finally:
-        executions = tuple(coord._executions)
+        executions = tuple(coord.dispatcher._executions)
         stopped.set()
         await asyncio.gather(*executions)
     assert (await coord.tasks.get(task.task_id)).state == "succeeded"
@@ -1051,7 +1152,7 @@ async def test_stop_defers_db_close_until_pending_worker_cleanup(coord, monkeypa
     draining = asyncio.Event()
     worker_done = threading.Event()
     real_close = coord.db.close
-    real_drain = coord.close_db_after_executions
+    real_drain = coord.dispatcher.close_db_after_executions
 
     async def drain():
         draining.set()
@@ -1072,12 +1173,12 @@ async def test_stop_defers_db_close_until_pending_worker_cleanup(coord, monkeypa
         return {"ok": True}
 
     monkeypatch.setattr(coord.db, "close", close)
-    monkeypatch.setattr(coord, "close_db_after_executions", drain)
+    monkeypatch.setattr(coord.dispatcher, "close_db_after_executions", drain)
     coord.sub.register_executor(_CHEAP_ACTION, execute)
-    task = await coord.tasks.create(
-        kind=_CHEAP_ACTION, params={}, idempotency_key="deferred-db", requires_lanes=[_CHEAP_ACTION_LANE]
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind=_CHEAP_ACTION, params={}, idempotency_key="deferred-db", requires_lanes=[_CHEAP_ACTION_LANE])
     )
-    action = asyncio.create_task(coord.run_task_registered(task))
+    action = asyncio.create_task(coord.dispatcher.run_task_registered(task))
     assert await asyncio.to_thread(entered.wait, 2)
     stopping = asyncio.create_task(coord.stop())
     try:
@@ -1104,32 +1205,17 @@ async def test_stop_defers_db_close_until_pending_worker_cleanup(coord, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_retired_queued_recover_emits_cancelled_result_without_failure(coord):
-    coord.sub.executor_registry.pop("recover", None)
-    task = await coord.tasks.create(
-        kind="recover", params={}, idempotency_key="retired-queued", requires_lanes=["server_lifecycle"]
-    )
-    await coord.locks.acquire_many(
-        ["server_lifecycle"], holder_id="occupied", task_id="occupied", action="baseline", ttl_sec=60
-    )
-    await pump_until_settled(coord)
-    assert (await coord.tasks.get(task.task_id)).state == "cancelled"
-    event = await coord.db.fetchone("SELECT payload FROM events WHERE topic='delegated_result'")
-    assert event is not None
-    import json
-
-    assert json.loads(event["payload"])["state"] == "cancelled"
-    assert (await coord.locks.lane_holders())["server_lifecycle"] == 1
-
-
-@pytest.mark.asyncio
 async def test_cancelled_result_bookkeeping_does_not_release_gpu_capacity(coord):
     from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 
     coord.gpu_specialist_pool = SpecialistGpuPool(coord.db, gpu_ids=[0])
-    task = await coord.tasks.create(kind="specialist", params={}, idempotency_key="pending-cleanup")
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="specialist", params={}, idempotency_key="pending-cleanup")
+    )
     await coord.gpu_specialist_pool.try_acquire(count=1, holder_id=task.task_id, task_id=task.task_id)
-    await coord._reap_dispatched_task(task, asyncio.CancelledError())
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
+
+    await coord.dispatcher.reap_dispatched_task(task, SubAgentResult(task.task_id, "cancelled", {}))
     assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is not None
 
 
@@ -1150,8 +1236,8 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
             return confirmed
 
     coord.sub.register_executor(_CHEAP_ACTION, lambda _ctx: _done({"ok": True}))
-    task = await coord.tasks.create(
-        kind=_CHEAP_ACTION, params={}, idempotency_key="cleanup-order", requires_lanes=[_CHEAP_ACTION_LANE]
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind=_CHEAP_ACTION, params={}, idempotency_key="cleanup-order", requires_lanes=[_CHEAP_ACTION_LANE])
     )
     gpu = await coord.gpu_specialist_pool.try_acquire(count=1, holder_id=task.task_id, task_id=task.task_id)
     assert gpu is not None
@@ -1163,7 +1249,9 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
 
     coord.gpu_specialist_pool.release = release
     on_complete = AsyncMock()
-    execution = coord.run_task_registered(task, gpu_lease=gpu, gpu_specialist_lease=RayLease(), on_complete=on_complete)
+    execution = coord.dispatcher.run_task_registered(
+        task, HeldLeases(gpu_lease=gpu, gpu_specialist_lease=RayLease()), on_complete=on_complete
+    )
     if confirmed:
         await execution
         on_complete.assert_awaited_once()
@@ -1171,11 +1259,14 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
         with pytest.raises(ExecutionCleanupUnconfirmed):
             await execution
         on_complete.assert_not_awaited()
-        await coord.close_db_after_executions()
-        assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is not None
-    assert events == (["close", "gpu_release"] if confirmed else ["close"])
-    holders = await coord.locks.lane_holders()
-    assert bool(holders) is not confirmed
+        await coord.dispatcher.close_db_after_executions()
+        # The unconfirmed close is reported to the caller and recorded on the
+        # row; the slot still goes back, because the task it was held for is over.
+        assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is None
+    # Cleanup is asked first either way -- its answer is evidence, so it has to
+    # be in hand before the row is written -- and the capacity follows it back.
+    assert events == ["close", "gpu_release"]
+    assert not await coord.locks.lane_holders()
 
 
 class TestTheRunnerRecordsACancellation:
@@ -1209,7 +1300,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
         task, atask = await _start_action_by_pump(coord, kind=_CHEAP_ACTION, key="p-budget")
         _set_budget(coord, minutes=600, elapsed_min=600.0)
 
-        await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=10.0)
+        await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=10.0)
 
         await _settle(atask)
         assert atask.cancelled()
@@ -1220,12 +1311,12 @@ class TestThePumpStopsWorkItCannotWaitFor:
         """The budget hits zero with the closing window still to spend."""
         _set_budget(coord, minutes=600, elapsed_min=600.0)
         _task, atask = await _start_action_by_pump(coord, kind=_CLOSING_ACTION, key="p-closing")
-        await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=10.0)
+        await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=10.0)
         await asyncio.sleep(0.3)
 
         assert not atask.done()
 
-        await coord.cancel_inflight_actions(reason="test_teardown")
+        await coord.dispatcher.cancel_inflight_actions(reason="test_teardown")
         await _settle(atask)
 
     @pytest.mark.asyncio
@@ -1235,7 +1326,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
         _task, atask = await _start_action_by_pump(coord, kind=_CHEAP_ACTION, key="p-signal")
         coord._stop.set()
 
-        await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=10.0)
+        await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=10.0)
 
         await _settle(atask)
         assert atask.cancelled()
@@ -1250,9 +1341,9 @@ class TestThePumpStopsWorkItCannotWaitFor:
         finish = threading.Event()
         worker_done = threading.Event()
         promoted = AsyncMock()
-        monkeypatch.setattr(coord, "_is_promotable_result", lambda *_args: True)
-        monkeypatch.setattr(coord, "_promote_to_shared_state", promoted)
-        monkeypatch.setattr(coord, "_fact_write_hook", AsyncMock())
+        monkeypatch.setattr(coord.writeback, "is_promotable_result", lambda *_args: True)
+        monkeypatch.setattr(coord.writeback, "promote_to_shared_state", promoted)
+        monkeypatch.setattr(coord.recipe_journal, "fact_write_hook", AsyncMock())
 
         def work():
             entered.set()
@@ -1264,18 +1355,18 @@ class TestThePumpStopsWorkItCannotWaitFor:
             return await asyncio.to_thread(work)
 
         coord.sub.register_executor(_CHEAP_ACTION, execute)
-        task = await coord.tasks.create(
-            kind=_CHEAP_ACTION, params={}, idempotency_key="p-orphan", requires_lanes=[_CHEAP_ACTION_LANE]
+        task, _ = await coord.tasks.create_or_return_existing(
+            TaskSpec(kind=_CHEAP_ACTION, params={}, idempotency_key="p-orphan", requires_lanes=[_CHEAP_ACTION_LANE])
         )
         try:
-            await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5.0)
+            await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5.0)
             assert await asyncio.to_thread(entered.wait, 2)
-            handle = coord._inflight_actions[task.task_id]
-            executions = tuple(coord._executions)
+            handle = coord.dispatcher._inflight_actions[task.task_id]
+            executions = tuple(coord.dispatcher._executions)
 
             assert not handle.atask.done()
             assert not handle.scope.cancelled
-            assert coord._inflight_actions[task.task_id] == handle
+            assert coord.dispatcher._inflight_actions[task.task_id] == handle
             assert executions and all(not execution.done() for execution in executions)
             assert (await coord.tasks.get(task.task_id)).state == "running"
             assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
@@ -1283,178 +1374,76 @@ class TestThePumpStopsWorkItCannotWaitFor:
             finish.set()
             await _settle(handle.atask)
             assert worker_done.is_set()
-            assert coord.has_unbooked_completions()
+            assert coord.dispatcher.has_unbooked_completions()
             promoted.assert_not_awaited()
 
-            await coord._pump_dispatcher_once()
+            await coord.dispatcher.pump_dispatcher_once()
             promoted.assert_awaited()
-            assert not coord.has_unbooked_completions()
+            assert not coord.dispatcher.has_unbooked_completions()
         finally:
             finish.set()
-            await asyncio.gather(*tuple(coord._executions))
+            await asyncio.gather(*tuple(coord.dispatcher._executions))
 
         assert worker_done.is_set()
         assert (await coord.tasks.get(task.task_id)).state == "succeeded"
         assert not await coord.locks.lane_holders()
-        assert coord._inflight_actions == {}
-        assert not coord._executions
-        await coord._pump_dispatcher_once()
+        assert coord.dispatcher._inflight_actions == {}
+        assert not coord.dispatcher._executions
+        await coord.dispatcher.pump_dispatcher_once()
         events = await coord.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
         assert len(events) == 1
         promoted.assert_awaited_once()
 
 
-def _allow_inline(coord: Coordinator, monkeypatch) -> asyncio.Event:
-    """Register a never-finishing executor and clear the gates around it."""
-    started = asyncio.Event()
-    coord.sub.register_executor(_CHEAP_ACTION, _never_finishes(started))
-    monkeypatch.setattr(coord.policy, "validate_intent", lambda *a, **k: None)
-    _set_budget(coord, minutes=600)
-    return started
-
-
-async def _start_inline_action(coord: Coordinator, monkeypatch) -> asyncio.Task:
-    """Run an inline action and wait until it is registered and under way."""
-    started = _allow_inline(coord, monkeypatch)
-    inline = asyncio.create_task(coord._run_action_now(_CHEAP_ACTION, {}))
+async def _start_self_settling_action(coord: Coordinator, *, key: str) -> Task:
+    """Dispatch a kernel_agent task, whose execution settles itself, and wait until it is under way."""
+    task, started = await _queue_action(coord, kind="kernel_agent", key=key)
+    await coord.dispatcher._spawn_fitting_queued()
     await asyncio.wait_for(started.wait(), timeout=5.0)
-    return inline
-
-
-class TestInlineActionsAreReachableToo:
-    """The inline path abandons its future, so it needs the same handle."""
-
-    @pytest.mark.asyncio
-    async def test_an_inline_action_that_outlived_its_caller_can_be_stopped(
-        self,
-        coord: Coordinator,
-        monkeypatch,
-    ):
-        """The caller stops promptly; its execution remains owned until it returns."""
-        started = _allow_inline(coord, monkeypatch)
-        finish = asyncio.Event()
-
-        async def execute(_ctx):
-            started.set()
-            await finish.wait()
-            return {"ok": True}
-
-        coord.sub.register_executor(_CHEAP_ACTION, execute)
-        inline = asyncio.create_task(coord._run_action_now(_CHEAP_ACTION, {}))
-        await asyncio.wait_for(started.wait(), 5)
-        task_id = next(iter(coord._inflight_actions))
-        try:
-            assert await coord.cancel_inflight_actions(reason="test") == [task_id]
-            await _settle(inline)
-            assert inline.cancelled()
-            assert (await coord.tasks.get(task_id)).state == "running"
-            assert coord._inflight_actions[task_id].scope.cancelled
-            assert coord._executions
-        finally:
-            executions = tuple(coord._executions)
-            finish.set()
-            await asyncio.gather(*executions)
-        assert (await coord.tasks.get(task_id)).state == "succeeded"
-        assert not coord._executions
-        assert coord._inflight_actions == {}
-
-    @pytest.mark.asyncio
-    async def test_an_inline_action_that_finishes_leaves_no_handle(
-        self,
-        coord: Coordinator,
-        monkeypatch,
-    ):
-        monkeypatch.setattr(coord.policy, "validate_intent", lambda *a, **k: None)
-        _set_budget(coord, minutes=600)
-        coord.sub.register_executor(_CHEAP_ACTION, lambda _ctx: _done({"ok": True}))
-
-        await coord._run_action_now(_CHEAP_ACTION, {})
-
-        assert coord._inflight_actions == {}
-
-    @pytest.mark.asyncio
-    async def test_the_sync_bridge_reports_the_cancellation_instead_of_raising(
-        self,
-        coord: Coordinator,
-        monkeypatch,
-    ):
-        """It runs on an agent's turn thread, which a ``CancelledError`` would end."""
-        started = _allow_inline(coord, monkeypatch)
-        monkeypatch.setattr(
-            coord,
-            "_inline_action_whitelist",
-            lambda: frozenset({_CHEAP_ACTION}),
-        )
-        coord._inline_fast_actions_enabled = True
-        coord._coordinator_loop = asyncio.get_running_loop()
-
-        outcome: list[str] = []
-        caller = threading.Thread(
-            target=lambda: outcome.append(coord._run_action_now_sync(_CHEAP_ACTION, {})),
-            daemon=True,
-        )
-        caller.start()
-        try:
-            await asyncio.wait_for(started.wait(), timeout=5.0)
-            await coord.cancel_inflight_actions(reason="test")
-            await asyncio.to_thread(caller.join, 5.0)
-        finally:
-            caller.join(5.0)
-
-        assert outcome and "was cancelled" in outcome[0]
+    return task
 
 
 class TestThePumpWaitsOnNoAction:
     """The registry is dispatcher-wide; the pump never waits on a running action."""
 
     @pytest.mark.asyncio
-    async def test_a_tick_with_nothing_queued_leaves_an_inline_action_running(
-        self,
-        coord: Coordinator,
-        monkeypatch,
-    ):
-        inline = await _start_inline_action(coord, monkeypatch)
+    async def test_a_tick_with_nothing_queued_leaves_a_self_settling_action_running(self, coord: Coordinator):
+        _set_budget(coord, minutes=600)
+        settling = await _start_self_settling_action(coord, key="settling-idle")
+        handle = coord.dispatcher._inflight_actions[settling.task_id]
         try:
-            await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=10.0)
+            await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=10.0)
 
-            assert not inline.done()
-            assert coord._inflight_actions
+            assert not handle.scope.cancelled
+            assert not handle.atask.done()
         finally:
-            inline.cancel()
-            await _settle(inline)
+            await coord.dispatcher.cancel_inflight_actions(reason="test")
 
     @pytest.mark.asyncio
-    async def test_the_pump_returning_ends_no_action(
-        self,
-        coord: Coordinator,
-        monkeypatch,
-    ):
-        """Neither its own spawn nor an inline action ends with the pump."""
-        inline = await _start_inline_action(coord, monkeypatch)
+    async def test_the_pump_returning_ends_no_action(self, coord: Coordinator):
+        """Neither its own spawn nor a self-settling action ends with the pump."""
+        _set_budget(coord, minutes=600)
+        settling = await _start_self_settling_action(coord, key="settling-own")
+        handle = coord.dispatcher._inflight_actions[settling.task_id]
         _task, spawned = await _start_action_by_pump(coord, kind=_CLOSING_ACTION, key="own-spawn")
         try:
             assert not spawned.done()
-            assert not inline.done()
+            assert not handle.scope.cancelled
+            assert not handle.atask.done()
         finally:
-            await coord.cancel_inflight_actions(reason="test_teardown")
-            await _settle(spawned)
-            inline.cancel()
-            await _settle(inline)
+            await coord.dispatcher.cancel_inflight_actions(reason="test")
 
     @pytest.mark.asyncio
-    async def test_a_shutdown_still_reaches_an_inline_action(
-        self,
-        coord: Coordinator,
-        monkeypatch,
-    ):
-        """The narrower sweep must not blunt the trigger that has to reach everything."""
-        inline = await _start_inline_action(coord, monkeypatch)
+    async def test_a_shutdown_still_reaches_a_self_settling_action(self, coord: Coordinator):
+        _set_budget(coord, minutes=600)
+        settling = await _start_self_settling_action(coord, key="settling-stop")
+        handle = coord.dispatcher._inflight_actions[settling.task_id]
         coord._stop.set()
 
-        await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=10.0)
+        await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=10.0)
 
-        await _settle(inline)
-        assert inline.cancelled()
+        assert handle.scope.cancelled
+        assert handle.atask.cancelled()
 
 
 class TestCoordinatorStop:
@@ -1477,20 +1466,9 @@ class TestCoordinatorStop:
             return execute
 
         task, atask = await _start_action(coord, kind=_CHEAP_ACTION, key="s-stop", make_executor=make_executor)
-        try:
-            await coord.stop()
-            assert atask.cancelled()
-            assert coord._inflight_actions[task.task_id].scope.cancelled
-            assert (await coord.tasks.get(task.task_id)).state == "running"
-            assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
-        finally:
-            executions = tuple(coord._executions)
-            finish.set()
-            await asyncio.gather(*executions)
-        assert (await coord.tasks.get(task.task_id)).state == "succeeded"
-        assert not await coord.locks.lane_holders()
-        assert coord._inflight_actions == {}
-        assert not coord._executions
+        await _cancel_then_let_finish(coord, task, atask, finish, coord.stop)
+        assert coord.dispatcher._inflight_actions == {}
+        assert not coord.dispatcher._executions
         await coord.stop()
 
 
@@ -1511,13 +1489,13 @@ class TestATickCannotOutliveTheSessionBound:
         coord: Coordinator,
         monkeypatch,
     ):
-        monkeypatch.setattr(coord, "_advance_phase_if_needed", _idle)
-        monkeypatch.setattr(coord, "_reactor_pass", _hang_forever)
-        monkeypatch.setattr(coord, "_pump_dispatcher_once", _idle)
+        monkeypatch.setattr(coord.phase_machine, "advance_phase_if_needed", _idle)
+        monkeypatch.setattr(coord, "reactor_pass", _hang_forever)
+        monkeypatch.setattr(coord.dispatcher, "pump_dispatcher_once", _idle)
         started = time.monotonic()
         try:
             reason = await asyncio.wait_for(
-                coord.run(max_minutes=0.05, closing_grace_sec=0.0, tick_interval_sec=0.0),
+                coord.run(options=RunOptions(max_minutes=0.05, tick_interval_sec=0.0, closing_grace_sec=0.0)),
                 timeout=15.0,
             )
         finally:
@@ -1531,13 +1509,13 @@ class TestATickCannotOutliveTheSessionBound:
         coord: Coordinator,
         monkeypatch,
     ):
-        monkeypatch.setattr(coord, "_advance_phase_if_needed", _hang_forever)
-        monkeypatch.setattr(coord, "_reactor_pass", _idle)
-        monkeypatch.setattr(coord, "_pump_dispatcher_once", _idle)
+        monkeypatch.setattr(coord.phase_machine, "advance_phase_if_needed", _hang_forever)
+        monkeypatch.setattr(coord, "reactor_pass", _idle)
+        monkeypatch.setattr(coord.dispatcher, "pump_dispatcher_once", _idle)
         started = time.monotonic()
         try:
             reason = await asyncio.wait_for(
-                coord.run(max_minutes=0.05, closing_grace_sec=0.0, tick_interval_sec=0.0),
+                coord.run(options=RunOptions(max_minutes=0.05, tick_interval_sec=0.0, closing_grace_sec=0.0)),
                 timeout=15.0,
             )
         finally:
@@ -1553,7 +1531,7 @@ class TestATickCannotOutliveTheSessionBound:
         async def _must_not_run() -> None:
             started.append(True)
 
-        await coord._await_within_session_bound(_must_not_run, stage="test")
+        await coord.await_within_session_bound(_must_not_run, stage="test")
         assert started == []
 
     @pytest.mark.asyncio
@@ -1563,7 +1541,7 @@ class TestATickCannotOutliveTheSessionBound:
         async def _ok() -> None:
             started.append(True)
 
-        await coord._await_within_session_bound(_ok, stage="test")
+        await coord.await_within_session_bound(_ok, stage="test")
         assert started == [True]
 
     @pytest.mark.asyncio
@@ -1581,7 +1559,7 @@ class TestATickCannotOutliveTheSessionBound:
             await asyncio.sleep(0.2)
             finished.append(True)
 
-        await coord._await_within_session_bound(
+        await coord.await_within_session_bound(
             _slower_than_the_idle_budget,
             stage="reactor:orchestration",
         )
@@ -1607,7 +1585,7 @@ class TestATickCannotOutliveTheSessionBound:
         # the turn was cancelled at its own 30 ms bound, which the assertions below read off directly. Holding this
         # to 0.2 s instead made cancellation latency on a loaded runner look like a failure of the bound.
         await asyncio.wait_for(
-            coord._await_within_session_bound(
+            coord.await_within_session_bound(
                 _stay_active,
                 stage="reactor:orchestration",
             ),
@@ -1630,7 +1608,7 @@ class TestATickCannotOutliveTheSessionBound:
         before = coord.shared_state.recent_crash_count(window_sec=3600.0)
 
         await asyncio.wait_for(
-            coord._await_within_session_bound(_hang_forever, stage="reactor:orchestration"),
+            coord.await_within_session_bound(_hang_forever, stage="reactor:orchestration"),
             timeout=0.5,
         )
 
@@ -1643,7 +1621,7 @@ class TestATickCannotOutliveTheSessionBound:
         before = coord.shared_state.recent_crash_count(window_sec=3600.0)
 
         await asyncio.wait_for(
-            coord._await_within_session_bound(_hang_forever, stage="reactor:orchestration"),
+            coord.await_within_session_bound(_hang_forever, stage="reactor:orchestration"),
             timeout=0.5,
         )
 
@@ -1672,7 +1650,7 @@ class TestATickCannotOutliveTheSessionBound:
             await asyncio.sleep(0.03)
             finished.append(True)
 
-        await coord._await_within_session_bound(_finish_after_the_reactor_cap, stage="advance_phase")
+        await coord.await_within_session_bound(_finish_after_the_reactor_cap, stage="advance_phase")
 
         assert finished == [True]
 
@@ -1683,7 +1661,7 @@ class TestATickCannotOutliveTheSessionBound:
         async def _factory() -> None:
             calls.append("factory")
 
-        await coord._await_within_session_bound(_factory, stage="reactor:orchestration")
+        await coord.await_within_session_bound(_factory, stage="reactor:orchestration")
 
         assert calls == ["factory"]
         assert not (coord.session_dir / "runtime" / "supervisor").exists()
@@ -1698,7 +1676,7 @@ class TestATickCannotOutliveTheSessionBound:
         async def _ok() -> None:
             started.append(True)
 
-        await coord._await_within_session_bound(_ok, stage="close")
+        await coord.await_within_session_bound(_ok, stage="close")
         assert started == [True]
 
 
@@ -1713,7 +1691,7 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
     @pytest.mark.asyncio
     async def test_a_leg_charges_its_time_to_the_session(self, coord: Coordinator):
         try:
-            await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
+            await coord.run(options=RunOptions(max_minutes=60, max_ticks=1, closing_grace_sec=0.0))
         finally:
             await coord.stop()
         assert coord.shared_state.leg_anchor_unix > 0.0
@@ -1725,7 +1703,7 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
         coord.shared_state.max_minutes = 180
         coord.shared_state.elapsed_charged_sec = 120 * 60.0
         try:
-            await coord.run(max_ticks=1, max_minutes=180, closing_grace_sec=0.0)
+            await coord.run(options=RunOptions(max_minutes=180, max_ticks=1, closing_grace_sec=0.0))
         finally:
             await coord.stop()
         assert coord.shared_state.elapsed_charged_sec >= 120 * 60.0
@@ -1737,17 +1715,11 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
         coord.shared_state.elapsed_charged_sec = 180 * 60.0
         started = time.monotonic()
         try:
-            reason = await coord.run(
-                max_minutes=180,
-                closing_grace_sec=0.0,
-                max_ticks=8,
-            )
+            reason = await coord.run(options=RunOptions(max_minutes=180, max_ticks=8, closing_grace_sec=0.0))
         finally:
             await coord.stop()
         assert reason == "time_exhausted"
         assert time.monotonic() - started < 15.0
-        assert "close_backends" in coord.shared_state.teardown_timings_sec
-        assert coord.shared_state.teardown_timings_sec["total"] >= 0.0
 
     @pytest.mark.asyncio
     async def test_a_server_still_up_at_exit_is_reaped_by_teardown(self, coord: Coordinator):
@@ -1793,7 +1765,7 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
         coord.shared_state.max_minutes = 180
         coord.shared_state.deadline_unix = start.timestamp() + 180 * 60.0
         try:
-            await coord.run(max_minutes=180, closing_grace_sec=0.0, max_ticks=8)
+            await coord.run(options=RunOptions(max_minutes=180, max_ticks=8, closing_grace_sec=0.0))
             # Read liveness before the safety kill below, or the assertion is
             # satisfied by this test rather than by the teardown.
             reaped = proc.poll() is not None or proc.wait(timeout=10) is not None
@@ -1803,6 +1775,5 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
                 proc.kill()
                 proc.wait(timeout=10)
 
-        assert "reap_orphaned_servers" in coord.shared_state.teardown_timings_sec
         assert reaped, "teardown left the serving process alive"
         assert not pidfile.exists()

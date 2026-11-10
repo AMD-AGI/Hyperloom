@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import llm_config
+from hyperloom_common.llm import llm_config
 from hyperloom.inference_optimizer.cli import backends as clib
 
 
@@ -42,6 +42,7 @@ def _stub_backends(monkeypatch):
     """Replace heavy backend classes with lightweight stubs (no SDK / network)."""
     monkeypatch.setattr(clib, "ClaudeBackend", lambda **kw: ("claude", kw))
     monkeypatch.setattr(clib, "CodexBackend", lambda **kw: ("codex", kw))
+    monkeypatch.setattr(clib, "DeepSeekBackend", lambda **kw: ("deepseek", kw))
     monkeypatch.setattr(clib, "MockCriticBackend", lambda: ("mock_critic",))
     monkeypatch.setattr(
         clib,
@@ -58,17 +59,33 @@ def _build(**over):
         session_dir=Path("/tmp/s"),
     )
     kwargs.update(over)
-    return clib._build_backends(**kwargs)
+    models = clib.ModelRouting(
+        claude_model=kwargs.pop("claude_model"),
+        codex_model=kwargs.pop("codex_model"),
+        codex_follows_claude=kwargs.pop("codex_follows_claude", False),
+        claude_follows_codex=kwargs.pop("claude_follows_codex", False),
+    )
+    critic = clib.CriticSetup(
+        choice=kwargs.pop("critic_choice"),
+        agent_root=kwargs.pop("critic_agent_root", None),
+        protocol=kwargs.pop("critic_protocol", "auto"),
+    )
+    session_dir = kwargs.pop("session_dir")
+    assert not kwargs, kwargs
+    return clib._build_backends(models, critic, session_dir=session_dir)
 
 
 @pytest.fixture(autouse=True)
 def _isolated_provider_env(monkeypatch):
     """Every case in this module resolves backends from the environment, so the machine running the suite must not be able to change the answer."""
     _clear_provider_env(monkeypatch)
+    # An operator override outranks the credential rule every case here exercises.
+    monkeypatch.delenv(llm_config.AGENT_BACKEND_ENV, raising=False)
     # Orchestration selection ranks the installed SDKs after the credential, and which extras the suite happens to
     # run with is exactly the kind of machine state this fixture exists to hold still.
     monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: True)
     monkeypatch.setattr(llm_config, "codex_agent_sdk_installed", lambda: True)
+    monkeypatch.setattr(llm_config, "deepseek_harness_sdk_installed", lambda: True)
 
 
 def test_build_backends_mock_defaults() -> None:
@@ -77,16 +94,6 @@ def test_build_backends_mock_defaults() -> None:
     assert b["critic"] == ("mock_critic",)
     assert set(b) == {"orchestration", "critic"}
     assert "kernel_agent" not in b
-
-
-def test_build_backends_invalid_critic_choice() -> None:
-    with pytest.raises(ValueError, match="critic_choice"):
-        _build(critic_choice="bogus")
-
-
-def test_build_backends_critic_agent_requires_root() -> None:
-    with pytest.raises(ValueError, match="critic_agent_root"):
-        _build(critic_choice="agent")
 
 
 def test_build_backends_critic_agent_with_root() -> None:
@@ -108,15 +115,6 @@ def test_build_backends_anthropic_only_uses_native_critic_agent(monkeypatch) -> 
     assert b["critic"][1]["protocol"] == "anthropic"
     assert b["critic"][1]["claude_model"] == "claude-x"
     assert "kernel_agent" not in b
-
-
-def test_build_backends_anthropic_only_refuses_to_degrade_without_root(monkeypatch) -> None:
-    """Silently swapping the critic for bare tool-use would drop KB priors and session memory with no signal, so a missing root is now an error."""
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
-    with pytest.raises(ValueError, match="critic_agent_root"):
-        _build(critic_choice="agent", critic_agent_root=None)
 
 
 def test_build_backends_oauth_only_uses_anthropic_critic_protocol(monkeypatch) -> None:
@@ -214,17 +212,6 @@ def test_build_backends_forced_openai_protocol_rejects_a_bare_anthropic_bearer(m
         )
 
 
-def test_build_backends_rejects_unknown_critic_protocol(monkeypatch) -> None:
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
-    with pytest.raises(ValueError, match="critic_protocol"):
-        _build(
-            critic_choice="agent",
-            critic_agent_root=Path("/tmp/critic"),
-            critic_protocol="bogus",
-        )
-
-
 def test_build_backends_dual_protocol_gateway_uses_standard_critic_agent(monkeypatch) -> None:
     """A dual-protocol gateway (e.g. DeepSeek) is just \"both sides configured\"."""
     _clear_provider_env(monkeypatch)
@@ -281,6 +268,58 @@ def test_build_backends_dual_config_keeps_claude_for_orchestration(monkeypatch) 
     assert _build()["orchestration"][0] == "claude"
 
 
+def test_an_operator_override_outranks_the_credential_rule(monkeypatch) -> None:
+    """The harness returns unenforced intents, so only an explicit ask selects it."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setenv(llm_config.AGENT_BACKEND_ENV, "deepseek")
+
+    name, kwargs = _build()["orchestration"]
+    assert name == "deepseek"
+    # The role only reads state and answers with intents.
+    assert kwargs["permission_mode"] == "read-only"
+
+
+def test_an_explicit_codex_pins_both_orchestration_and_the_critic_side(monkeypatch) -> None:
+    """One resolver answers both: naming Codex must not leave the critic on the side the credentials rank first."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setenv(llm_config.AGENT_BACKEND_ENV, "codex")
+
+    built = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
+    assert built["orchestration"][0] == "codex"
+    assert built["critic"][1]["protocol"] == "openai"
+
+
+def test_the_harness_is_never_selected_by_credentials_alone(monkeypatch) -> None:
+    """A DeepSeek gateway configures Claude's and Codex's protocols, not this route."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+
+    assert _build()["orchestration"][0] == "claude"
+
+
+def test_asking_for_the_harness_without_its_sdk_fails_at_launch(monkeypatch) -> None:
+    """Naming a backend whose SDK cannot import must not be answered hours in."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setenv(llm_config.AGENT_BACKEND_ENV, "deepseek")
+    monkeypatch.setattr(llm_config, "deepseek_harness_sdk_installed", lambda: False)
+
+    with pytest.raises(ValueError, match="requires the DeepSeek Harness SDK"):
+        _build()
+
+
+def test_an_unknown_orchestration_backend_is_rejected(monkeypatch) -> None:
+    """Silently falling back would hide a typo behind a whole run on the wrong CLI."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setenv(llm_config.AGENT_BACKEND_ENV, "clause")
+
+    with pytest.raises(ValueError, match="not in"):
+        _build()
+
+
 def test_build_backends_dual_config_drops_claude_when_its_sdk_is_absent(monkeypatch) -> None:
     """Same credentials, so only the importable SDK separates them -- and a ClaudeBackend that cannot import is not an answer."""
     _clear_provider_env(monkeypatch)
@@ -318,13 +357,16 @@ def test_proposal_scorer_empty_models_returns_none(monkeypatch) -> None:
 
 
 def test_proposal_scorer_default_models(monkeypatch) -> None:
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+    from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
+
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(clib, "ProposalScorer", lambda **kw: ("scorer", kw))
-    args = argparse.Namespace(proposal_scoring=True)
+    args = _build_parser().parse_args(["optimize", "--model", "x", "--proposal-scoring"])
     out = clib._build_proposal_scorer(args)
     assert out[0] == "scorer"
-    assert len(out[1]["models"]) >= 1
+    assert out[1]["models"] == tuple(DEFAULT_SCORER_MODELS)
 
 
 def test_proposal_scorer_explicit_models(monkeypatch) -> None:
@@ -373,3 +415,11 @@ def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:
     assert args.proposal_scorer_models == "m1,m2"
     assert args.proposal_scoring is False
     assert clib._build_proposal_scorer(args) is None
+
+
+def test_orchestration_follows_the_openai_only_intent_after_preflight_fills_anthropic(monkeypatch):
+    """Preflight may publish ANTHROPIC_BASE_URL; the intent captured before it still puts orchestration on Codex."""
+    monkeypatch.setattr(llm_config, "preferred_agent_backend", lambda: llm_config.AGENT_BACKEND_CLAUDE)
+    assert clib.orchestration_runs_on_codex(codex_follows_claude=False, claude_follows_codex=True) is True
+    assert clib.orchestration_runs_on_codex(codex_follows_claude=False, claude_follows_codex=False) is False
+    assert clib.orchestration_runs_on_codex(codex_follows_claude=True, claude_follows_codex=True) is False

@@ -292,7 +292,7 @@ def read_hwcr() -> int | None:
         with open("/dev/cpu/0/msr", "rb") as fh:
             fh.seek(0xC0010015)
             return struct.unpack("<Q", fh.read(8))[0]
-    except Exception:  # noqa: BLE001 - msr module absent or not permitted.
+    except (OSError, struct.error):  # msr module absent or not permitted
         return None
 
 
@@ -432,12 +432,16 @@ def render(osl: dict, rows: list[dict]) -> None:
         print(f"  {r['verdict']:<7} {r['knob']:<{width}}  {r['value']}{target}")
         # An inferred row always shows its note: the value is a deduction, and a reader who cannot see that will treat
         # it as a reading.
-        if r["note"] and (r["verdict"] in ("UNKNOWN", "FAIL") or r["inferred"]):
+        if r["note"]:
             prefix = "inferred: " if r["inferred"] else ""
             print(f"          {' ' * width}  {prefix}{r['note']}")
     print()
-    fails = [r for r in rows if r["verdict"] == "FAIL"]
-    unknown = [r for r in rows if r["verdict"] == "UNKNOWN"]
+    fails, unknown = [], []
+    for r in rows:
+        if r["verdict"] == "FAIL":
+            fails.append(r)
+        elif r["verdict"] == "UNKNOWN":
+            unknown.append(r)
     if fails:
         print("Off target:")
         for r in fails:
@@ -450,7 +454,7 @@ def render(osl: dict, rows: list[dict]) -> None:
     if unknown:
         print("Unresolved (not a pass):")
         for r in unknown:
-            print(f"    {r['knob']}: {r['note'] or 'not readable on this host'}")
+            print(f"    {r['knob']}: not readable on this host")
     if not fails and not unknown:
         print("All checked knobs on target.")
     print(f"\nTargets follow {SOURCE}.")

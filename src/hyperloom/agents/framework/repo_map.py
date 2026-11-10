@@ -1,17 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Canonical mapping from serving framework name to upstream git repo URL."""
+"""Bridging repos a framework-agent round scouts; a framework's own repo is its ``FrameworkSpec.repo_url``."""
 
 from __future__ import annotations
-
-_FRAMEWORK_TO_REPO_URL: dict[str, str] = {
-    "sglang": "https://github.com/sgl-project/sglang.git",
-    "vllm": "https://github.com/ROCm/vllm.git",
-    "atom": "https://github.com/ROCm/ATOM.git",
-    "xdit": "https://github.com/xdit-project/xDiT.git",
-}
-
 
 # Enablement bridging repos, keyed by ``bridge_layer``.
 _BRIDGE_LAYER_TO_REPO_URLS: dict[str, tuple[str, ...]] = {
@@ -41,9 +33,4 @@ def bridge_repo_urls(bridge_layer: str) -> tuple[str, ...]:
     return _BRIDGE_LAYER_TO_REPO_URLS.get((bridge_layer or "").strip().lower(), ())
 
 
-def repo_url_for_framework(framework: str) -> str:
-    """Return the canonical GitHub repo URL for ``framework``."""
-    return _FRAMEWORK_TO_REPO_URL.get((framework or "").strip().lower(), "")
-
-
-__all__ = ["bridge_repo_urls", "repo_url_for_framework", "upstream_repo_urls"]
+__all__ = ["bridge_repo_urls", "upstream_repo_urls"]

@@ -1,0 +1,229 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+import subprocess
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from kernelforge.workflows.rewrite_controller import ControllerLayout, TaskStateStore
+from kernelforge.workflows.rewrite_controller import dispatcher
+from kernelforge.workflows.rewrite_controller.forge_runner import ForgeLoopOutcome
+from kernelforge.workflows.rewrite_controller.recovery import RecoveryResult
+from kernelforge.workflows.rewrite_controller.worktree import OperatorWorktree
+
+
+def _fake_worktree(task, layout: ControllerLayout) -> OperatorWorktree:
+    workspace = layout.workspace_dir(task.operator_id)
+    kernel = workspace / task.kernel_path
+    kernel.parent.mkdir(parents=True)
+    kernel.write_text("VALUE = 1\n", encoding="utf-8")
+    return OperatorWorktree(
+        repo_root=task.repo_root,
+        workspace=workspace,
+        branch="forge/controller/test",
+        base_commit=task.base_commit,
+        kernel_path=kernel,
+        source_files=(kernel,),
+    )
+
+
+def test_dispatch_single_task_records_success_and_controller_base_patch(
+    tmp_path: Path,
+    task_dir: Path,
+    monkeypatch,
+) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    monkeypatch.setattr(dispatcher, "create_operator_worktree", _fake_worktree)
+    monkeypatch.setattr(
+        dispatcher,
+        "run_forge_loop",
+        lambda invocation, **_kwargs: ForgeLoopOutcome(
+            returncode=0,
+            stdout="forge stdout\n",
+            stderr="forge stderr\n",
+            result={"improved": True, "best_commit": "b" * 40},
+            timed_out=False,
+            command=invocation.command,
+        ),
+    )
+    patch_dir = layout.patches_root / "published"
+    patch_dir.mkdir(parents=True)
+    (patch_dir / "change.patch").write_text("diff\n", encoding="utf-8")
+    monkeypatch.setattr(
+        dispatcher,
+        "recover_task_result",
+        lambda *_args, **_kwargs: RecoveryResult(
+            operator_id="published",
+            published=True,
+            patch_dir=patch_dir,
+            best_commit="b" * 40,
+        ),
+    )
+
+    result = dispatcher.dispatch_single_task(
+        task_dir,
+        layout=layout,
+        deadline_unix=10**12,
+        expected_base_commit="a" * 40,
+    )
+
+    assert result.status == "succeeded"
+    assert result.patch_path == patch_dir / "change.patch"
+    assert result.patch_path.is_file()
+    state = TaskStateStore(task_dir).load()
+    assert state is not None
+    assert state.status == "succeeded"
+    assert state.workspace_dir == str(layout.workspace_dir(result.task.operator_id))  # type: ignore[union-attr]
+    assert (task_dir / "forge-loop.stdout.log").read_text(encoding="utf-8") == "forge stdout\n"
+    assert (task_dir / "forge-loop.stderr.log").read_text(encoding="utf-8") == "forge stderr\n"
+
+
+def test_dispatch_single_task_contains_forge_failure(
+    tmp_path: Path,
+    task_dir: Path,
+    monkeypatch,
+) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    monkeypatch.setattr(dispatcher, "create_operator_worktree", _fake_worktree)
+    monkeypatch.setattr(
+        dispatcher,
+        "run_forge_loop",
+        lambda invocation, **_kwargs: ForgeLoopOutcome(
+            returncode=2,
+            stdout="",
+            stderr="driver preparation failed",
+            result=None,
+            timed_out=False,
+            command=invocation.command,
+        ),
+    )
+    monkeypatch.setattr(
+        dispatcher,
+        "recover_task_result",
+        lambda *_args, **_kwargs: RecoveryResult(
+            operator_id="missing",
+            published=False,
+            reason="no trusted forge-loop best result",
+        ),
+    )
+
+    result = dispatcher.dispatch_single_task(
+        task_dir,
+        layout=layout,
+        deadline_unix=10**12,
+        expected_base_commit="a" * 40,
+    )
+
+    assert result.status == "failed"
+    assert "driver preparation failed" in result.reason
+    assert result.patch_path is None
+    state = TaskStateStore(task_dir).load()
+    assert state is not None
+    assert state.status == "failed"
+
+
+def test_a_recovery_defect_on_a_borrowed_tree_still_releases_the_tree(
+    tmp_path: Path,
+    task_dir: Path,
+    monkeypatch,
+) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    borrowed: list[OperatorWorktree] = []
+    released: list[OperatorWorktree | None] = []
+
+    def _borrowed_worktree(task, layout: ControllerLayout) -> OperatorWorktree:
+        borrowed.append(replace(_fake_worktree(task, layout), inplace=True))
+        return borrowed[0]
+
+    def _defect(*_args, **_kwargs):
+        raise RuntimeError("recovery defect")
+
+    monkeypatch.setattr(dispatcher, "create_operator_worktree", _borrowed_worktree)
+    monkeypatch.setattr(
+        dispatcher,
+        "run_forge_loop",
+        lambda invocation, **_kwargs: ForgeLoopOutcome(
+            returncode=2, stdout="", stderr="", result=None, timed_out=False, command=invocation.command
+        ),
+    )
+    monkeypatch.setattr(dispatcher, "recover_task_result", _defect)
+    monkeypatch.setattr(dispatcher, "release_operator_worktree", released.append)
+
+    with pytest.raises(RuntimeError, match="^recovery defect$"):
+        dispatcher.dispatch_single_task(
+            task_dir,
+            layout=layout,
+            deadline_unix=10**12,
+            expected_base_commit="a" * 40,
+        )
+
+    assert released == borrowed
+
+
+def test_a_git_failure_in_the_last_recovery_keeps_the_result_and_releases_the_tree(
+    tmp_path: Path,
+    task_dir: Path,
+    monkeypatch,
+) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    borrowed: list[OperatorWorktree] = []
+    released: list[OperatorWorktree | None] = []
+
+    def _borrowed_worktree(task, layout: ControllerLayout) -> OperatorWorktree:
+        borrowed.append(replace(_fake_worktree(task, layout), inplace=True))
+        return borrowed[0]
+
+    def _git_timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(["git", "cat-file"], 30)
+
+    monkeypatch.setattr(dispatcher, "create_operator_worktree", _borrowed_worktree)
+    monkeypatch.setattr(
+        dispatcher,
+        "run_forge_loop",
+        lambda invocation, **_kwargs: ForgeLoopOutcome(
+            returncode=2,
+            stdout="",
+            stderr="driver preparation failed",
+            result=None,
+            timed_out=False,
+            command=invocation.command,
+        ),
+    )
+    monkeypatch.setattr(dispatcher, "recover_task_result", _git_timeout)
+    monkeypatch.setattr(dispatcher, "release_operator_worktree", released.append)
+
+    result = dispatcher.dispatch_single_task(
+        task_dir,
+        layout=layout,
+        deadline_unix=10**12,
+        expected_base_commit="a" * 40,
+    )
+
+    assert result.status == "failed"
+    assert released == borrowed
+
+
+def test_dispatch_single_task_skips_an_invalid_task_without_starting_forge(
+    tmp_path: Path,
+    task_dir: Path,
+    monkeypatch,
+) -> None:
+    (task_dir / "task.json").write_text("{", encoding="utf-8")
+    monkeypatch.setattr(
+        dispatcher,
+        "run_forge_loop",
+        lambda invocation: (_ for _ in ()).throw(AssertionError("forge-loop must not start")),
+    )
+
+    result = dispatcher.dispatch_single_task(
+        task_dir,
+        layout=ControllerLayout(tmp_path / "output"),
+        deadline_unix=10**12,
+    )
+
+    assert result.status == "skipped"
+    assert TaskStateStore(task_dir).load().status == "skipped"  # type: ignore[union-attr]

@@ -5,8 +5,8 @@ description: >
   from a natural-language prompt. Produces a HuggingFace-format quantized
   model directory plus a structured assessment of every artifact that the
   Quark workflow + validator + llm-eval skills emit. Single public entry:
-  `quantize_via_prompt(prompt, *, workspace, quark_root=None,
-  interactive=None, acceptable_eval_gap=None, max_requantize_attempts=1)`.
+  `quantize_via_prompt(prompt, *, workspace, options=QuantSkillRunOptions(),
+  runner_fn=None, log=None)`.
 layer: hyperloom-subagent
 primary_artifact: quantized_model_dir
 delegates_to:
@@ -302,7 +302,6 @@ You may write any of these files; the Python runner reads them:
 | `last_phase.txt`       | you | One token: pre/intake/plan/manifest/exec/export/validate/eval. Updated at the START of each phase. |
 | `fix_hypothesis_attempt_N.md` | you | Precondition for Python retry — see §8. |
 | `blocked.md`           | you | `outcome_id: <id>\n<reason>` for any non-clean stop. |
-| `requantize_attempts.txt` | Python | Counter — do NOT touch. |
 
 ## 10. Self-check before declaring success
 

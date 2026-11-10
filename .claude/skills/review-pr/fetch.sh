@@ -24,19 +24,30 @@ WORK="${2:-/tmp/hl-review-$PR}"
 EXPECTED_HEAD="${3:-}"
 EXPECTED_BASE_TIP="${4:-}"
 command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) is required"
+command -v python3 >/dev/null 2>&1 || die "python3 is required"
 
 REPO="${HL_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)}"
 [ -n "$REPO" ] || die "cannot resolve the repository: run inside a checkout or set HL_REPO=owner/name"
 
 mkdir -p "$WORK"
 
+# The skill's version and the reviewer's model, which the card's Checked line names. The version is this directory's
+# tree hash at HEAD, so two cards that name the same one ran the same skill text; uncommitted edits to it add +dirty.
+SKILL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SKILL_TREE=$(git -C "$SKILL_DIR" rev-parse --short=12 HEAD:./) \
+  || die "cannot name this skill's version: $SKILL_DIR is not in a git checkout"
+if [ -n "$(git -C "$SKILL_DIR" status --porcelain -- .)" ]; then
+  SKILL_TREE="$SKILL_TREE+dirty"
+fi
+printf 'skill: %s\nmodel: %s\n' "$SKILL_TREE" "${ANTHROPIC_MODEL:-${PR_REVIEW_MODEL:-unknown}}" > "$WORK/skill.txt"
+
 # GitHub computes mergeability lazily: the first read of a cold PR returns UNKNOWN and only
 # starts the background job. Queried once, meta.txt says UNKNOWN for every PR nobody looked at
 # recently, and the conflict check in SKILL.md Step 8 then never fires on a conflicting PR.
 for attempt in 1 2 3 4 5; do
   gh pr view "$PR" --repo "$REPO" \
-    --json number,title,author,state,headRefOid,baseRefName,baseRefOid,url,mergeable \
-    --template '{{printf "number: %v\ntitle: %v\nauthor: %v\nstate: %v\nhead: %v\nbase_ref: %v\nbase_tip: %v\nurl: %v\nmergeable: %v\n" .number .title .author.login .state .headRefOid .baseRefName .baseRefOid .url .mergeable}}' \
+    --json number,title,author,state,headRefOid,baseRefName,baseRefOid,url,mergeable,labels \
+    --template '{{printf "number: %v\ntitle: %v\nauthor: %v\nstate: %v\nhead: %v\nbase_ref: %v\nbase_tip: %v\nurl: %v\nmergeable: %v\n" .number .title .author.login .state .headRefOid .baseRefName .baseRefOid .url .mergeable}}{{range .labels}}{{printf "label: %v\n" .name}}{{end}}' \
     > "$WORK/meta.txt" || die "gh pr view failed for #$PR"
   grep -q '^mergeable: UNKNOWN$' "$WORK/meta.txt" || break
   # A merged or closed PR has no mergeability to compute and stays UNKNOWN for good; only an
@@ -81,12 +92,16 @@ gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" \
 TOTAL_COMMITS=$(head -1 "$WORK/.commits.raw")
 tail -n +2 "$WORK/.commits.raw" > "$WORK/commits.txt"
 rm -f "$WORK/.commits.raw"
+# X9 reads whole messages: a trailer is how a link to an internal discussion reaches the base branch's history.
+gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" \
+  --jq '.commits[] | "--- \(.sha)\n\(.commit.message)"' > "$WORK/messages.txt"
 LISTED_COMMITS=$(wc -l < "$WORK/commits.txt" | tr -d ' ')
 if [ "$LISTED_COMMITS" -lt "$TOTAL_COMMITS" ]; then
+  HEAD_MESSAGE=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq '.commit.message')
   printf '# TRUNCATED: %s of %s commits listed, oldest first. Head commit: %s\n' \
-    "$LISTED_COMMITS" "$TOTAL_COMMITS" \
-    "$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq '.commit.message | split("\n")[0]')" \
-    >> "$WORK/commits.txt"
+    "$LISTED_COMMITS" "$TOTAL_COMMITS" "${HEAD_MESSAGE%%$'\n'*}" >> "$WORK/commits.txt"
+  printf '# TRUNCATED: %s of %s messages listed, oldest first; the head commit follows.\n--- %s\n%s\n' \
+    "$LISTED_COMMITS" "$TOTAL_COMMITS" "$HEAD_SHA" "$HEAD_MESSAGE" >> "$WORK/messages.txt"
 fi
 
 gh api -H "Accept: application/vnd.github.v3.diff" \
@@ -119,8 +134,22 @@ awk '
 ' "$WORK/diff.txt" > "$WORK/numstat.txt"
 cut -f3- "$WORK/numstat.txt" > "$WORK/files.txt"
 [ -s "$WORK/files.txt" ] || die "the diff names no changed path"
+python3 "$SKILL_DIR/risk.py" <(cat "$WORK/files.txt"; sed -n 's/^rename from //p' "$WORK/diff.txt") \
+  > "$WORK/risk.txt" || die "risk.py could not grade the changed paths"
 
 grep -E '(^|/)tests/' "$WORK/files.txt" > "$WORK/testfiles.txt" || : > "$WORK/testfiles.txt"
+
+# E3 turns on one number: production lines added minus deleted, src/ outside tests/. Binary rows
+# carry "-" instead of a count and are not arithmetic, so they are excluded and reported separately.
+awk -F'\t' '
+  $1 == "-" { binary++; next }
+  $3 ~ /^src\// && $3 !~ /(^|\/)tests?\// { added += $1; deleted += $2; files++ }
+  END {
+    printf "production files: %d\nadded: %d\ndeleted: %d\nnet: %+d\nbinary excluded: %d\n",
+      files, added, deleted, added - deleted, binary
+  }
+' "$WORK/numstat.txt" > "$WORK/netlines.txt"
+
 
 # The X family's mechanical input, the counterpart of testfiles.txt for the T family. An empty
 # docfiles.txt beside a changed src/ file is the shape X3 fires on, so the emptiness is the signal.
@@ -138,7 +167,8 @@ gh api --paginate "repos/$REPO/commits/$HEAD_SHA/status" \
   --jq '.statuses[] | [.context, .state, (.target_url // "")] | @tsv' >> "$WORK/ci.txt"
 
 # Only the author, users with write access and this bot reach comments.txt, so an outside comment
-# cannot steer the review.
+# cannot steer the review. Each entry names its time: the three lists are written one after another,
+# so their order does not tell a re-review which card came last (references/re-review.md).
 raw=$(mktemp -d)
 trap 'rm -rf "$raw"' EXIT
 gh api --paginate --slurp "repos/$REPO/pulls/$PR/reviews" | jq -s '[.[][][]]' > "$raw/reviews.json"
@@ -146,34 +176,68 @@ gh api --paginate --slurp "repos/$REPO/pulls/$PR/comments" | jq -s '[.[][][]]' >
 gh api --paginate --slurp "repos/$REPO/issues/$PR/comments" | jq -s '[.[][][]]' > "$raw/issue.json"
 
 PR_AUTHOR=$(sed -n 's/^author: //p' "$WORK/meta.txt")
-jq -r '.[].user.login' "$raw"/{reviews,inline,issue}.json | sort -u | while IFS= read -r login; do
+# jq writes CRLF on some platforms; a login carrying CR matches no author and makes the
+# permission URL below unparseable, which empties comments.txt without failing the fetch.
+# Two shapes cost this block a silent failure already. A bare `perm=$(gh api ...)` trips errexit
+# on any non-zero exit, so the test below it never ran and the fetch died with no message on the
+# 404 it means to accept -- `Copilot`, which GitHub's code review posts under, 404s here. And a
+# loop on the left of a pipe runs in a subshell, where `die` ends only that subshell.
+jq -r '.[].user.login' "$raw"/{reviews,inline,issue}.json | tr -d '\015' | sort -u > "$raw/logins.txt"
+: > "$raw/trusted.txt"
+while IFS= read -r login; do
   if [ "$login" = "$PR_AUTHOR" ] || [ "$login" = 'github-actions[bot]' ]; then
-    echo "$login"
+    printf '%s\n' "$login" >> "$raw/trusted.txt"
     continue
   fi
-  case "$(gh api "repos/$REPO/collaborators/$login/permission" --jq .permission 2>/dev/null || true)" in
-    admin | write) echo "$login" ;;
-  esac
-done | jq -Rsc 'split("\n") | map(select(length > 0))' > "$raw/trusted.json"
+  # A 404 is the valid negative: not a collaborator. Any other failure -- a rate limit, a network
+  # drop -- must not read as one, or comments.txt silently loses entries the review is required
+  # to settle, which is the shape the CR strip above already cost once.
+  if perm=$(gh api "repos/$REPO/collaborators/$login/permission" --jq .permission 2>"$raw/perm.err"); then
+    case "$perm" in
+      admin | write) printf '%s\n' "$login" >> "$raw/trusted.txt" ;;
+    esac
+  elif ! grep -q 'HTTP 404' "$raw/perm.err"; then
+    die "cannot resolve $login's permission: $(tr -d '\r' < "$raw/perm.err" | tail -1)"
+  fi
+done < "$raw/logins.txt"
+jq -Rsc 'split("\n") | map(select(length > 0))' < "$raw/trusted.txt" > "$raw/trusted.json"
 
 jq -nr --slurpfile t "$raw/trusted.json" '
   def trusted: select(.user.login | IN($t[0][]));
-  (input[] | trusted | select((.body // "") != "") | "[REVIEW \(.user.login) \(.state)]\n\(.body)\n"),
-  (input[] | trusted | "[INLINE \(.user.login)] \(.path):\(.line // .original_line // 0)\n\(.body)\n"),
-  (input[] | trusted | "[COMMENT \(.user.login)]\n\(.body)\n")' \
+  (input[] | trusted | select((.body // "") != "")
+    | "[REVIEW \(.user.login) \(.state) \(.submitted_at // "pending")]\n\(.body)\n"),
+  (input[] | trusted
+    | "[INLINE \(.user.login) \(.created_at)] \(.path):\(.line // .original_line // 0)\n\(.body)\n"),
+  (input[] | trusted | "[COMMENT \(.user.login) \(.created_at)]\n\(.body)\n")' \
   "$raw"/{reviews,inline,issue}.json > "$WORK/comments.txt"
 
 # Other open PRs whose changed paths intersect this one's (rule V4). One query: gh
 # returns each open PR's file list, and the intersection is computed locally rather
 # than with one REST call per PR.
+OPEN_PR_LIMIT=100
+gh pr list --repo "$REPO" --state open --limit "$OPEN_PR_LIMIT" \
+  --json number,title,url,files,changedFiles > "$raw/openprs.json"
+LISTED_PRS=$(jq length "$raw/openprs.json")
+# gh stops short of the limit only when it ran out of open PRs, so only a full list needs the total.
+OPEN_PRS=$LISTED_PRS
+if [ "$LISTED_PRS" -ge "$OPEN_PR_LIMIT" ]; then
+  # shellcheck disable=SC2016  # $owner and $name are GraphQL variables, not shell ones
+  OPEN_PRS=$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO#*/}" \
+    -f query='query($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) { pullRequests(states: OPEN) { totalCount } } }' \
+    --jq '.data.repository.pullRequests.totalCount')
+  case "$OPEN_PRS" in
+    '' | *[!0-9]*) die "cannot read the open-PR count for $REPO" ;;
+  esac
+fi
 # shellcheck disable=SC2016  # $p is a jq variable, not a shell one
-gh pr list --repo "$REPO" --state open --limit 100 --json number,title,url,files,changedFiles \
-  --jq '.[] | . as $p | $p.files[].path
-        | [$p.number, $p.title, $p.url, ., ($p.files | length), $p.changedFiles] | @tsv' \
-  > "$WORK/.openprs.tsv"
-# gh lists only the first 100 files of each PR. A larger PR overlapping this one on file 101
-# is then invisible here, and an empty openprs.txt reads as "no in-flight conflict" (rule V4),
-# so the PRs whose lists were cut are named rather than dropped.
+jq -r '.[] | . as $p | $p.files[].path
+       | [$p.number, $p.title, $p.url, ., ($p.files | length), $p.changedFiles] | @tsv' \
+  "$raw/openprs.json" > "$raw/openprs.tsv"
+# gh lists only the newest OPEN_PR_LIMIT open PRs and the first 100 files of each. A PR past
+# the limit, or a larger PR overlapping this one on file 101, is then invisible here, and an
+# empty openprs.txt reads as "no in-flight conflict" (rule V4), so each cut is named in a
+# PARTIAL line rather than dropped.
 awk -v self="$PR" -F'\t' '
   NR == FNR { want[$0] = 1; next }
   $1 == self { next }
@@ -192,11 +256,14 @@ awk -v self="$PR" -F'\t' '
     for (k in cut)
       printf "# PARTIAL: #%s changes %s files, only its first 100 were compared\n", k, cut[k]
   }
-' "$WORK/files.txt" "$WORK/.openprs.tsv" > "$WORK/openprs.txt"
-rm -f "$WORK/.openprs.tsv"
+' "$WORK/files.txt" "$raw/openprs.tsv" > "$WORK/openprs.txt"
+if [ "$LISTED_PRS" -lt "$OPEN_PRS" ]; then
+  printf '# PARTIAL: %s has %s open PRs, only the newest %s were compared\n' \
+    "$REPO" "$OPEN_PRS" "$LISTED_PRS" >> "$WORK/openprs.txt"
+fi
 
-for artifact in meta.txt title.txt body.txt diff.txt files.txt numstat.txt commits.txt \
-  base.txt ci.txt comments.txt testfiles.txt docfiles.txt openprs.txt; do
+for artifact in meta.txt title.txt body.txt diff.txt files.txt numstat.txt netlines.txt commits.txt \
+  messages.txt base.txt ci.txt comments.txt testfiles.txt docfiles.txt openprs.txt skill.txt risk.txt; do
   printf '%-16s %s line(s)\n' "$artifact" "$(wc -l < "$WORK/$artifact" | tr -d ' ')"
 done
 

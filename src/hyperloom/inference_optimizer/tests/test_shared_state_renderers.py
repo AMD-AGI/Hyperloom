@@ -32,17 +32,37 @@ def test_format_variant_line_no_measurement_carries_reason():
         {
             "name": "slow",
             "reason": "killed_overtime",
-            "wall_clock_ratio_vs_baseline": 2.06,
         }
     )
     assert "no_meas" in line
     assert "killed_overtime" in line
-    assert "2.06x" in line
     # A measured row needs no reason: the gain already carries the verdict.
     measured = SharedState._format_variant_line(
         {"name": "low", "gain_pct": 0.4, "reason": "gain_below_threshold"},
     )
     assert "gain_below_threshold" not in measured
+
+
+def test_format_variant_line_refused_variant_is_not_unmeasured():
+    """A REVERT has no ``gain_pct`` by design; its ``graded_gain_pct`` is what it measured."""
+    line = SharedState._format_variant_line(
+        {
+            "name": "spec",
+            "outcome": "REVERT",
+            "gain_pct": None,
+            "graded_gain_pct": 7.2,
+            "graded_objective": "e2e_norm_intvty_p50",
+            "tput": 1074.9,
+            "reason": "p90_regressed (intvty 85.1->91.3 tput 168970.6->169070.5)",
+        }
+    )
+    assert "no_meas" not in line
+    assert "+7.20%" in line
+    assert "[e2e_norm_intvty_p50]" in line
+    assert "p90_regressed" in line
+    # The refused gain never displaces a recorded one, and a bool is not a measurement.
+    assert "+1.00%" in SharedState._format_variant_line({"name": "k", "gain_pct": 1.0, "graded_gain_pct": 9.0})
+    assert "no_meas" in SharedState._format_variant_line({"name": "b", "graded_gain_pct": True})
 
 
 def test_format_search_state_enumerates_every_tested_entry():
@@ -68,6 +88,7 @@ def test_format_search_state_puts_keeps_first():
 
 def test_format_search_state():
     assert SharedState._format_search_state(None) == "(none)"
+    assert SharedState._format_search_state({"tested": {}}).strip().startswith("cursor=0")
     search = {
         "cursor": 3,
         "accepted": [{"name": "a", "fingerprint": "f1"}],
@@ -77,22 +98,6 @@ def test_format_search_state():
     out = SharedState._format_search_state(search)
     assert "cursor=3  accepted=1  rejected=1  tested=1" in out
     assert "f1" in out and "KEEP" in out
-    assert "killed_overtime" not in out
-
-
-def test_format_search_state_head_reports_killed_overtime():
-    search = {
-        "cursor": 8,
-        "tested": {"f1": {}, "f2": {}},
-        "last_round": {"round_id": 3, "killed_overtime": ["f1", "f2"]},
-    }
-    out = SharedState._format_search_state(search)
-    assert "killed_overtime(last_round)=2" in out
-    # A round with no kill must not add noise to the head line.
-    search["last_round"] = {"round_id": 4, "killed_overtime": []}
-    assert "killed_overtime" not in SharedState._format_search_state(search)
-    search["last_round"] = "not-a-dict"
-    assert "killed_overtime" not in SharedState._format_search_state(search)
 
 
 def test_format_optimization_stack():
@@ -101,6 +106,35 @@ def test_format_optimization_stack():
     st.optimization_stack = [{"action": "explore", "variant_name": "v1"}, "bad"]
     parts = st._format_optimization_stack()
     assert "explore:v1" in parts
+
+
+def test_prompt_summary_renders_current_best_without_stack_or_measurement():
+    st = SharedState()
+    st.current_best = {
+        "variant_name": "k23",
+        "tput": 2049.9,
+        "optimization_stack": [{"action": "explore", "variant_name": "stacked"}],
+        "measurement": {"launch_evidence_path": "/runs/launch_evidence.json"},
+    }
+    line = next(ln for ln in st.to_prompt_summary().splitlines() if ln.startswith("current_best="))
+    assert "k23" in line and "2049.9" in line
+    assert "stacked" not in line and "launch_evidence" not in line
+
+
+def _launch_flags_line(state: SharedState) -> str:
+    return next(ln for ln in state.to_prompt_summary().splitlines() if ln.startswith("current_launch_flags"))
+
+
+def test_prompt_summary_renders_the_flags_the_current_best_launched_with():
+    """Orchestration cannot read the session config, so the summary is its only account of the running launch."""
+    st = SharedState()
+    assert _launch_flags_line(st) == "current_launch_flags(already passed by the running stack)=(unknown)"
+    st.current_best_measurement = {
+        "launch_evidence": {"requested_server_args": "--max-num-seqs 64 --kv-cache-dtype fp8 --max-num-seqs 128"}
+    }
+    assert _launch_flags_line(st) == (
+        "current_launch_flags(already passed by the running stack)=--max-num-seqs 128 --kv-cache-dtype fp8"
+    )
 
 
 def test_format_last_trace_analyze():
@@ -135,19 +169,17 @@ def test_format_trace_analyze_skipped_kernels():
     assert "skipped_kernels_top" in out
 
 
-def test_format_analysis_md_full(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1")
+def test_format_analysis_md_pointer():
     st = SharedState()
-    assert "no TraceLens snapshot" in st._format_analysis_md_full()
+    assert "no TraceLens snapshot" in st._format_analysis_md_pointer()
     st.last_trace_analyze = {
         "analysis_md_text": "# Analysis\nbody",
         "roofline_snapshot_id": 5,
         "roofline_baseline_gain_at_snapshot": 12.5,
     }
-    out = st._format_analysis_md_full()
+    out = st._format_analysis_md_pointer()
     assert "snapshot #5" in out
     assert "12.50%" in out
-    assert "body" in out
 
 
 def test_format_last_action_failures_multiline_and_log_path():

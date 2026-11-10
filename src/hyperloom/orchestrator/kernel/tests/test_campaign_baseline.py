@@ -19,13 +19,13 @@ from hyperloom.orchestrator.kernel.campaign_baseline import (
     seal_campaign_baseline,
     session_branch_name,
 )
-from kernelforge.kernel_rewrite_controller.worktree import (
+from kernelforge.workflows.rewrite_controller.worktree import (
     CAMPAIGN_BRANCH_PREFIX,
     FORGE_LOOP_OUTPUT_DIRNAME,
     record_campaign_baseline,
     untracked_paths,
 )
-from kernelforge.loop.editable_repo import acquire_repo_lock, release_repo_lock
+from kernelforge.utils import acquire_repo_lock, release_repo_lock
 
 _GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "baseline-test",
@@ -60,6 +60,9 @@ def _state(repo: Path) -> SimpleNamespace:
     return SimpleNamespace(framework_repo_path=str(repo))
 
 
+_RESOLVER = campaign_baseline._package_repository
+
+
 @pytest.fixture(autouse=True)
 def _no_runtime_discovery(monkeypatch: pytest.MonkeyPatch):
     """Keep these tests off whatever framework the host has installed.
@@ -67,9 +70,11 @@ def _no_runtime_discovery(monkeypatch: pytest.MonkeyPatch):
     ``seal_campaign_baseline`` commits, and it finds its repositories from the
     interpreter. Left alone it would reach a real sglang or aiter checkout.
 
-    Stubbed at ``find_spec`` rather than at ``_package_repository`` so the
+    The suite's host isolation stubs ``_package_repository`` out; these tests
+    put the real resolver back and stub ``find_spec`` beneath it instead, so the
     resolver itself still runs for the tests that are about it.
     """
+    monkeypatch.setattr(campaign_baseline, "_package_repository", _RESOLVER)
     monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
 
 

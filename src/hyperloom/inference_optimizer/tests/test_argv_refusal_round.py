@@ -12,7 +12,9 @@ import pytest
 import yaml
 
 from hyperloom.common.bringup import LadderStage
+from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
 from hyperloom.orchestrator.actions.executors import baseline as bl
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
 from hyperloom.orchestrator.bringup import argv_preflight as pf
 from hyperloom.orchestrator.bringup import load_boot_observation
 from hyperloom.orchestrator.rehearsal import LaunchScenario, ScriptedLaunchBackend
@@ -52,7 +54,9 @@ def refusing_probe(monkeypatch):
         )
 
     monkeypatch.setattr(pf, "_default_probe", _probe)
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: _PROBE_PYTHON)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: _PROBE_PYTHON
+    )
     return calls
 
 
@@ -76,16 +80,18 @@ async def _attempt(session: Path, slot: Path, *, task_id: str, server_args: str)
         encoding="utf-8",
     )
     return await executor._run_single_benchmark(
+        BenchmarkAttempt(
+            timeout_sec=1800,
+            override_result_dir=None,
+            resolved_model="scripted/Model",
+            materialized_config_path=config,
+            inferencex_path="",
+            effective_extra_server_args="",
+            params={"framework": "sglang"},
+            ctx=_ctx(task_id),
+        ),
         config_path=config,
         output_dir=slot,
-        timeout_sec=1800,
-        override_result_dir=None,
-        resolved_model="scripted/Model",
-        materialized_config_path=config,
-        inferencex_path="",
-        effective_extra_server_args="",
-        params={"framework": "sglang"},
-        ctx=_ctx(task_id),
     )
 
 
@@ -153,7 +159,9 @@ async def test_an_argv_the_parser_accepts_still_reaches_the_launch(
         )
 
     monkeypatch.setattr(pf, "_default_probe", _probe)
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: _PROBE_PYTHON)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: _PROBE_PYTHON
+    )
 
     session, slot = round_slot
     launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_SCENARIO))
@@ -190,7 +198,9 @@ async def test_the_one_allowed_drop_is_written_back_before_the_launch(
         return subprocess.CompletedProcess(argv, 0, stdout=body + "\n", stderr="")
 
     monkeypatch.setattr(pf, "_default_probe", _probe)
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: _PROBE_PYTHON)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: _PROBE_PYTHON
+    )
 
     session, slot = round_slot
     launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_SCENARIO))
@@ -212,7 +222,7 @@ async def test_an_unavailable_probe_does_not_stop_the_round(
     from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
 
     monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)
-    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: "")
+    monkeypatch.setattr(pf, "resolve_serving_interpreter", lambda _framework, _env: "")
 
     session, slot = round_slot
     launches = ScriptedLaunchBackend(scenario=LaunchScenario.from_dict(_SCENARIO))

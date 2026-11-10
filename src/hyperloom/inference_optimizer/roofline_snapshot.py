@@ -5,13 +5,26 @@
 
 from __future__ import annotations
 
+import csv
 import logging
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.jsonio import read_json
+from hyperloom_common.coerce import dict_rows, first_str
+from hyperloom_common.jsonio import read_json
+from hyperloom.common.tracelens_report import member_name
+from hyperloom.inference_optimizer import framework_registry
+from hyperloom.inference_optimizer.roofline_ceiling import (
+    ComputeTarget,
+    DecodeShape,
+    RooflineBreakdown,
+    apply_runtime_dtype,
+    resolve_compute_peak_provenance,
+    resolve_runtime_dtype,
+)
 
 log = logging.getLogger(__name__)
 
@@ -68,38 +81,82 @@ def _parse_top_bottleneck(raw: str | None) -> str | None:
     return name or None
 
 
+def _exposed_memcpy_pct(tracelens_dir: Path) -> float | None:
+    """Exposed memcpy share from ``perf_report_csvs/gpu_timeline.csv``; analysis.md omits it."""
+    try:
+        with (tracelens_dir / "perf_report_csvs" / "gpu_timeline.csv").open(encoding="utf-8", newline="") as fh:
+            row = next((r for r in csv.DictReader(fh) if r.get("type") == "exposed_memcpy_time"), None)
+    except OSError:
+        return None
+    return _parse_pct(row.get("percent")) if row else None
+
+
+def _shares_from_md(path: Path) -> dict[str, Any]:
+    """Workload shares from the markdown Executive Summary table."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    rows = _parse_executive_table(text)
+    return {
+        "compute_pct": _parse_pct(rows.get("Compute %")),
+        "idle_pct": _parse_pct(rows.get("Idle %")),
+        "comm_pct": _parse_pct(rows.get("Exposed Communication %") or rows.get("Communication %")),
+        "top_bottleneck": _parse_top_bottleneck(rows.get("Top Bottleneck Category")),
+    }
+
+
+def _shares_from_json(path: Path) -> dict[str, Any]:
+    """Workload shares from ``analysis.json``: ``executive_summary.metrics`` and the first top operation."""
+    data = read_json(path, default={}, require_dict=True)
+    metrics = (data.get("executive_summary") or {}).get("metrics") or {}
+    top_operations = data.get("top_operations")
+    return {
+        "top_bottleneck": top_operations[0]["category"] if top_operations else None,
+        "compute_pct": metrics.get("compute_pct"),
+        "idle_pct": metrics.get("idle_pct"),
+        "comm_pct": metrics.get("exposed_communication_pct"),
+    }
+
+
 def extract_workload_summary(analysis_md_path: str | Path) -> dict[str, Any]:
-    """Best-effort workload-level metrics from Executive Summary table."""
+    """Best-effort workload-level metrics from the report's Executive Summary (``analysis.md`` or ``analysis.json``)."""
     path = Path(analysis_md_path)
     out: dict[str, Any] = {
         "compute_pct": None,
         "idle_pct": None,
         "comm_pct": None,
+        "memcpy_pct": None,
         "top_bottleneck": None,
     }
     if not path.is_file():
         return out
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return out
-    rows = _parse_executive_table(text)
-    out["compute_pct"] = _parse_pct(rows.get("Compute %"))
-    out["idle_pct"] = _parse_pct(rows.get("Idle %"))
-    out["comm_pct"] = _parse_pct(rows.get("Exposed Communication %") or rows.get("Communication %"))
-    out["top_bottleneck"] = _parse_top_bottleneck(rows.get("Top Bottleneck Category"))
+    out.update(_shares_from_json(path) if path.suffix == ".json" else _shares_from_md(path))
+    out["memcpy_pct"] = _exposed_memcpy_pct(path.parent)
     return out
 
 
-def _tracelens_dir_for_analysis_md(analysis_md_path: Path) -> Path:
-    """Return the TraceLens output directory containing an ``analysis.md``."""
-    return analysis_md_path.parent
+def _top_kernel_from_json(path: Path) -> dict[str, Any] | None:
+    """The ``compute_optimizations`` member with the highest ``pct_e2e`` of an ``analysis.json``."""
+    data = read_json(path, default={}, require_dict=True)
+    members = [(task, m) for task in data.get("compute_optimizations") or [] for m in task["members"]]
+    if not members:
+        return None
+    task, best = max(members, key=lambda pair: pair[1]["pct_e2e"])
+    return {
+        "name": member_name(task, best),
+        "gpu_pct": round(best["pct_e2e"], 2),
+        "efficiency_pct": _parse_pct(None if best["efficiency_percent"] is None else str(best["efficiency_percent"])),
+        "bound_type": best["bound"] or "",
+    }
 
 
 def extract_top_kernel(analysis_md_path: str | Path) -> dict[str, Any] | None:
-    """Return the highest ``percent_of_total`` operation across category metrics."""
+    """Return the highest-share operation: from ``category_data`` metrics, or from an ``analysis.json`` path."""
     md_path = Path(analysis_md_path)
-    cat_dir = _tracelens_dir_for_analysis_md(md_path) / "category_data"
+    if md_path.suffix == ".json":
+        return _top_kernel_from_json(md_path)
+    cat_dir = md_path.parent / "category_data"
     if not cat_dir.is_dir():
         return None
 
@@ -152,82 +209,70 @@ def _clamp_within(raw: float | None) -> tuple[float | None, float | None]:
     return within, round(100.0 - within, 2)
 
 
-def _compute_within_and_gap(
-    *,
-    peak: float,
-    achieved: float,
-) -> tuple[float | None, float | None]:
-    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both ``None`` when either input is non-positive."""
-    return _clamp_within(within_roofline_pct(peak=peak, achieved=achieved))
-
-
 def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str) -> None:
     """Add ``roofline_provenance`` (+ ``perfmodel_breakdown`` when the PerfModel succeeds) for *arm*."""
-    try:
-        from .roofline_ceiling import (
-            apply_runtime_dtype,
-            compute_roofline_from_perfmodel,
-            load_model_meta,
-            resolve_compute_peak_provenance,
-            resolve_runtime_dtype,
-            resolve_runtime_workload,
-        )
+    from .roofline_ceiling import compute_roofline_from_perfmodel, load_model_meta, resolve_runtime_workload
 
-        runtime = resolve_runtime_workload(state, arm=arm)
-        meta = load_model_meta(runtime.model_path, precision_hint=runtime.precision)
-        if meta is None:
-            return
-        rt = resolve_runtime_dtype(state, meta, arm=arm)
-        meta = apply_runtime_dtype(meta, rt)
-        compute_precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
-        pm_bd = compute_roofline_from_perfmodel(
-            meta=meta,
-            gpu_type=runtime.gpu_type,
-            concurrency=runtime.concurrency,
-            isl=runtime.isl,
-            osl=runtime.osl,
-            num_gpus=runtime.tp,
-            precision_tag=compute_precision_tag,
-        )
-        snapshot["roofline_provenance"] = {
-            "formula": "perfmodel" if pm_bd is not None else "legacy",
-            **resolve_compute_peak_provenance(runtime.gpu_type, compute_precision_tag),
-            "runtime_weight_dtype": rt.weight_dtype_tag,
-            "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
-            "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
-            "quantization": rt.quantization,
-            "dtype_source": rt.source,
-            "effective_concurrency": runtime.concurrency,
-            "runtime_tp": runtime.tp,
-            "runtime_isl": runtime.isl,
-            "runtime_osl": runtime.osl,
-            "runtime_precision": runtime.precision,
-            "runtime_framework": runtime.framework,
+    runtime = resolve_runtime_workload(state, arm=arm)
+    if framework_registry.is_scriptable(runtime.framework):
+        return
+    meta = load_model_meta(runtime.model_path, precision_hint=runtime.precision)
+    if meta is None:
+        return
+    rt = resolve_runtime_dtype(state, meta, arm=arm)
+    meta = apply_runtime_dtype(meta, rt)
+    compute_precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
+    pm_bd = compute_roofline_from_perfmodel(
+        meta=meta,
+        target=ComputeTarget(gpu_type=runtime.gpu_type, num_gpus=runtime.tp, precision_tag=compute_precision_tag),
+        shape=DecodeShape(isl=runtime.isl, osl=runtime.osl, concurrency=runtime.concurrency),
+    )
+    snapshot["roofline_provenance"] = {
+        "formula": "perfmodel" if pm_bd is not None else "legacy",
+        **resolve_compute_peak_provenance(runtime.gpu_type, compute_precision_tag),
+        "runtime_weight_dtype": rt.weight_dtype_tag,
+        "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
+        "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
+        "quantization": rt.quantization,
+        "dtype_source": rt.source,
+        "effective_concurrency": runtime.concurrency,
+        "runtime_tp": runtime.tp,
+        "runtime_isl": runtime.isl,
+        "runtime_osl": runtime.osl,
+        "runtime_precision": runtime.precision,
+        "runtime_framework": runtime.framework,
+    }
+    if pm_bd is not None:
+        snapshot["perfmodel_breakdown"] = {
+            "decode_tok_per_s": pm_bd.decode_tok_per_s,
+            "prefill_tok_per_s": pm_bd.prefill_tok_per_s,
+            "decode_mem_tok_per_s": pm_bd.decode_mem_tok_per_s,
+            "decode_cmp_tok_per_s": pm_bd.decode_cmp_tok_per_s,
+            "bound_kind": pm_bd.bound_kind,
+            "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
+            "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
+            "ops": [
+                {
+                    "name": op.name,
+                    "flops": op.flops,
+                    "bytes_moved": op.bytes_moved,
+                    "ai": op.ai,
+                    "time_s": op.time_s,
+                    "bound": op.bound,
+                    "pct_time": op.pct_time,
+                }
+                for op in pm_bd.ops
+            ],
         }
-        if pm_bd is not None:
-            snapshot["perfmodel_breakdown"] = {
-                "decode_tok_per_s": pm_bd.decode_tok_per_s,
-                "prefill_tok_per_s": pm_bd.prefill_tok_per_s,
-                "decode_mem_tok_per_s": pm_bd.decode_mem_tok_per_s,
-                "decode_cmp_tok_per_s": pm_bd.decode_cmp_tok_per_s,
-                "bound_kind": pm_bd.bound_kind,
-                "hbm_bw_gbps": pm_bd.hbm_bw_gbps,
-                "peak_achievable_tflops": pm_bd.peak_achievable_tflops,
-                "ops": [
-                    {
-                        "name": op.name,
-                        "flops": op.flops,
-                        "bytes_moved": op.bytes_moved,
-                        "ai": op.ai,
-                        "time_s": op.time_s,
-                        "bound": op.bound,
-                        "pct_time": op.pct_time,
-                    }
-                    for op in pm_bd.ops
-                ],
-            }
-    except Exception:  # noqa: BLE001 — PerfModel serialization is best-effort
-        pass
+
+
+@dataclass(frozen=True)
+class RooflineReading:
+    """One arm's achieved throughput (in ``throughput_unit``) against its modelled ceiling."""
+
+    ceiling: RooflineBreakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
+    achieved_tok_per_sec: float = 0.0
+    throughput_unit: str = "tok/s"
 
 
 def build_roofline_snapshot(
@@ -235,24 +280,13 @@ def build_roofline_snapshot(
     snapshot_id: int | None,
     ts: str,
     analysis_md_path: str,
-    theoretical_peak_tok_per_sec: float = 0.0,
-    achieved_tok_per_sec: float = 0.0,
-    mem_ceiling_tok_per_sec: float = 0.0,
-    cmp_ceiling_tok_per_sec: float = 0.0,
-    bound_kind: str = "unknown",
-    throughput_unit: str = "tok/s",
+    reading: RooflineReading = RooflineReading(),
     framework: str = "",
-    e2e_mean_ms: float = 0.0,
-    roofline_ideal_ms: float = 0.0,
 ) -> dict[str, Any]:
     """Materialise one side (baseline or latest) of the comparison."""
-    within_raw = within_roofline_pct(
-        peak=theoretical_peak_tok_per_sec,
-        achieved=achieved_tok_per_sec,
-    )
-    # Unit-agnostic fallback: with no tok/s ceiling, derive within/gap from the ms pair as within = ideal / measured.
-    if within_raw is None and roofline_ideal_ms > 0 and e2e_mean_ms > 0:
-        within_raw = round(roofline_ideal_ms / e2e_mean_ms * 100.0, 2)
+    ceiling = reading.ceiling
+    peak, achieved = ceiling.peak_tok_per_sec, reading.achieved_tok_per_sec
+    within_raw = within_roofline_pct(peak=peak, achieved=achieved)
     within, gap = _clamp_within(within_raw)
     snap: dict[str, Any] = {
         "snapshot_id": snapshot_id,
@@ -264,21 +298,17 @@ def build_roofline_snapshot(
         "compute_pct": None,
         "idle_pct": None,
         "comm_pct": None,
+        "memcpy_pct": None,
         "top_bottleneck": None,
         "top_kernel": None,
         # Primary decode ceiling plus memory/compute sides; None when unavailable.
-        "theoretical_peak_tok_per_sec": (
-            float(theoretical_peak_tok_per_sec) if theoretical_peak_tok_per_sec > 0 else None
-        ),
-        "roofline_mem_ceiling_tok_per_sec": (float(mem_ceiling_tok_per_sec) if mem_ceiling_tok_per_sec > 0 else None),
-        "roofline_cmp_ceiling_tok_per_sec": (float(cmp_ceiling_tok_per_sec) if cmp_ceiling_tok_per_sec > 0 else None),
-        "roofline_bound_kind": (str(bound_kind) if bound_kind else "unknown"),
+        "theoretical_peak_tok_per_sec": (float(peak) if peak > 0 else None),
+        "roofline_mem_ceiling_tok_per_sec": (float(ceiling.mem_tok_per_sec) if ceiling.mem_tok_per_sec > 0 else None),
+        "roofline_cmp_ceiling_tok_per_sec": (float(ceiling.cmp_tok_per_sec) if ceiling.cmp_tok_per_sec > 0 else None),
+        "roofline_bound_kind": (str(ceiling.bound_kind) if ceiling.bound_kind else "unknown"),
         # Unit for the *_tok_per_sec fields ("tok/s" text-gen, "img/s" xDiT).
-        "throughput_unit": (str(throughput_unit) if throughput_unit else "tok/s"),
-        "achieved_tok_per_sec": (float(achieved_tok_per_sec) if achieved_tok_per_sec > 0 else None),
-        # Scriptable/diffusion siblings (compute-latency roofline); None for serving.
-        "e2e_mean_ms": (float(e2e_mean_ms) if e2e_mean_ms > 0 else None),
-        "roofline_ideal_ms": (float(roofline_ideal_ms) if roofline_ideal_ms > 0 else None),
+        "throughput_unit": (str(reading.throughput_unit) if reading.throughput_unit else "tok/s"),
+        "achieved_tok_per_sec": (float(achieved) if achieved > 0 else None),
         "within_roofline_pct": within,
         "gap_to_roofline_pct": gap,
         # Uncapped ratio + the flag derived from it: an achieved throughput above the modelled ceiling is a
@@ -292,6 +322,7 @@ def build_roofline_snapshot(
     snap["compute_pct"] = wl.get("compute_pct")
     snap["idle_pct"] = wl.get("idle_pct")
     snap["comm_pct"] = wl.get("comm_pct")
+    snap["memcpy_pct"] = wl.get("memcpy_pct")
     snap["top_bottleneck"] = wl.get("top_bottleneck")
     top_k = extract_top_kernel(analysis_md_path)
     if top_k:
@@ -315,14 +346,11 @@ def _num_delta(latest: float | None, baseline: float | None) -> float | None:
 _CEILING_REL_TOL: float = 0.01
 
 
-def _ceiling_of(snapshot: dict[str, Any]) -> tuple[str, float] | None:
-    """Return one snapshot's ceiling as ``(unit, value)``, or ``None``."""
+def _ceiling_of(snapshot: dict[str, Any]) -> float | None:
+    """Return one snapshot's modelled ceiling in its throughput unit, or ``None``."""
     peak = snapshot.get("theoretical_peak_tok_per_sec")
     if isinstance(peak, (int, float)) and peak > 0:
-        return "tok/s", float(peak)
-    ideal = snapshot.get("roofline_ideal_ms")
-    if isinstance(ideal, (int, float)) and ideal > 0:
-        return "ms", float(ideal)
+        return float(peak)
     return None
 
 
@@ -335,10 +363,8 @@ def ceilings_comparable(
     latest_ceiling = _ceiling_of(latest or {})
     if base_ceiling is None or latest_ceiling is None:
         return True
-    if base_ceiling[0] != latest_ceiling[0]:
-        return False
-    largest = max(base_ceiling[1], latest_ceiling[1])
-    return abs(base_ceiling[1] - latest_ceiling[1]) <= largest * _CEILING_REL_TOL
+    largest = max(base_ceiling, latest_ceiling)
+    return abs(base_ceiling - latest_ceiling) <= largest * _CEILING_REL_TOL
 
 
 def build_roofline_comparison_from_history(
@@ -412,8 +438,6 @@ def _fmt_tput(v: float | None, framework: str = "") -> str:
     """Format the achieved primary-metric cell for the roofline table."""
     if not isinstance(v, (int, float)) or v <= 0:
         return "—"
-    from hyperloom.inference_optimizer import framework_registry
-
     if framework_registry.is_scriptable(framework):
         return framework_registry.format_primary_metric(framework, float(v))
     return f"{float(v):.1f} tok/s"
@@ -426,24 +450,30 @@ def _fmt_pct_cell(v: float | None) -> str:
     return f"{float(v):.1f}%"
 
 
-#: Ceiling unit -> the label the report uses for it.
-_CEILING_LABELS: dict[str, str] = {
-    "tok/s": "Theoretical peak (decode memory-roofline ceiling)",
-    "ms": "Compute-roofline ideal (per-image latency floor)",
-}
+def _pct_cells(snaps: list[dict[str, Any]], key: str) -> list[str]:
+    """One :func:`_fmt_pct_cell` per snapshot for ``key``."""
+    return [_fmt_pct_cell(snap.get(key)) for snap in snaps]
 
 
-def _single_ceiling(baseline: dict[str, Any], latest: dict[str, Any]) -> tuple[str, float] | None:
-    """Pick the one ceiling to render when both sides share it."""
-    for snap in (baseline, latest):
-        peak = snap.get("theoretical_peak_tok_per_sec")
-        if isinstance(peak, (int, float)) and peak > 0:
-            return "tok/s", float(peak)
-    for snap in (baseline, latest):
-        ideal = snap.get("roofline_ideal_ms")
-        if isinstance(ideal, (int, float)) and ideal > 0:
-            return "ms", float(ideal)
-    return None
+_CEILING_LABEL = "Roofline ceiling"
+
+
+def _unit_of(snapshot: dict[str, Any]) -> str:
+    """The throughput unit a snapshot's ceiling and achieved values are in."""
+    return str(snapshot.get("throughput_unit") or "tok/s")
+
+
+def _ceiling_note(snapshot: dict[str, Any]) -> str:
+    """The ceiling explainer, worded from the snapshot's bound kind and throughput unit."""
+    kind = snapshot.get("roofline_bound_kind")
+    basis = f"{kind}-roofline ceiling" if kind in ("memory", "compute") else "modelled ceiling"
+    return (
+        f"_The **{_CEILING_LABEL}** below is the {basis} "
+        "(see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
+        f"It is an upper bound on the measured throughput ({_unit_of(snapshot)}): real runs "
+        "stay under it because of comm overhead and kernel efficiency below 100%. "
+        "**Within roofline %** = measured / ceiling; **Gap to roofline %** = 100 − Within._"
+    )
 
 
 def _ceiling_lines(
@@ -452,28 +482,29 @@ def _ceiling_lines(
     *,
     mode: str,
 ) -> list[str]:
-    """Render the ceiling header above the metrics table."""
+    """Render the ceiling explainer and header above the metrics table."""
     base_ceiling = _ceiling_of(baseline)
     latest_ceiling = _ceiling_of(latest)
     if mode == "before_after" and base_ceiling is not None and latest_ceiling is not None:
         if not ceilings_comparable(baseline, latest):
-            base_unit, base_val = base_ceiling
-            latest_unit, latest_val = latest_ceiling
             return [
-                f"**{_CEILING_LABELS[base_unit]} (Base):** {base_val:.1f} {base_unit}",
-                f"**{_CEILING_LABELS[latest_unit]} (Opt):** {latest_val:.1f} {latest_unit}",
+                _ceiling_note(baseline),
+                "",
+                f"**{_CEILING_LABEL} (Base):** {base_ceiling:.1f} {_unit_of(baseline)}",
+                f"**{_CEILING_LABEL} (Opt):** {latest_ceiling:.1f} {_unit_of(latest)}",
                 "_Ceilings differ (runtime dtype / quantization changed): each side's "
                 "within % and gap % are measured against its own ceiling, so the Δ "
                 "column is withheld._",
                 "",
             ]
-    chosen = _single_ceiling(baseline, latest)
-    if chosen is None:
+    value, side = (base_ceiling, baseline) if base_ceiling is not None else (latest_ceiling, latest)
+    if value is None:
         return []
-    unit, value = chosen
     return [
-        f"**{_CEILING_LABELS[unit]}:** "
-        f"{value:.1f} {unit}  "
+        _ceiling_note(side),
+        "",
+        f"**{_CEILING_LABEL}:** "
+        f"{value:.1f} {_unit_of(side)}  "
         f"_(single-source ceiling; baseline / latest compared against it)_",
         "",
     ]
@@ -485,10 +516,7 @@ _UNCAPPED_KEY = "within_roofline_pct_uncapped"
 
 def _ceiling_exceeded(snapshot: dict[str, Any]) -> bool:
     """Whether a snapshot measured above its own modelled ceiling."""
-    if snapshot.get("roofline_ceiling_exceeded"):
-        return True
-    uncapped = snapshot.get(_UNCAPPED_KEY)
-    return isinstance(uncapped, (int, float)) and float(uncapped) > 100.0
+    return bool(snapshot.get("roofline_ceiling_exceeded"))
 
 
 def _ceiling_exceeded_lines(
@@ -520,99 +548,48 @@ def _ceiling_exceeded_lines(
 
 def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
     """Render the compact Base / Opt / Δ markdown table (session-constant ceiling rendered once above the Base/Opt columns)."""
-
-    def cell(v: float | None) -> str:
-        """Format a percentage value for a table cell."""
-        return f"{v:.1f}%" if isinstance(v, float) else "—"
-
     baseline = cmp.get("baseline") or {}
     latest = cmp.get("latest") or {}
     delta = cmp.get("delta") or {}
     mode = cmp.get("mode") or "single_snapshot"
+    single = mode == "single_snapshot"
+    sides = [baseline] if single else [baseline, latest]
+    kernels = [snap.get("top_kernel") or {} for snap in sides]
+
+    def row(label: str, cells: list[str], delta_value: float | None = None) -> str:
+        """One table row: a cell per side, then the Δ cell when two snapshots are compared."""
+        return f"| {label} | {' | '.join(cells if single else [*cells, _fmt_delta(delta_value)])} |"
 
     # The ceiling is usually session-constant, so surface it once above the table; when the two sides model different
     # ceilings (a dtype / quantization change) both are reported and the within/gap columns are flagged as not
     # directly comparable.
-    ceiling_lines: list[str] = _ceiling_lines(baseline, latest, mode=mode)
-
-    lines: list[str] = list(ceiling_lines)
-    if mode == "single_snapshot":
-        snap = baseline
-        lines.extend(
-            [
-                "| Metric | Value |",
-                "|--------|-------|",
-                f"| Compute % | {cell(snap.get('compute_pct'))} |",
-                f"| Idle % | {cell(snap.get('idle_pct'))} |",
-                f"| Comm % | {cell(snap.get('comm_pct'))} |",
-                f"| Top bottleneck | {snap.get('top_bottleneck') or '—'} |",
-            ]
+    lines = _ceiling_lines(baseline, latest, mode=mode)
+    if single:
+        lines += ["| Metric | Value |", "|--------|-------|"]
+    else:
+        lines += ["| Metric | Base | Opt | Δ |", "|--------|------|-----|---|"]
+    lines.append(row("Compute %", _pct_cells(sides, "compute_pct"), delta.get("compute_pct")))
+    lines.append(row("Idle %", _pct_cells(sides, "idle_pct"), delta.get("idle_pct")))
+    lines.append(row("Comm %", _pct_cells(sides, "comm_pct"), delta.get("comm_pct")))
+    lines.append(row("Top bottleneck", [str(snap.get("top_bottleneck") or "—") for snap in sides]))
+    lines.append(
+        row("Top kernel efficiency", _pct_cells(kernels, "efficiency_pct"), delta.get("top_kernel_efficiency_pct"))
+    )
+    if any(kernel.get("name") for kernel in kernels):
+        lines.append(row("Top kernel", [f"`{kernel.get('name') or '—'}`" for kernel in kernels]))
+    lines.append(
+        row(
+            "Achieved output_throughput",
+            [_fmt_tput(snap.get("achieved_tok_per_sec"), snap.get("framework")) for snap in sides],
         )
-        tk = snap.get("top_kernel") or {}
-        lines.append(f"| Top kernel efficiency | {cell(tk.get('efficiency_pct'))} |")
-        if tk.get("name"):
-            lines.append(f"| Top kernel | `{tk.get('name')}` |")
-        lines.append(
-            f"| Achieved output_throughput | {_fmt_tput(snap.get('achieved_tok_per_sec'), snap.get('framework') or '')} |"
-        )
-        lines.append(f"| Within roofline % | {_fmt_pct_cell(snap.get('within_roofline_pct'))} |")
-        lines.append(f"| Gap to roofline % | {_fmt_pct_cell(snap.get('gap_to_roofline_pct'))} |")
-        if _ceiling_exceeded(snap):
-            lines.append(f"| Within roofline % (uncapped) | {_fmt_pct_cell(snap.get(_UNCAPPED_KEY))} |")
-        lines.append("")
-        lines.extend(_ceiling_exceeded_lines(snap, {}, mode=mode))
-        return lines
-
-    lines.extend(
-        [
-            "| Metric | Base | Opt | Δ |",
-            "|--------|------|-----|---|",
-            f"| Compute % | {cell(baseline.get('compute_pct'))} | "
-            f"{cell(latest.get('compute_pct'))} | "
-            f"{_fmt_delta(delta.get('compute_pct'))} |",
-            f"| Idle % | {cell(baseline.get('idle_pct'))} | "
-            f"{cell(latest.get('idle_pct'))} | "
-            f"{_fmt_delta(delta.get('idle_pct'))} |",
-            f"| Comm % | {cell(baseline.get('comm_pct'))} | "
-            f"{cell(latest.get('comm_pct'))} | "
-            f"{_fmt_delta(delta.get('comm_pct'))} |",
-            f"| Top bottleneck | {baseline.get('top_bottleneck') or '—'} | {latest.get('top_bottleneck') or '—'} | — |",
-        ]
     )
-    btk = baseline.get("top_kernel") or {}
-    ltk = latest.get("top_kernel") or {}
-    lines.append(
-        f"| Top kernel efficiency | {cell(btk.get('efficiency_pct'))} | "
-        f"{cell(ltk.get('efficiency_pct'))} | "
-        f"{_fmt_delta(delta.get('top_kernel_efficiency_pct'))} |"
-    )
-    if btk.get("name") or ltk.get("name"):
-        lines.append(f"| Top kernel | `{btk.get('name') or '—'}` | `{ltk.get('name') or '—'}` | — |")
-    lines.append(
-        f"| Achieved output_throughput | "
-        f"{_fmt_tput(baseline.get('achieved_tok_per_sec'), baseline.get('framework') or '')} | "
-        f"{_fmt_tput(latest.get('achieved_tok_per_sec'), latest.get('framework') or '')} | — |"
-    )
-    lines.append(
-        f"| Within roofline % | "
-        f"{_fmt_pct_cell(baseline.get('within_roofline_pct'))} | "
-        f"{_fmt_pct_cell(latest.get('within_roofline_pct'))} | "
-        f"{_fmt_delta(delta.get('within_roofline_pct'))} |"
-    )
-    lines.append(
-        f"| Gap to roofline % | "
-        f"{_fmt_pct_cell(baseline.get('gap_to_roofline_pct'))} | "
-        f"{_fmt_pct_cell(latest.get('gap_to_roofline_pct'))} | "
-        f"{_fmt_delta(delta.get('gap_to_roofline_pct'))} |"
-    )
-    if _ceiling_exceeded(baseline) or _ceiling_exceeded(latest):
-        lines.append(
-            f"| Within roofline % (uncapped) | "
-            f"{_fmt_pct_cell(baseline.get(_UNCAPPED_KEY))} | "
-            f"{_fmt_pct_cell(latest.get(_UNCAPPED_KEY))} | — |"
-        )
+    for label, key in (("Within roofline %", "within_roofline_pct"), ("Gap to roofline %", "gap_to_roofline_pct")):
+        lines.append(row(label, _pct_cells(sides, key), delta.get(key)))
+    exceeded = _ceiling_exceeded_lines(baseline, {} if single else latest, mode=mode)
+    if exceeded:
+        lines.append(row("Within roofline % (uncapped)", _pct_cells(sides, _UNCAPPED_KEY)))
     lines.append("")
-    lines.extend(_ceiling_exceeded_lines(baseline, latest, mode=mode))
+    lines.extend(exceeded)
     return lines
 
 
@@ -620,11 +597,12 @@ def format_roofline_metrics_table(cmp: dict[str, Any]) -> list[str]:
 #: profiler digest and the coordinator's bottleneck-redirect advisory.
 BOTTLENECK_DOMAIN_HINTS: dict[str, tuple[str, str]] = {
     "comm": ("comm_specialist", "communication"),
-    "host_overhead": ("system_specialist", "systems"),
     "idle": ("system_specialist", "systems"),
     "compute": ("kernel_switch_specialist", "kernel_agent"),
     "memory": ("serving_specialist", "framework"),
 }
+
+_DIRECTION_PCT_KEYS = (("compute", "compute_pct"), ("idle", "idle_pct"), ("comm", "comm_pct"))
 
 
 def dominant_direction(snapshot: dict[str, Any] | None) -> tuple[str, float]:
@@ -632,11 +610,7 @@ def dominant_direction(snapshot: dict[str, Any] | None) -> tuple[str, float]:
     if not isinstance(snapshot, dict):
         return "", 0.0
     candidates: dict[str, float] = {}
-    for direction, key in (
-        ("compute", "compute_pct"),
-        ("idle", "idle_pct"),
-        ("comm", "comm_pct"),
-    ):
+    for direction, key in _DIRECTION_PCT_KEYS:
         val = snapshot.get(key)
         if isinstance(val, (int, float)):
             candidates[direction] = float(val)
@@ -673,36 +647,27 @@ def direction_saturation(snapshot: dict[str, Any] | None) -> dict[str, Any]:
 def build_profiler_digest(
     snapshots: list[dict[str, Any]] | None,
     trace_analyze: dict[str, Any] | None,
-    *,
-    top_n: int = 3,
 ) -> str:
     """Render a compact, bottleneck-focused profiler block for prompt injection."""
-    snaps = [s for s in (snapshots or []) if isinstance(s, dict)]
+    snaps = dict_rows(snapshots)
     ta = trace_analyze if isinstance(trace_analyze, dict) else {}
     if not snaps and not ta:
         return ""
     latest = snaps[-1] if snaps else {}
 
-    def _pct(v: Any) -> str:
-        """Format a value as a one-decimal percentage, or ``—`` when not numeric."""
-        return f"{float(v):.1f}%" if isinstance(v, (int, float)) else "—"
-
     bound_kind = str(latest.get("roofline_bound_kind") or "").strip() or "unknown"
     lines: list[str] = [
         f"bound_kind={bound_kind}  "
-        f"compute={_pct(latest.get('compute_pct'))}  "
-        f"idle={_pct(latest.get('idle_pct'))}  "
-        f"comm={_pct(latest.get('comm_pct'))}"
+        f"compute={_fmt_pct_cell(latest.get('compute_pct'))}  "
+        f"idle={_fmt_pct_cell(latest.get('idle_pct'))}  "
+        f"comm={_fmt_pct_cell(latest.get('comm_pct'))}  "
+        f"memcpy={_fmt_pct_cell(latest.get('memcpy_pct'))}"
     ]
 
     if len(snaps) >= 2:
         prev = snaps[-2]
         parts: list[str] = []
-        for label, key in (
-            ("compute", "compute_pct"),
-            ("idle", "idle_pct"),
-            ("comm", "comm_pct"),
-        ):
+        for label, key in _DIRECTION_PCT_KEYS:
             d = _num_delta(latest.get(key), prev.get(key))
             if d is not None:
                 parts.append(f"{label} {_fmt_delta(d)}pp")
@@ -710,17 +675,13 @@ def build_profiler_digest(
             lines.append("delta_vs_prev: " + "  ".join(parts))
 
     rows: list[str] = []
-    hot = ta.get("hot_kernels_top15") or []
-    if isinstance(hot, list):
-        for entry in hot[:top_n]:
-            if not isinstance(entry, dict):
-                continue
-            name = str(entry.get("name") or entry.get("kernel_id") or "?")
-            seg = f"  {name}  {_pct(entry.get('gpu_pct'))} gpu"
-            eff = entry.get("efficiency_percent")
-            if isinstance(eff, (int, float)):
-                seg += f"  (eff {float(eff):.1f}%)"
-            rows.append(seg)
+    for entry in ta.get("hot_kernels_top15", [])[:3]:
+        name = first_str(entry.get("name"), entry.get("kernel_id"), "?")
+        seg = f"  {name}  {_fmt_pct_cell(entry.get('gpu_pct'))} gpu"
+        eff = entry.get("efficiency_percent")
+        if isinstance(eff, (int, float)):
+            seg += f"  (eff {float(eff):.1f}%)"
+        rows.append(seg)
     if not rows and latest.get("top_bottleneck"):
         rows.append(f"  {latest.get('top_bottleneck')}")
     if rows:
@@ -732,8 +693,8 @@ def build_profiler_digest(
     if lever:
         lines.append(f"suggested_lever (dominant={direction}): {lever[0]}")
 
-    reusable = ta.get("reusable_native_kernel_ids") or []
-    if isinstance(reusable, list) and reusable:
+    reusable = ta.get("reusable_native_kernel_ids")
+    if reusable:
         lines.append(f"reusable_native_kernel_ids={[str(r) for r in reusable[:12]]}")
 
     return "\n".join(lines)

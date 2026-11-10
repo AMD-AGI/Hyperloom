@@ -71,42 +71,30 @@ Each iteration:
    Critic is given 10 minutes **per plan it has to read**, capped by the
    Orchestration session timeout, because a round of several plans is several
    times the reading. A turn cap, timeout, SDK truncation, or empty answer is
-   never published as a complete plan. Empty or failed Critic calls fail open to
-   the draft and record the verdict `NOT_REVIEWED`, which is what the artifact,
-   the diagnostics, and the next round are all given. Review diagnostics record
-   duration and whether the verdict was explicit or inferred. Shorter sessions publish the synthesized plan directly.
+   never published as a complete plan. Empty or failed Critic calls, and answers
+   not in the shape the review is held to, fail open to the draft and record the
+   verdict `NOT_REVIEWED`, which is what the artifact, the diagnostics, and the
+   next round are all given. Review diagnostics record duration.
+   Shorter sessions publish the synthesized plan directly.
    A multi-lane round is reviewed once, with its division in view, and the one
    verdict reaches every lane.
-4. How wide the round runs is a separate answer, given per lane, and it is the
-   one part of the review a machine reads. A multi-lane review stays prose and
-   ends with one JSON object —
-   `{"lane_narrowing": [{"lane_id": 2, "reason": "..."}]}` — naming the lanes it
-   judges not worth an Implementer session (ground the evidence does not
-   support, or another lane's change in different words). Those lanes are not
-   published, so the round spends fewer sessions than it planned. A review that
-   wants the round whole ends with `{"lane_narrowing": []}`: an empty list and a
-   missing block are different answers, and only the first means "run every
-   lane". The reason travels with the lane into `structured_output.json`,
-   dropping happens before the revision so no revision turn is spent on a lane
-   that will not run, and three rules bound it: at least one lane always runs, a
-   drop naming a lane the round does not have or carrying no readable reason
-   keeps its lane and is reported, and a round carrying a challenger for a
+4. How wide the round runs is a separate answer, given per lane. The review is
+   one structured answer -- `verdict`, the prose `review`, and `lane_narrowing`,
+   the lanes it judges not worth an Implementer session (ground the evidence does
+   not support, or another lane's change in different words), each with its
+   reason. Those lanes are not published, so the round spends fewer sessions
+   than it planned; an empty list runs every lane. The reason travels with the
+   lane into `structured_output.json`, dropping happens before the revision so
+   no revision turn is spent on a lane that will not run, and three rules bound
+   it: at least one lane always runs, a drop naming a lane the round does not
+   have keeps its lane and is reported, and a round carrying a challenger for a
    pending `REPLACE` refuses narrowing whole because which lane is the
    challenger was never written down. A lane the partition widened to joint
    ground is dropped like any other — the review is shown its `joint` flag and
    its fallback and rules with them in view — and the round records under
-   `dropped_joint` that it spent that width without measuring it. A review that
-   ends with no readable block
-   is asked once more for it — one call, no tools, two turns, two minutes, and
-   only when the alternative is running a lane the review said was not worth its
-   session. Every refusal, and everything the round could not read, is recorded
-   under `lane_narrowing`: `status` says what happened to the ruling and `block`
-   says whether it was `answered`, `repaired`, `absent`, `malformed`, or
-   `not_asked` (a one-lane round, which is never held to a block). A `notes`
-   entry says only what was seen while reading the block and leaves the outcome
-   to `status` and `dropped`, so the record cannot contradict itself, and the
-   warning that a narrowing was not applied is logged where that is what
-   happened rather than wherever a note exists.
+   `dropped_joint` that it spent that width without measuring it. Every refusal
+   is recorded under `lane_narrowing`, where `status` says what happened to the
+   ruling.
 5. A `REPLACE` verdict is spent on the round *after* the one it judged. It says
    the implementation route itself is dominated, which the round already
    synthesized cannot act on, so the ruling is carried forward: the next round's
@@ -145,6 +133,24 @@ Framework writes a minimal plan that points to the current Analysis artifacts
 and asks the Implementer to plan directly. Only deterministic plan-persistence or
 workspace failures produce `ORCHESTRATION_ERROR`.
 
+Every plan leaves a short account of itself. A plan's first line, before any
+heading, is a `Summary:` line: one to three plain sentences stating the problem
+the plan addresses and what it changes to address it. The Implementer session
+does not write that takeaway. After the session ends, a separate lesson turn
+records what the session explored, including the directions it kept or dropped,
+on the lines `HELD-FIXED`, `NEGATIVES`, and `DISPROOF`. The loop then appends
+the scope and outcome lines. That file is `lessons/iter_NNN.md`, and it is the
+only reasoning record. A lane takes that turn at the end of its round, while
+its copy of the workspace still exists, and `lane_queue.json` carries the record,
+or the reason there is none, to whichever iteration measures the lane. When the loop
+starts it hides `forge_experiments/` from git with a `forge_experiments/.gitignore`
+holding `*`, so nothing written there is committed or rejected by the workspace
+guard as a new file, whatever the workspace itself ignores.
+`kernelforge export-runs` turns the plan's `Summary:` line, the whole lesson,
+and the `report.md` of the Analysis bundle the round planned on into the
+Experiences of a run; see
+{doc}`the CLI reference </kernelforge/reference/cli>`.
+
 After a KEEP, the previous Analysis bundle remains available and is marked
 stale. The loop refreshes it only after the canonical mean-case score has
 improved by the code-level 5% threshold from the evidence score, or
@@ -167,8 +173,10 @@ failed request is eligible for the next iteration while the service still has
 an attempt available. PARTIAL evidence may use the second attempt; an exhausted
 commit continues with its published or checkpoint evidence.
 
-The campaign is TIME-driven (`--max-hours`). When the search stalls, a
-supervisor injects fresh directions rather than self-terminating on plateau.
+The campaign is TIME-driven (`--max-hours`). When the search stalls, the loop
+hands it to another Agent profile (see *Model relay* below), or the supervisor
+injects fresh directions when no other profile is available, rather than
+self-terminating on plateau.
 
 ## Round admission
 
@@ -271,16 +279,85 @@ from expected skips or misses (`not_configured`, `missing_arch`,
 empty for non-error outcomes; failures contain a bounded, credential-redacted
 exception summary. Apply decisions remain separate in `reference_reason`.
 
+## Model relay
+
+Every new campaign relays its search between Agent profiles: one profile per
+auto-selectable provider (`claude` runs Claude Code, `codex` runs Codex), the
+`--agent-backend` provider first as the primary. `deepseek` (the DeepSeek
+Harness) is not auto-selectable: it joins the relay only as the primary, when
+the campaign starts on it through `--agent-backend deepseek`,
+`FORGE_AGENT_BACKEND=deepseek` or `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`
+(the last is how a Hyperloom run selects it). The campaign records only the
+members, the primary and the blockage threshold. Each session resolves every
+member's model: the primary takes `--model`; every member without one takes its
+provider's `CLAUDE_MODEL` / `CODEX_MODEL` / `DSH_MODEL`, else the provider's
+default model.
+`--model`, `--agent-reasoning-effort` and the model variables therefore apply on
+`--resume` as well. An `--agent-backend` (or `FORGE_AGENT_BACKEND`) that differs
+from the campaign's primary is refused on resume; leave it unset to keep the
+campaign's primary.
+
+Before the first iteration, every profile's exact provider and model is checked
+once, with one minimal model call per profile. Like the rest of the campaign
+setup, the check runs before the `--max-hours` budget starts. A profile that
+fails the check stays unavailable for the session, and the startup log gives
+the reason. When only one profile passes, the log says model relay is off for
+the session and how to turn it on.
+
+A blockage is three consecutive non-improving search iterations produced by the
+active profile. Infrastructure, API, device-contention and integrity failures,
+and outcomes no profile produced (such as a stacked merge), do not count; a
+KEEP ends the blockage. Every blockage takes the first of these the session can
+run, checked against the startup check:
+
+1. Switch to an available profile on a different harness and model (Claude Code
+   and Codex).
+2. Otherwise, switch to an available profile on the same harness with a
+   different model.
+3. Otherwise, run the supervisor below on the active profile.
+
+Every intervention acts on the next plan, so the candidates a `--lanes` round
+already produced are measured first: while the lane queue holds candidates, the
+intervention waits, and a KEEP among them ends the blockage without one. A
+switch replaces the complete search actor (orchestration, specialists, Plan
+Critic and Implementer) at the next clean iteration boundary and forces the next
+round to diversify. With both `claude` and `codex` available, the search
+therefore alternates between them at every blockage until a KEEP.
+
+A session starts on the profile a resumed campaign was running, else the
+primary, else the `--agent-fallback-provider` member, else any available member.
+With `--agent-fallback-provider none`, a session that has no profile to resume
+does not start on a member other than the primary.
+
+When a profile's API retries run out, its startup check runs again at the next
+iteration boundary: the search keeps the profile if the check passes and
+switches to an available one if it fails.
+
+A profile without a gateway of its own borrows the other configured one: Codex
+uses the `ANTHROPIC_*` line with `/v1` appended, and Claude uses the `OPENAI_*`
+line without its trailing `/v1`. This works only on a gateway that serves both
+protocols, and the startup check decides. Set the provider's own variables when
+your gateway routes them differently.
+
+The result's `agent_relay` field and the `relay_*` events in
+`forge_experiments/events.jsonl` record the active profile, the availability of
+every profile and each switch.
+
 ## Stalled-search supervisor
 
-When the search plateaus, `forge-loop` escalates to a supervisor backend:
+When the search plateaus and no other Agent profile is available (see
+*Model relay* above), `forge-loop` escalates to a supervisor backend.
+A campaign without relay escalates after three stalled iterations instead, at
+most once every three iterations; the startup log states which schedule
+applies.
 
 ```bash
 kernelforge forge-loop --workspace /work/aiter-amd --resume \
     --supervisor-backend codex
 ```
 
-`--supervisor-backend` can override the Implementer backend used for this review.
+`--supervisor-backend` can override the provider of the active Agent profile
+for this review; under relay it runs on that provider's profile.
 The Supervisor inspects the stalled run and writes a free-form ruling for the
 next fresh orchestration plan. Every interaction is archived under
 `forge_experiments/supervisor/intervention_iter_NNN.md`; the latest non-empty

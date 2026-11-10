@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hyperloom.campaign-spec/v1",
+  "title": "Hyperloom campaign spec v1",
+  "description": "What a hosted Hyperloom run is asked to do. Unknown fields are ignored. The platform that hosts the run never reads it; resources are requested separately. 'multibranch' is opaque here: it is handed untouched to the multibranch entry.",
+  "type": "object",
+  "required": ["schema", "model", "framework", "hardware", "budget", "placement"],
+  "properties": {
+    "schema": {"const": "hyperloom.campaign-spec/v1"},
+    "name": {"type": "string"},
+    "flow": {"enum": ["single", "multibranch"], "default": "single"},
+    "multibranch": {"description": "Opaque; not validated by this schema."},
+    "model": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {"path": {"type": "string", "minLength": 1, "pattern": "\\S"}}
+    },
+    "framework": {
+      "type": "object",
+      "required": ["name", "image"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "image": {"type": "string", "minLength": 1, "pattern": "\\S"}
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "required": ["gpu_type", "tp"],
+      "properties": {
+        "gpu_type": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "tp": {"type": "integer", "minimum": 1},
+        "ep": {"type": "integer", "minimum": 1},
+        "nodes": {"const": 1}
+      }
+    },
+    "workload": {
+      "type": "object",
+      "properties": {
+        "conc": {"type": "integer", "minimum": 1},
+        "isl": {"type": "integer", "minimum": 1},
+        "osl": {"type": "integer", "minimum": 1},
+        "precision": {"type": "string", "minLength": 1, "pattern": "\\S"}
+      }
+    },
+    "objective": {
+      "type": "object",
+      "properties": {"target_gain_pct": {"type": "number", "exclusiveMinimum": 0}}
+    },
+    "budget": {
+      "type": "object",
+      "required": ["max_hours"],
+      "properties": {
+        "max_hours": {"type": "number", "exclusiveMinimum": 0},
+        "max_gpu_hours": {"type": "number", "minimum": 0, "description": "0 means no limit."},
+        "max_llm_usd": {"type": "number", "minimum": 0, "description": "0 means no limit."}
+      }
+    },
+    "launch": {
+      "type": "object",
+      "properties": {
+        "server_args": {"type": "string"},
+        "extra_env": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "options": {
+      "type": "object",
+      "properties": {
+        "kernel": {"type": "boolean"},
+        "framework_agent": {"type": "boolean"},
+        "eval": {"const": true, "description": "The accuracy eval cannot be turned off; false is refused."},
+        "enablement": {"enum": ["all", "launch", "eval", "off"]}
+      }
+    },
+    "placement": {
+      "type": "object",
+      "required": ["profile"],
+      "properties": {
+        "profile": {"enum": ["hosted-gpu", "hosted-cpu"]},
+        "measurement": {"enum": ["local", "hosted"], "description": "Default: local for flow single, hosted for flow multibranch. Flow single accepts only local."},
+        "max_parallel_tests": {"type": "integer", "minimum": 1, "default": 8},
+        "specialist_capacity": {"type": "integer", "minimum": 0}
+      }
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "repo": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "sha": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "kind": {"enum": ["user", "ci"]},
+        "task_id": {"type": "string"}
+      }
+    }
+  }
+}

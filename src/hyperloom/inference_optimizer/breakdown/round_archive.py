@@ -79,23 +79,12 @@ class RoundArchive:
 
         Args:
             role: One of the single-valued ``ROLE_*`` constants;
-                :data:`ROLE_PATCH` repeats and wants :meth:`paths_for`.
+                :data:`ROLE_PATCH` repeats and is read from :meth:`to_list`.
 
         Returns:
             str: The recorded path, ``""`` when no such copy landed.
         """
         return next((f.path for f in self._files if f.role == role), "")
-
-    def paths_for(self, role: str) -> tuple[str, ...]:
-        """Return every session-relative path recorded for ``role``, in order.
-
-        Args:
-            role: One of the ``ROLE_*`` constants.
-
-        Returns:
-            tuple[str, ...]: The recorded paths, empty when none landed.
-        """
-        return tuple(f.path for f in self._files if f.role == role)
 
     def to_list(self) -> list[dict[str, str]]:
         """Serialize every record to a JSON-safe ``{"path", "role"}`` list."""

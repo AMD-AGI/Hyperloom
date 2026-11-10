@@ -15,10 +15,9 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.actions.executors import report_executor
-from hyperloom.orchestrator.loop.coordinator import (
-    Coordinator,
-    effective_closing_grace_sec,
-)
+from hyperloom.orchestrator.loop import coordinator as coordinator_mod
+from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
+from hyperloom.orchestrator.state.shared_state import effective_closing_grace_sec
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.objective import (
     ObjectiveError,
@@ -55,19 +54,16 @@ def _backends_silent() -> dict[str, object]:
 
 
 # TargetGainObjective
-def test_target_gain_basic_progress():
+def test_target_gain_reached_at_target():
     obj = TargetGainObjective(target_gain_pct=10.0)
     s = SharedState(baseline_tput=1000.0, cumulative_gain_validated=0.0)
     assert obj.kind() == "gain_pct"
-    assert obj.progress(s) == 0.0
     assert not obj.reached(s)
 
     s.cumulative_gain_validated = 5.0
-    assert obj.progress(s) == 0.5
     assert not obj.reached(s)
 
     s.cumulative_gain_validated = 12.0
-    assert obj.progress(s) == 1.0
     assert obj.reached(s)
 
 
@@ -95,18 +91,16 @@ def test_target_tput_uses_current_best():
     obj = TargetTputObjective(target_tput_per_gpu=900.0)
     s = SharedState(baseline_tput=800.0, current_best={"tput": 850.0})
     assert obj.kind() == "tput"
-    assert obj.progress(s) == pytest.approx(850.0 / 900.0)
     assert not obj.reached(s)
 
     s.current_best = {"tput": 950.0}
-    assert obj.progress(s) == 1.0
     assert obj.reached(s)
 
 
 def test_target_tput_falls_back_to_baseline_when_no_current_best():
     obj = TargetTputObjective(target_tput_per_gpu=900.0)
     s = SharedState(baseline_tput=750.0, current_best={})
-    assert obj.progress(s) == pytest.approx(750.0 / 900.0)
+    assert obj.gap_pct(s) == pytest.approx(20.0)
 
 
 def test_target_tput_gap_pct_is_relative_to_current():
@@ -141,7 +135,6 @@ def test_target_baseline_loads_ref_tput(tmp_path):
     s = SharedState(baseline_tput=1000.0, current_best={"tput": 1000.0})
     assert obj.kind() == "baseline"
     assert "1234" in obj.describe()
-    assert obj.progress(s) == pytest.approx(1000.0 / 1234.5)
     assert not obj.reached(s)
 
     s.current_best = {"tput": 1300.0}
@@ -186,7 +179,6 @@ def test_time_only_never_reached():
     obj = TimeOnlyObjective()
     s = SharedState(baseline_tput=999.0, current_best={"tput": 9999.0}, cumulative_gain_validated=99.0)
     assert obj.kind() == "time_only"
-    assert obj.progress(s) == 0.0
     assert not obj.reached(s)
     assert obj.gap_pct(s) == 0.0
 
@@ -246,7 +238,7 @@ def test_build_objective_treats_empty_target_as_unset():
 async def test_run_stops_on_max_ticks(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        reason = await c.run(max_ticks=3)
+        reason = await c.run(options=RunOptions(max_ticks=3))
         assert reason == "max_ticks"
         assert c.shared_state.stop_reason == "max_ticks"
     finally:
@@ -261,10 +253,7 @@ async def test_run_routes_a_met_objective_through_sweep(session_dir):
         c.shared_state.baseline_tput = 1000.0
         c.shared_state.cumulative_gain_validated = 50.0
         c.shared_state.save(session_dir)
-        reason = await c.run(
-            objective=TargetGainObjective(target_gain_pct=10.0),
-            max_ticks=10,
-        )
+        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), options=RunOptions(max_ticks=10))
         assert c.shared_state.target_reached_at
         assert [row.get("to_phase") for row in c.shared_state.phase_history].count("SWEEP") == 1
         # The ladder never ran in this harness, so SWEEP names its own failure rather than borrowing the target's
@@ -283,10 +272,7 @@ async def test_run_does_not_stop_on_a_gain_no_rebench_confirmed(session_dir):
         c.shared_state.current_best = {"action": "explore", "tput": 1500.0}
         c.shared_state.cumulative_gain_validated = 2.0
         c.shared_state.save(session_dir)
-        reason = await c.run(
-            objective=TargetGainObjective(target_gain_pct=10.0),
-            max_ticks=3,
-        )
+        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), options=RunOptions(max_ticks=3))
         assert reason == "max_ticks"
     finally:
         await c.stop()
@@ -304,7 +290,7 @@ async def test_run_stops_on_time_exhausted(session_dir):
     """A short wall-clock budget stops the run wherever it expires."""
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        reason = await c.run(max_minutes=0.001, max_ticks=1000)
+        reason = await c.run(options=RunOptions(max_minutes=0.001, max_ticks=1000))
         # The 60 ms budget can expire before or after PRELUDE depending on the runner's speed; both reasons prove that
         # the session bound stopped it.
         assert reason in {"time_exhausted", "time_exhausted_during_prelude"}
@@ -343,10 +329,7 @@ async def test_run_closing_phase_writes_report_on_time_exhausted(session_dir):
     c.shared_state.save(session_dir)
     try:
         reason = await c.run(
-            max_minutes=0.0001,
-            max_ticks=50,
-            closing_grace_sec=30.0,
-            tick_interval_sec=0.0,
+            options=RunOptions(max_minutes=0.0001, tick_interval_sec=0.0, max_ticks=50, closing_grace_sec=30.0)
         )
         assert reason == "time_exhausted"
         assert (session_dir / "reports" / "final.md").exists()
@@ -382,20 +365,15 @@ async def test_run_closing_phase_skips_reactor(session_dir):
     c.shared_state.baseline_tput = 50.0
     c.shared_state.save(session_dir)
     calls_at_closing: list[int] = []
-    real_enter = c._enter_closing_phase
+    real_enter = c.phase_close.enter_closing_phase
 
     async def _enter_and_record(*, grace_sec: float) -> float:
         calls_at_closing.append(spy.calls)
         return await real_enter(grace_sec=grace_sec)
 
-    c._enter_closing_phase = _enter_and_record  # type: ignore[method-assign]
+    c.phase_close.enter_closing_phase = _enter_and_record  # type: ignore[method-assign]
     try:
-        await c.run(
-            max_minutes=0.0001,
-            max_ticks=30,
-            closing_grace_sec=5.0,
-            tick_interval_sec=0.0,
-        )
+        await c.run(options=RunOptions(max_minutes=0.0001, tick_interval_sec=0.0, max_ticks=30, closing_grace_sec=5.0))
         assert calls_at_closing, "expected closing phase to be entered"
         # A spent bound cancels phase-enter and skips reactors on the tick that trips CLOSE.
         assert spy.calls == calls_at_closing[0]
@@ -408,7 +386,7 @@ async def test_run_stops_on_signal_via_stop_event(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c._stop.set()
-        reason = await c.run(max_ticks=10)
+        reason = await c.run(options=RunOptions(max_ticks=10))
         assert reason == "signal"
     finally:
         await c.stop()
@@ -421,7 +399,7 @@ async def test_run_stops_on_emergency_crash_count(session_dir):
         # Record crashes so the trailing-window rate sees them.
         for _ in range(30):
             c.shared_state.increment_crash_count()
-        reason = await c.run(max_ticks=10)
+        reason = await c.run(options=RunOptions(max_ticks=10))
         assert reason == "emergency"
     finally:
         await c.stop()
@@ -432,7 +410,7 @@ async def test_run_does_not_emergency_below_default_threshold(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.crash_count = 5
-        reason = await c.run(max_ticks=2)
+        reason = await c.run(options=RunOptions(max_ticks=2))
         assert reason == "max_ticks"
     finally:
         await c.stop()
@@ -448,9 +426,9 @@ async def test_run_records_tick_exception_and_continues(session_dir, monkeypatch
         if calls["n"] == 1:
             raise RuntimeError("dispatcher boom")
 
-    monkeypatch.setattr(c, "_pump_dispatcher_once", flaky_dispatcher_once)
+    monkeypatch.setattr(c.dispatcher, "pump_dispatcher_once", flaky_dispatcher_once)
     try:
-        reason = await c.run(max_ticks=2)
+        reason = await c.run(options=RunOptions(max_ticks=2))
         assert reason == "max_ticks"
         assert calls["n"] == 2
         assert c.shared_state.crash_count == 1
@@ -471,9 +449,10 @@ async def test_run_repeated_tick_exceptions_stop_as_emergency(
     async def broken_dispatcher_once() -> None:
         raise RuntimeError("persistent dispatcher boom")
 
-    monkeypatch.setattr(c, "_pump_dispatcher_once", broken_dispatcher_once)
+    monkeypatch.setattr(c.dispatcher, "pump_dispatcher_once", broken_dispatcher_once)
+    monkeypatch.setattr(coordinator_mod, "_CRASH_EMERGENCY_THRESHOLD", 2)
     try:
-        reason = await c.run(max_ticks=10, crash_emergency_threshold=2)
+        reason = await c.run(options=RunOptions(max_ticks=10))
         assert reason == "emergency"
         assert c.shared_state.crash_count == 2
         assert c.shared_state.stop_reason == "emergency"
@@ -492,13 +471,14 @@ async def test_run_finally_labels_residual_escape_as_coordinator_exception(
     async def broken_dispatcher_once() -> None:
         raise RuntimeError("recorded tick failure")
 
-    def broken_stop_when(_c) -> bool:
-        raise ValueError("stop callback failed")
+    class _BrokenObjective(TimeOnlyObjective):
+        def reached(self, state: SharedState) -> bool:
+            raise ValueError("objective check failed")
 
-    monkeypatch.setattr(c, "_pump_dispatcher_once", broken_dispatcher_once)
+    monkeypatch.setattr(c.dispatcher, "pump_dispatcher_once", broken_dispatcher_once)
     try:
-        with pytest.raises(ValueError, match="stop callback failed"):
-            await c.run(stop_when=broken_stop_when, max_ticks=10)
+        with pytest.raises(ValueError, match="objective check failed"):
+            await c.run(objective=_BrokenObjective(), options=RunOptions(max_ticks=10))
         persisted = SharedState.load_or_init(session_dir)
         assert persisted.stop_reason == "coordinator_exception"
         assert persisted.last_tick_exception["type"] == "RuntimeError"
@@ -508,30 +488,14 @@ async def test_run_finally_labels_residual_escape_as_coordinator_exception(
 
 
 @pytest.mark.asyncio
-async def test_run_emergency_threshold_can_be_lowered_per_call(session_dir):
+async def test_run_stops_as_emergency_once_recent_crashes_reach_the_threshold(session_dir, monkeypatch):
+    monkeypatch.setattr(coordinator_mod, "_CRASH_EMERGENCY_THRESHOLD", 3)
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         for _ in range(4):
             c.shared_state.increment_crash_count()
-        reason = await c.run(max_ticks=10, crash_emergency_threshold=3)
+        reason = await c.run(options=RunOptions(max_ticks=10))
         assert reason == "emergency"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_run_stops_on_custom_stop_when(session_dir):
-    c = Coordinator(session_dir, backends=_backends_silent())
-    try:
-        ticks = {"n": 0}
-
-        def custom_stop(_c) -> bool:
-            ticks["n"] += 1
-            return ticks["n"] >= 2
-
-        reason = await c.run(stop_when=custom_stop, max_ticks=20)
-        assert reason == "custom"
-        assert ticks["n"] == 2
     finally:
         await c.stop()
 
@@ -540,7 +504,7 @@ async def test_run_stops_on_custom_stop_when(session_dir):
 async def test_run_persists_stop_reason_to_state_json(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        await c.run(max_ticks=2)
+        await c.run(options=RunOptions(max_ticks=2))
     finally:
         await c.stop()
     on_disk = json.loads((session_dir / "state.json").read_text())
@@ -551,25 +515,10 @@ async def test_run_persists_stop_reason_to_state_json(session_dir):
 async def test_run_persists_max_minutes_to_state(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        await c.run(max_ticks=1, max_minutes=42.0)
+        await c.run(options=RunOptions(max_minutes=42.0, max_ticks=1))
     finally:
         await c.stop()
     assert c.shared_state.max_minutes == 42
-
-
-@pytest.mark.asyncio
-async def test_run_async_stop_when_callback(session_dir):
-    """stop_when can be an async function too."""
-    c = Coordinator(session_dir, backends=_backends_silent())
-    try:
-
-        async def acb(_c):
-            return True
-
-        reason = await c.run(stop_when=acb, max_ticks=10)
-        assert reason == "custom"
-    finally:
-        await c.stop()
 
 
 # --- the roofline target ---
@@ -582,14 +531,13 @@ def _state_with_within(value: object) -> SharedState:
 
 
 class TestARooflineTargetOnlyCountsAMeasuredRoofline:
-    """The objective has no separate "was it profiled" gate; an unmeasured ceiling simply reads as zero progress."""
+    """The objective has no separate "was it profiled" gate; an unmeasured ceiling simply reads as zero."""
 
     def test_no_snapshot_reads_as_unmeasured(self):
         st = SharedState(session_id="s")
         assert st.current_within_roofline_pct() is None
         obj = TargetRooflineObjective(80.0)
         assert obj.reached(st) is False
-        assert obj.progress(st) == 0.0
         assert obj.gap_pct(st) == pytest.approx(80.0)
 
     @pytest.mark.parametrize("value", [None, "62.5"])
@@ -609,7 +557,6 @@ class TestARooflineTargetOnlyCountsAMeasuredRoofline:
         assert obj.reached(_state_with_within(79.99)) is False
         assert obj.reached(_state_with_within(80.0)) is True
         assert obj.gap_pct(_state_with_within(62.5)) == pytest.approx(17.5)
-        assert obj.progress(_state_with_within(40.0)) == pytest.approx(0.5)
 
     @pytest.mark.parametrize("bad", [0.0, -1.0, 100.1])
     def test_the_target_is_a_percentage(self, bad):
@@ -643,7 +590,6 @@ class TestEitherTargetEndsTheRun:
         st = _state_with_within(40.0)
         st.cumulative_gain_validated = 200.0
         both = self._both()
-        assert both.progress(st) == pytest.approx(2 / 3)
         assert both.gap_pct(st) == pytest.approx(100.0)
 
 

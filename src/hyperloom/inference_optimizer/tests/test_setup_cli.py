@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.llm_config import deepseek_compat_env
+from hyperloom_common.llm.llm_config import deepseek_compat_env
 from hyperloom.inference_optimizer import setup
 
 
@@ -138,8 +138,8 @@ def test_setup_cli_scrubs_stale_workspace_runtime_env_when_dotenv_exists(tmp_pat
     monkeypatch.setenv("HYPERLOOM_RUNTIME_DIR", "/old/workspace/session/runtime")
     monkeypatch.setenv("KERNEL_AGENT_ENV", "/old/workspace/session/runtime/kernel-agent.env.sh")
     monkeypatch.setenv("HYPERLOOM_ROOT", "/old/workspace/session/runtime/source-mirrors")
-    monkeypatch.setenv("KERNEL_AGENT_ROOT", "/old/workspace/hyperloom/agents/kernel")
-    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/old/workspace/hyperloom/agents/kernel")
+    monkeypatch.setenv("KERNEL_AGENT_ROOT", "/old/workspace/kernel-agent")
+    monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", "/old/workspace/kernel-agent")
     monkeypatch.setenv("FRAMEWORK_AGENT_ROOT", "/old/workspace/hyperloom/agents/framework")
     monkeypatch.setenv("HYPERLOOM_SKILL_PATH", "/old/workspace/hyperloom/inference_optimizer/SKILL.md")
     monkeypatch.setenv("PYTHONPATH", "/old/workspace:/old/site-packages")
@@ -175,7 +175,7 @@ def _credential_functions() -> str:
 
 
 def test_baremetal_setup_accepts_a_codex_only_gateway(tmp_path: Path):
-    """Hyperloom's runtime drives both claude and codex, and ``cli/preflight._provider_only_mode`` already treats an
+    """Hyperloom's runtime drives both claude and codex, and ``cli/preflight_env._provider_only_mode`` already treats an
     OpenAI-only environment as a valid single provider; the bare-metal installer must not be the one place refusing it.
     """
     dotenv = tmp_path / ".env"
@@ -475,16 +475,20 @@ def test_baremetal_setup_keeps_hand_written_dual_protocol_openai_side(tmp_path: 
     assert 'OPENAI_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: deepseek-test-key"' in text
 
 
-def test_baremetal_setup_drops_openai_side_of_a_separate_provider(tmp_path: Path):
-    """A different host is a second provider, and is still scrubbed."""
+def test_baremetal_setup_keeps_both_providers_on_separate_hosts(tmp_path: Path):
+    """The setup skill's Both choice must survive the installer write-back."""
     dotenv = tmp_path / ".env"
     dotenv.write_text(
         "\n".join(
             [
+                "HYPERLOOM_RUN_MODE=baremetal",
                 "ANTHROPIC_BASE_URL=https://api.anthropic.com",
                 "ANTHROPIC_API_KEY=anthropic-test-key",
+                "CLAUDE_MODEL=claude-test-model",
                 "OPENAI_BASE_URL=https://api.openai.com/v1",
                 "OPENAI_API_KEY=openai-test-key",
+                'OPENAI_CUSTOM_HEADERS="X-Test-Key: openai-test-key"',
+                "CODEX_MODEL=codex-test-model",
             ]
         )
         + "\n",
@@ -517,8 +521,12 @@ def test_baremetal_setup_drops_openai_side_of_a_separate_provider(tmp_path: Path
 
     text = dotenv.read_text(encoding="utf-8")
     assert "ANTHROPIC_BASE_URL=https://api.anthropic.com" in text
-    assert "OPENAI_BASE_URL=" not in text
-    assert "OPENAI_API_KEY=" not in text
+    assert "ANTHROPIC_API_KEY=anthropic-test-key" in text
+    assert "CLAUDE_MODEL=claude-test-model" in text
+    assert "OPENAI_BASE_URL=https://api.openai.com/v1" in text
+    assert "OPENAI_API_KEY=openai-test-key" in text
+    assert 'OPENAI_CUSTOM_HEADERS="X-Test-Key: openai-test-key"' in text
+    assert "CODEX_MODEL=codex-test-model" in text
 
 
 def test_baremetal_setup_keeps_legacy_env_when_validation_fails(tmp_path: Path):
@@ -672,11 +680,6 @@ def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
             # extracted slice.
             ["preflight_load_dotenv() { :; }", "normalize_legacy_deepseek_env() { :; }"],
         ),
-        (
-            "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
-            [],
-        ),
     ]
     for name, script_path, stubs in script_paths:
         script_text = script_path.read_text(encoding="utf-8")
@@ -715,17 +718,12 @@ def test_install_preflights_accept_dual_protocol_gateway(tmp_path: Path):
 
 
 def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
-    """Both installers reject a mispaired config at install time."""
+    """install.sh rejects a mispaired config at install time."""
     script_paths = [
         (
             "install",
             Path(setup.__file__).resolve().parent / "assets" / "install.sh",
             ["preflight_load_dotenv() { :; }"],
-        ),
-        (
-            "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
-            [],
         ),
     ]
     for name, script_path, stubs in script_paths:
@@ -765,7 +763,7 @@ def test_install_preflights_reject_cross_provider_pairing(tmp_path: Path):
 
 
 def test_baremetal_setup_rejects_cross_provider_pairing(tmp_path: Path):
-    """install_baremetal.sh rejects a mispaired config during setup, like the CLI preflight and the other two installers."""
+    """install_baremetal.sh rejects a mispaired config during setup, like the CLI preflight and install.sh."""
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
     start = script_text.index("read_dotenv_var() {")
@@ -818,11 +816,6 @@ def test_install_preflights_accept_oauth_only_credentials(tmp_path: Path):
             "install",
             Path(setup.__file__).resolve().parent / "assets" / "install.sh",
             ["preflight_load_dotenv() { :; }"],
-        ),
-        (
-            "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
-            [],
         ),
     ]
     for name, script_path, stubs in script_paths:
@@ -910,11 +903,6 @@ def test_install_preflights_accept_oauth_alongside_bare_openai_key(tmp_path: Pat
             Path(setup.__file__).resolve().parent / "assets" / "install.sh",
             ["preflight_load_dotenv() { :; }"],
         ),
-        (
-            "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
-            [],
-        ),
     ]
     for name, script_path, stubs in script_paths:
         script_text = script_path.read_text(encoding="utf-8")
@@ -957,11 +945,6 @@ def test_install_preflights_still_reject_gateway_url_with_bare_openai_key(tmp_pa
             "install",
             Path(setup.__file__).resolve().parent / "assets" / "install.sh",
             ["preflight_load_dotenv() { :; }"],
-        ),
-        (
-            "kernel",
-            Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh",
-            [],
         ),
     ]
     for name, script_path, stubs in script_paths:
@@ -1194,6 +1177,8 @@ def _sourceable_installer(install_script: Path, tmp_path: Path) -> Path:
     assert marker in text, "install_baremetal.sh must end by invoking main"
     lib = tmp_path / "installer_lib.sh"
     lib.write_text(text.replace(marker, "\n"), encoding="utf-8", newline="\n")
+    # The installer sources the runtime_env.sh beside it.
+    (tmp_path / "runtime_env.sh").write_bytes((install_script.parent / "runtime_env.sh").read_bytes())
     return lib
 
 
@@ -2274,12 +2259,8 @@ def test_hotfix_phase_survives_a_failed_torch_lib_sync(tmp_path: Path):
     assert (torch_lib / "libamdhip64.so").read_bytes() == b"stock-hip-bytes"
 
 
-def test_hotfix_syncs_the_isolated_vllm_venv_torch_not_the_shared_one(tmp_path: Path):
-    """vLLM defaults to FRAMEWORK_ENV=isolated with its own ROCm torch under $VLLM_VENV_ROOT, so a shared-interpreter lookup patched a torch that never runs the benchmark and left the profiler unfixed."""
-    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
-    lib = _sourceable_installer(install_script, tmp_path)
-    rocm_lib = _fake_rocm_lib(tmp_path)
-
+def _shared_and_vllm_venv_torch(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """Lay out a framework-less shared torch and an isolated vLLM venv torch, both with stock libs."""
     shared_torch_lib = tmp_path / "shared" / "torch" / "lib"
     venv_torch_lib = tmp_path / "vllm-venv" / "torch" / "lib"
     for d in (shared_torch_lib, venv_torch_lib):
@@ -2290,6 +2271,16 @@ def test_hotfix_syncs_the_isolated_vllm_venv_torch_not_the_shared_one(tmp_path: 
     venv_root = tmp_path / "vllm-venv"
     shared_py = _fake_python_for_torch_lib(tmp_path / "shared-python", shared_torch_lib, importable=frozenset())
     _fake_python_for_torch_lib(venv_root / "bin" / "python", venv_torch_lib, importable=frozenset({"vllm"}))
+    return shared_torch_lib, venv_torch_lib, venv_root, shared_py
+
+
+def test_hotfix_syncs_the_isolated_vllm_venv_torch_not_the_shared_one(tmp_path: Path):
+    """vLLM defaults to FRAMEWORK_ENV=isolated with its own ROCm torch under $VLLM_VENV_ROOT, so a shared-interpreter lookup patched a torch that never runs the benchmark and left the profiler unfixed."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    lib = _sourceable_installer(install_script, tmp_path)
+    rocm_lib = _fake_rocm_lib(tmp_path)
+
+    shared_torch_lib, venv_torch_lib, venv_root, shared_py = _shared_and_vllm_venv_torch(tmp_path)
 
     runner = tmp_path / "runner.sh"
     runner.write_text(
@@ -2377,16 +2368,7 @@ def test_hotfix_rerun_restores_isolated_vllm_from_dotenv(tmp_path: Path):
     lib = _sourceable_installer(install_script, tmp_path)
     rocm_lib = _fake_rocm_lib(tmp_path)
 
-    shared_torch_lib = tmp_path / "shared" / "torch" / "lib"
-    venv_torch_lib = tmp_path / "vllm-venv" / "torch" / "lib"
-    for d in (shared_torch_lib, venv_torch_lib):
-        d.mkdir(parents=True)
-        (d / "libamdhip64.so").write_bytes(b"stock-hip-bytes")
-        (d / "libroctracer64.so").write_bytes(b"stock-tracer-bytes")
-
-    venv_root = tmp_path / "vllm-venv"
-    shared_py = _fake_python_for_torch_lib(tmp_path / "shared-python", shared_torch_lib, importable=frozenset())
-    _fake_python_for_torch_lib(venv_root / "bin" / "python", venv_torch_lib, importable=frozenset({"vllm"}))
+    shared_torch_lib, venv_torch_lib, venv_root, shared_py = _shared_and_vllm_venv_torch(tmp_path)
 
     dotenv = tmp_path / ".env"
     dotenv.write_text(
@@ -2733,7 +2715,7 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
 
 
 def test_kernel_install_no_longer_exports_openai_safe_credentials():
-    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
     script_text = install_script.read_text(encoding="utf-8")
     write_start = script_text.index("write_env_file() {")
     write_end = script_text.index("\nensure_geak()", write_start)
@@ -2846,15 +2828,14 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
                 "HYPERLOOM_RUNTIME_DIR=/old/workspace/session/runtime",
                 "KERNEL_AGENT_ENV=/old/workspace/session/runtime/kernel-agent.env.sh",
                 "HYPERLOOM_ROOT=/old/workspace/session/runtime/source-mirrors",
-                "KERNEL_AGENT_ROOT=/old/workspace/hyperloom/agents/kernel",
-                "HYPERLOOM_KERNEL_AGENT_ROOT=/old/workspace/hyperloom/agents/kernel",
+                "KERNEL_AGENT_ROOT=/old/workspace/kernel-agent",
+                "HYPERLOOM_KERNEL_AGENT_ROOT=/old/workspace/kernel-agent",
                 "FRAMEWORK_AGENT_ROOT=/old/workspace/hyperloom/agents/framework",
                 "HYPERLOOM_SKILL_PATH=/old/workspace/hyperloom/inference_optimizer/SKILL.md",
                 "PYTHONPATH=/old/workspace",
                 "scrub_stale_workspace_env_for_setup_dotenv",
                 "load_dotenv_no_clobber",
-                'HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"',
-                'KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"',
+                "runtime_env_derive_runtime_paths",
                 "printf 'USER_DATA_PATH=%s\n' \"${USER_DATA_PATH-}\"",
                 "printf 'HYPERLOOM_RUNTIME_DIR=%s\n' \"${HYPERLOOM_RUNTIME_DIR-}\"",
                 "printf 'KERNEL_AGENT_ENV=%s\n' \"${KERNEL_AGENT_ENV-}\"",
@@ -2875,13 +2856,17 @@ def test_install_sh_scrubs_stale_runtime_env_for_setup_dotenv(tmp_path: Path):
 
     assert f"USER_DATA_PATH={workspace}/session\n" in out
     assert f"HYPERLOOM_RUNTIME_DIR={workspace}/session/runtime\n" in out
-    assert f"KERNEL_AGENT_ENV={workspace}/session/runtime/kernel-agent.env.sh\n" in out
+    kernel_agent_env = next(line for line in out.splitlines() if line.startswith("KERNEL_AGENT_ENV="))
+    assert kernel_agent_env.endswith("/kernel-agent.env.sh")
+    assert str(workspace) not in kernel_agent_env
     assert "KERNEL_AGENT_ROOT=\n" in out
     assert "/old/workspace" not in out
 
 
-def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tmp_path: Path):
-    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
+def _kernel_env_writer_sources() -> tuple[str, str, str]:
+    """The .env upsert helpers, ``_compose_pythonpath`` and ``write_env_file`` cut out of install_kernel_tools.sh,
+    the first after the ``runtime_env.sh`` install.sh sources before it."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_kernel_tools.sh"
     script_text = install_script.read_text(encoding="utf-8")
     upsert_start = script_text.index("upsert_dotenv_var() {")
     upsert_end = script_text.index("\n# In --check-only mode")
@@ -2889,9 +2874,15 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
     compose_end = script_text.index("\n# Keep REPO_ROOT on PYTHONPATH")
     env_start = script_text.index("write_env_file() {")
     env_end = script_text.index("\nensure_geak() {")
-    dotenv_helpers = script_text[upsert_start:upsert_end]
-    compose_pythonpath = script_text[compose_start:compose_end]
-    write_env_file = script_text[env_start:env_end]
+    return (
+        f'. "{install_script.with_name("runtime_env.sh").as_posix()}"\n' + script_text[upsert_start:upsert_end],
+        script_text[compose_start:compose_end],
+        script_text[env_start:env_end],
+    )
+
+
+def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tmp_path: Path):
+    dotenv_helpers, compose_pythonpath, write_env_file = _kernel_env_writer_sources()
     dotenv = tmp_path / ".env"
     kernel_env = tmp_path / "runtime" / "kernel-agent.env.sh"
     dotenv.write_text(
@@ -2929,8 +2920,6 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
                 "_OPENAI_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
                 "LLM_API_KEY=",
-                "HYPERLOOM_KERNEL_AGENT_ROOT=",
-                "KERNEL_AGENT_ROOT=",
                 "MAGPIE_PATH=",
                 "MAGPIE_PYTHON=",
                 "PYTHONPATH=",
@@ -2974,17 +2963,7 @@ def test_kernel_env_authoritative_anthropic_mode_does_not_emit_openai_aliases(tm
 
 def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
     """Writing kernel-agent env must NOT wipe the Anthropic creds the operator put in .env (an Anthropic-only setup must keep ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL after install)."""
-    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
-    script_text = install_script.read_text(encoding="utf-8")
-    upsert_start = script_text.index("upsert_dotenv_var() {")
-    upsert_end = script_text.index("\n# In --check-only mode")
-    compose_start = script_text.index("_compose_pythonpath() {")
-    compose_end = script_text.index("\n# Keep REPO_ROOT on PYTHONPATH")
-    env_start = script_text.index("write_env_file() {")
-    env_end = script_text.index("\nensure_geak() {")
-    dotenv_helpers = script_text[upsert_start:upsert_end]
-    compose_pythonpath = script_text[compose_start:compose_end]
-    write_env_file = script_text[env_start:env_end]
+    dotenv_helpers, compose_pythonpath, write_env_file = _kernel_env_writer_sources()
     dotenv = tmp_path / ".env"
     kernel_env = tmp_path / "runtime" / "kernel-agent.env.sh"
     dotenv.write_text(
@@ -3017,8 +2996,6 @@ def test_kernel_env_keeps_anthropic_creds_in_dotenv(tmp_path: Path):
                 "_OPENAI_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
                 "LLM_API_KEY=",
-                "HYPERLOOM_KERNEL_AGENT_ROOT=",
-                "KERNEL_AGENT_ROOT=",
                 "MAGPIE_PATH=",
                 "MAGPIE_PYTHON=",
                 "PYTHONPATH=",
@@ -3072,21 +3049,11 @@ def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
             return f"/mnt/{path.drive[0].lower()}{rest}"
         return text
 
-    install_script = Path(setup.__file__).resolve().parents[1] / "agents" / "kernel" / "scripts" / "install.sh"
-    script_text = install_script.read_text(encoding="utf-8")
-    upsert_start = script_text.index("upsert_dotenv_var() {")
-    upsert_end = script_text.index("\n# In --check-only mode")
-    compose_start = script_text.index("_compose_pythonpath() {")
-    compose_end = script_text.index("\n# Keep REPO_ROOT on PYTHONPATH")
-    env_start = script_text.index("write_env_file() {")
-    env_end = script_text.index("\nensure_geak() {")
-    dotenv_helpers = script_text[upsert_start:upsert_end]
-    compose_pythonpath = script_text[compose_start:compose_end]
-    write_env_file = script_text[env_start:env_end]
+    dotenv_helpers, compose_pythonpath, write_env_file = _kernel_env_writer_sources()
     dotenv = tmp_path / ".env"
     kernel_env = tmp_path / "runtime" / "kernel-agent.env.sh"
     dotenv.write_text(
-        f"HYPERLOOM_KERNEL_AGENT_ROOT={tmp_path / 'kernel-agent'}\n",
+        "HYPERLOOM_RUN_MODE=baremetal\n",
         encoding="utf-8",
     )
     runner = tmp_path / "kernel-run.sh"
@@ -3107,8 +3074,6 @@ def test_kernel_env_persists_geak_claude_model_to_dotenv(tmp_path: Path):
                 "_OPENAI_KEY_VAL=",
                 "LLM_GATEWAY_KEY=",
                 "LLM_API_KEY=",
-                "HYPERLOOM_KERNEL_AGENT_ROOT=",
-                "KERNEL_AGENT_ROOT=",
                 "MAGPIE_PATH=",
                 "MAGPIE_PYTHON=",
                 "PYTHONPATH=",

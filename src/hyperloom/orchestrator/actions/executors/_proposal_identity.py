@@ -6,18 +6,23 @@
 from __future__ import annotations
 
 import shlex
+from dataclasses import dataclass
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom_common.coerce import to_str_list
 
+from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
 
 __all__ = [
+    "BaseControls",
     "coerce_args",
+    "content_fingerprint",
     "controls_of",
     "effective_fingerprint",
     "is_executable",
+    "keeps_effective_args",
     "normalize_proposal",
 ]
 
@@ -86,23 +91,55 @@ def controls_of(fields: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+@dataclass(frozen=True)
+class BaseControls:
+    """The removal and args-mode controls of the base stack a variant is launched on."""
+
+    remove_args: Any = None
+    unset_envs: Any = None
+    args_mode: Any = None
+
+    @classmethod
+    def of_params(cls, params: Mapping[str, Any]) -> BaseControls:
+        """The base controls an explore task's params carry."""
+        return cls(params.get("base_remove_args"), params.get("base_unset_envs"), params.get("base_args_mode"))
+
+
 def effective_fingerprint(
     extra_args: Any,
     extra_envs: Any,
     *,
     controls: Mapping[str, Any] | None = None,
-    base_remove_args: Any = None,
-    base_unset_envs: Any = None,
-    base_args_mode: Any = None,
+    base: BaseControls = BaseControls(),
 ) -> str:
     """Fingerprint a variant against the stack it will be launched on."""
     identity = dict(controls or {})
-    remove_args = list(dict.fromkeys(to_str_list(base_remove_args) + to_str_list(identity.get("remove_args"))))
-    unset_envs = list(dict.fromkeys(to_str_list(base_unset_envs) + to_str_list(identity.get("unset_envs"))))
+    remove_args = list(dict.fromkeys(to_str_list(base.remove_args) + to_str_list(identity.get("remove_args"))))
+    unset_envs = list(dict.fromkeys(to_str_list(base.unset_envs) + to_str_list(identity.get("unset_envs"))))
     if remove_args:
         identity["remove_args"] = remove_args
     if unset_envs:
         identity["unset_envs"] = unset_envs
-    if _args_mode_of(base_args_mode) == "replace":
+    if _args_mode_of(base.args_mode) == "replace":
         identity["args_mode"] = "replace"
     return canonical_fingerprint(extra_args, extra_envs, **identity)
+
+
+def content_fingerprint(proposal: Mapping[str, Any]) -> str:
+    """Fingerprint the change a ``proposal_set`` entry or grid row asks for, independent of its name and stack."""
+    fields = normalize_proposal(proposal)
+    return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields))
+
+
+def keeps_effective_args(
+    benchmark: Mapping[str, Any], base_mode: str, variant_mode: str, remove_args: list[str], unset_envs: list[str]
+) -> bool:
+    """Whether a KEEP persists as a replace snapshot of the argv it launched.
+
+    Native KEEP edits remain relative to the verified recipe unless explicitly replaced.
+    """
+    return (
+        base_mode == "replace"
+        or variant_mode == "replace"
+        or (not is_magpie_agentx(benchmark) and bool(remove_args or unset_envs))
+    )

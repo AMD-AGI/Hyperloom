@@ -719,10 +719,10 @@ def test_static_call_ordered_after_all_pip_steps() -> None:
         if "pip install" in body:
             pip_steps_before.append((pos, name))
 
-    # chain_kernel_agent installs INDIRECTLY (it shells out to another install.sh), so it has no literal "pip install"
-    # in its body — include it explicitly as a pip step that must precede the pin.
-    chain = text.rindex("\nchain_kernel_agent\n") + 1
-    pip_steps_before.append((chain, "chain_kernel_agent"))
+    # install_kernel_agent_tools installs INDIRECTLY (its pip installs live in install_kernel_tools.sh), so it has no
+    # literal "pip install" in its body — include it explicitly as a pip step that must precede the pin.
+    kernel = text.rindex("\ninstall_kernel_agent_tools\n") + 1
+    pip_steps_before.append((kernel, "install_kernel_agent_tools"))
 
     assert pip_steps_before, "expected to find pip-installing steps to order against"
     latest_pos, latest_name = max(pip_steps_before)

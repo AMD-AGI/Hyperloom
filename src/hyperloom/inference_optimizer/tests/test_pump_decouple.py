@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from hyperloom.orchestrator.loop.coordinator import RunOptions
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 class _Gated:
@@ -38,37 +40,36 @@ class _Instant(_Gated):
 
 @pytest.fixture
 def coord(tmp_path: Path):
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState(session_id="decouple-test")
-    state.max_minutes = 30
+    # Room for a patch specialist's 60-minute admission floor.
+    state.max_minutes = 120
     state.save(tmp_path)
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
-    coord = Coordinator(
+    return Coordinator(
         session_dir=tmp_path,
         backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
         role_registry=default_role_registry(),
-        recipe_kb=None,
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
-    return coord
 
 
 async def _enqueue(coord, kind: str, key: str, lanes: list[str] | None = None, params: dict | None = None):
     await coord.tasks.create_or_return_existing(
-        kind=kind, params=params or {}, idempotency_key=key, requires_lanes=lanes or [], lease_ttl_sec=600
+        TaskSpec(kind=kind, params=params or {}, idempotency_key=key, requires_lanes=lanes or [], lease_ttl_sec=600)
     )
 
 
 def _in_flight_kinds(coord) -> list[str]:
-    return [entry.kind for entry in coord._inflight_actions.values()]
+    return [entry.kind for entry in coord.dispatcher._inflight_actions.values()]
 
 
 async def _settle(coord) -> None:
-    await asyncio.wait_for(coord.wait_for_running_work(timeout=5), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.wait_for_running_work(timeout=5), timeout=5)
 
 
 async def test_pump_returns_while_its_only_task_keeps_running(coord):
@@ -77,13 +78,13 @@ async def test_pump_returns_while_its_only_task_keeps_running(coord):
     await _enqueue(coord, "slow_action", "slow")
 
     started = time.monotonic()
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
 
     assert time.monotonic() - started < 2
     assert _in_flight_kinds(coord) == ["slow_action"]
     slow.gate.set()
     await _settle(coord)
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
     assert slow.calls and _in_flight_kinds(coord) == []
 
 
@@ -93,11 +94,11 @@ async def test_a_pump_that_books_a_completion_spawns_the_task_it_unblocked(coord
     coord.sub.register_executor("second_action", second)
     await _enqueue(coord, "first_action", "first", ["benchmark_lane"])
     await _enqueue(coord, "second_action", "second", ["benchmark_lane"])
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
     await _settle(coord)
     assert first.calls and not second.calls
 
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
     await _settle(coord)
 
     assert second.calls
@@ -107,8 +108,8 @@ async def test_a_running_task_is_not_dispatched_again_by_a_later_pump(coord):
     slow = _Gated()
     coord.sub.register_executor("slow_action", slow)
     await _enqueue(coord, "slow_action", "slow")
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
 
     slow.gate.set()
     await _settle(coord)
@@ -128,14 +129,14 @@ async def test_gpu_specialist_stays_exclusive_with_a_running_explore_across_pump
         {"domain": "serving_specialist", "gap_canonical_id": "gap.test"},
     )
 
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
     await asyncio.wait_for(explore.entered.wait(), timeout=5)
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
     assert not specialist.calls
 
     explore.gate.set()
     await _settle(coord)
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
     await _settle(coord)
     assert specialist.calls
 
@@ -145,13 +146,13 @@ async def test_frozen_admission_spawns_nothing(coord):
     coord.sub.register_executor("fast_action", fast)
     await _enqueue(coord, "fast_action", "fast")
 
-    coord.admission_frozen = True
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    coord.dispatcher.admission_frozen = True
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
     await _settle(coord)
     assert not fast.calls
 
-    coord.admission_frozen = False
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    coord.dispatcher.admission_frozen = False
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
     await _settle(coord)
     assert fast.calls
 
@@ -172,7 +173,7 @@ async def test_spawning_a_specialist_resets_its_domain_stale_counter(coord):
         {"domain": "serving_specialist", "gap_canonical_id": "gap.test"},
     )
 
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
     assert coord.shared_state.rounds_since_last_specialist[anchor] == 0
 
     specialist.gate.set()
@@ -184,47 +185,203 @@ async def test_waiting_for_running_work_returns_when_an_action_finishes(coord):
     slow = _Gated()
     coord.sub.register_executor("slow_action", slow)
     await _enqueue(coord, "slow_action", "slow")
-    await asyncio.wait_for(coord._pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
 
     started = time.monotonic()
-    await coord.wait_for_running_work(timeout=0.2)
+    await coord.dispatcher.wait_for_running_work(timeout=0.2)
     assert _in_flight_kinds(coord) == ["slow_action"]
     assert time.monotonic() - started >= 0.2
 
     asyncio.get_running_loop().call_later(0.1, slow.gate.set)
-    await asyncio.wait_for(coord.wait_for_running_work(timeout=60), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.wait_for_running_work(timeout=60), timeout=5)
     assert slow.calls
 
 
 async def test_an_unbooked_completion_holds_the_phase_transition(coord):
-    coord._completion_queue.append((SimpleNamespace(task_id="t", kind="specialist", params={}), object()))
+    coord.dispatcher._completion_queue.append((SimpleNamespace(task_id="t", kind="specialist", params={}), object()))
     coord.shared_state.phase = "PRELUDE"
     coord.shared_state.baseline_tput = 1.0
 
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
 
     assert coord.shared_state.phase == "PRELUDE"
-    assert coord.admission_frozen
+    assert coord.dispatcher.admission_frozen
+
+
+async def test_refresh_admission_freeze_uses_current_phase_machine_api(coord):
+    coord.dispatcher._completion_queue.append((SimpleNamespace(task_id="t", kind="specialist", params={}), object()))
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.baseline_tput = 1.0
+
+    await coord.phase_machine.refresh_admission_freeze()
+
+    assert coord.dispatcher.admission_frozen
+
+
+async def test_keep_booked_before_an_unbooked_roofline_does_not_enqueue_another(coord):
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
+
+    state = coord.shared_state
+    state.baseline_tput = 100.0
+    state.baseline_perf = {"output_throughput": 100.0}
+    state.cumulative_gain_validated = 0.0
+    state.last_roofline_tput = 100.0
+    roofline, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="roofline", params={}, idempotency_key="roofline-pending", requires_lanes=[], lease_ttl_sec=600)
+    )
+    state.auto_roofline_pending_task_id = roofline.task_id
+    keep, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="integrate_patch", params={}, idempotency_key="keep", requires_lanes=[], lease_ttl_sec=600)
+    )
+    roofline = await coord.tasks.transition(roofline.task_id, "running")
+    roofline = await coord.tasks.transition(roofline.task_id, "succeeded")
+    keep = await coord.tasks.transition(keep.task_id, "running")
+    keep = await coord.tasks.transition(keep.task_id, "succeeded")
+    coord.dispatcher._completion_queue.extend(
+        [
+            (
+                keep,
+                SubAgentResult(
+                    task_id=keep.task_id,
+                    state="succeeded",
+                    result={"status": "kept", "output_throughput": 120.0, "kernel_id": "keep"},
+                ),
+            ),
+            (
+                roofline,
+                SubAgentResult(
+                    task_id=roofline.task_id,
+                    state="succeeded",
+                    result={"status": "succeeded", "output_throughput": 100.0},
+                ),
+            ),
+        ]
+    )
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
+
+    roofline_tasks = await coord.tasks.db.fetchall("SELECT task_id FROM tasks WHERE kind='roofline'")
+    assert len(roofline_tasks) == 1
+    assert roofline_tasks[0]["task_id"] == roofline.task_id
+    assert state.auto_roofline_pending_task_id == ""
+
+
+async def _prelude_held_by_a_running_roofline(coord):
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.baseline_tput = 1.0
+    roofline, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="roofline", params={}, idempotency_key="roofline", requires_lanes=[], lease_ttl_sec=600)
+    )
+    await coord.tasks.transition(roofline.task_id, "running")
+    coord.shared_state.auto_roofline_pending_task_id = roofline.task_id
+    return roofline
+
+
+async def test_work_queued_while_the_exit_hold_lifts_is_not_spawned_by_the_same_tick(coord):
+    baseline = _Gated()
+    coord.sub.register_executor("baseline", baseline)
+    roofline = await _prelude_held_by_a_running_roofline(coord)
+    fired: list[str] = []
+
+    async def reactor_pass_that_outlasts_the_hold(name: str) -> None:
+        if fired:
+            return
+        fired.append(name)
+        await _enqueue(coord, "baseline", "baseline-retry")
+        await coord.tasks.transition(roofline.task_id, "succeeded")
+
+    coord.reactor_pass = reactor_pass_that_outlasts_the_hold
+
+    await coord._tick_once()
+    await asyncio.sleep(0.05)
+
+    assert not baseline.entered.is_set()
+    assert _in_flight_kinds(coord) == []
+    baseline.gate.set()
+
+
+async def test_a_roofline_finished_but_not_booked_does_not_let_the_same_tick_spawn_work(coord):
+    roofline_run, baseline = _Gated(), _Gated()
+    coord.sub.register_executor("roofline", roofline_run)
+    coord.sub.register_executor("baseline", baseline)
+    coord.shared_state.phase = "PRELUDE"
+    coord.shared_state.baseline_tput = 1.0
+    roofline, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="roofline", params={}, idempotency_key="roofline", requires_lanes=[], lease_ttl_sec=600)
+    )
+    coord.shared_state.auto_roofline_pending_task_id = roofline.task_id
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(roofline_run.entered.wait(), timeout=5)
+    await _enqueue(coord, "baseline", "baseline-retry")
+    roofline_run.gate.set()
+    await _settle(coord)
+    assert coord.dispatcher.owes_result(roofline.task_id) and coord.dispatcher.has_unbooked_completions()
+
+    async def idle_reactor_pass(name: str) -> None:
+        return None
+
+    coord.reactor_pass = idle_reactor_pass
+
+    await coord._tick_once()
+    await asyncio.sleep(0.05)
+
+    assert not baseline.entered.is_set()
+    assert _in_flight_kinds(coord) == []
+    assert coord.shared_state.auto_roofline_pending_task_id == ""
+    baseline.gate.set()
+
+
+async def test_the_freeze_refresh_the_pump_runs_is_skipped_while_closing(coord):
+    refreshes: list[bool] = []
+
+    async def refresh() -> None:
+        refreshes.append(bool(coord.shared_state.closing_phase))
+
+    coord.phase_machine.refresh_admission_freeze = refresh
+
+    await coord._refresh_admission_freeze_unless_closing()
+    coord.shared_state.closing_phase = True
+    await coord._refresh_admission_freeze_unless_closing()
+
+    assert refreshes == [False]
+
+
+async def test_work_queued_while_the_exit_hold_still_holds_is_spawned(coord):
+    baseline = _Gated()
+    coord.sub.register_executor("baseline", baseline)
+    await _prelude_held_by_a_running_roofline(coord)
+
+    async def reactor_pass(name: str) -> None:
+        if not baseline.calls:
+            await _enqueue(coord, "baseline", "baseline-retry")
+
+    coord.reactor_pass = reactor_pass
+
+    await coord._tick_once()
+    await asyncio.wait_for(baseline.entered.wait(), timeout=5)
+
+    assert _in_flight_kinds(coord) == ["baseline"]
+    assert coord.shared_state.phase == "PRELUDE"
+    baseline.gate.set()
 
 
 async def test_the_closing_transition_releases_a_held_barrier(coord):
     async def _close_sequence(*, reason: str) -> bool:
         return True
 
-    coord.ensure_close_sequence = _close_sequence
-    coord.admission_frozen = True
+    coord.phase_close.ensure_close_sequence = _close_sequence
+    coord.dispatcher.admission_frozen = True
     coord.shared_state.closing_phase = True
     coord.shared_state.phase = "CLOSE"
 
-    await coord._advance_phase_if_needed()
+    await coord.phase_machine.advance_phase_if_needed()
 
-    assert not coord.admission_frozen
+    assert not coord.dispatcher.admission_frozen
 
 
 async def test_the_closing_grace_waits_on_a_report_that_outlived_the_close_sequence(coord):
     report = _Gated()
     coord.sub.register_executor("report", report)
-    real_enter = coord._enter_closing_phase
+    real_enter = coord.phase_close.enter_closing_phase
     closing_tick: list[int] = []
 
     async def _enter(*, grace_sec: float):
@@ -236,10 +393,12 @@ async def test_the_closing_grace_waits_on_a_report_that_outlived_the_close_seque
         coord.shared_state.close_sequence_done = True
         return True
 
-    coord._enter_closing_phase = _enter
-    coord.ensure_close_sequence = _close_sequence
+    coord.phase_close.enter_closing_phase = _enter
+    coord.phase_close.ensure_close_sequence = _close_sequence
 
-    await asyncio.wait_for(coord.run(max_minutes=0.001, closing_grace_sec=30.0, tick_interval_sec=0.0), timeout=20)
+    await asyncio.wait_for(
+        coord.run(options=RunOptions(max_minutes=0.001, tick_interval_sec=0.0, closing_grace_sec=30.0)), timeout=20
+    )
 
     assert report.calls
     assert int(coord.shared_state.tick) - closing_tick[0] < 20

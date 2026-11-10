@@ -12,21 +12,24 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.bringup import LadderStage
-from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.session_paths import reports_dir
 from hyperloom.orchestrator.actions.executors import baseline as bl
+from hyperloom.orchestrator.actions.executors.benchmark_run import launch as launch_mod
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
 from hyperloom.orchestrator.bringup import load_boot_observation
-from hyperloom.orchestrator.bringup.reconcile import Reconciler
-from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bringup import reconcile
+from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.enablement.build import EnablementBuild
 from hyperloom.orchestrator.enablement.lane import EnablementLane
+from hyperloom.orchestrator.enablement.params import EnablementParams
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
 from hyperloom.orchestrator.policy.gate import PolicyGate
+from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.rehearsal import (
     COMPLETED,
     CRASHED,
@@ -37,13 +40,16 @@ from hyperloom.orchestrator.rehearsal import (
     SpecialistStep,
     boot_log_for,
 )
+from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.round_store import (
     FAILED,
     SETTLED,
+    RoundRequest,
     RoundStore,
 )
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
 #: The round: two blockers peeled one per attempt, then a boot that serves.
@@ -83,9 +89,9 @@ def round_slot(tmp_path, monkeypatch):
     session.mkdir()
     slot = tmp_path / "round"
     slot.mkdir()
-    monkeypatch.setattr(bl, "harvest_leaked_artifacts", lambda *a, **k: [])
-    monkeypatch.setattr(bl, "snapshot_workspaces", lambda *a, **k: set())
-    monkeypatch.setattr(bl, "select_run_workspace", lambda *a, **k: None)
+    monkeypatch.setattr(launch_mod, "harvest_leaked_artifacts", lambda *a, **k: [])
+    monkeypatch.setattr(launch_mod, "snapshot_workspaces", lambda *a, **k: set())
+    monkeypatch.setattr(launch_mod, "select_run_workspace", lambda *a, **k: None)
     return session, slot
 
 
@@ -94,7 +100,7 @@ def registry(tmp_path):
     """A real ``TaskRegistry``, round store and lock manager over one database."""
     db = SqliteConnection(tmp_path / "coordinator.db")
     ensure_schema(db.raw)
-    yield TaskRegistry(db), RoundStore(db), ResourceLockManager(SqliteLeaseBackend(db))
+    yield TaskRegistry(db), RoundStore(db), SqliteLeaseBackend(db)
     db.close()
 
 
@@ -113,16 +119,18 @@ async def _bringup_attempt(session: Path, slot: Path, *, task_id: str) -> dict:
     config = session / "bench.yaml"
     config.write_text("benchmark:\n  framework: vllm\n  model: scripted/Model\n", encoding="utf-8")
     return await executor._run_single_benchmark(
+        BenchmarkAttempt(
+            timeout_sec=1800,
+            override_result_dir=None,
+            resolved_model="scripted/Model",
+            materialized_config_path=config,
+            inferencex_path="",
+            effective_extra_server_args="",
+            params={"framework": "vllm"},
+            ctx=_ctx(task_id),
+        ),
         config_path=config,
         output_dir=slot,
-        timeout_sec=1800,
-        override_result_dir=None,
-        resolved_model="scripted/Model",
-        materialized_config_path=config,
-        inferencex_path="",
-        effective_extra_server_args="",
-        params={"framework": "vllm"},
-        ctx=_ctx(task_id),
     )
 
 
@@ -144,6 +152,8 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         model_path="",
         reference_model="",
         gpu_type="mi300x",
+        tp=1,
+        max_model_len=0,
         enablement_mode="all",
         enablement=EnablementRound(launch_log=launch_log),
         baseline_tput=0.0,
@@ -164,37 +174,48 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         tasks=tasks,
         rounds=rounds,
         session_dir=str(session),
-        _run_deadline=None,
-        _warm_specialist_params=_noop,
-        _record_observation=_noop,
-        action_registry=ACTION_CATALOGUE,
+        run_deadline=None,
+        warm_specialist_params=_noop,
+        bus=types.SimpleNamespace(record_observation=_noop),
         state=types.SimpleNamespace(pending_proposals={}),
         _read_enablement_source_context=lambda _sig: "",
         _derive_checkpoint_weight_facts=lambda _log: "",
-        _framework_authoring_lanes_ttl=lambda _params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
-        _time_budget_denial_for_action=lambda _action: None,
+        framework_authoring_lanes_ttl=lambda _params, *, base_ttl_sec: (["research_lane"], base_ttl_sec),
+        time_budget_denial_for_action=lambda _action: None,
+        _enqueue_on_validated_board=_noop,
+        # Attributes exposed by CoordinatorCollaborator properties; set directly
+        # on the shim since property descriptors don't apply to SimpleNamespace.
+        knowledge_plane=None,
+        recipe_kb=None,
     )
     for owner, name in (
-        (Coordinator, "_build_enablement_specialist_params"),
-        (Coordinator, "_discover_enablement_candidate_refs"),
-        (Coordinator, "_registry_lanes_ttl"),
-        (Coordinator, "_maybe_record_enablement_human_review"),
-        (Coordinator, "_maybe_rearm_enablement"),
+        (EnablementParams, "build_enablement_specialist_params"),
+        (EnablementParams, "_discover_enablement_candidate_refs"),
+        (EnablementLane, "_maybe_record_enablement_human_review"),
+        (EnablementLane, "maybe_rearm_enablement"),
         (EnablementLane, "_maybe_enqueue_enablement_specialist"),
-        (EnablementLane, "_enablement_admitted"),
+        (EnablementLane, "enablement_admitted"),
         (EnablementLane, "_check_argv_terminal"),
         (EnablementLane, "_check_environment_terminal"),
         (EnablementLane, "_environment_verdict"),
-        (EnablementLane, "_enablement_in_flight"),
+        (EnablementLane, "enablement_in_flight"),
         (EnablementLane, "_round_has_live_work"),
         (EnablementLane, "_open_authoring_round"),
         (EnablementLane, "_renew_enablement_round"),
-        (EnablementLane, "_settle_enablement_round"),
-        (EnablementBuild, "_maybe_enqueue_specialist_requested_build"),
-        (EnablementBuild, "_maybe_escalate_to_targeted_build"),
-        (WritebackCollaborator, "_close_enablement_lane"),
+        (EnablementLane, "settle_enablement_round"),
+        (EnablementLane, "close_lane_event"),
+        (EnablementBuild, "maybe_enqueue_specialist_requested_build"),
+        (EnablementBuild, "maybe_escalate_to_targeted_build"),
     ):
         setattr(shim, name, types.MethodType(getattr(owner, name), shim))
+    # Collaborator access goes through self._coord, so route it back to the shim.
+    shim._coord = types.SimpleNamespace(
+        run_deadline=None,
+        enablement_params=shim,
+        enablement_build=shim,
+        specialist_dispatch=shim,
+        gpu_lanes=shim,
+    )
     return shim
 
 
@@ -247,7 +268,6 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
         role_registry=default_role_registry(),
         session_dir=session,
         shared_state=None,
-        strict_paths=False,
     )
 
     observations: list = []
@@ -258,7 +278,7 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
         loaded = load_boot_observation(result.get("boot_observation_path"))
         assert loaded.observation is not None, loaded.degraded
         observations.append(loaded.observation)
-        if loaded.observation.booted:
+        if loaded.observation.stage_failed is None and loaded.observation.stage_reached >= LadderStage.HTTP_READY:
             break
 
         # The excerpt is what the round recorded off the server's own log, and
@@ -268,12 +288,17 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
         # specialist crashed without settling anything, and the lane will not
         # open a second round while the first is still held: the repair pass is
         # what ends it, and it runs before anything is admitted.
+        monkeypatch.setattr(reconcile, "TERMINAL_HOLDER_CAP_SEC", 0.0)
         await Reconciler(
-            rounds=rounds,
-            tasks=tasks,
-            locks=ResourceLockManager(SqliteLeaseBackend(rounds.db)),
-            shared_state=None,
-            terminal_holder_cap_sec=0.0,
+            ReconcileStores(rounds=rounds, tasks=tasks, locks=SqliteLeaseBackend(rounds.db)),
+            SharedState(),
+            links=ReconcileLinks(
+                resources=ResourceFacts(),
+                proposals=dict,
+                drop_proposal=lambda _pending, _reason: None,
+                session_dir=session,
+                result_pending=lambda _task_id: False,
+            ),
         ).run(time.time())
         # A confirmed kill keeps excluding until the reap grace passes: the
         # kernel has not torn the address space down when the signal returns,
@@ -290,7 +315,15 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
         dispatched.append(task_id)
 
         workspace = session / "runs" / "specialist" / task_id
-        outcome = await specialists.run(task_id=task_id, workspace=workspace)
+        spawn = SpecialistSpawn(
+            task_id=task_id,
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="",
+            user_prompt="",
+        )
+        outcome = await specialists.run(spawn)
         await tasks.transition(task_id, "running")
         await tasks.transition(task_id, "succeeded" if outcome.done_payload else "failed")
 
@@ -304,7 +337,8 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
     assert stages == sorted(stages), stages
     assert stages[0] == LadderStage.ARGV_PARSE
     assert stages[1] == LadderStage.CONFIG_VALIDATE
-    assert observations[-1].booted
+    assert observations[-1].stage_failed is None
+    assert observations[-1].stage_reached >= LadderStage.HTTP_READY
 
     # Two repair dispatches under two different ids: the lane minted a fresh
     # idempotency key for the retry rather than reopening the crashed task,
@@ -384,7 +418,7 @@ async def _settle_failures(coordinator, session, slot, scenario_len: int) -> lis
     for index in range(scenario_len):
         result = await _bringup_attempt(session, slot, task_id=f"baseline-{index}")
         played.append(result)
-        await coordinator._handle_unpromotable_result(_baseline_task(f"baseline-{index}"), result)
+        await coordinator.writeback.handle_unpromotable_result(_baseline_task(f"baseline-{index}"), result)
         if coordinator.shared_state.stop_reason:
             break
     return played
@@ -413,10 +447,12 @@ async def test_a_baseline_that_keeps_failing_reaches_the_prelude_terminal(
 
     assert state.baseline_failure_streak == 3
     assert state.stop_reason == "baseline_failed"
-    assert machine_state.exit_terminal_prelude(state) == (
-        "prelude_baseline_failed",
-        {"baseline_failure_streak": 3},
-    )
+    out = machine_state.compute_next_phase(state)
+    assert out is not None
+    target, reason, evidence = out
+    assert (target, reason) == ("CLOSE", "baseline_failed")
+    assert evidence["terminal"] is True
+    assert evidence["predicate_inputs"]["baseline"]["failure_streak"] == 3
     # The fourth attempt was never played: the session stopped on the third.
     assert len(played) == 3
     assert launches.served == 3
@@ -429,9 +465,9 @@ async def _seed_failed_rounds(rounds: RoundStore, n: int) -> None:
         rid = f"seed-failed-{i:03d}"
         holder = f"holder-{i:03d}"
         now = float(i)
-        await rounds.open(rid, holder_task_id=holder, lease_sec=3600.0, now_unix=now, request_id=rid)
+        await rounds.open(rid, RoundRequest(now_unix=now, request_id=rid), holder_task_id=holder, lease_sec=3600.0)
         await rounds.settle(
-            rid, holder_task_id=holder, fence=1, outcome=FAILED, now_unix=now + 1.0, request_id=f"settle-{rid}"
+            await rounds.get(rid), RoundRequest(now_unix=now + 1.0, request_id=f"settle-{rid}"), outcome=FAILED
         )
 
 
@@ -461,7 +497,7 @@ async def test_the_enablement_attempt_cap_stops_a_round_that_keeps_asking(
     assert not lane.shared_state.stop_reason
     # That round has to end before the next one can ask for the machine, and a
     # revert is how a round that repaired nothing ends.
-    await lane._maybe_rearm_enablement({"enablement": True, "status": "reverted"})
+    await lane.maybe_rearm_enablement({"enablement": True, "status": "reverted"})
     assert await rounds.held() is None
 
     # Now at the cap: the lane must stop.
@@ -496,7 +532,7 @@ async def test_an_advancing_round_does_not_exhaust_the_cap(
     assert not lane.shared_state.stop_reason
 
     # An advancing result settles the open round as ADVANCED, resetting the streak.
-    await lane._maybe_rearm_enablement(
+    await lane.maybe_rearm_enablement(
         {"enablement": True, "status": "advanced", "patches_applied": ["vllm/platforms/rocm.py"]}
     )
     assert await rounds.held() is None
@@ -530,7 +566,7 @@ async def test_a_round_settles_when_the_caller_has_no_reason_to_give(
     held = await rounds.held()
     assert held is not None
 
-    await lane._settle_enablement_round(FAILED, reason="")
+    await lane.settle_enablement_round(FAILED, reason="")
 
     assert await rounds.held() is None
     row = await rounds.get(held.round_id)

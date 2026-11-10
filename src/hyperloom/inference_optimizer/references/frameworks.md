@@ -6,11 +6,11 @@ A session is single-framework. Pick `sglang` (default), `vllm`, `atom`, `xdit`
 or `custom` via `--framework` or `$FRAMEWORK`:
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
-FRAMEWORK=vllm python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
-python3 -m hyperloom.inference_optimizer.cli optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
-python3 -m hyperloom.inference_optimizer.cli optimize --framework xdit --model "$MODEL_PATH" --max-hours 2  # scriptable diffusion
-python3 -m hyperloom.inference_optimizer.cli optimize --framework custom --model "$MODEL_PATH" --max-hours 12  # your own scriptable workload
+python3 -m hyperloom optimize --framework vllm --model "$MODEL_PATH" --max-hours 2
+FRAMEWORK=vllm python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
+python3 -m hyperloom optimize --framework atom --model "$MODEL_PATH" --max-hours 2  # IR-8 single-node only
+python3 -m hyperloom optimize --framework xdit --model "$MODEL_PATH" --max-hours 2  # scriptable diffusion
+python3 -m hyperloom optimize --framework custom --model "$MODEL_PATH" --max-hours 12  # your own scriptable workload
 ```
 
 Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
@@ -18,17 +18,23 @@ Resolution order: `--framework` > `$FRAMEWORK` > `sglang` (default).
 What this controls:
 - Which Magpie YAML the executors default to —
   `baseline_{sglang,vllm,atom,xdit,custom}.yaml` and
-  `profile_{sglang,vllm,atom,xdit,custom}.yaml`. The per-framework resolver
-  `_default_profile_config()` in `src/hyperloom/orchestrator/actions/executors/profile.py` picks the right
-  file from `$FRAMEWORK`.
+  `profile_{sglang,vllm,atom,xdit,custom}.yaml`, one pair per framework registered in
+  `src/hyperloom/inference_optimizer/framework_registry.py`.
+  `framework_registry.shipped_config_name()` names the file for `$FRAMEWORK`; an unregistered
+  name is refused at launch and on resume.
 - Which framework-specific seed grid the `explore` action falls back to when no
   `params.grid` is supplied. atom and xdit are the frameworks with programmatic
   seeds today (`_default_grid_for_framework` in
-  `src/hyperloom/orchestrator/actions/executors/explore.py` dispatches to
+  `src/hyperloom/orchestrator/actions/executors/_grid_base.py` dispatches to
   `_atom_default_grid()` / `_xdit_default_grid()`); sglang
   and vllm continue to rely on the orchestration LLM emitting
-  `provenance='default_grid'` variants and will fail with
-  `error_class="empty_grid"` on a cold-start with no LLM input.
+  `provenance='default_grid'` variants. On those two an `explore` that carries no
+  usable `params.grid` is refused at admission with
+  `rule="explore_grid_missing"` — before a task row exists — and never reaches
+  `error_class="empty_grid"`. Send `params.grid` as a non-empty list of variant
+  dicts (`{"name": ..., "extra_server_args": ..., "extra_envs": {...}}`): rows
+  that are not dicts, or dicts without a `name`, build no variant, and a grid
+  that was sent is never replaced by the seed grid.
 - Which extra-args env name `_grid_runner` writes (`EXTRA_VLLM_ARGS` /
   `EXTRA_SGLANG_ARGS` / `EXTRA_ATOM_ARGS` / `EXTRA_XDIT_ARGS` /
   `EXTRA_CUSTOM_ARGS`).
@@ -45,13 +51,14 @@ Single-node only (`--nodes>=2` fails fast). Shipped configs `baseline_atom.yaml`
 `--torch-profiler-dir`, and TraceLens consumes the resulting
 `*.pt.trace.json.gz` unchanged. atom source roots (`/app/ATOM/atom/`) are in
 PolicyGate's allowlist + `_REUSABLE_SOURCE_ROOTS`, and the repo URL
-`https://github.com/ROCm/ATOM.git` is in `hyperloom.agents.framework.repo_map`. Unlike
+`https://github.com/ROCm/ATOM.git` is atom's `FrameworkSpec.repo_url` in `framework_registry`. Unlike
 sglang/vllm, atom ships a programmatic cold-start seed grid
 (`_atom_default_grid`: `atom_level_{2,3}`, `atom_prefix_cache`, `atom_kv_fp8` on
 FP8, model-class-gated `atom_ep` / `atom_dp_attn` / `atom_mtp_{1,3}`,
-`atom_cudagraph_bracket`) — as does xdit (`_xdit_default_grid`), while
-sglang/vllm fail `error_class="empty_grid"` on a
-cold start with no LLM variants.
+`atom_cudagraph_bracket`) — as does xdit (`_xdit_default_grid`), so a cold-start
+`explore` on either is admitted with no grid of its own, while on sglang/vllm it
+is refused at admission with `rule="explore_grid_missing"` until the LLM sends
+variants.
 
 ### `--framework custom` specifics (your own workload)
 
@@ -62,7 +69,7 @@ paths at launch replace everything the shipped frameworks hardcode:
 
 ```bash
 export HYPERLOOM_BENCHMARK_BACKEND=bypass
-python3 -m hyperloom.inference_optimizer.cli -v optimize \
+python3 -m hyperloom optimize -v \
   --framework custom \
   --framework-path /path/to/my-framework \
   --benchmark-scripts-dir /path/to/my-scripts \
@@ -175,15 +182,22 @@ optimizer auto-detects via `rocm-smi --showproductname` (falling back to
 `torch.cuda.get_device_properties(0).gcnArchName`).
 
 ```bash
-python3 -m hyperloom.inference_optimizer.cli optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
-GPU_TYPE=mi300x python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
+python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
+GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
-Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`. **`mi308x` and
+Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`, `r9600d`,
+`radeon8060s`. **`mi308x` and
 `mi325x` map to `runner_type=mi300x`** with a warning, since the GPUs share the
 same runner family and Magpie has not shipped MI308X/MI325X-specific SGLang/vLLM
 scripts yet. If you need a true MI308X/MI325X-specific script, uncomment the `benchmark_script:` template in the
 relevant YAML and point it at your script under `InferenceX/benchmarks/...`.
+
+`r9700` (Radeon AI PRO R9700, gfx1201) and `r9600d` (Radeon AI PRO R9600D, gfx1201)
+map to `runner_type=gfx12`, Magpie's
+`vllm_gfx12.sh`, and run with `--framework vllm` only: pass
+`--framework vllm`, since another framework (including the default) exits
+with code 2 at launch.
 
 Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use

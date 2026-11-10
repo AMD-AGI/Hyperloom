@@ -1,13 +1,13 @@
 # Review Coordinator Inbox
 
-Use this action when `request.kind == "coordinator_inbox"`. The host has
+Use this action for every Critic turn. The host has
 forwarded the Coordinator's per-turn prompt verbatim (see
 [references/coordinator_protocol.md](../references/coordinator_protocol.md)).
 
 ## Step 1 — Prepare
 
 ```bash
-python -m runtime.cli prepare-review \
+python -m hyperloom.agents.critic.runtime.cli prepare-review \
   --request "$CRITIC_WORKDIR/request.json" \
   --out "$CRITIC_WORKDIR/judge_bundle.json"
 ```
@@ -120,7 +120,7 @@ are complementary, not mutually exclusive.
 ## Step 3 — Commit
 
 ```bash
-python -m runtime.cli commit-review \
+python -m hyperloom.agents.critic.runtime.cli commit-review \
   --request "$CRITIC_WORKDIR/request.json" \
   --review "$CRITIC_WORKDIR/review.json" \
   --out "$CRITIC_WORKDIR/emit.json"

@@ -111,7 +111,7 @@ def test_static_probe_covers_the_fusion_package() -> None:
     """A tree missing the fusion subpackage imports the CLI fine."""
     body = _extract_fn("_check_kernelforge_ready")
     assert "kernelforge.cli" in body, "the CLI entry point must be probed"
-    assert "kernelforge.fusion" in body, "the probe must require fusion too"
+    assert "kernelforge.workflows.forge_fusion" in body, "the probe must require fusion too"
 
 
 def test_static_probe_installs_nothing() -> None:

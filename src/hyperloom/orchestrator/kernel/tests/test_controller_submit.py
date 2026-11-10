@@ -54,7 +54,6 @@ def test_timeout_result_recovers_complete_patches_without_terminal_state(tmp_pat
 
     assert result["status"] == "partial"
     assert result["patch_count"] == 1
-    assert result["killed_by_hyperloom"] is True
     assert result["patches_root"] == str(output.resolve() / "result" / "patches")
 
 

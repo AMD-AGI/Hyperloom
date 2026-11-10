@@ -13,20 +13,22 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom.inference_optimizer.breakdown.recorder import record_metadata_langfuse
 from hyperloom.inference_optimizer.session.session_paths import (
+    BREAKDOWN_FILENAME,
     decision_trace_path,
     forge_steps_path,
     gemm_tuning_steps_path,
+    manifest_path,
     recipe_snapshot_audit_jsonl,
     specialist_intel_path,
     trace_dir,
-    trace_ext_dir,
+    trajectory_dir,
 )
 from . import langfuse_mapping as lfmap
 from . import trajectory_projection as trajmap
-from .trajectory_trace import load_shard as load_trajectory_shard, trajectory_shards
+from .trajectory_trace import load_shard, trajectory_shards
 from .trace_env import (
     ENV_LANGFUSE_HOST,
     ENV_LANGFUSE_PUBLIC_KEY,
@@ -38,6 +40,9 @@ from .trace_env import (
 )
 
 log = logging.getLogger(__name__)
+
+#: What a Langfuse SDK call fails with: an argument or method one SDK major version rejects, or the transport refusing.
+_SDK_FAILURES: tuple[type[Exception], ...] = (AttributeError, TypeError, ValueError, RuntimeError, OSError)
 
 _STATUS_CLOCK_BUCKET_SEC = 60
 _STATUS_CLOCK_KEYS = frozenset({"explore_elapsed_s", "session_elapsed_s"})
@@ -63,30 +68,8 @@ def _status_signature(status: dict[str, Any]) -> tuple:
     return tuple(sorted(items))
 
 
-def _manifest_path(session_dir: Path) -> Path:
-    """Return the path to a session's ``manifest.json``."""
-    return session_dir / "manifest.json"
-
-
-#: Session-end reconcile steps, in run order. The names are persisted in the
-#: receipt (``flush_steps_done``), so a restart resumes instead of replaying.
-_FLUSH_STEP_NAMES: tuple[str, ...] = (
-    "pending_halves",
-    "ext_shards",
-    "recipe_kb_audit",
-    "specialist_intel",
-    "forge_steps",
-    "gemm_tuning",
-    "trajectory",
-    "decision_scores",
-    "close_spans",
-    "client_flush",
-)
-
-
-def _persisted_shard_cursors(session_dir: Path, key: str) -> dict[str, int]:
-    """Return how far each shard under receipt ``key`` was drained by a previous process."""
-    persisted = (read_receipt(session_dir) or {}).get(key)
+def _cursor_entries(persisted: Any) -> dict[str, int]:
+    """Return the well-formed ``{name: rows}`` entries of one persisted cursor map."""
     if not isinstance(persisted, dict):
         return {}
     cursors: dict[str, int] = {}
@@ -95,6 +78,17 @@ def _persisted_shard_cursors(session_dir: Path, key: str) -> dict[str, int]:
             cursors[str(name)] = max(0, int(count))
         except (TypeError, ValueError):
             continue
+    return cursors
+
+
+def _persisted_rows_sent(session_dir: Path, receipt: dict[str, Any]) -> dict[str, int]:
+    """Return how many rows of each source log a previous process sent, keyed by its path under ``session_dir``.
+
+    v1.1.3 receipts carry the trajectory cursors as ``trajectory_rows_sent``, keyed by shard name.
+    """
+    prefix = trajectory_dir(session_dir).relative_to(session_dir).as_posix()
+    cursors = {f"{prefix}/{name}": rows for name, rows in _cursor_entries(receipt.get("trajectory_rows_sent")).items()}
+    cursors.update(_cursor_entries(receipt.get("rows_sent")))
     return cursors
 
 
@@ -109,7 +103,7 @@ def _sdk_available() -> bool:
 
     try:
         return importlib.util.find_spec("langfuse") is not None
-    except Exception:  # noqa: BLE001
+    except ValueError:
         return False
 
 
@@ -122,7 +116,7 @@ def _to_ns(dt: Any) -> int | None:
 
         if isinstance(dt, datetime):
             return int(dt.timestamp() * 1_000_000_000)
-    except Exception:  # noqa: BLE001
+    except ValueError:
         return None
     return None
 
@@ -180,10 +174,7 @@ def _end_obs(obs: Any, end_dt: Any) -> None:
     try:
         obs.end(end_time=end_time)
     except (TypeError, ValueError):
-        try:
-            obs.end()
-        except Exception:  # noqa: BLE001
-            pass
+        obs.end()
 
 
 def _otel_attr_value(v: Any) -> Any:
@@ -196,7 +187,7 @@ def _otel_attr_value(v: Any) -> Any:
         import json
 
         return json.dumps(v, ensure_ascii=False, default=str)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError):
         return str(v)
 
 
@@ -213,40 +204,24 @@ def _set_trace_attrs(
         return
     except AttributeError:
         pass  # v4: no update_trace
-    except Exception:
-        log.debug("langfuse: update_trace failed", exc_info=True)
-        return
     otel = getattr(span, "_otel_span", None)
     if otel is None or not hasattr(otel, "set_attribute"):
         log.debug("langfuse: no OTEL span to set trace attrs on")
         return
-    try:
-        if name is not None:
-            otel.set_attribute("langfuse.trace.name", name)
-        if session_id is not None:
-            otel.set_attribute("session.id", session_id)
-        for k, v in (metadata or {}).items():
-            clean = _otel_attr_value(v)
-            if clean is None:
-                continue  # OTEL rejects None
-            try:
-                otel.set_attribute(f"langfuse.trace.metadata.{k}", clean)
-            except Exception:  # noqa: BLE001 — skip unserialisable values
-                continue
-    except Exception:
-        log.debug("langfuse: setting OTEL trace attrs failed", exc_info=True)
-
-
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Load a JSONL file into a list of dict records."""
-    from hyperloom.common.jsonio import read_jsonl
-
-    return read_jsonl(path, require_dict=True, skip_malformed=True, skip_non_dict=True)
+    if name is not None:
+        otel.set_attribute("langfuse.trace.name", name)
+    if session_id is not None:
+        otel.set_attribute("session.id", session_id)
+    for k, v in (metadata or {}).items():
+        clean = _otel_attr_value(v)
+        if clean is None:
+            continue  # OTEL rejects None
+        otel.set_attribute(f"langfuse.trace.metadata.{k}", clean)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
     """Load a JSON object file."""
-    from hyperloom.common.jsonio import read_json
+    from hyperloom_common.jsonio import read_json
 
     return read_json(path, default={}, require_dict=True)
 
@@ -286,7 +261,6 @@ def _forge_step_span(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "wall_ms": row.get("wall_ms"),
         "snr_db": row.get("snr_db"),
         "validation_passed": row.get("validation_passed"),
-        "pmc_diagnosis": row.get("pmc_diagnosis"),
     }
 
 
@@ -317,18 +291,16 @@ class LangfuseEmitter:
         self._pending: dict[tuple, dict[str, dict[str, Any]]] = {}
         self._client: Any = None
         # Manifest + correlation resolved unconditionally so the receipt always reports the right ids.
-        self._manifest: dict[str, Any] = _load_json(_manifest_path(self.session_dir))
-        self._session_label: str | None = lfmap.langfuse_session_id(
-            self._manifest,
-            self.session_dir.name,
-        )
-        self._trace_id: str | None = lfmap.derive_trace_id(
-            lfmap.correlation_seed(self._manifest, self.session_dir.name),
-        )
+        self._manifest: dict[str, Any] = _load_json(manifest_path(self.session_dir))
+        self._session_label: str = lfmap.correlation_seed(self._manifest, self.session_dir.name)
+        self._trace_id: str = lfmap.derive_trace_id(self._session_label)
         # Span hierarchy caches (lazy): root; one per phase; one per (phase, agent).
         self._root_span: Any = None
         self._phase_spans: dict[str, Any] = {}
         self._agent_spans: dict[tuple[str, str], Any] = {}
+        # Hierarchy spans not ended yet, in creation order. The caches above keep ended spans as parents for rows
+        # recorded after a flush, so a later flush ends only what was opened since.
+        self._unended_spans: list[Any] = []
         self._trace_attrs_set = False
         # Receipt counters (for the session_breakdown ``langfuse`` section).
         self._disabled_reason: str | None = None
@@ -342,7 +314,6 @@ class LangfuseEmitter:
             "status_updates_sent": 0,  # live state.json status snapshots mirrored
             "scores_sent": 0,  # decision Scores created (span + trace)
             "spans_opened": 0,  # phase + agent spans created
-            "ext_shards_read": 0,  # out-of-process ext/*.jsonl files swept
             "breakdown_recorded": 0,  # 1 once the full SBD JSON was attached
             "kb_spans_sent": 0,  # non-LLM spans (recipe-KB / critic priors / specialist intel / forge / gemm)
             "recipe_audit_read": 0,  # recipe_snapshot/.audit.jsonl read rows swept
@@ -353,13 +324,14 @@ class LangfuseEmitter:
             "trajectory_spans_sent": 0,  # closed trajectory spans + point events projected
             "errors": 0,  # swallowed send failures
         }
-        # Reconcile steps that already succeeded in *this* process, so a retry after a partial flush neither re-emits
-        # them nor loses the ones still owed.
-        self._flush_steps_done: set[str] = set()
+        # Whether the last flush_session completed every step, leaving nothing it read unsent.
         self._flushed = False
-        # How many rows of each ext/ shard have been sent, restored from the receipt.
-        self._ext_rows_sent: dict[str, int] = _persisted_shard_cursors(self.session_dir, "ext_rows_sent")
-        self._trajectory_rows_sent: dict[str, int] = _persisted_shard_cursors(self.session_dir, "trajectory_rows_sent")
+        # What earlier legs already handed to the SDK. A resumed leg reports into the same trace, so it starts after
+        # these. The SDK's flush does not report a failed export, so "handed to the SDK" is all they can record.
+        persisted = read_receipt(self.session_dir) or {}
+        self._rows_sent: dict[str, int] = _persisted_rows_sent(self.session_dir, persisted)
+        decisions_sent = persisted.get("decisions_sent")
+        self._decisions_sent: set[str] = set(map(str, decisions_sent)) if isinstance(decisions_sent, list) else set()
         # Live-status mirror throttle: last pushed signature + monotonic ts, so a snapshot is sent only on-change or
         # after a slow refresh interval.
         self._last_status_sig: tuple | None = None
@@ -380,8 +352,8 @@ class LangfuseEmitter:
             )
             return False
         try:
-            from langfuse import get_client  # type: ignore
-        except Exception as exc:  # noqa: BLE001
+            from langfuse import get_client  # type: ignore[import-not-found]
+        except ImportError as exc:
             self._disabled_reason = "sdk_missing"
             log.warning(
                 "langfuse: SDK not importable (%s: %s); live push disabled. "
@@ -430,6 +402,7 @@ class LangfuseEmitter:
                 trace_context={"trace_id": self._trace_id},
                 metadata=lfmap.trace_metadata(self._manifest),
             )
+            self._unended_spans.append(self._root_span)
             if not self._trace_attrs_set:
                 _set_trace_attrs(
                     self._root_span,
@@ -453,6 +426,7 @@ class LangfuseEmitter:
                 metadata={"phase": phase},
             )
             self._phase_spans[phase] = span
+            self._unended_spans.append(span)
             self._counts["spans_opened"] += 1
         return span
 
@@ -470,6 +444,7 @@ class LangfuseEmitter:
                 metadata={"phase": phase, "agent": agent},
             )
             self._agent_spans[key] = span
+            self._unended_spans.append(span)
             self._counts["spans_opened"] += 1
         return span
 
@@ -478,10 +453,7 @@ class LangfuseEmitter:
         """Buffer a token row; emit the Generation if its text half is in."""
         if not self._enabled:
             return
-        try:
-            self._buffer(row, half="llm")
-        except Exception:
-            log.debug("langfuse: record_llm_call failed", exc_info=True)
+        self._buffer(row, half="llm")
 
     def record_conversation(self, row: dict[str, Any]) -> None:
         """Buffer a conversation row; emit the Generation if its tokens are in."""
@@ -516,16 +488,15 @@ class LangfuseEmitter:
         name: str,
         agent: str,
         output: Any,
-        phase: str = lfmap.UNPHASED,
         metadata: dict[str, Any] | None = None,
         ts: str | None = None,
-    ) -> None:
-        """Emit one non-LLM KB trace as a span nested under its agent span."""
+    ) -> bool:
+        """Emit one non-LLM KB trace as a span nested under its agent span; return whether it was handed over."""
         if not self._enabled:
-            return
+            return False
         try:
             start = lfmap.parse_ts(ts)
-            parent = self._ensure_agent_span(phase, agent, start)
+            parent = self._ensure_agent_span(lfmap.UNPHASED, agent, start)
             obs = _start_obs(
                 parent,
                 name=name,
@@ -537,9 +508,11 @@ class LangfuseEmitter:
             )
             _end_obs(obs, start)
             self._counts["kb_spans_sent"] += 1
-        except Exception:
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: record_kb_span failed", exc_info=True)
+            return False
+        return True
 
     def _emit_generation(
         self,
@@ -582,7 +555,7 @@ class LangfuseEmitter:
             else:
                 self._counts["generations_token_only"] += 1
             return True
-        except Exception:
+        except Exception:  # isolation boundary: one Langfuse generation
             self._counts["errors"] += 1
             log.debug("langfuse: emit generation failed", exc_info=True)
             return False
@@ -594,44 +567,53 @@ class LangfuseEmitter:
             # Still drop a receipt so the breakdown can report why nothing was pushed.
             self._write_receipt()
             return
-        if self._flushed:
-            log.debug("langfuse: flush_session already ran; shipping only the trajectory tail")
-            self._flush_trajectory_tail()
-            self._write_receipt()
-            return
-        # ``client_flush`` is last and is a step like any other: everything before it only hands observations to the
-        # SDK's buffer, so a failed final flush means nothing reached Langfuse and has to be retried.
+        # Every step sends only what is still owed (the pending halves, the rows past the receipt cursors, the spans
+        # not yet ended), so each call runs them all. ``client_flush`` is last because everything before it only fills
+        # the SDK's buffer.
         kb_backfills: dict[str, tuple[Callable[[Path], Path], str, str, _SpanBuilder]] = {
             "recipe_kb_audit": (recipe_snapshot_audit_jsonl, "recipe_audit_read", "recipe_kb", self._recipe_audit_span),
             "specialist_intel": (specialist_intel_path, "specialist_intel_read", "specialist", _specialist_intel_span),
             "forge_steps": (forge_steps_path, "forge_steps_read", "forge", _forge_step_span),
             "gemm_tuning": (gemm_tuning_steps_path, "gemm_tuning_read", "gemm_tuning", _gemm_tuning_span),
         }
-        steps: dict[str, Any] = {
+        steps: dict[str, Callable[[], None]] = {
             "pending_halves": self._flush_pending_halves,
-            "ext_shards": self._flush_ext_shards,
             **{name: functools.partial(self._backfill_kb_spans, *spec) for name, spec in kb_backfills.items()},
             "trajectory": self._flush_trajectory,
             "decision_scores": self._flush_decision_scores,
             "close_spans": self._close_spans,
             "client_flush": self._flush_client,
         }
-        for name in _FLUSH_STEP_NAMES:
-            if name in self._flush_steps_done:
-                continue
+        failed = False
+        for name, step in steps.items():
             try:
-                steps[name]()
-            except Exception:
+                step()
+            except _SDK_FAILURES:
+                failed = True
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush step %s failed", name, exc_info=True)
-                continue
-            self._flush_steps_done.add(name)
-        self._flushed = self._flush_steps_done.issuperset(_FLUSH_STEP_NAMES)
+        self._flushed = not failed
         self._write_receipt()
 
     def _flush_client(self) -> None:
         """Hand the SDK's buffered observations to the network."""
         self._client.flush()
+
+    def _rows_sent_key(self, source: Path) -> str:
+        """Return the ``rows_sent`` receipt key of an append-only source log."""
+        return source.relative_to(self.session_dir).as_posix()
+
+    def _drain(self, source: Path, rows: list[dict[str, Any]], send: Callable[[dict[str, Any]], bool]) -> None:
+        """Send the rows of ``source`` past its ``rows_sent`` cursor, advancing the cursor one sent row at a time.
+
+        Raises at the first row ``send`` could not hand to the SDK, so the flush is not final and every retry, in this
+        process or the next leg, resumes at that row.
+        """
+        key = self._rows_sent_key(source)
+        for index in range(self._rows_sent.get(key, 0), len(rows)):
+            if not send(rows[index]):
+                raise RuntimeError(f"{key} row {index} could not be sent")
+            self._rows_sent[key] = index + 1
 
     def record_session_start(self) -> None:
         """Emit a one-shot ``session_start`` marker the moment a session begins."""
@@ -680,13 +662,13 @@ class LangfuseEmitter:
             )
             _end_obs(obs, None)
             self._counts["session_start_recorded"] = 1
-        except Exception:
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: record_session_start failed", exc_info=True)
         finally:
             try:
                 self._client.flush()
-            except Exception:
+            except _SDK_FAILURES:
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush after session_start failed", exc_info=True)
             # Persist the flag so a later process skips re-emitting.
@@ -728,13 +710,13 @@ class LangfuseEmitter:
             )
             _end_obs(obs, None)
             self._counts["breakdown_recorded"] = 1
-        except Exception:
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: record_session_breakdown failed", exc_info=True)
         finally:
             try:
                 self._client.flush()
-            except Exception:
+            except _SDK_FAILURES:
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush after breakdown failed", exc_info=True)
             # Persist the flag so a later process skips re-attaching the document.
@@ -782,25 +764,21 @@ class LangfuseEmitter:
             self._counts["status_updates_sent"] += 1
             self._last_status_sig = sig
             self._last_status_ts = now
-        except Exception:
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
             log.debug("langfuse: record_status failed", exc_info=True)
 
     def _close_spans(self) -> None:
-        """End every open span, innermost first (agent -> phase -> root)."""
-        for span in list(self._agent_spans.values()):
-            self._safe_end(span)
-        for span in list(self._phase_spans.values()):
-            self._safe_end(span)
-        if self._root_span is not None:
-            self._safe_end(self._root_span)
+        """End every hierarchy span not ended yet, innermost first (a span is always opened after its parent)."""
+        while self._unended_spans:
+            self._safe_end(self._unended_spans.pop())
 
-    @staticmethod
-    def _safe_end(span: Any) -> None:
-        """End a span, swallowing any errors."""
+    def _safe_end(self, span: Any) -> None:
+        """End a span; a failure is counted in the receipt's ``errors``."""
         try:
             span.end()
-        except Exception:
+        except _SDK_FAILURES:
+            self._counts["errors"] += 1
             log.debug("langfuse: span end failed", exc_info=True)
 
     def _flush_pending_halves(self) -> None:
@@ -827,25 +805,6 @@ class LangfuseEmitter:
             for half, row in parts.items():
                 current.setdefault(half, row)
 
-    def _flush_ext_shards(self) -> None:
-        """Backfill out-of-process children's token rows from ext/*.jsonl."""
-        ext_dir = trace_ext_dir(self.session_dir)
-        if not ext_dir.is_dir():
-            return
-        unsent = 0
-        for shard in sorted(ext_dir.glob("*.jsonl")):
-            sent = self._ext_rows_sent.get(shard.name, 0)
-            rows = _load_jsonl(shard)
-            if sent == 0 and rows:
-                self._counts["ext_shards_read"] += 1
-            for index in range(sent, len(rows)):
-                if not self._emit_generation(token_row=rows[index], conv_row=None):
-                    unsent += 1
-                    break
-                self._ext_rows_sent[shard.name] = index + 1
-        if unsent:
-            raise RuntimeError(f"{unsent} ext-shard row(s) could not be sent")
-
     def _backfill_kb_spans(
         self,
         path_for: Callable[[Path], Path],
@@ -853,11 +812,15 @@ class LangfuseEmitter:
         agent: str,
         span_for: _SpanBuilder,
     ) -> None:
-        """Backfill every row of one session audit log as a KB span under ``agent``."""
-        for row in _load_jsonl(path_for(self.session_dir)):
+        """Backfill the rows of one session audit log earlier legs did not send as KB spans under ``agent``."""
+
+        def _send(row: dict[str, Any]) -> bool:
             self._counts[counter] += 1
             name, metadata = span_for(row)
-            self.record_kb_span(name=name, agent=agent, output=row, metadata=metadata, ts=row.get("ts"))
+            return self.record_kb_span(name=name, agent=agent, output=row, metadata=metadata, ts=row.get("ts"))
+
+        path = path_for(self.session_dir)
+        self._drain(path, load_shard(path), _send)
 
     def _recipe_audit_span(self, row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """Name + metadata for one recipe-KB read or write audit row."""
@@ -868,38 +831,17 @@ class LangfuseEmitter:
 
     def _flush_trajectory(self) -> None:
         """Backfill closed trajectory spans and point events, resuming each shard at its receipt cursor."""
-        shard_rows = {shard.name: load_trajectory_shard(shard) for shard in trajectory_shards(self.session_dir)}
+        shard_rows = {shard: load_shard(shard) for shard in trajectory_shards(self.session_dir)}
         openings = trajmap.span_openings(row for rows in shard_rows.values() for row in rows)
-        for name, rows in shard_rows.items():
-            for index in range(self._trajectory_rows_sent.get(name, 0), len(rows)):
-                spec = trajmap.project_row(rows[index], openings)
-                if spec is not None:
-                    self._emit_trajectory_span(spec)
-                self._trajectory_rows_sent[name] = index + 1
 
-    def _flush_trajectory_tail(self) -> None:
-        """Ship the trajectory rows recorded after the full flush, ending any span opened to parent them.
+        def _send(row: dict[str, Any]) -> bool:
+            spec = trajmap.project_row(row, openings)
+            if spec is not None:
+                self._emit_trajectory_span(spec)
+            return True
 
-        The CLOSE phase flushes from inside the run, so the last close work and the session's own terminal row land on
-        the ledger after it; the per-shard cursors make a re-flush send only those rows.
-        """
-        agent_keys, phase_keys, had_root = set(self._agent_spans), set(self._phase_spans), self._root_span is not None
-        sent = self._counts["trajectory_spans_sent"]
-        try:
-            self._flush_trajectory()
-            for key, span in list(self._agent_spans.items()):
-                if key not in agent_keys:
-                    self._safe_end(span)
-            for phase, span in list(self._phase_spans.items()):
-                if phase not in phase_keys:
-                    self._safe_end(span)
-            if not had_root and self._root_span is not None:
-                self._safe_end(self._root_span)
-            if self._counts["trajectory_spans_sent"] != sent:
-                self._flush_client()
-        except Exception:  # trace must never break shutdown
-            self._counts["errors"] += 1
-            log.debug("langfuse: trajectory tail flush failed", exc_info=True)
+        for shard, rows in shard_rows.items():
+            self._drain(shard, rows, _send)
 
     def _emit_trajectory_span(self, spec: trajmap.TrajectorySpanSpec) -> None:
         """Create and close one projected trajectory span under its (phase, agent) span."""
@@ -917,25 +859,34 @@ class LangfuseEmitter:
         self._counts["trajectory_spans_sent"] += 1
 
     def _flush_decision_scores(self) -> None:
-        """Convert each decision_trace row into Langfuse Score(s)."""
-        for drow in _load_jsonl(decision_trace_path(self.session_dir)):
-            scores = lfmap.decision_to_scores(drow)
-            if not scores:
+        """Convert each decision_trace row earlier legs did not score into Langfuse Score(s).
+
+        The writer rewrites the file as a ts-sorted join on every export, so a new decision can land ahead of ones
+        already sent; rows are matched by the ``decision_id`` the writer stamps, not by position. Raises at the first
+        row that could not be sent, leaving it and the rows after it owed.
+        """
+        for drow in load_shard(decision_trace_path(self.session_dir)):
+            decision_id = drow["decision_id"]
+            if decision_id in self._decisions_sent:
                 continue
-            meta0 = scores[0].get("metadata") or {}
-            phase = str(meta0.get("phase") or lfmap.UNPHASED)
-            agent = lfmap.span_agent_for(str(meta0.get("component") or ""))
-            # Per-decision span carrying ``operation_kind`` so the trace can be filtered by step.
-            step_span = self._open_decision_span(drow, phase, agent)
-            for score in scores:
-                self._create_score(
-                    score,
-                    phase=phase,
-                    agent=agent,
-                    span=step_span,
-                )
-            if step_span is not None:
-                self._safe_end(step_span)
+            if not self._send_decision(drow):
+                raise RuntimeError(f"decision {decision_id} could not be sent")
+            self._decisions_sent.add(decision_id)
+
+    def _send_decision(self, drow: dict[str, Any]) -> bool:
+        """Hand one decision's step span and Scores to the SDK; return whether every Score was handed over."""
+        scores = lfmap.decision_to_scores(drow)
+        if not scores:
+            return True
+        meta0 = scores[0].get("metadata") or {}
+        phase = str(meta0.get("phase") or lfmap.UNPHASED)
+        agent = lfmap.span_agent_for(str(meta0.get("component") or ""))
+        # Per-decision span carrying ``operation_kind`` so the trace can be filtered by step.
+        step_span = self._open_decision_span(drow, phase, agent)
+        sent = all(self._create_score(score, phase=phase, agent=agent, span=step_span) for score in scores)
+        if step_span is not None:
+            self._safe_end(step_span)
+        return sent
 
     def _open_decision_span(
         self,
@@ -993,8 +944,8 @@ class LangfuseEmitter:
         phase: str,
         agent: str,
         span: Any = None,
-    ) -> None:
-        """Attach a Langfuse Score to a step span / agent span / the trace."""
+    ) -> bool:
+        """Attach a Langfuse Score to a step span / agent span / the trace; return whether it was handed over."""
         if span is None:
             span = self._agent_spans.get((phase, agent))
         try:
@@ -1016,13 +967,15 @@ class LangfuseEmitter:
                     metadata=score.get("metadata") or {},
                 )
             self._counts["scores_sent"] += 1
-        except Exception:
+        except _SDK_FAILURES:
             self._counts["errors"] += 1
-            log.debug(
+            log.warning(
                 "langfuse: create_score failed for %s",
                 score.get("name"),
                 exc_info=True,
             )
+            return False
+        return True
 
     # -- receipt (session_breakdown ``langfuse`` section) ---------------
     def receipt(self) -> dict[str, Any]:
@@ -1046,11 +999,8 @@ class LangfuseEmitter:
             ),
             "counts": dict(self._counts),
             "counts_final": self._flushed,
-            # Which reconcile steps have completed, so a receipt written after a partial flush says what is still owed
-            # instead of reading as final.
-            "flush_steps_done": sorted(self._flush_steps_done),
-            "ext_rows_sent": dict(self._ext_rows_sent),
-            "trajectory_rows_sent": dict(self._trajectory_rows_sent),
+            "rows_sent": dict(self._rows_sent),
+            "decisions_sent": sorted(self._decisions_sent),
         }
 
     def _claim_one_shot(self, marker: str) -> bool:
@@ -1096,13 +1046,9 @@ class LangfuseEmitter:
             atomic_write_json(
                 _receipt_path(self.session_dir),
                 _stamp_receipt_hash(receipt),
-                indent=2,
-                sort_keys=True,
-                make_parents=True,
-                fsync=True,
-                fsync_dir=True,
+                options=WriteOptions(make_parents=True, fsync=True, fsync_dir=True),
             )
-        except Exception:
+        except (OSError, TypeError, ValueError):
             log.debug("langfuse: receipt write failed", exc_info=True)
         record_metadata_langfuse(self.session_dir, receipt)
 
@@ -1133,28 +1079,15 @@ def flush_session(session_dir: Path) -> None:
     get_emitter(session_dir).flush_session()
 
 
-def record_session_breakdown(
-    session_dir: Path,
-    breakdown: dict[str, Any] | None = None,
-) -> None:
+def record_session_breakdown(session_dir: Path) -> None:
     """Attach the final ``session_breakdown.json`` to the session's trace."""
-    if breakdown is None:
-        from hyperloom.common.jsonio import read_json
-
-        from ..session.session_paths import BREAKDOWN_FILENAME
-
-        breakdown = read_json(Path(session_dir) / BREAKDOWN_FILENAME, default={}, require_dict=True)
+    breakdown = _load_json(Path(session_dir) / BREAKDOWN_FILENAME)
     get_emitter(session_dir).record_session_breakdown(breakdown)
 
 
-def record_status(
-    session_dir: Path,
-    status: dict[str, Any],
-    *,
-    min_refresh_sec: float = 300.0,
-) -> None:
+def record_status(session_dir: Path, status: dict[str, Any]) -> None:
     """Module-level convenience: mirror a status snapshot for ``session_dir``."""
-    get_emitter(session_dir).record_status(status, min_refresh_sec=min_refresh_sec)
+    get_emitter(session_dir).record_status(status)
 
 
 #: Receipt key holding the SHA-256 of the receipt body (excluding itself).
@@ -1178,7 +1111,7 @@ def _stamp_receipt_hash(payload: dict[str, Any]) -> dict[str, Any]:
 
 def read_receipt(session_dir: Path) -> dict[str, Any] | None:
     """Read the persisted ``langfuse_receipt.json`` for ``session_dir``."""
-    from hyperloom.common.jsonio import read_json
+    from hyperloom_common.jsonio import read_json
 
     payload = read_json(_receipt_path(session_dir), default=None, require_dict=True)
     if payload is None:

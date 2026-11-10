@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.env import EnvValueError, env_bool
+from hyperloom_common.env import EnvValueError, env_bool
 from hyperloom.inference_optimizer.cli import parser as cli_parser
 from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
 from hyperloom.inference_optimizer.cli import quantization as cli_quantization
@@ -26,13 +26,14 @@ def _enable_quant_by_default(monkeypatch):
 # fakes
 
 
-def _fake_result(status: str, qdir: str | None, *, final="x", eval_gap=None):
+def _fake_result(status: str, qdir: str | None, *, final="x", eval_gap=None, run_dir: str | None = None):
     """Build a stand-in for quantization_agent.QuantSkillRunResult."""
     assessment = types.SimpleNamespace(final=final, eval_gap=eval_gap)
     return types.SimpleNamespace(
         status=status,
         quantized_model_dir=Path(qdir) if qdir else None,
         assessment=assessment,
+        run_dir=Path(run_dir) if run_dir else None,
     )
 
 
@@ -86,8 +87,7 @@ def test_resolve_scheme_none_returns_none():
 
 
 def test_resolve_scheme_known_returns_prompt():
-    p = qs.resolve_scheme_prompt("fp8")
-    assert p and "fp8" in p
+    assert qs.resolve_scheme_prompt("fp8") == "Quantization strategy:\nApply fp8 as the global quantization scheme."
 
 
 def test_resolve_scheme_has_no_hardcoded_defaults():
@@ -97,11 +97,6 @@ def test_resolve_scheme_has_no_hardcoded_defaults():
     assert "kv_cache" not in p
     assert "Calibration" not in p
     assert "Evaluation" not in p
-
-
-def test_resolve_scheme_unknown_raises():
-    with pytest.raises(ValueError):
-        qs.resolve_scheme_prompt("bogus")
 
 
 def test_scheme_choices_match_supported_set():
@@ -154,77 +149,21 @@ def test_validate_scheme_unknown_raises_valueerror():
         qs.validate_scheme("bogus", "mi355x")
 
 
-# Group A4 — build_quantization_prompt (no hard-coded defaults; three groups)
-
-
-def test_build_prompt_minimal_only_strategy():
-    cfg = qs.QuantizationConfig(global_scheme="fp8")
-    p = qs.build_quantization_prompt(cfg)
-    assert "Apply fp8 as the global quantization scheme." in p
-    # Unset optional fields are omitted.
-    assert "Calibration" not in p
-    assert "Evaluation" not in p
-    assert "kv_cache" not in p
-    assert "pileval" not in p
-
-
-def test_build_prompt_full_renders_three_groups():
-    cfg = qs.QuantizationConfig(
-        global_scheme="mxfp4",
-        output_dir="/data/quantized/qwen3_32b_mxfp4",
-        layer_overrides={"self_attn": "fp8", "moe/mlp": "ptpc_fp8"},
-        kv_cache="fp8",
-        exclude_layers=["model.layers.0.mlp.down_proj"],
-        calib_dataset="pileval",
-        num_calib_data=512,
-        seq_len=2048,
-        acceptable_eval_gap=0.03,
-    )
-    p = qs.build_quantization_prompt(
-        cfg,
-        model_path="/path/models/Qwen-Qwen3-32B",
-        gpu_type="mi355x",
-        skill_path="@/shared/quantization_agent/SKILL.md",
-    )
-    assert "Use the skill at @/shared/quantization_agent/SKILL.md" in p
-    assert "on an MI355X target" in p
-    assert "Quantization strategy:" in p
-    assert "Apply mxfp4 as the global quantization scheme." in p
-    assert "Override the self_attn layers with fp8 and the moe/mlp layers with ptpc_fp8." in p
-    assert "Quantize the kv_cache with fp8." in p
-    assert "exclude model.layers.0.mlp.down_proj from quantization" in p
-    assert "Write the quantized model to /data/quantized/qwen3_32b_mxfp4." in p
-    assert "Calibration:" in p
-    assert "Calibrate with the pileval dataset using 512 samples at a sequence length of 2048." in p
-    assert "Evaluation:" in p
-    assert "Keep the quantized model's accuracy within 3% of the bf16 baseline." in p
-
-
-def test_build_prompt_eval_gap_formats_percent():
-    p = qs.build_quantization_prompt(qs.QuantizationConfig(global_scheme="fp8", acceptable_eval_gap=0.05))
-    assert "within 5% of the bf16 baseline" in p
-
-
-def test_build_prompt_partial_calibration():
-    # Only num_calib_data set -> calibration group renders just that part.
-    p = qs.build_quantization_prompt(qs.QuantizationConfig(global_scheme="fp8", num_calib_data=256))
-    assert "Calibration:" in p
-    assert "256 samples" in p
-    assert "pileval" not in p
-
-
 # Group B — adapter status mapping
 
 
 def test_adapter_success_returns_quantized_dir(tmp_path, monkeypatch):
+    from hyperloom.agents.quantization import QuantSkillRunOptions
+
     calls = _patch_quantize(monkeypatch, _fake_result("success", str(tmp_path / "q"), final=None, eval_gap=0.01))
     out = asyncio.run(qrh.run_quantization_prelude_async(prompt="fp8", source_model="/models/src", workspace=tmp_path))
     assert out == str(tmp_path / "q")
-    # source model + export dir folded into the effective prompt.
+    # source model + export dir folded into the effective prompt; the export dir is inside the run's own directory.
     assert "/models/src" in calls[0]["prompt"]
-    assert str(tmp_path / "quantized") in calls[0]["prompt"]
+    assert "`quantized/` in your workspace" in calls[0]["prompt"]
+    assert str(tmp_path) not in calls[0]["prompt"]
     assert "fp8" in calls[0]["prompt"]
-    assert calls[0]["interactive"] is False
+    assert calls[0]["options"] == QuantSkillRunOptions(interactive=False)
     assert calls[0]["workspace"] == tmp_path
 
 
@@ -234,18 +173,21 @@ def test_adapter_partial_with_model_returns_dir(tmp_path, monkeypatch):
     assert out == str(tmp_path / "q")
 
 
-def test_adapter_partial_without_model_exits_3(tmp_path, monkeypatch):
+def test_adapter_partial_without_model_exits_4(tmp_path, monkeypatch):
     _patch_quantize(monkeypatch, _fake_result("partial", None, final="must_validate_skipped"))
     with pytest.raises(SystemExit) as ei:
         asyncio.run(qrh.run_quantization_prelude_async(prompt="fp8", source_model="/m", workspace=tmp_path))
-    assert ei.value.code == 3
+    assert ei.value.code == 4
 
 
-def test_adapter_failed_exits_3(tmp_path, monkeypatch):
-    _patch_quantize(monkeypatch, _fake_result("failed", None, final="exec_model_load_failed"))
+def test_adapter_failed_exits_4(tmp_path, monkeypatch, capsys):
+    run_dir = str(tmp_path / "runs" / "r1")
+    _patch_quantize(monkeypatch, _fake_result("failed", None, final="exec_model_load_failed", run_dir=run_dir))
     with pytest.raises(SystemExit) as ei:
         asyncio.run(qrh.run_quantization_prelude_async(prompt="fp8", source_model="/m", workspace=tmp_path))
-    assert ei.value.code == 3
+    assert ei.value.code == 4
+    # The failure names the run directory that holds this run's diagnosis.
+    assert run_dir in capsys.readouterr().err
 
 
 # Group C — cli prelude hook

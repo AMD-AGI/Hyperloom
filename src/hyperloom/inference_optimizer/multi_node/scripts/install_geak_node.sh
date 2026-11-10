@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # One-time GEAK install on a Infera GPU pod (idempotent), driven over SSH by
-# `hyperloom.inference_optimizer.multi_node install-geak`.
+# `hyperloom multi-node install-geak`.
 #
 # The GEAK source tree is already cloned by the sandbox's install.sh onto the
 # shared $USER_DATA_PATH mount (which the Infera pod also mounts), so we do NOT

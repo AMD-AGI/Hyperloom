@@ -30,6 +30,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from hyperloom.common.agentx_workload import find_aiperf_artifact
+from hyperloom.common.outside_facts import AIPERF_PHASE_KEY
+
 log = logging.getLogger(__name__)
 
 
@@ -45,10 +48,6 @@ __all__ = [
 
 #: Artifact written beside ``kv_metrics.json``.
 TIMELINE_ARTIFACT_NAME = "agentx_timeline.jsonl"
-
-#: Where aiperf's per-request export lands, relative to the round's own directory. Mirrors how the progress-API address
-#: and the aiperf log are resolved, since an AgentX round may nest its benchmark one level down.
-_EXPORT_RELPATHS = ("aiperf_artifacts/profile_export.jsonl", "*/aiperf_artifacts/profile_export.jsonl")
 
 #: Cap on request-level events written out. A three-hour round at high concurrency produces well over a hundred
 #: thousand requests, and three events each would outweigh every other artifact in the session bundle combined. Over
@@ -72,8 +71,10 @@ class RequestRecord:
     start: float
     end: float
     first_token: float | None
-    phase: str
     ok: bool
+    phase: str = ""
+    output_tokens: float | None = None
+    latency: float | None = None
 
     def overlaps(self, window_start: float, window_end: float) -> bool:
         """Whether this request was in flight at any point in a window."""
@@ -82,15 +83,7 @@ class RequestRecord:
 
 def find_profile_export(workspace: Any) -> Path | None:
     """Locate aiperf's per-request export under a round's directory."""
-    try:
-        root = Path(workspace)
-        for pattern in _EXPORT_RELPATHS:
-            for candidate in sorted(root.glob(pattern)):
-                if candidate.is_file():
-                    return candidate
-    except OSError:
-        return None
-    return None
+    return find_aiperf_artifact(workspace, "profile_export.jsonl")
 
 
 def _seconds(raw: Any) -> float | None:
@@ -126,7 +119,9 @@ def _record_from(payload: dict[str, Any]) -> RequestRecord | None:
     # alongside rather than used as the identity.
     trajectory = metadata.get("x_correlation_id") or metadata.get("conversation_id") or ""
     turn = metadata.get("turn_index")
-    ttft_ms = _metric(payload.get("metrics"), "time_to_first_token")
+    metrics = payload.get("metrics")
+    ttft_ms = _metric(metrics, "time_to_first_token")
+    latency_ms = _metric(metrics, "request_latency")
     # Derived from TTFT rather than from ``request_ack_ns``: the ack is when the server accepted the request, which is
     # not the same instant as the first token, and conflating them would misplace exactly the event a reader would use
     # to line a decode-phase KV rise up against.
@@ -139,8 +134,10 @@ def _record_from(payload: dict[str, Any]) -> RequestRecord | None:
         start=start,
         end=end,
         first_token=first_token,
-        phase=str(metadata.get("benchmark_phase") or ""),
         ok=payload.get("error") in (None, {}),
+        phase=str(metadata.get(AIPERF_PHASE_KEY) or ""),
+        output_tokens=_metric(metrics, "output_sequence_length"),
+        latency=latency_ms / 1000.0 if latency_ms is not None else None,
     )
 
 
@@ -161,10 +158,11 @@ def parse_profile_export(path: Path) -> list[RequestRecord]:
                     payload = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(payload, dict):
-                    record = _record_from(payload)
-                    if record is not None:
-                        records.append(record)
+                if not isinstance(payload, dict):
+                    continue
+                record = _record_from(payload)
+                if record is not None:
+                    records.append(record)
     except OSError as exc:
         log.debug("agentx_timeline: could not read %s (%s)", path, exc)
         return []
@@ -203,8 +201,7 @@ def build_events(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Turn records into a time-ordered event stream, with a summary of what it covers.
 
-    Phase events come from the caller's authoritative bounds -- aiperf's progress API -- rather than from the records,
-    whose ``benchmark_phase`` currently reads ``profiling`` for everything it exports.
+    Phase events come from the caller's authoritative bounds -- aiperf's progress API -- rather than from the records.
     """
     events: list[dict[str, Any]] = []
     for phase, (start, end) in (phase_bounds or {}).items():

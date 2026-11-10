@@ -451,7 +451,7 @@ class TestModeResult:
 
 
 class TestToFloat:
-    """The canonical coercion from hyperloom.common.coerce, not a local copy."""
+    """The canonical coercion from hyperloom_common.coerce, not a local copy."""
 
     def test_a_bool_is_not_a_measurement(self):
         assert pms.to_float(True) is None

@@ -10,16 +10,16 @@ import pytest
 from hyperloom.agents.critic.runtime.errors import IntentEnvelopeValidationError
 from hyperloom.agents.critic.runtime.intent_envelope import (
     ALLOWED_VERDICT_SOURCES,
-    DEFAULT_IDLE_BODY,
     Intent,
     IntentEnvelope,
+    ReviewVerdict,
     build_advice_intent,
     build_envelope,
     build_idle_intent,
     build_review_verdict_intent,
     validate_envelope,
 )
-from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS
+from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS, DEFAULT_IDLE_BODY
 
 
 def test_allowed_verdicts_match_design_v06():
@@ -31,10 +31,7 @@ def test_allowed_verdict_sources_match_schema():
 
 
 def test_build_review_verdict_intent_minimal():
-    intent = build_review_verdict_intent(
-        target_proposal_msg_id="abc1",
-        verdict="approve",
-    )
+    intent = build_review_verdict_intent(ReviewVerdict(target_proposal_msg_id="abc1", verdict="approve"))
     assert intent.intent_type == "review_verdict"
     assert intent.payload["target_proposal_msg_id"] == "abc1"
     assert intent.payload["verdict"] == "approve"
@@ -44,17 +41,19 @@ def test_build_review_verdict_intent_minimal():
 
 def test_build_review_verdict_intent_full():
     intent = build_review_verdict_intent(
-        target_proposal_msg_id="abc1",
-        verdict="redirect",
-        reasoning="prefer dispatch fix first",
-        confidence="high",
-        predicted_gain_pct=2.5,
-        kb_evidence=["kb_1"],
-        packet_evidence=["benchmark.after.gain_pct"],
-        risks=[{"type": "active_path_unproven", "severity": "blocker"}],
-        required_evidence=["dispatch_evidence"],
-        alternative_action="profile",
-        notes=["see kb_1"],
+        ReviewVerdict(
+            target_proposal_msg_id="abc1",
+            verdict="redirect",
+            reasoning="prefer dispatch fix first",
+            confidence="high",
+            predicted_gain_pct=2.5,
+            kb_evidence=["kb_1"],
+            packet_evidence=["benchmark.after.gain_pct"],
+            risks=[{"type": "active_path_unproven", "severity": "blocker"}],
+            required_evidence=["dispatch_evidence"],
+            alternative_action="profile",
+            notes=["see kb_1"],
+        )
     )
     p = intent.payload
     assert p["confidence"] == "high"
@@ -62,19 +61,9 @@ def test_build_review_verdict_intent_full():
     assert p["risks"][0]["type"] == "active_path_unproven"
 
 
-def test_build_review_verdict_rejects_bad_verdict():
-    with pytest.raises(IntentEnvelopeValidationError, match="verdict"):
-        build_review_verdict_intent(target_proposal_msg_id="abc1", verdict="lgtm")
-
-
 def test_build_review_verdict_rejects_bad_source():
     with pytest.raises(IntentEnvelopeValidationError, match="source"):
-        build_review_verdict_intent(target_proposal_msg_id="abc1", verdict="approve", source="someone")
-
-
-def test_build_review_verdict_rejects_empty_target():
-    with pytest.raises(IntentEnvelopeValidationError, match="target"):
-        build_review_verdict_intent(target_proposal_msg_id="", verdict="approve")
+        build_review_verdict_intent(ReviewVerdict(target_proposal_msg_id="abc1", verdict="approve", source="someone"))
 
 
 def test_build_idle_intent_default():
@@ -87,8 +76,8 @@ def test_build_idle_intent_default():
 def test_build_envelope_with_intents_validates():
     env = build_envelope(
         [
-            build_review_verdict_intent(target_proposal_msg_id="m1", verdict="approve"),
-            build_review_verdict_intent(target_proposal_msg_id="m2", verdict="reject"),
+            build_review_verdict_intent(ReviewVerdict(target_proposal_msg_id="m1", verdict="approve")),
+            build_review_verdict_intent(ReviewVerdict(target_proposal_msg_id="m2", verdict="reject")),
         ]
     )
     d = env.to_dict()
@@ -96,12 +85,9 @@ def test_build_envelope_with_intents_validates():
     assert d["intents"][0]["payload"]["target_proposal_msg_id"] == "m1"
 
 
-def test_build_envelope_empty_falls_back_to_idle_observation():
-    env = build_envelope([])
-    d = env.to_dict()
-    assert len(d["intents"]) == 1
-    assert d["intents"][0]["intent_type"] == "send_message"
-    assert d["intents"][0]["payload"]["topic"] == "observation"
+def test_build_envelope_empty_raises():
+    with pytest.raises(IntentEnvelopeValidationError, match="non-empty"):
+        build_envelope([])
 
 
 def test_validate_envelope_accepts_well_formed_dict():

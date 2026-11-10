@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.env import EnvValueError
+from hyperloom_common.env import EnvValueError
 from hyperloom.orchestrator.actions.executors import TargetAnalysisExecutor
 from hyperloom.orchestrator.actions.executors import target_analysis as ta
 from hyperloom.orchestrator.state.task_registry import Task
@@ -102,7 +102,7 @@ def test_executor_uses_public_summary_helpers():
 @pytest.mark.asyncio
 async def test_no_flag_writes_skipped_marker(session_dir):
     """Without --compare-against-gpu, the executor still runs and persists a ``no_target_gpu_configured`` marker JSON."""
-    executor = TargetAnalysisExecutor(compare_against_gpu="", session_dir=session_dir)
+    executor = TargetAnalysisExecutor(compare_against_gpu="")
     result = await executor(_ctx(session_dir, {"model_path": "MiniMax-M2.5"}))
     assert result["status"] == "succeeded"
     assert result["baseline_status"] == "skipped"
@@ -119,7 +119,7 @@ async def test_no_flag_writes_skipped_marker(session_dir):
 async def test_no_inferencex_data_graceful(session_dir, monkeypatch):
     """InferenceX returns no rows for the model → succeeded + no_match."""
     _patch_fetch_rows(monkeypatch, [])
-    executor = TargetAnalysisExecutor(compare_against_gpu="b300", session_dir=session_dir)
+    executor = TargetAnalysisExecutor(compare_against_gpu="b300")
     params = {
         "model_path": "MiniMax-M2.5",
         "framework": "vllm",
@@ -142,7 +142,7 @@ async def test_model_mapping_miss_writes_skipped(session_dir, monkeypatch):
     monkeypatch.setenv("INFERENCEX_TIMEOUT_SEC", "5.0")
     monkeypatch.setenv("INFERENCEX_MAX_ATTEMPTS", "1")
 
-    executor = TargetAnalysisExecutor(compare_against_gpu="b300", session_dir=session_dir)
+    executor = TargetAnalysisExecutor(compare_against_gpu="b300")
     result = await executor(
         _ctx(
             session_dir,
@@ -165,7 +165,7 @@ async def test_happy_path_writes_files(session_dir, monkeypatch):
     """Full pipeline reading live InferenceX-measured rows (mocked)."""
     _patch_fetch_rows(monkeypatch, _ifx_rows())
 
-    executor = TargetAnalysisExecutor(compare_against_gpu="b300", session_dir=session_dir)
+    executor = TargetAnalysisExecutor(compare_against_gpu="b300")
     result = await executor(
         _ctx(
             session_dir,
@@ -207,7 +207,7 @@ async def test_happy_path_writes_files(session_dir, monkeypatch):
 @pytest.mark.asyncio
 async def test_report_executor_renders_external_baseline_section(tmp_path: Path, monkeypatch):
     """ReportExecutor reads target_baseline.json and injects an advisory section without touching SharedState."""
-    from hyperloom.orchestrator.actions.executors import ReportExecutor
+    from hyperloom.orchestrator.actions.executors.report import ReportExecutor
     from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
@@ -271,15 +271,17 @@ async def test_report_executor_renders_external_baseline_section(tmp_path: Path,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode_source", ["state", "environment"])
-async def test_agentx_executor_fetches_reference_and_maps_derived_id(session_dir, monkeypatch, mode_source):
+async def test_agentx_executor_fetches_reference_and_maps_derived_id(
+    native_benchmark, session_dir, monkeypatch, mode_source
+):
     from hyperloom.inference_optimizer.baseline_comparison import inferencex_client
     from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     ctx = _ctx(session_dir, {"model_path": "/models/GLM-5.2-MXFP4", "precision": "mxfp4", "isl": 1024, "osl": 2048})
     ctx.extra["shared_state"] = SimpleNamespace(benchmark_mode="agentx" if mode_source == "state" else "")
     if mode_source == "environment":
-        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+        monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     calls = []
 
     def fetch(url):
@@ -321,7 +323,7 @@ async def test_agentx_executor_fetches_reference_and_maps_derived_id(session_dir
 
 @pytest.mark.asyncio
 async def test_agentx_executor_uses_persisted_model_and_precision(session_dir, monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     for key in ("MODEL_PATH", "FRAMEWORK", "PRECISION"):
         monkeypatch.delenv(key, raising=False)
     ctx = _ctx(session_dir)
@@ -336,15 +338,15 @@ async def test_agentx_executor_uses_persisted_model_and_precision(session_dir, m
 
     monkeypatch.setattr(ta, "analyze", analyze)
     await TargetAnalysisExecutor(compare_against_gpu="b300")(ctx)
-    assert captured[0]["model_path"] == "/models/GLM-5.2-MXFP4"
-    assert captured[0]["precision"] == "mxfp4"
-    assert captured[0]["benchmark_mode"] == "agentx"
+    assert captured[0]["request"].model_path == "/models/GLM-5.2-MXFP4"
+    assert captured[0]["request"].precision == "mxfp4"
+    assert captured[0]["request"].benchmark_mode == "agentx"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["params", "environment"])
 async def test_agentx_explicit_precision_override_wins_over_stale_state(session_dir, monkeypatch, source):
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.delenv("PRECISION", raising=False)
     params = {"model_path": "GLM-5.2"}
     if source == "params":
@@ -361,15 +363,15 @@ async def test_agentx_explicit_precision_override_wins_over_stale_state(session_
 
     monkeypatch.setattr(ta, "analyze", analyze)
     await TargetAnalysisExecutor(compare_against_gpu="b300")(ctx)
-    assert captured[0]["precision"] == "bf16"
+    assert captured[0]["request"].precision == "bf16"
     assert ctx.extra["shared_state"].precision == "fp8"
 
 
 @pytest.mark.asyncio
-async def test_agentx_no_gpu_persists_mode_and_clears_previous_target(session_dir, monkeypatch):
+async def test_agentx_no_gpu_persists_mode_and_clears_previous_target(native_benchmark, session_dir, monkeypatch):
     from hyperloom.inference_optimizer.session import session_paths
 
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     ctx = _ctx(session_dir, {"model_path": "GLM-5.2"})
     stale = session_paths.competitor_target_json(session_dir)
     stale.write_text('{"old":true}', encoding="utf-8")
@@ -382,10 +384,12 @@ async def test_agentx_no_gpu_persists_mode_and_clears_previous_target(session_di
 @pytest.mark.asyncio
 @pytest.mark.parametrize("gpu", ["b300", ""])
 @pytest.mark.parametrize("error", [ValueError("schema mismatch"), OSError("read-only filesystem")])
-async def test_analyzer_exception_clears_target_without_replacing_summary(session_dir, monkeypatch, gpu, error):
+async def test_analyzer_exception_propagates_and_clears_target_without_replacing_summary(
+    native_benchmark, session_dir, monkeypatch, gpu, error
+):
     from hyperloom.inference_optimizer.session import session_paths
 
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     stale = session_paths.competitor_target_json(session_dir)
     stale.write_text('{"old":true}', encoding="utf-8")
     baseline = session_dir / "target_analysis/target_baseline.json"
@@ -397,10 +401,8 @@ async def test_analyzer_exception_clears_target_without_replacing_summary(sessio
         raise error
 
     monkeypatch.setattr(ta, "analyze", fail)
-    result = await TargetAnalysisExecutor(compare_against_gpu=gpu)(_ctx(session_dir, {"model_path": "GLM-5.2"}))
-    assert result["status"] == "succeeded"
-    assert result["baseline_status"] == "fetch_error"
-    assert result["reason"] == "analyzer_crash"
+    with pytest.raises(type(error), match=str(error)):
+        await TargetAnalysisExecutor(compare_against_gpu=gpu)(_ctx(session_dir, {"model_path": "GLM-5.2"}))
     assert not stale.exists()
     assert baseline.read_bytes() == previous
 
@@ -409,11 +411,11 @@ async def test_analyzer_exception_clears_target_without_replacing_summary(sessio
 @pytest.mark.parametrize("competitor_write_failure", [False, True])
 async def test_agentx_state_to_external_reference_and_final_report(session_dir, monkeypatch, competitor_write_failure):
     from hyperloom.inference_optimizer.baseline_comparison import inferencex_client
-    from hyperloom.orchestrator.actions.executors import ReportExecutor
+    from hyperloom.orchestrator.actions.executors.report import ReportExecutor
     from hyperloom.inference_optimizer.baseline_comparison import research_hints
     from hyperloom.orchestrator.state.shared_state import SharedState
 
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.delenv("AGENTX_NONCANONICAL_REASONS", raising=False)
     # An ambient PRECISION deliberately outranks the session's own, so this test has to clear it to read the state
@@ -455,7 +457,7 @@ async def test_agentx_state_to_external_reference_and_final_report(session_dir, 
             ).encode()
         return json.dumps({"42": {"id": 42, "p90_e2e_norm_intvty": 20.0}}).encode()
 
-    from hyperloom.common import io as common_io
+    from hyperloom_common import io as common_io
     from hyperloom.inference_optimizer.session import session_paths
 
     if competitor_write_failure:
@@ -515,9 +517,6 @@ class TestRequestShapeFromEnv:
             await TargetAnalysisExecutor(compare_against_gpu="b300")(_ctx(session_dir, {"model_path": "GLM-5.2"}))
 
 
-# session_dir resolution
-
-
 class _DummySummary:
     status = "ok"
     reason = ""
@@ -526,52 +525,11 @@ class _DummySummary:
     best = SimpleNamespace(tput_per_gpu=10.0, conc=4, decode_tp=2)
 
 
-def _unit_ctx(*, params: dict | None = None, extra: dict | None = None) -> SimpleNamespace:
+def _unit_ctx(session_dir: Path, *, params: dict | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         task=SimpleNamespace(task_id="ta-t1", kind="target_analysis", params=params or {}),
-        extra=extra or {},
+        extra={"session_dir": str(session_dir)},
     )
-
-
-class TestResolveSessionDir:
-    def test_extra_session_dir_wins(self, tmp_path):
-        ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
-        ctx = _unit_ctx(extra={"session_dir": str(tmp_path)})
-        assert ex._resolve_session_dir(ctx) == tmp_path
-
-    def test_params_session_dir_used(self, tmp_path):
-        ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
-        ctx = _unit_ctx(params={"session_dir": str(tmp_path)})
-        assert ex._resolve_session_dir(ctx) == tmp_path
-
-    def test_constructor_session_dir_used(self, tmp_path):
-        ex = ta.TargetAnalysisExecutor(
-            compare_against_gpu="MI300X",
-            session_dir=tmp_path,
-        )
-        ctx = _unit_ctx()
-        assert ex._resolve_session_dir(ctx) == tmp_path
-
-    def test_falls_back_to_paths_session_dir(self, tmp_path, monkeypatch):
-        ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
-        monkeypatch.setattr(
-            "hyperloom.inference_optimizer.session.paths.session_dir",
-            lambda: tmp_path,
-        )
-        ctx = _unit_ctx()
-        assert ex._resolve_session_dir(ctx) == tmp_path
-
-    def test_returns_none_when_fallback_missing(self, monkeypatch):
-        ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
-
-        def boom():
-            raise RuntimeError("no session")
-
-        monkeypatch.setattr(
-            "hyperloom.inference_optimizer.session.paths.session_dir",
-            boom,
-        )
-        assert ex._resolve_session_dir(_unit_ctx()) is None
 
 
 # Execution branches
@@ -579,63 +537,21 @@ class TestResolveSessionDir:
 
 class TestExecutor:
     @pytest.mark.asyncio
-    async def test_skipped_when_no_session_dir(self, monkeypatch):
-        ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
-        monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: None)
-        result = await ex(_unit_ctx())
-        assert result["status"] == "succeeded"
-        assert result["baseline_status"] == "skipped"
-        assert result["reason"] == "no_session_dir"
-
-    @pytest.mark.asyncio
-    async def test_skipped_when_no_session_dir_clears_stale_competitor_target(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        from hyperloom.inference_optimizer.session import session_paths
-        from hyperloom.inference_optimizer.baseline_comparison import research_hints
-
-        sd = tmp_path / "sess"
-        sd.mkdir()
-        research_hints.write_competitor_target(
-            sd,
-            {
-                "gpu": "b300",
-                "model": "MiniMax-M2.5",
-                "per_conc": [{"conc": 64, "tput_per_gpu": 999.0, "source": "scout"}],
-            },
-        )
-        assert session_paths.competitor_target_json(sd).exists()
-
-        ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
-        monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: None)
-        monkeypatch.setattr(
-            "hyperloom.inference_optimizer.session.paths.session_dir",
-            lambda: sd,
-        )
-        result = await ex(_unit_ctx())
-        assert result["reason"] == "no_session_dir"
-        assert not session_paths.competitor_target_json(sd).exists()
-        assert research_hints.load_competitor_target(sd) is None
-
-    @pytest.mark.asyncio
     async def test_writes_skipped_summary_when_no_gpu(self, tmp_path, monkeypatch):
         ex = ta.TargetAnalysisExecutor(compare_against_gpu="")
-        monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: tmp_path)
         monkeypatch.setattr(
             "hyperloom.orchestrator.actions.executors.target_analysis.analyze",
             lambda **kwargs: _DummySummary(),
         )
-        result = await ex(_unit_ctx())
+        result = await ex(_unit_ctx(tmp_path))
         assert result["status"] == "succeeded"
         assert result["baseline_status"] == "ok"
         assert result["best_tput_per_gpu"] == 10.0
 
     @pytest.mark.asyncio
-    async def test_analyzer_crash_is_swallowed(self, tmp_path, monkeypatch):
-        ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
-        monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: tmp_path)
+    @pytest.mark.parametrize("gpu", ["MI300X", ""])
+    async def test_analyzer_crash_propagates(self, tmp_path, monkeypatch, gpu):
+        ex = ta.TargetAnalysisExecutor(compare_against_gpu=gpu)
 
         def boom(**_):
             raise RuntimeError("InferenceX 500")
@@ -644,29 +560,8 @@ class TestExecutor:
             "hyperloom.orchestrator.actions.executors.target_analysis.analyze",
             boom,
         )
-        result = await ex(_unit_ctx())
-        assert result["status"] == "succeeded"
-        assert result["baseline_status"] == "fetch_error"
-        assert "analyzer crashed" in result["note"]
-
-    @pytest.mark.asyncio
-    async def test_analyzer_crash_in_no_gpu_branch_is_swallowed(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        ex = ta.TargetAnalysisExecutor(compare_against_gpu="")
-        monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: tmp_path)
-
-        def boom(**_):
-            raise RuntimeError("nope")
-
-        monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors.target_analysis.analyze",
-            boom,
-        )
-        result = await ex(_unit_ctx())
-        assert result["baseline_status"] == "fetch_error"
+        with pytest.raises(RuntimeError, match="InferenceX 500"):
+            await ex(_unit_ctx(tmp_path))
 
     @pytest.mark.asyncio
     async def test_format_result_uses_summary_without_best(
@@ -682,11 +577,10 @@ class TestExecutor:
             best = None
 
         ex = ta.TargetAnalysisExecutor(compare_against_gpu="MI300X")
-        monkeypatch.setattr(ex, "_resolve_session_dir", lambda ctx: tmp_path)
         monkeypatch.setattr(
             "hyperloom.orchestrator.actions.executors.target_analysis.analyze",
             lambda **kwargs: _NoBestSummary(),
         )
-        result = await ex(_unit_ctx(params={"model_path": "/m"}))
+        result = await ex(_unit_ctx(tmp_path, params={"model_path": "/m"}))
         assert result["baseline_status"] == "no_data"
         assert "best_tput_per_gpu" not in result

@@ -15,23 +15,23 @@ Hyperloom includes external components (GEAK, Magpie, TraceLens, IntelliKit, fra
 
 ## CI and documentation-only changes
 
-This repository treats **documentation-only** pushes and pull requests the same way across automation: when **every** changed file in that event matches **only** the [canonical paths-ignore list](#canonical-paths-ignore-list) below, matching GitHub Actions workflows **do not** start (no workflow run is created for that event).
+This repository treats **documentation-only** pushes and pull requests the same way across automation: an event is documentation-only when **every** changed file matches the [canonical documentation-only list](#canonical-documentation-only-list) below. Workflows whose checks the `main` ruleset requires still start on such an event and skip only their expensive jobs, so their checks report; CodeQL does not start at all.
 
 ### What is skipped today on GitHub Actions
 
-| Check (concept) | Implemented in Actions | Skipped for doc-only events? |
-|-----------------|------------------------|------------------------------|
-| **Pytest** (full suite with coverage reporting) | [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml) (reads ``[tool.hyperloom.tests_coverage]`` / coverage config from ``pyproject.toml`` via inline Python) | Yes (`paths-ignore` on `push` / `pull_request` for all branches) |
-| **CodeQL** | [`.github/workflows/codeql.yml`](.github/workflows/codeql.yml) | Yes on **PR and push** when doc-only (`paths-ignore`); **no** — the **weekly schedule** on the default branch still runs a full analysis |
-| **Ruff** (lint + format check) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`ruff check` / `ruff format --check`; hard gate) | Yes (same `paths-ignore` as tests / CodeQL) |
-| **Pylint** (errors-only) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`pylint --errors-only` on `hyperloom.inference_optimizer`, `hyperloom.orchestrator`, `hyperloom.agents.framework`, `hyperloom.agents.critic.runtime`, and `hyperloom.agents.quantization`; advisory `continue-on-error`) | Yes (same `paths-ignore`) |
-| **Mypy** | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (advisory `continue-on-error`; config in `[tool.mypy]`) | Yes (same `paths-ignore`) |
+| Check (concept) | Implemented in Actions | On doc-only events |
+|-----------------|------------------------|--------------------|
+| **Pytest** (full suite with coverage reporting) | [`.github/workflows/tests-coverage.yml`](.github/workflows/tests-coverage.yml) (reads ``[tool.hyperloom.tests_coverage]`` / coverage config from ``pyproject.toml`` via inline Python) | Starts; the test shards do not run and the required `coverage (Python 3.x)` checks report success without measuring |
+| **CodeQL** | [`.github/workflows/codeql.yml`](.github/workflows/codeql.yml) | Does not start on **PR and push** (`paths-ignore`); the **weekly schedule** on the default branch still runs a full analysis |
+| **Ruff** (lint + format check) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`ruff check` / `ruff format --check` / `check_broad_suppress.py`; hard gate) | Runs (required check `ruff`) |
+| **Pylint** (errors-only) | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (`pylint --errors-only` on `hyperloom.inference_optimizer`, `hyperloom.orchestrator`, `hyperloom.agents.framework`, `hyperloom.agents.critic.runtime`, and `hyperloom.agents.quantization`; advisory `continue-on-error`) | Skipped (job condition) |
+| **Mypy** | [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (advisory `continue-on-error`; config in `[tool.mypy]`) | Skipped (job condition) |
 
-If you add standalone workflows for **pytest**, **ruff**, **pylint**, or similar, copy the **same** `paths-ignore` blocks as in `tests-coverage.yml` / `codeql.yml` so documentation-only PRs stay consistent and cheap.
+The decision is made once per event by [`.github/workflows/code-changes.yml`](.github/workflows/code-changes.yml), which runs [`scripts/ci_code_changed.py`](scripts/ci_code_changed.py) and exposes `code=true|false` to the calling workflow. A workflow whose check is required on `main` must not use `paths-ignore` (a workflow that does not start leaves its required check pending forever); call `code-changes.yml` and condition its jobs instead. Other workflows may copy the `paths-ignore` block from `codeql.yml`.
 
-### Canonical paths-ignore list
+### Canonical documentation-only list
 
-Use this list (or keep it in sync) for any workflow that should skip on documentation-only changes:
+`scripts/ci_code_changed.py` (`DOCS_ONLY_PATTERNS`) holds this list and matches it as GitHub path filters do (`*` within one directory, `**` across them; other glob syntax is refused). `codeql.yml`'s `paths-ignore` blocks repeat it, and a test keeps them equal:
 
 - `**/*.md`
 - `docs/**`
@@ -40,9 +40,9 @@ Use this list (or keep it in sync) for any workflow that should skip on document
 - `**/CODEOWNERS`
 - `.gitattributes`
 
-If **any** changed file falls **outside** these patterns (for example `.py`, `pyproject.toml`, or `.github/workflows/*.yml`), the workflows that declare this list run as usual.
+If **any** changed file falls **outside** these patterns (for example `.py`, `pyproject.toml`, or `.github/workflows/*.yml`), every check runs as usual.
 
-These GitHub jobs are optional from a default merge-policy perspective; skipping them on doc-only PRs saves runner time. You should still run **local** `pytest`, **ruff**, and **mypy** when your edits are not purely cosmetic (for example, Markdown that embeds commands, code blocks, or configuration snippets).
+Skipping the test shards on doc-only changes saves runner time. You should still run **local** `pytest`, **ruff**, and **mypy** when your edits are not purely cosmetic (for example, Markdown that embeds commands, code blocks, or configuration snippets).
 
 ## Coding style
 

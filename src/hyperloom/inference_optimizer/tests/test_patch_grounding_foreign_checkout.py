@@ -48,18 +48,20 @@ def foreign_checkout(tmp_path, monkeypatch):
     return repo
 
 
-def test_applicable_patch_is_not_called_stale(foreign_checkout):
+def _verdict(tmp_path, checkout) -> str:
+    patch = tmp_path / "hello.patch"
+    patch.write_text(_PATCH, encoding="utf-8")
+    _kept, _ungrounded, grounding, _spans = patch_safety.vet_patches([str(patch)], base_checkout=checkout)
+    return grounding[str(patch)]
+
+
+def test_applicable_patch_is_not_called_stale(tmp_path, foreign_checkout):
     """The worst shape of this bug: a wrong verdict rather than an error."""
-    result = patch_safety.ground_patch_text(_PATCH, base_checkout=foreign_checkout)
-
-    assert result.verdict == patch_safety.GROUND_APPLIES, result.detail
+    assert _verdict(tmp_path, foreign_checkout) == patch_safety.GROUND_APPLIES
 
 
-def test_a_genuinely_stale_patch_is_still_stale(foreign_checkout):
+def test_a_genuinely_stale_patch_is_still_stale(tmp_path, foreign_checkout):
     """Lifting the refusal must not turn grounding into a rubber stamp."""
     (foreign_checkout / "hello.txt").write_text("something else\n", encoding="utf-8")
 
-    result = patch_safety.ground_patch_text(_PATCH, base_checkout=foreign_checkout)
-
-    assert result.verdict == patch_safety.GROUND_STALE
-    assert "dubious ownership" not in (result.detail or "")
+    assert _verdict(tmp_path, foreign_checkout) == patch_safety.GROUND_STALE

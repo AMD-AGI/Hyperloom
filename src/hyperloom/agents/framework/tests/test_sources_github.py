@@ -45,7 +45,7 @@ def _install_urlopen(monkeypatch, handler) -> None:
 
 def test_build_query_scopes_repo_and_ors_the_terms() -> None:
     """The query is scoped to the repo's PRs and ORs exactly the given terms."""
-    q = gh._build_query("ROCm/vllm", ("all",), terms=("deepseekv4", "causallm"))
+    q = gh._build_query("ROCm/vllm", terms=("deepseekv4", "causallm"))
     assert "repo:ROCm/vllm" in q
     assert "is:pr" in q
     assert "(deepseekv4 OR causallm)" in q
@@ -54,7 +54,7 @@ def test_build_query_scopes_repo_and_ors_the_terms() -> None:
 def test_build_query_stays_within_the_search_operator_limit() -> None:
     """GitHub answers 422 past five OR operators, so only the leading terms are sent."""
     terms = ("glm5", "next", "glm", "flash", "model", "architecture", "support", "add")
-    q = gh._build_query("vllm-project/vllm", ("all",), terms=terms)
+    q = gh._build_query("vllm-project/vllm", terms=terms)
     assert q.count(" OR ") == 5
     assert "(glm5 OR next OR glm OR flash OR model OR architecture)" in q
 
@@ -75,15 +75,9 @@ def test_search_perf_prs_sends_the_given_terms(monkeypatch) -> None:
     assert "sort=" not in captured["url"]
 
 
-def test_build_query_open_only_keeps_is_open() -> None:
-    """Default open-only keeps the is:open qualifier."""
-    q = gh._build_query("sgl-project/sglang", states=("open",), terms=gh.PERF_TERMS)
-    assert "is:open" in q
-
-
-def test_build_query_all_drops_is_open() -> None:
-    """Explicit all-state search omits the is:open qualifier."""
-    q = gh._build_query("sgl-project/sglang", states=("all",), terms=gh.PERF_TERMS)
+def test_build_query_searches_every_pr_state() -> None:
+    """The search carries no is:open qualifier, so merged and closed PRs are found too."""
+    q = gh._build_query("sgl-project/sglang", terms=gh.PERF_TERMS)
     assert "is:open" not in q
     assert "is:pr" in q
 
@@ -126,7 +120,7 @@ def test_search_perf_prs_non_github_returns_empty() -> None:
     assert out == []
 
 
-# pr_patches / fetch_raw_file -------------------------------------------
+# pr_patches -------------------------------------------
 
 
 class _RawResp(io.BytesIO):
@@ -195,23 +189,5 @@ def test_pr_patches_anonymous_when_no_token(monkeypatch):
     assert captured["auth"] is None
 
 
-def test_fetch_raw_file_returns_content(monkeypatch):
-    monkeypatch.setattr(gh.urllib.request, "urlopen", _raw_urlopen_ok("print('hi')\n"))
-    assert gh.fetch_raw_file("ROCm/vllm", "abc123", "vllm/model.py") == "print('hi')\n"
-
-
-def test_fetch_raw_file_network_error_returns_empty(monkeypatch):
-    monkeypatch.setattr(gh.urllib.request, "urlopen", _raw_urlopen_fail)
-    assert gh.fetch_raw_file("o/r", "ref", "p.py") == ""
-
-
-def test_fetch_raw_file_invalid_args(monkeypatch):
-    monkeypatch.setattr(gh.urllib.request, "urlopen", _raw_urlopen_ok("x"))
-    assert gh.fetch_raw_file("", "ref", "p") == ""
-    assert gh.fetch_raw_file("o/r", "", "p") == ""
-    assert gh.fetch_raw_file("o/r", "ref", "") == ""
-
-
 def test_source_patch_exports():
     assert "pr_patches" in gh.__all__
-    assert "fetch_raw_file" in gh.__all__

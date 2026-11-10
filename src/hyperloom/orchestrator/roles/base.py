@@ -130,10 +130,7 @@ async def retry_with_backoff(
                 raise
             delay = policy.delay_for(attempt)
             if on_retry is not None:
-                try:
-                    on_retry(attempt, exc, delay)
-                except Exception:  # noqa: BLE001 — telemetry callback never fatal
-                    pass
+                on_retry(attempt, exc, delay)
             log.warning(
                 "LLM call failed (attempt %d/%d: %r); retrying in %.2fs",
                 attempt,
@@ -142,14 +139,6 @@ async def retry_with_backoff(
                 delay,
             )
             await sleep(delay)
-
-
-def safe_int(value: Any) -> int:
-    """Coerce a possibly-missing usage value to a non-negative int."""
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
 
 
 @dataclass
@@ -185,5 +174,4 @@ __all__ = [
     "build_chat_messages",
     "parse_call_timeout_env",
     "retry_with_backoff",
-    "safe_int",
 ]

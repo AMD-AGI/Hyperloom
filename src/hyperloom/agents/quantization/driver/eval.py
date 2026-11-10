@@ -22,29 +22,27 @@ class EvalDecision:
 
     status: str  # "within" | "exceeded" | "missing"
     relative_gap: float | None
-    threshold: float
-    threshold_source: str  # "arg" | "file" | "default"
 
 
 def resolve_threshold(
     workspace: Path,
     *,
     acceptable_eval_gap: float | None,
-) -> tuple[float, str]:
+) -> float:
     """Resolve the eval-gap threshold per the SKILL.md §5.4 priority chain."""
 
     if acceptable_eval_gap is not None:
-        return float(acceptable_eval_gap), "arg"
+        return float(acceptable_eval_gap)
     threshold_file = workspace / "eval_gap_threshold.txt"
     if threshold_file.is_file():
         raw = threshold_file.read_text(encoding="utf-8").strip()
         if raw:
             try:
-                return float(raw), "file"
+                return float(raw)
             except ValueError:
                 # Malformed file falls through to the safe default.
                 pass
-    return DEFAULT_ACCEPTABLE_GAP, "default"
+    return DEFAULT_ACCEPTABLE_GAP
 
 
 def decide(
@@ -54,13 +52,8 @@ def decide(
     acceptable_eval_gap: float | None,
 ) -> EvalDecision:
     """Decide whether an evaluation report passes the quality gap threshold."""
-    threshold, source = resolve_threshold(workspace, acceptable_eval_gap=acceptable_eval_gap)
-    missing = EvalDecision(
-        status="missing",
-        relative_gap=None,
-        threshold=threshold,
-        threshold_source=source,
-    )
+    threshold = resolve_threshold(workspace, acceptable_eval_gap=acceptable_eval_gap)
+    missing = EvalDecision(status="missing", relative_gap=None)
 
     if not isinstance(eval_report, dict):
         return missing
@@ -84,8 +77,6 @@ def decide(
     return EvalDecision(
         status="within" if gap <= threshold else "exceeded",
         relative_gap=gap,
-        threshold=threshold,
-        threshold_source=source,
     )
 
 

@@ -913,7 +913,7 @@ def test_model_is_gemma2_falls_back_to_path_on_residual_config(tmp_path):
     m = tmp_path / "google-gemma-2-9b-it"
     m.mkdir()
     (m / "config.json").write_text("{}", encoding="utf-8")
-    assert mcu._model_is_gemma2(str(m)) is True
+    assert mcu.model_is_gemma2(str(m)) is True
 
 
 def test_model_is_gemma2_trusts_identified_non_gemma_config(tmp_path):
@@ -931,7 +931,7 @@ def test_model_is_gemma2_trusts_identified_non_gemma_config(tmp_path):
         ),
         encoding="utf-8",
     )
-    assert mcu._model_is_gemma2(str(m)) is False
+    assert mcu.model_is_gemma2(str(m)) is False
 
 
 def test_model_is_gemma2_detects_nested_text_config(tmp_path):
@@ -948,7 +948,7 @@ def test_model_is_gemma2_detects_nested_text_config(tmp_path):
         ),
         encoding="utf-8",
     )
-    assert mcu._model_is_gemma2(str(m)) is True
+    assert mcu.model_is_gemma2(str(m)) is True
 
 
 def test_detect_unregistered_custom_config_blocks(tmp_path):
@@ -1341,7 +1341,7 @@ def test_emit_to_langfuse_is_best_effort(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
 
     def _boom(*a, **k):
-        raise RuntimeError("langfuse down")
+        raise OSError("langfuse down")
 
     monkeypatch.setattr(lfe, "flush_session", _boom)
 
@@ -1402,10 +1402,10 @@ def test_run_compat_detector_resolves_repo_id_before_dispatch(tmp_path, monkeypa
 
     def _fake_detector(model_path):
         seen["model_path"] = model_path
-        return None
+        return
 
     spec = cli_model_gate.DetectorSpec("t", _fake_detector, args=("model_path",))
-    cli_model_gate._run_compat_detector(spec, model_path="org/repo", data={}, gpu_type=None)
+    cli_model_gate._run_compat_detector(spec, model_path="org/repo", data={})
     assert seen["model_path"] == str(local_dir)
 
 
@@ -1416,8 +1416,8 @@ def test_run_compat_detector_falls_back_to_raw_when_unresolvable(monkeypatch):
 
     def _fake_detector(model_path):
         seen["model_path"] = model_path
-        return None
+        return
 
     spec = cli_model_gate.DetectorSpec("t", _fake_detector, args=("model_path",))
-    cli_model_gate._run_compat_detector(spec, model_path="/raw/model/path", data={}, gpu_type=None)
+    cli_model_gate._run_compat_detector(spec, model_path="/raw/model/path", data={})
     assert seen["model_path"] == "/raw/model/path"

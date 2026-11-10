@@ -13,21 +13,22 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.specialists import runner as sr
+from hyperloom.orchestrator.specialists import worktrees
+from hyperloom.orchestrator.specialists.failure_class import SpecialistFailureType, classify_specialist_failure
 from hyperloom.orchestrator.specialists.runner import (
-    SpecialistFailureType,
     SpecialistRunner,
     build_empty_specialist_done,
-    classify_specialist_failure,
 )
 from hyperloom.orchestrator.state.task_registry import Task
 
+from .conftest import init_git_repo, make_fake_claude
+
 
 def _runner(**over):
-    kwargs = dict(backend_factory=lambda *a, **k: None)
+    kwargs = dict(subprocess_config=sr.SpecialistSubprocessConfig())
     kwargs.update(over)
     return SpecialistRunner(**kwargs)
 
@@ -101,10 +102,6 @@ def test_classify_succeeded():
     assert classify_specialist_failure("succeeded", "") == (SpecialistFailureType.NONE, False)
 
 
-def test_classify_tool_violation():
-    assert classify_specialist_failure("tool_violation", "x") == (SpecialistFailureType.TOOL_VIOLATION, False)
-
-
 def test_classify_stale_variants():
     assert classify_specialist_failure("stale", "request timeout")[0] == SpecialistFailureType.TIMEOUT
     assert classify_specialist_failure("stale", "stale_heartbeat 200s")[0] == SpecialistFailureType.STALE_HEARTBEAT
@@ -137,7 +134,6 @@ def test_build_empty_specialist_done_default_reason():
 
 def test_path_helpers_none_workspace():
     r = _runner()
-    assert r._prompt_path(None) is None
     assert r._transcript_path(None) is None
     assert r._heartbeat_path(None) is None
     assert r._done_path(None) is None
@@ -145,12 +141,9 @@ def test_path_helpers_none_workspace():
 
 def test_path_helpers_with_workspace(tmp_path):
     r = _runner()
-    assert r._prompt_path(tmp_path).name == "prompt.md"
     assert r._transcript_path(tmp_path).name == "transcript.jsonl"
     assert r._heartbeat_path(tmp_path).name == "heartbeat.json"
     assert r._done_path(tmp_path).name == "specialist_done.json"
-    assert r._partial_done_path(tmp_path).name == "specialist_done.partial.json"
-    assert r._partial_done_path(None) is None
 
 
 def test_resolve_workspace_from_extra(tmp_path):
@@ -177,17 +170,9 @@ def test_resolve_workspace_session_dir(tmp_path):
 
 def test_write_helpers_noop_none_workspace():
     r = _runner()
-    r._write_prompt(None, "sys", "user")
     r._append_transcript(None, 0, {"k": "v"})
     r._write_heartbeat(None, turn=0, max_turns=1, status="x")
     r._write_specialist_done(None, {"a": 1})
-
-
-def test_write_prompt(tmp_path):
-    r = _runner()
-    r._write_prompt(tmp_path, "SYS", "USER")
-    text = (tmp_path / "prompt.md").read_text(encoding="utf-8")
-    assert "SYS" in text and "USER" in text
 
 
 def test_append_transcript(tmp_path):
@@ -232,6 +217,15 @@ def test_write_specialist_done(tmp_path):
     assert payload["proposal_set"] == [] and "ts" in payload
 
 
+def test_write_specialist_done_scrubs_credentials(tmp_path):
+    r = _runner()
+    reason = "clone failed: Authorization: Bearer abcdefgh12345678 ghp_abcdef123456"
+    r._write_specialist_done(tmp_path, {"reason": reason, "n": 2})
+    text = (tmp_path / "specialist_done.json").read_text(encoding="utf-8")
+    assert "abcdefgh12345678" not in text and "ghp_abcdef123456" not in text
+    assert json.loads(text)["n"] == 2
+
+
 def test_write_specialist_done_atomic_leaves_no_tmp(tmp_path):
     # Final write goes through temp + os.replace; no .tmp residue, valid JSON.
     r = _runner()
@@ -240,38 +234,94 @@ def test_write_specialist_done_atomic_leaves_no_tmp(tmp_path):
     assert json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))["proposal_set"] == []
 
 
-def test_write_specialist_done_partial(tmp_path):
-    # Partial lands at its own path, is flagged, and does not create the final file.
-    r = _runner()
-    r._write_specialist_done_partial(tmp_path, {"proposal_set": [{"name": "x"}]})
-    partial = tmp_path / "specialist_done.partial.json"
-    assert partial.exists()
-    assert not (tmp_path / "specialist_done.json").exists()
-    payload = json.loads(partial.read_text(encoding="utf-8"))
-    assert payload["_recovered_from_partial"] is True
-    assert payload["proposal_set"] == [{"name": "x"}]
-    assert "ts" in payload
-
-
-def _finalize(r, tmp_path, payload):
+def _finalize(r, tmp_path, payload, params=None):
     """Drive ``_finalize`` far enough to inspect the artifact it writes."""
     prep = sr._PreparedRun(
         domain=SimpleNamespace(key="serving_specialist"),
         gap="gap-1",
         workspace=tmp_path,
     )
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
-    result = r._finalize(
-        ctx=ctx,
-        prep=prep,
-        specialist_done_payload=payload,
-        turns_used=1,
-        tool_violations=[],
-        backend_error="",
-        extra_notes=[],
-        patches_written=[],
-    )
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params=dict(params or {})), extra={})
+    result = r._finalize(ctx=ctx, prep=prep, sub_result=sr.SpecialistSubprocessResult(done_payload=payload))
     return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
+
+
+def _vetted_by_finalize(tmp_path, monkeypatch, sub_result, **prep):
+    """The patch lists ``_finalize`` hands the patch-safety gate for ``sub_result``."""
+    vetted: list[list[str]] = []
+
+    def _spy_vet(patches, **_kwargs):
+        vetted.append(list(patches))
+        return list(patches), [], {}, False
+
+    monkeypatch.setattr(sr._patch_safety, "vet_patches", _spy_vet)
+    _runner()._finalize(
+        ctx=SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={}),
+        prep=sr._PreparedRun(domain=SimpleNamespace(key="serving_specialist"), gap="gap-1", workspace=tmp_path, **prep),
+        sub_result=sub_result,
+    )
+    return vetted
+
+
+def test_a_harvested_diff_is_the_whole_round_and_the_specialists_copy_of_it_is_not_added(tmp_path, monkeypatch):
+    patches = tmp_path / "patches"
+    patches.mkdir()
+    harvested, copy = patches / "_worktree_diff.patch", patches / "001_x.patch"
+    harvested.write_text("diff\n")
+    copy.write_text("diff\n")
+
+    vetted = _vetted_by_finalize(
+        tmp_path,
+        monkeypatch,
+        sr.SpecialistSubprocessResult(
+            done_payload={"proposal_set": [], "summary": "s", "patches_written": [str(copy)]},
+            patches=[str(harvested)],
+            patch_roots={str(harvested): str(tmp_path)},
+        ),
+    )
+
+    assert vetted == [[str(harvested)]]
+
+
+def test_a_refused_worktree_leaves_no_patch_the_specialist_claims(tmp_path, monkeypatch):
+    """A claimed path resolves through the worktree's path, which the agent may have pointed at a host directory."""
+    (tmp_path / "worktree").mkdir()
+    (tmp_path / "patches").mkdir()
+    claimed = tmp_path / "patches" / "001_x.patch"
+    claimed.write_text("diff\n")
+    refused = "worktree_refused: replaced"
+    payload = {"proposal_set": [], "summary": "s", "patches_written": [str(claimed), "creds.txt"]}
+
+    vetted = _vetted_by_finalize(
+        tmp_path,
+        monkeypatch,
+        sr.SpecialistSubprocessResult(done_payload=payload, worktree_refused=refused, error=refused),
+        worktree=tmp_path / "worktree",
+    )
+
+    assert vetted == [[]]
+
+
+def test_a_specialist_keeps_only_citations_of_experiences_its_dispatch_showed(tmp_path):
+    shown_id, unshown_id = "exp-" + "1" * 32, "exp-" + "2" * 32
+    cite = {"id": shown_id, "stance": "avoid", "claim": "It reverted on this stack."}
+    _, written = _finalize(
+        _runner(),
+        tmp_path,
+        {
+            "proposal_set": [
+                {"name": "v1", "reason": "why", "experience_citations": [cite, {**cite, "id": unshown_id}]},
+                {"name": "v2", "reason": "why"},
+            ],
+            "experience_citations": [{**cite, "stance": "adapt"}, {**cite, "id": unshown_id, "stance": "adapt"}],
+            "summary": "s",
+        },
+        params={"kb_rendered_refs": [{"id": shown_id, "purpose": "representative"}]},
+    )
+
+    assert written["proposal_set"][0]["experience_citations"] == [cite]
+    assert "experience_citations" not in written["proposal_set"][1]
+    assert written["experience_citations"] == [{**cite, "stance": "adapt"}]
 
 
 def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):
@@ -308,7 +358,7 @@ def test_finalize_keeps_the_round_level_confidence_the_audit_records(tmp_path):
 
 @pytest.mark.asyncio
 async def test_patch_vetting_runs_off_the_event_loop_thread(tmp_path, monkeypatch):
-    """In-process ``run`` wraps ``_finalize`` in ``to_thread``; vetting must not freeze the loop."""
+    """``run`` wraps ``_finalize`` in ``to_thread``; vetting must not freeze the loop."""
     seen: dict[str, int] = {}
     loop_ident = threading.get_ident()
     orig = sr._patch_safety.vet_patches
@@ -328,19 +378,23 @@ async def test_patch_vetting_runs_off_the_event_loop_thread(tmp_path, monkeypatc
         "new_findings": [],
         "residual_questions": [],
     }
-    plan = ScriptedPlan(
-        turns=[MockTurn(intents=[Intent(type=IntentType.SPECIALIST_DONE, payload=done)])],
-    )
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
     runner = SpecialistRunner(
-        backend_factory=lambda d: MockBackend(plan, name="mock"),
-        session_dir=tmp_path,
+        subprocess_config=sr.SpecialistSubprocessConfig(
+            claude_executable=str(make_fake_claude(tmp_path / "bin", behavior="done_only", payload=done)),
+            framework_source_roots=(str(repo),),
+            poll_interval_seconds=0.2,
+        ),
+        session_dir=tmp_path / "session",
         default_max_turns=2,
     )
     task = Task(
         task_id="t1",
         kind="specialist",
         state="queued",
-        params={"domain": "serving_specialist", "gap_canonical_id": "gap-1", "max_turns": 1},
+        params={"domain": "serving_specialist", "framework": "sglang", "gap_canonical_id": "gap-1", "max_turns": 1},
         idempotency_key="t1",
         requires_lanes=tuple(),
     )
@@ -349,33 +403,14 @@ async def test_patch_vetting_runs_off_the_event_loop_thread(tmp_path, monkeypatc
     assert seen["ident"] != loop_ident
 
 
-def test_write_specialist_done_partial_noop_none_workspace():
-    _runner()._write_specialist_done_partial(None, {"a": 1})  # must not raise
-
-
-def test_write_specialist_done_partial_rewrite_is_atomic(tmp_path):
-    r = _runner()
-    for i in range(5):
-        r._write_specialist_done_partial(tmp_path, {"turns_used": i})
-    assert not list(tmp_path.glob("*.tmp"))
-    payload = json.loads((tmp_path / "specialist_done.partial.json").read_text(encoding="utf-8"))
-    assert payload["turns_used"] == 4
-
-
-def test_maybe_setup_worktree_in_process_mode(tmp_path):
-    r = _runner()  # no subprocess_config
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={}))
-    assert r._maybe_setup_worktree(ctx, workspace=tmp_path) == (None, None, "")
-
-
 def test_maybe_setup_worktree_research_mode_skips_worktree(tmp_path):
     from hyperloom.orchestrator.specialists.profile import resolve_specialist_profile
 
     cfg = sr.SpecialistSubprocessConfig()
-    r = _runner(backend_factory=None, subprocess_config=cfg)
+    r = _runner(subprocess_config=cfg)
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"mode": "research"}))
     profile = resolve_specialist_profile(ctx.task.params)
-    assert r._maybe_setup_worktree(ctx, workspace=tmp_path, profile=profile) == (None, None, "")
+    assert r._maybe_setup_worktree(ctx, workspace=tmp_path, profile=profile) == (None, None, "", None)
 
 
 def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, monkeypatch):
@@ -391,30 +426,32 @@ def test_maybe_setup_worktree_bases_on_the_framework_being_optimised(tmp_path, m
     """
     aiter = _checkout(tmp_path / "aiter", "aiter/__init__.py")
     worldplay = _checkout(tmp_path / "HY-WorldPlay", "hyvideo/__init__.py")
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(worldplay))
+    monkeypatch.setenv("CUSTOM_REPO_PATH", str(worldplay))
 
     cfg = sr.SpecialistSubprocessConfig(
         framework_source_roots=(str(aiter), str(worldplay)),
     )
-    r = _runner(backend_factory=None, subprocess_config=cfg)
+    r = _runner(subprocess_config=cfg)
     seen: dict = {}
 
     def _fake_setup(base, worktree_path, branch):
         seen["base"] = base
         return worktree_path, ""
 
-    monkeypatch.setattr(sr, "_setup_worktree", _fake_setup)
+    monkeypatch.setattr(worktrees, "_setup_worktree", _fake_setup)
+    monkeypatch.setattr(worktrees, "recorded_admin_dir", lambda base, worktree: base / "worktrees" / "w")
     ctx = SimpleNamespace(
         task=SimpleNamespace(
             task_id="t",
-            params={"framework": "worldplay", "domain": "framework_rewrite_specialist"},
+            params={"framework": "custom", "domain": "framework_rewrite_specialist"},
         )
     )
 
-    _wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+    _wt, source, err, admin = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 
     assert err == ""
     assert source.root == worldplay and seen["base"] == worldplay, f"specialist would patch {seen.get('base')}"
+    assert admin == worldplay / "worktrees" / "w"
 
 
 def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_path, monkeypatch):
@@ -423,20 +460,21 @@ def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_p
     package = tmp_path / "site-packages" / "worldplay"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(package))
+    monkeypatch.setenv("CUSTOM_REPO_PATH", str(package))
 
     cfg = sr.SpecialistSubprocessConfig(framework_source_roots=(str(aiter),))
-    r = _runner(backend_factory=None, subprocess_config=cfg, session_dir=tmp_path / "session")
+    r = _runner(subprocess_config=cfg, session_dir=tmp_path / "session")
     seen: dict = {}
 
     def _fake_setup(base, worktree_path, branch):
         seen["base"] = base
         return worktree_path, ""
 
-    monkeypatch.setattr(sr, "_setup_worktree", _fake_setup)
-    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "worldplay"}))
+    monkeypatch.setattr(worktrees, "_setup_worktree", _fake_setup)
+    monkeypatch.setattr(worktrees, "recorded_admin_dir", lambda base, worktree: base / "worktrees" / "w")
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t", params={"framework": "custom"}))
 
-    _wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
+    _wt, source, err, _admin = r._maybe_setup_worktree(ctx, workspace=tmp_path)
 
     assert err == ""
     assert source.root == package and not source.checkout
@@ -446,19 +484,17 @@ def test_maybe_setup_worktree_snapshots_a_framework_that_is_not_a_checkout(tmp_p
 
 def test_maybe_setup_worktree_has_nothing_to_isolate_without_a_named_tree(tmp_path, monkeypatch):
     aiter = _checkout(tmp_path / "aiter", "aiter/__init__.py")
-    monkeypatch.setenv("WORLDPLAY_REPO_PATH", str(tmp_path / "absent"))
+    monkeypatch.setenv("CUSTOM_REPO_PATH", str(tmp_path / "absent"))
     monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
     monkeypatch.setattr(sr, "resolve_framework_tree", lambda framework: "")
 
     cfg = sr.SpecialistSubprocessConfig(framework_source_roots=(str(aiter),))
-    r = _runner(backend_factory=None, subprocess_config=cfg)
+    r = _runner(subprocess_config=cfg)
     ctx = SimpleNamespace(
-        task=SimpleNamespace(task_id="t", params={"framework": "worldplay", "domain": "framework_rewrite_specialist"})
+        task=SimpleNamespace(task_id="t", params={"framework": "custom", "domain": "framework_rewrite_specialist"})
     )
 
-    wt, source, err = r._maybe_setup_worktree(ctx, workspace=tmp_path)
-
-    assert (wt, source, err) == (None, None, sr.NO_GIT_FRAMEWORK_SOURCE_ROOT)
+    assert r._maybe_setup_worktree(ctx, workspace=tmp_path) == (None, None, sr.NO_GIT_FRAMEWORK_SOURCE_ROOT, None)
 
 
 def test_patch_path_within_bases_accepts_sandbox_paths(tmp_path):
@@ -489,3 +525,81 @@ def test_patch_path_within_bases_rejects_outside_paths(tmp_path):
     assert sr._patch_path_within_bases(Path("/etc/passwd"), bases) is False
     assert sr._patch_path_within_bases(worktree / ".." / "escape.patch", bases) is False
     assert sr._patch_path_within_bases(tmp_path / "sibling.patch", bases) is False
+
+
+def test_subprocess_backend_error_leading_tokens():
+    assert sr._subprocess_backend_error(sr.SpecialistSubprocessResult(timed_out=True)) == "subprocess_timeout"
+    assert (
+        sr._subprocess_backend_error(sr.SpecialistSubprocessResult(timed_out=True, error="  late  "))
+        == "subprocess_timeout: late"
+    )
+    assert (
+        sr._subprocess_backend_error(sr.SpecialistSubprocessResult(stale_heartbeat=True))
+        == "subprocess_stale_heartbeat"
+    )
+    assert (
+        sr._subprocess_backend_error(sr.SpecialistSubprocessResult(exit_code=1, done_payload=None))
+        == "subprocess_exit_code:1"
+    )
+    assert sr._subprocess_backend_error(sr.SpecialistSubprocessResult(error="boom")) == "subprocess_error:boom"
+
+
+def test_finalize_notes_a_recovered_partial_payload(tmp_path):
+    result, written = _finalize(
+        _runner(),
+        tmp_path,
+        {"proposal_set": [{"name": "v1"}], "summary": "s", "_recovered_from_partial": True},
+    )
+    assert result.status == "partial"
+    assert "recovered_from_partial" in result.notes
+    assert written["_specialist_notes"]
+
+
+def test_finalize_skips_non_dict_proposals_and_drops_scanned_patches_outside(tmp_path, monkeypatch):
+    monkeypatch.setattr(sr._patch_safety, "vet_patches", lambda patches, **_: (list(patches), [], {}, False))
+    outside = tmp_path.parent / "outside.patch"
+    outside.write_text("diff\n", encoding="utf-8")
+    prep = sr._PreparedRun(domain=SimpleNamespace(key="serving_specialist"), gap="gap-1", workspace=tmp_path)
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
+    result = _runner()._finalize(
+        ctx=ctx,
+        prep=prep,
+        sub_result=sr.SpecialistSubprocessResult(
+            done_payload={"proposal_set": ["skip-me", {"name": "keep"}], "summary": "s"},
+            patches=[str(outside)],
+        ),
+    )
+    assert any(n.startswith("patches_scanned_outside_workspace:") for n in result.notes)
+
+
+def test_record_subprocess_run_emits_one_ledger_row_per_turn(tmp_path):
+    r = _runner(session_dir=tmp_path / "session")
+    (tmp_path / "session").mkdir()
+    prep = sr._PreparedRun(
+        domain=SimpleNamespace(key="serving_specialist"),
+        gap="gap-1",
+        workspace=tmp_path,
+        system_prompt="sys",
+        user_prompt="usr",
+        max_turns=2,
+    )
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
+    traced: list[int] = []
+
+    def _spy(ctx, turn, metadata, latency_ms=None):
+        traced.append(turn)
+
+    r._trace_specialist_llm_call = _spy  # type: ignore[method-assign]
+    r._record_subprocess_run(
+        ctx,
+        prep,
+        sr.SpecialistSubprocessResult(
+            trace=AgentTrace(
+                turn_usages=[{"input_tokens": 1}, {"input_tokens": 2}],
+                usage={"model": "m", "input_tokens": 3},
+            )
+        ),
+        "call-1",
+        12,
+    )
+    assert traced == [1, 2]

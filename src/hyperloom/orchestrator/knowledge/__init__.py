@@ -2,7 +2,3 @@
 # SPDX-License-Identifier: MIT
 
 """Knowledge plane: per-column KB facades, PR monitor, Recipe KB writeback, static recon, trajectory review."""
-
-from .agent_kb import ConfigKB, KernelAgentKB, PatchKB
-
-__all__ = ["ConfigKB", "KernelAgentKB", "PatchKB"]

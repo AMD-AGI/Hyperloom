@@ -276,6 +276,7 @@ case "$RUNTIME" in
       --security-opt seccomp=unconfined --group-add video --ipc=host \
       --shm-size="${HL_SHM_SIZE:-64g}" \
       -v "${HL_SHARED_MOUNT}:${HL_SHARED_MOUNT}" \
+      --entrypoint "" \
       "${CA_MOUNT[@]}" "${ADD_HOST[@]}" "${DOCKER_ENV[@]}" \
       "${IMAGE}" bash "$INCONTAINER"
     ;;

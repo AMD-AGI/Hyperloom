@@ -23,11 +23,13 @@ on:
     paths:
       - "docs/**"
       - "src/**"
+      - "examples/**"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
       - "docs/**"
       - "src/**"
+      - "examples/**"
       - ".github/workflows/docs.yml"
   # Allow manual runs (e.g. to republish after changing Pages settings).
   workflow_dispatch:
@@ -58,9 +60,10 @@ jobs:
           # docs/requirements.txt cap is for local installs only.
           pip install -r docs/sphinx/requirements.txt
 
+      # scripts/check_cli_references.py runs in pr-hygiene.yml, which has no
+      # paths filter and can therefore be a required check.
+
       - name: Build HTML
-        # conf.py mocks the heavy runtime imports (torch, triton, ray, ...), so
-        # the build does not need an editable install of the packages.
         run: |
           sphinx-build -b html docs docs/_build/html
 

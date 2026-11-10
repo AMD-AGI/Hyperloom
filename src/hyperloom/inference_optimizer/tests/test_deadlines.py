@@ -19,6 +19,7 @@ from hyperloom.orchestrator.rehearsal import VirtualClock, installed_clock
 from hyperloom.orchestrator.specialists import subprocess_ as subprocess_module
 from hyperloom.orchestrator.specialists.subprocess_ import (
     UNBOUNDED_REAP_CAP_SEC,
+    ReapWatch,
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
 )
@@ -77,13 +78,10 @@ async def _reap(deadline: Deadline | None, clock: VirtualClock, workspace: Path)
 
     dispatcher._kill = _kill  # type: ignore[assignment,method-assign]
     return await dispatcher._reap_loop(
-        proc=proc,
-        workspace=workspace,
-        done_files=(),
-        heartbeat_file=workspace / "heartbeat.json",
+        proc,
+        ReapWatch(workspace=workspace, done_files=(), task_id="t"),
         deadline=deadline,
         started=clock.monotonic(),
-        task_id="t",
     )
 
 
@@ -241,12 +239,11 @@ class TestTheBudgetSurvivesALegBoundary:
         state.charge_elapsed(now_unix=4_600.0)
         assert state.session_deadline(now=_at(4_600.0)).expired()  # type: ignore[union-attr]
 
-        state.extend_budget_minutes(30.0, reason="operator asked for more")
+        state.extend_budget_minutes(30.0)
 
         deadline = state.session_deadline(now=_at(4_600.0))
         assert deadline is not None and not deadline.expired()
-        assert state.budget_extensions[-1]["minutes"] == 30.0
-        assert state.budget_extensions[-1]["reason"] == "operator asked for more"
+        assert state.max_minutes == 90
 
     def test_an_extension_does_not_refund_elapsed_time(self):
         state = SharedState(session_id="s", max_minutes=60)
@@ -263,7 +260,7 @@ class TestOffloadedWorkCannotHoldTheTick:
     """Blocking work returns the loop at a known instant, whatever it is doing."""
 
     @pytest.mark.asyncio
-    async def test_work_that_outlasts_its_deadline_returns_the_default(self):
+    async def test_work_that_outlasts_its_deadline_returns_none(self):
         from hyperloom.orchestrator.loop.offload import offload
 
         released = threading.Event()
@@ -280,11 +277,10 @@ class TestOffloadedWorkCannotHoldTheTick:
             _blocks,
             deadline=Deadline.after(0.05),
             label="a call that will not return",
-            default="moved on",
         )
         released.set()
 
-        assert result == "moved on"
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_work_with_a_spent_deadline_is_never_started(self):
@@ -300,22 +296,20 @@ class TestOffloadedWorkCannotHoldTheTick:
             _work,
             deadline=Deadline.after(-1.0),
             label="already too late",
-            default="skipped",
         )
 
-        assert result == "skipped"
+        assert result is None
         assert started == []
 
     @pytest.mark.asyncio
-    async def test_work_that_raises_does_not_end_the_tick(self):
+    async def test_work_that_raises_reaches_the_caller(self):
         from hyperloom.orchestrator.loop.offload import offload
 
         def _boom() -> str:
             raise RuntimeError("the network went away")
 
-        result = await offload(_boom, deadline=None, label="boom", default="degraded")
-
-        assert result == "degraded"
+        with pytest.raises(RuntimeError, match="the network went away"):
+            await offload(_boom, deadline=Deadline.after(5.0), label="boom")
 
 
 class TestAStopIsRecordedBeforeItIsDispatched:
@@ -391,20 +385,3 @@ class TestTheChargeAnchorIsNotPersisted:
         state.save(tmp_path)
 
         assert SharedState.load_or_init(tmp_path).elapsed_charged_sec == pytest.approx(600.0, abs=5.0)
-
-    def test_a_state_written_before_the_elapsed_sum_carries_its_spend_over(self):
-        # The old shape recorded spend only as a stamped deadline; what it had
-        # used was the time since start_ts, and that must survive the upgrade.
-        started = time.time() - 2 * 3600.0
-        state = SharedState.from_dict(
-            {
-                "schema_version": 6,
-                "session_id": "s",
-                "max_minutes": 180,
-                "start_ts": datetime.fromtimestamp(started, tz=timezone.utc).isoformat(),
-                "deadline_unix": started + 180 * 60.0,
-            }
-        )
-
-        assert state.elapsed_charged_sec == pytest.approx(2 * 3600.0, abs=5.0)
-        assert state.remaining_minutes() == pytest.approx(60.0, abs=1.0)

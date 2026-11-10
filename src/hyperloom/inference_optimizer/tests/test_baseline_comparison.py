@@ -11,11 +11,13 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.baseline_comparison.types import TargetAnalysisRequest
+
 
 def test_shared_helpers_are_exported():
     from hyperloom.inference_optimizer.baseline_comparison import inferencex_client, target_analyzer
 
-    assert {"persist_summary", "clear_competitor_target", "to_inferencex_name"} <= set(target_analyzer.__all__)
+    assert {"clear_competitor_target", "to_inferencex_name"} <= set(target_analyzer.__all__)
     assert "normalize_benchmark_id" in inferencex_client.__all__
     assert target_analyzer.normalize_benchmark_id is inferencex_client.normalize_benchmark_id
 
@@ -130,16 +132,18 @@ def _patch_fetch_rows(monkeypatch, rows: list[dict[str, Any]] | None) -> None:
 def test_analyze_happy_path_writes_files(tmp_path: Path, monkeypatch):
     _patch_fetch_rows(monkeypatch, _make_rows())
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="/path/models/MiniMaxAI-MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="/path/models/MiniMaxAI-MiniMax-M2.5",
+            compare_against_gpu="b300",
+            framework="vllm",
+            precision="fp8",
+            isl=1024,
+            osl=1024,
+        ),
     )
 
     # Only fp8 / b300 / 1024-1024 rows match (mi300x + fp4 rows filtered out).
@@ -183,16 +187,13 @@ def test_analyze_excludes_disagg_and_multinode_from_best(tmp_path: Path, monkeyp
     rows.append(disagg)
     _patch_fetch_rows(monkeypatch, rows)
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=1024, osl=1024
+        ),
     )
     assert summary.status == "ok"
     assert summary.best is not None
@@ -203,17 +204,14 @@ def test_analyze_writes_measured_advisory_target(tmp_path: Path, monkeypatch):
     """On success, a measured ``competitor_target.json`` (source = API URL) is written so the EXPLORE advisory gap is driven by real InferenceX data."""
     _patch_fetch_rows(monkeypatch, _make_rows())
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
     from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=1024, osl=1024
+        ),
     )
     assert summary.status == "ok"
 
@@ -222,12 +220,7 @@ def test_analyze_writes_measured_advisory_target(tmp_path: Path, monkeypatch):
     assert ct["per_conc"]
     assert all(row["source"] == summary.source for row in ct["per_conc"])
 
-    gap = research_hints.gap_analysis(
-        ct,
-        our_tput_per_gpu=100.0,
-        our_tpot_ms=50.0,
-        conc=64,
-    )
+    gap = research_hints.gap_analysis(ct, research_hints.AcceptedMetrics(tput_per_gpu=100.0, tpot_ms=50.0), conc=64)
     assert gap is not None
     assert gap["source"] == summary.source
 
@@ -235,16 +228,18 @@ def test_analyze_writes_measured_advisory_target(tmp_path: Path, monkeypatch):
 def test_analyze_mapping_miss_writes_skipped_summary(tmp_path, monkeypatch):
     _patch_fetch_rows(monkeypatch, _make_rows())
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="/path/models/MyCorp-Custom-FT-7B",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="/path/models/MyCorp-Custom-FT-7B",
+            compare_against_gpu="b300",
+            framework="vllm",
+            precision="fp8",
+            isl=1024,
+            osl=1024,
+        ),
     )
     assert summary.status == "skipped"
     assert summary.reason == "model_mapping_miss"
@@ -258,12 +253,11 @@ def test_analyze_mapping_miss_writes_skipped_summary(tmp_path, monkeypatch):
 
 def test_analyze_no_target_gpu_writes_marker(tmp_path):
     """``compare_against_gpu=""`` short-circuits and persists a marker JSON."""
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="/path/models/MiniMaxAI-MiniMax-M2.5",
-        compare_against_gpu="",
+        request=TargetAnalysisRequest(model_path="/path/models/MiniMaxAI-MiniMax-M2.5", compare_against_gpu=""),
     )
     assert summary.status == "skipped"
     assert summary.reason == "no_target_gpu_configured"
@@ -279,16 +273,18 @@ def test_analyze_unsupported_target_gpu(tmp_path, monkeypatch):
     """A GPU InferenceX has no data for → ``no_match`` / ``unsupported_target_gpu``."""
     _patch_fetch_rows(monkeypatch, _make_rows())
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="mi999x",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5",
+            compare_against_gpu="mi999x",
+            framework="vllm",
+            precision="fp8",
+            isl=1024,
+            osl=1024,
+        ),
     )
     assert summary.status == "no_match"
     assert summary.reason == "unsupported_target_gpu"
@@ -299,16 +295,13 @@ def test_analyze_dimension_mismatch(tmp_path, monkeypatch):
     """GPU present but no row matches the run's isl/osl → ``dimension_mismatch``."""
     _patch_fetch_rows(monkeypatch, _make_rows())
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=2048,
-        osl=2048,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=2048, osl=2048
+        ),
     )
     assert summary.status == "no_match"
     assert summary.reason == "dimension_mismatch"
@@ -321,16 +314,18 @@ def test_analyze_precision_mismatch(tmp_path, monkeypatch):
     # this shape.
     _patch_fetch_rows(monkeypatch, _make_rows())
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="bf16",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5",
+            compare_against_gpu="b300",
+            framework="vllm",
+            precision="bf16",
+            isl=1024,
+            osl=1024,
+        ),
     )
     assert summary.status == "no_match"
     assert summary.reason == "precision_mismatch"
@@ -341,16 +336,13 @@ def test_analyze_fetch_error(tmp_path, monkeypatch):
     """API fetch failure (``fetch_rows`` returns ``None``) → ``fetch_error``."""
     _patch_fetch_rows(monkeypatch, None)
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=1024, osl=1024
+        ),
     )
     assert summary.status == "no_match"
     assert summary.reason == "fetch_error"
@@ -377,16 +369,13 @@ def test_analyze_no_match_clears_stale_competitor_target(tmp_path, monkeypatch):
     assert session_paths.competitor_target_json(tmp_path).exists()
 
     _patch_fetch_rows(monkeypatch, None)  # force fetch_error / no_match
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=1024, osl=1024
+        ),
     )
     assert summary.status == "no_match"
     assert not session_paths.competitor_target_json(tmp_path).exists()
@@ -414,16 +403,13 @@ def test_analyze_ok_write_failure_clears_stale_competitor_target(tmp_path, monke
         lambda *_args, **_kwargs: False,
     )
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=1024, osl=1024
+        ),
     )
     assert summary.status == "ok"
     assert not session_paths.competitor_target_json(tmp_path).exists()
@@ -434,16 +420,13 @@ def test_analyze_no_inferencex_data(tmp_path, monkeypatch):
     """Empty API result (``fetch_rows`` returns ``[]``) → ``no_inferencex_data``."""
     _patch_fetch_rows(monkeypatch, [])
 
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=1024, osl=1024
+        ),
     )
     assert summary.status == "no_match"
     assert summary.reason == "no_inferencex_data"
@@ -487,18 +470,16 @@ def _agentic_row(benchmark_id, *, tput=2643.69293, conc=1, **overrides):
 
 
 def _analyze_agentx(tmp_path, **kwargs):
-    from hyperloom.inference_optimizer.baseline_comparison import analyze
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import analyze
 
-    return analyze(
-        **{
-            "session_dir": tmp_path,
-            "model_path": "GLM-5.2",
-            "compare_against_gpu": "b300",
-            "precision": "fp4",
-            "benchmark_mode": "agentx",
-            **kwargs,
-        }
-    )
+    request = {
+        "model_path": "GLM-5.2",
+        "compare_against_gpu": "b300",
+        "precision": "fp4",
+        "benchmark_mode": "agentx",
+        **kwargs,
+    }
+    return analyze(session_dir=tmp_path, request=TargetAnalysisRequest(**request))
 
 
 def test_agentx_analysis_joins_p90_before_selecting_one_real_reference(tmp_path, monkeypatch):
@@ -557,10 +538,8 @@ def test_agentx_analysis_joins_p90_before_selecting_one_real_reference(tmp_path,
     assert "interactivity" not in target["per_conc"][0]
     gap = research_hints.gap_analysis(
         target,
+        research_hints.AcceptedMetrics(tput_per_gpu=1000.0, tpot_ms=None, e2e_norm_intvty_p90=20.0),
         benchmark_mode="agentx",
-        our_tput_per_gpu=1000.0,
-        our_tpot_ms=None,
-        our_e2e_norm_intvty_p90=20.0,
         conc=1,
     )
     assert gap["throughput_gap_pct"] == 50.0
@@ -664,7 +643,8 @@ def test_synthetic_analysis_never_fetches_agentic_p90(tmp_path, monkeypatch):
         ta, "fetch_agentic_interactivity", lambda ids: pytest.fail("synthetic must not fetch P90"), raising=False
     )
     summary = ta.analyze(
-        session_dir=tmp_path, model_path="MiniMax-M2.5", compare_against_gpu="b300", isl=1024, osl=1024
+        session_dir=tmp_path,
+        request=TargetAnalysisRequest(model_path="MiniMax-M2.5", compare_against_gpu="b300", isl=1024, osl=1024),
     )
     assert summary.best.tput_per_gpu == 6624.1
     assert summary.best.e2e_norm_intvty_p90 is None
@@ -765,3 +745,32 @@ def test_session_paths_helpers_under_target_analysis(tmp_path):
     assert target_analysis_dir(sd) == sd / "target_analysis"
     assert target_baseline_json(sd) == sd / "target_analysis" / "target_baseline.json"
     assert target_analysis_report_md(sd) == (sd / "target_analysis" / "target_analysis_report.md")
+
+
+def _measured_point():
+    from hyperloom.inference_optimizer.baseline_comparison.types import BaselinePoint
+
+    return BaselinePoint(
+        tput_per_gpu=100.0,
+        output_tput_per_gpu=50.0,
+        conc=8,
+        decode_tp=8,
+        mean_ttft_ms=1.0,
+        mean_tpot_ms=10.0,
+        mean_e2el_ms=2.0,
+    )
+
+
+def test_competitor_target_write_failure_surfaces(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints, target_analyzer
+    from hyperloom.inference_optimizer.baseline_comparison.types import BaselineQuery
+
+    def _boom(*_a, **_k):
+        raise TypeError("target is not serialisable")
+
+    monkeypatch.setattr(research_hints, "write_competitor_target", _boom)
+
+    with pytest.raises(TypeError, match="target is not serialisable"):
+        target_analyzer._write_measured_competitor_target(
+            tmp_path, BaselineQuery(model="m", gpu="mi355x"), [_measured_point()], "https://example.test"
+        )

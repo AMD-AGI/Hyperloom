@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 
-from hyperloom.common.env import env_flag
+from hyperloom_common.env import env_flag
 
 # Master switch for live Langfuse push.
 ENV_LANGFUSE_ENABLE = "HYPERLOOM_LANGFUSE_ENABLE"

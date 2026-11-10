@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+
 import os
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol
 
 # Backend selection env var.
@@ -14,11 +17,27 @@ BENCHMARK_BACKEND_ENV = "HYPERLOOM_BENCHMARK_BACKEND"
 DEFAULT_BENCHMARK_BACKEND = "magpie"
 KNOWN_BENCHMARK_BACKENDS = frozenset({"magpie", "bypass"})
 
+# Magpie built-in benchmark scripts that support the server_lifecycle reuse protocol.
+MAGPIE_BUILTIN_SCRIPTS = frozenset(
+    {
+        "vllm_mi300x.sh",
+        "vllm_mi355x.sh",
+        "vllm_gfx12.sh",
+        "sglang_mi300x.sh",
+        "sglang_mi355x.sh",
+        "atom_mi300x.sh",
+        "atom_mi355x.sh",
+    }
+)
+
 
 class BenchmarkBackend(Protocol):
     """Builds the benchmark subprocess command for one benchmark run."""
 
     name: str
+    #: What a round that only boots the persistent server (and leaves it up for the rounds that measure) must carry in
+    #: its config's ``benchmark.envs`` to stop after the server phase; empty when the backend needs nothing said.
+    boot_phase_envs: Mapping[str, str]
 
     def build_command(
         self,
@@ -35,6 +54,10 @@ class MagpieBackend:
     """Default backend: launches Magpie's local benchmark subprocess."""
 
     name = "magpie"
+    #: Nothing. Magpie sets ``MAGPIE_RUN_PHASE`` itself on the processes it starts, and it keeps every config env that is
+    #: not one of its client-only keys as the persistent server's reuse identity: a boot round that carried the key
+    #: would make every round that measures on that server fail its reuse check ("Reuse metadata mismatch").
+    boot_phase_envs: Mapping[str, str] = MappingProxyType({})
 
     def resolve_interpreter(self) -> str:
         """Return the Magpie-importable interpreter for the Magpie backend."""
@@ -42,8 +65,17 @@ class MagpieBackend:
 
         return _resolve_magpie_python()
 
-    def lifecycle_eligibility(self, bench: dict) -> dict | None:
-        """Return None to use the default (Magpie script-based) eligibility."""
+    def lifecycle_refusal(self, bench: dict, framework: str) -> str | None:
+        """Why Magpie cannot run ``bench`` under server_lifecycle, or ``None`` when it can."""
+        from hyperloom.inference_optimizer import framework_registry
+
+        # Server-less (scriptable) frameworks such as xDiT never boot a persistent server.
+        workload_kind = str(bench.get("workload_kind") or "").strip().lower()
+        if workload_kind == framework_registry.SCRIPTABLE or framework_registry.is_scriptable(framework):
+            return "scriptable framework (server-less; no server_lifecycle)"
+        script_name = Path(str(bench.get("benchmark_script") or "")).name
+        if script_name not in MAGPIE_BUILTIN_SCRIPTS:
+            return f"benchmark_script={script_name!r} is not a Magpie built-in ({sorted(MAGPIE_BUILTIN_SCRIPTS)})"
         return None
 
     def build_command(
@@ -53,11 +85,11 @@ class MagpieBackend:
         config_path: Path,
         output_dir: Path,
     ) -> list[str]:
-        """Return the canonical python -m Magpie ... --run-mode local argv."""
+        """Return the Magpie ... --run-mode local argv, run through :mod:`.magpie_confined` so that Magpie's
+        leftover-server sweep cannot kill another sandbox's server."""
         return [
             python_exe,
-            "-m",
-            "Magpie",
+            str(Path(__file__).with_name("magpie_confined.py")),
             "-v",
             "benchmark",
             "--benchmark-config",
@@ -73,6 +105,8 @@ class BypassBackend:
     """Bypass backend: launches Hyperloom's own benchmark runner."""
 
     name = "bypass"
+    #: The runner reads the phase from ``benchmark.envs`` (it has no reuse check on envs, and nothing else says it).
+    boot_phase_envs: Mapping[str, str] = MappingProxyType({"MAGPIE_RUN_PHASE": "server"})
 
     def resolve_interpreter(self) -> str:
         """Return a plain python3 for bypass (no Magpie import needed)."""
@@ -81,33 +115,13 @@ class BypassBackend:
 
         return sys.executable or shutil.which("python3") or "python3"
 
-    # Serving frameworks whose OpenAI server bypass can persist for reuse.
-    _LIFECYCLE_FRAMEWORKS = frozenset({"vllm", "atom", "sglang"})
+    def lifecycle_refusal(self, bench: dict, framework: str) -> str | None:
+        """Why bypass cannot persist ``framework``'s server for reuse, or ``None`` when it can."""
+        from .bypass_engine import SERVER_FRAMEWORKS
 
-    def lifecycle_eligibility(self, bench: dict) -> dict | None:
-        """Decide bypass server_lifecycle eligibility."""
-        framework = str(bench.get("framework") or "").lower()
-        envs = bench.get("envs") or {}
-        try:
-            port = int(envs.get("PORT", 8888))
-        except (TypeError, ValueError):
-            port = 8888
-        verdict = {"eligible": False, "framework": framework, "port": port, "reason": ""}
-        # The reuse protocol boots a local server and re-attaches a client round to it; that only holds single-node.
-        from ._multi_node_env import is_multi_node
-
-        if is_multi_node():
-            verdict["reason"] = "multi-node (server_lifecycle is local-only)"
-            return verdict
-        if framework not in self._LIFECYCLE_FRAMEWORKS:
-            verdict["reason"] = f"framework {framework!r} is not a serving framework"
-            return verdict
-        profiler_on = bool((bench.get("profiler") or {}).get("torch_profiler", {}).get("enabled"))
-        if profiler_on:
-            verdict["reason"] = "torch_profiler enabled (incompatible with reuse)"
-            return verdict
-        verdict["eligible"] = True
-        return verdict
+        if framework not in SERVER_FRAMEWORKS:
+            return f"framework {framework!r} is not a serving framework"
+        return None
 
     def build_command(
         self,

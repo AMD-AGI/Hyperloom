@@ -5,47 +5,39 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.tests.conftest import make_coordinator
 from hyperloom.orchestrator.phases.kernel import MAX_FUSION_INFRA_RETRIES, KernelPhase
 
 REQUIRED = KernelPhase._fusion_required_before_kernel_opt
 RECORD = KernelPhase._handle_fusion_result
 
 
-def _phase(*, spent: int = 0, session_dir=None):
-    """A stand-in carrying only what the two methods under test read."""
-    state = SimpleNamespace(
-        framework="sglang",
-        last_profile_trace="/tmp/decode.trace.json.gz",
-        last_fusion=None,
-        fusion_infra_aborts=spent,
-        macro_cycle=1,
-        save=lambda *a, **k: None,
-    )
-    bus = SimpleNamespace(posted=[])
+def _phase(*, spent: int = 0, session_dir):
+    """The real kernel phase over a real session, with the bus and integration recorded."""
+    coord = make_coordinator(session_dir)
+    state = coord.shared_state
+    state.framework = "sglang"
+    state.last_profile_trace = "/tmp/decode.trace.json.gz"
+    state.fusion_infra_aborts = spent
+    state.macro_cycle = 1
+    posted: list = []
+    integrated: list[dict] = []
 
     async def _append_and_seq(message):
-        bus.posted.append(message)
-
-    bus.append_and_seq = _append_and_seq
-    integrated: list[dict] = []
+        posted.append(message)
 
     async def _integrate_fusion(result):
         integrated.append(result)
 
-    phase = SimpleNamespace(
-        shared_state=state,
-        bus=bus,
-        session_dir=session_dir,
-        integrated=integrated,
-        _integrate_fusion=_integrate_fusion,
-    )
-    phase._kernel_timeline = KernelPhase._kernel_timeline.__get__(phase)
-    phase._record_fusion_timeline = KernelPhase._record_fusion_timeline.__get__(phase)
+    coord.bus.append_and_seq = _append_and_seq
+    phase = coord.phase_kernel
+    phase._integrate_fusion = _integrate_fusion
+    phase.posted = posted
+    phase.integrated = integrated
     return phase
 
 
@@ -117,7 +109,7 @@ async def test_the_bus_and_the_record_agree_on_the_failure(tmp_path):
 
     await RECORD(phase, _kept())
 
-    (message,) = phase.bus.posted
+    (message,) = phase.posted
     assert message.payload["status"] == "failed"
     assert message.payload["status"] == phase.shared_state.last_fusion["status"]
 

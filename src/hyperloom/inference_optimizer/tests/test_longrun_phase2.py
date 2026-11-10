@@ -13,6 +13,8 @@ from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 
+from .conftest import make_mock_critic_coordinator
+
 
 def _plateaued_explore_state(
     *,
@@ -44,9 +46,9 @@ def _plateaued_explore_state(
 # plateau → actionable
 def test_both_arms_dry_is_actionable():
     st = _plateaued_explore_state()
-    out = ps.exit_normal_optimize(st)
+    out = ps.compute_next_phase(st)
     assert out is not None
-    reason, evidence = out
+    _target, reason, evidence = out
     assert reason == "optimize_no_more_leverage"
     assert evidence.get("switch_bottleneck") is True
     assert evidence.get("plateau") is True
@@ -63,24 +65,8 @@ def test_compute_next_phase_plateau_routes_optimize_to_kernel():
 
 # Coordinator stamps the bottleneck-switch handoff
 @pytest.fixture
-def cyclic_coordinator(tmp_path, monkeypatch):
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
-    from .conftest import seed_target_analysis_marker
-
-    sd = _msd()
-    seed_target_analysis_marker(sd)
-    backends = {
-        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "critic": MockCriticBackend(),
-    }
-    c = Coordinator(sd, backends=backends)
+def cyclic_coordinator(session_dir):
+    c = make_mock_critic_coordinator(session_dir)
     yield c
 
 
@@ -99,7 +85,7 @@ async def test_coordinator_marks_bottleneck_switch_on_plateau(cyclic_coordinator
     st.framework_agent_phase_done = src.framework_agent_phase_done
     st.roofline_snapshots = src.roofline_snapshots
 
-    await c._advance_phase_if_needed()
+    await c.phase_machine.advance_phase_if_needed()
 
     # Exhausted optimisation leverage switches lever to KERNEL.
     assert st.phase == ps.PHASE_KERNEL_AGENT
@@ -125,7 +111,7 @@ def test_redirect_advisory_renders_with_suggested_domain(cyclic_coordinator):
             "roofline_bound_kind": "compute",
         }
     ]
-    block = c._bottleneck_redirect_advisory_block()
+    block = c.conversation._bottleneck_redirect_advisory_block()
     assert "plateaued_bottleneck=MoE_fused" in block
     assert "comm_specialist" in block
     assert "macro_cycle=2" in block
@@ -144,7 +130,7 @@ def test_redirect_advisory_renders_for_saturation_without_plateau(cyclic_coordin
             "threshold_pct": 95.0,
         }
     }
-    block = c._bottleneck_redirect_advisory_block()
+    block = c.conversation._bottleneck_redirect_advisory_block()
     assert "saturated_domain=kernel_switch_specialist" in block
     assert "Advisory only" in block
 
@@ -159,13 +145,13 @@ def test_cycle_strategy_planner_avoids_saturated_focus(cyclic_coordinator):
         "kernel_switch_specialist": {"saturated": True, "within_pct": 98.0},
         "comm_specialist": {"saturated": False},
     }
-    c._record_cycle_strategy_for_current_cycle()
+    c.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
     row = st.cycle_strategy_log[-1]
     assert row["cycle"] == 2
     assert row["focus"] != "kernel_switch_specialist"
-    block = c._cycle_strategy_block()
-    assert "=== Cycle 2 strategy ===" in block
-    assert f"focus={row['focus']}" in block
+    strategy = c.phase_macro_cycle.plan_cycle_focus()
+    assert strategy["focus"] != "kernel_switch_specialist"
+    assert "focus" in strategy
 
 
 def test_redirect_advisory_empty_outside_explore(cyclic_coordinator):
@@ -173,7 +159,7 @@ def test_redirect_advisory_empty_outside_explore(cyclic_coordinator):
     st = c.shared_state
     st.phase = ps.PHASE_SWEEP
     st.mark_bottleneck_switch(prev_bottleneck="MoE_fused")
-    assert c._bottleneck_redirect_advisory_block() == ""
+    assert c.conversation._bottleneck_redirect_advisory_block() == ""
 
 
 def test_acceptance_threshold_advisory_lists_unblocked(cyclic_coordinator):
@@ -188,7 +174,7 @@ def test_acceptance_threshold_advisory_lists_unblocked(cyclic_coordinator):
         },
         "rejected": [],
     }
-    block = c._acceptance_threshold_advisory_block()
+    block = c.conversation._acceptance_threshold_advisory_block()
     assert "KEEP>=0.40%" in block
     # All entries with measured gains appear as evidence regardless of outcome.
     assert "v_hi" in block  # >= bar
@@ -201,7 +187,7 @@ def test_acceptance_threshold_advisory_empty_first_cycle(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
     st.macro_cycle = 0  # first cycle: bar == default, nothing decayed
-    assert c._acceptance_threshold_advisory_block() == ""
+    assert c.conversation._acceptance_threshold_advisory_block() == ""
 
 
 # drift clears the pending switch
@@ -230,7 +216,6 @@ def test_tested_and_rejected_stamped_with_macro_cycle():
     st = SharedState(session_id="t", macro_cycle=0)
     st.apply_explore_search_update(
         {
-            "schema_version": 1,
             "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
             "rejected": [{"name": "a", "fingerprint": "fp_a"}],
         }
@@ -242,7 +227,6 @@ def test_tested_and_rejected_stamped_with_macro_cycle():
     st.macro_cycle = 1
     st.apply_explore_search_update(
         {
-            "schema_version": 1,
             "tested": {
                 "fp_a": {"name": "a", "fingerprint": "fp_a", "cycle": 0},
                 "fp_b": {"name": "b", "fingerprint": "fp_b"},
@@ -258,36 +242,3 @@ def test_tested_and_rejected_stamped_with_macro_cycle():
     assert tested["fp_b"]["cycle"] == 1
     cycles = {r["fingerprint"]: r["cycle"] for r in st.explore_search["rejected"]}
     assert cycles == {"fp_a": 0, "fp_b": 1}
-
-
-def test_veto_fingerprints_bucketed_by_bottleneck():
-    st = SharedState(session_id="t", macro_cycle=0)
-    # cycle 0 worked the MoE bottleneck.
-    st.roofline_snapshots = [{"snapshot_id": 1, "top_bottleneck": "MoE_fused"}]
-    st.apply_explore_search_update(
-        {
-            "schema_version": 1,
-            "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
-            "rejected": [{"name": "a", "fingerprint": "fp_a"}],
-        }
-    )
-    assert st.explore_search["tested"]["fp_a"]["bottleneck"] == "MoE_fused"
-    assert st.explore_search["rejected"][0]["bottleneck"] == "MoE_fused"
-
-    # cycle 1 drifted to a comm bottleneck; new rejection carries the new bucket.
-    st.macro_cycle = 1
-    st.roofline_snapshots = [{"snapshot_id": 2, "top_bottleneck": "all_reduce"}]
-    st.apply_explore_search_update(
-        {
-            "schema_version": 1,
-            "tested": {
-                "fp_a": {"name": "a", "fingerprint": "fp_a", "cycle": 0, "bottleneck": "MoE_fused"},
-                "fp_b": {"name": "b", "fingerprint": "fp_b"},
-            },
-            "rejected": [],
-        }
-    )
-    tested = st.explore_search["tested"]
-    assert tested["fp_a"]["bottleneck"] == "MoE_fused"
-    assert tested["fp_b"]["bottleneck"] == "all_reduce"
-    assert tested["fp_b"]["cycle"] == 1

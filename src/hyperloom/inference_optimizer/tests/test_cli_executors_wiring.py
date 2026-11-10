@@ -10,7 +10,8 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 
-from hyperloom.inference_optimizer.cli import executors as cli_executors
+import pytest
+
 from hyperloom.inference_optimizer.protocol.action_surfaces import KERNEL_AGENT_OWNED_ACTIONS
 from hyperloom.inference_optimizer.cli.executors import (
     _build_specialist_executor,
@@ -23,43 +24,48 @@ def test_recover_executor_is_not_registered() -> None:
     assert "recover" not in _REAL_EXECUTORS_FULL
 
 
-def _spec_args(dispatch_mode: str) -> argparse.Namespace:
+def _spec_args() -> argparse.Namespace:
     return argparse.Namespace(
         claude_model="claude-opus-4-6",
         specialist_model=None,
         specialist_max_turns=3,
-        specialist_per_turn_max_seconds=120.0,
-        specialist_dispatch_mode=dispatch_mode,
         specialist_mcp_config=None,
     )
 
 
-def test_build_specialist_executor_inprocess_when_no_claude(monkeypatch, tmp_path):
-    """dispatch_mode=inprocess builds the in-process backend runner."""
+def test_build_specialist_executor_refuses_to_start_without_a_claude_cli(monkeypatch, tmp_path):
+    """Specialists only run as CLI subprocesses, so a missing CLI stops the run at startup."""
     import shutil
 
     monkeypatch.setattr(shutil, "which", lambda _n: "")
-    executor = _build_specialist_executor(
-        _spec_args("inprocess"),
-        session_dir=tmp_path,
-        knowledge_plane=None,
-    )
-    assert callable(executor)
+    monkeypatch.delenv("GEAK_CLAUDE_BIN", raising=False)
+    monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
+    with pytest.raises(RuntimeError, match="none was found in"):
+        _build_specialist_executor(
+            _spec_args(),
+            session_dir=tmp_path,
+            knowledge_plane=None,
+        )
 
 
-def test_build_specialist_executor_subprocess_fallback_warns(monkeypatch, tmp_path, caplog):
-    """subprocess requested but no claude binary -> warns + falls back."""
+def test_build_specialist_executor_subprocess_uses_the_recorded_claude(monkeypatch, tmp_path, caplog):
+    """A CLI recorded in GEAK_CLAUDE_BIN keeps subprocess dispatch when ``claude`` is not on PATH."""
     import shutil
 
+    recorded = tmp_path / "claude"
+    recorded.write_text("#!/bin/sh\n", encoding="utf-8")
+    recorded.chmod(0o755)
     monkeypatch.setattr(shutil, "which", lambda _n: "")
-    with caplog.at_level(logging.WARNING, logger=cli_executors.log.name):
+    monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
+    monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
+    with caplog.at_level(logging.WARNING):
         executor = _build_specialist_executor(
-            _spec_args("subprocess"),
+            _spec_args(),
             session_dir=tmp_path,
             knowledge_plane=None,
         )
     assert callable(executor)
-    assert any("claude" in rec.message for rec in caplog.records)
+    assert not any("claude" in rec.message for rec in caplog.records)
 
 
 def test_build_specialist_executor_subprocess_with_knowledge_plane(monkeypatch, tmp_path):
@@ -73,23 +79,9 @@ def test_build_specialist_executor_subprocess_with_knowledge_plane(monkeypatch, 
             return "http://pr-monitor.invalid/mcp"
 
     executor = _build_specialist_executor(
-        _spec_args("subprocess"),
+        _spec_args(),
         session_dir=tmp_path,
         knowledge_plane=_KP(),
-    )
-    assert callable(executor)
-
-
-def test_build_specialist_executor_subprocess_kp_missing_methods(monkeypatch, tmp_path):
-    """subprocess path tolerates a KnowledgePlane lacking the MCP-url methods."""
-    import shutil
-
-    monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/claude")
-
-    executor = _build_specialist_executor(
-        _spec_args("subprocess"),
-        session_dir=tmp_path,
-        knowledge_plane=object(),
     )
     assert callable(executor)
 
@@ -145,11 +137,10 @@ def test_register_executors_covers_every_phase_allowed_action():
     assert not missing, f"phase-allowed actions with no executor: {missing}"
 
 
-def test_register_executors_never_wires_kernel_owned_actions(caplog):
+def test_register_executors_never_wires_kernel_owned_actions():
     """Kernel-owned actions are REQUEST-only, so they get no executor at all."""
     coord = _fake_coordinator()
-    with caplog.at_level(logging.DEBUG, logger=cli_executors.log.name):
-        _register_executors(coord, session_dir=None)
+    _register_executors(coord, session_dir=None)
     reg = coord.sub.executor_registry
     assert "roofline" in reg
     assert not (set(reg) & KERNEL_AGENT_OWNED_ACTIONS)
@@ -191,12 +182,12 @@ def test_no_executor_is_registered_under_an_unknown_action_name():
     """The reverse direction: a stale key left behind by a rename."""
     from hyperloom.inference_optimizer.protocol.action_surfaces import (
         ACTION_CATALOGUE,
-        INTERNAL_ONLY_ACTION_NAMES,
+        COORDINATOR_INTERNAL_ACTIONS,
     )
 
     registry = _fully_wired_registry()
     catalogue = {meta.name for meta in ACTION_CATALOGUE.values()}
-    uncatalogued_by_design = INTERNAL_ONLY_ACTION_NAMES - catalogue
+    uncatalogued_by_design = COORDINATOR_INTERNAL_ACTIONS - catalogue
 
     phantom = sorted(set(registry) - catalogue - uncatalogued_by_design)
     assert not phantom, f"executor keys absent from ACTION_CATALOGUE: {phantom}"

@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.actions.executors._proposal_identity import (
+    BaseControls,
     controls_of,
     effective_fingerprint,
     is_executable,
@@ -47,9 +48,7 @@ def test_effective_fingerprint_matches_the_pinned_executor_values(args, envs, va
             args,
             envs,
             controls=_controls(*variant),
-            base_remove_args=b_remove,
-            base_unset_envs=b_unset,
-            base_args_mode=b_mode,
+            base=BaseControls(remove_args=b_remove, unset_envs=b_unset, args_mode=b_mode),
         )
         == expected
     )
@@ -58,12 +57,14 @@ def test_effective_fingerprint_matches_the_pinned_executor_values(args, envs, va
 def test_base_controls_change_the_fingerprint():
     controls = _controls(["--x"], [], "append")
     assert effective_fingerprint("--a 1", {}, controls=controls) != effective_fingerprint(
-        "--a 1", {}, controls=controls, base_remove_args=["--b"]
+        "--a 1", {}, controls=controls, base=BaseControls(remove_args=["--b"])
     )
 
 
 def test_removal_union_is_base_first_and_deduped():
-    both = effective_fingerprint("", {}, controls=_controls(["--b", "--v"], [], "append"), base_remove_args=["--b"])
+    both = effective_fingerprint(
+        "", {}, controls=_controls(["--b", "--v"], [], "append"), base=BaseControls(remove_args=["--b"])
+    )
     assert both == effective_fingerprint("", {}, controls=_controls(["--b", "--v"], [], "append"))
 
 
@@ -151,6 +152,25 @@ def test_mapping_form_args_pass_the_grid_argv_gate():
 
     args = normalize_proposal({"extra_args": {"--kv-cache-dtype": "fp8_e4m3"}})["extra_args"]
     assert validate_server_args_shell_safe(args) == args
+
+
+def test_a_variants_experience_citations_survive_its_rebuild_into_a_derived_variant():
+    from hyperloom.orchestrator.actions.executors.explore import (
+        _decision_fields,
+        _grid_variants_from_payload,
+        _variant_with_eval_off,
+    )
+
+    citation = {"id": "exp-" + "1" * 32, "stance": "adopt", "claim": "Kept on the same model."}
+    [variant] = _grid_variants_from_payload(
+        [{"name": "v", "extra_args": "--x 1", "reasoning": "why", "experience_citations": [citation]}]
+    )
+
+    assert _decision_fields(_variant_with_eval_off(variant)) == {
+        "note": "why",
+        "reasoning_origin": "action_payload.reasoning",
+        "experience_citations": [citation],
+    }
 
 
 def test_the_queue_and_the_grid_parser_agree_on_a_list_form_variant():

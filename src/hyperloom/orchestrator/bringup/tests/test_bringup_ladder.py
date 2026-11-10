@@ -20,6 +20,11 @@ from hyperloom.common.bringup import (
 from hyperloom.orchestrator.bringup import ladder, trees
 
 
+def _trees(*roots: str) -> tuple[trees.TreeIdentity, ...]:
+    """Pinned trees rooted at ``roots``."""
+    return tuple(trees.TreeIdentity(tree_id=trees.path_slug(root), root=root) for root in roots)
+
+
 # --- digest stability ------------------------------------------------------
 
 
@@ -37,9 +42,9 @@ def _crash_log(*, root: str, pid: int, stamp: str, line: int) -> str:
 def _observe(*, root: str, pid: int, stamp: str, line: int) -> BootObservation:
     """Classify one host's rendering of the shared crash."""
     return ladder.classify(
-        server_log=_crash_log(root=root, pid=pid, stamp=stamp, line=line),
+        ladder.BootStreams(_crash_log(root=root, pid=pid, stamp=stamp, line=line)),
         server_elapsed_sec=float(pid % 7),
-        trees=[root],
+        trees=_trees(root),
     )
 
 
@@ -55,26 +60,26 @@ def test_failure_digest_is_stable_across_runs() -> None:
 def test_failure_digest_separates_different_failures() -> None:
     base = _observe(root="/sgl-workspace/vllm", pid=1, stamp="s", line=884)
     other = ladder.classify(
-        server_log=(
+        ladder.BootStreams(
             "Traceback (most recent call last):\n"
             '  File "/sgl-workspace/vllm/engine/model_runner.py", line 884, in load_model\n'
             "KeyError: 'model.layers.0.mlp.down_proj.weight'\n"
         ),
         server_elapsed_sec=1.0,
-        trees=["/sgl-workspace/vllm"],
+        trees=_trees("/sgl-workspace/vllm"),
     )
     assert failure_digest(base) != failure_digest(other)
 
 
 def test_unmatched_failure_still_digests() -> None:
     observation = ladder.classify(
-        server_log=(
+        ladder.BootStreams(
             "Traceback (most recent call last):\n"
             '  File "/sgl-workspace/vllm/srt/entry.py", line 12, in boot\n'
             "ZeroDivisionError: division by zero\n"
         ),
         server_elapsed_sec=2.0,
-        trees=["/sgl-workspace/vllm"],
+        trees=_trees("/sgl-workspace/vllm"),
     )
     assert observation.matched_marker == ""
     assert observation.stage_failed is not None
@@ -98,10 +103,12 @@ def _engine_core_crash(root_error: str) -> str:
 
 
 def test_a_child_process_root_error_keys_the_failure_not_the_parent_reraise() -> None:
-    from hyperloom.orchestrator.bringup.observe import round_advanced
+    from hyperloom.orchestrator.bringup.observe import round_advanced, round_outcome_unchanged
 
     before, after = (
-        ladder.classify(server_log=_engine_core_crash(error), server_elapsed_sec=1.0, trees=["/opt/vllm"])
+        ladder.classify(
+            ladder.BootStreams(_engine_core_crash(error)), server_elapsed_sec=1.0, trees=_trees("/opt/vllm")
+        )
         for error in ("RuntimeError: cancelled", "AttributeError: 'MambaSpec' object has no attribute 'x'")
     )
 
@@ -110,6 +117,26 @@ def test_a_child_process_root_error_keys_the_failure_not_the_parent_reraise() ->
     )
     assert failure_digest(before) != failure_digest(after)
     assert round_advanced(before, after)
+    assert not round_outcome_unchanged(before, after)
+
+
+def test_only_two_observed_boots_at_one_wall_read_as_unchanged() -> None:
+    """The one outcome that shows a patch moved the boot nowhere.
+
+    A half that was never observed is not that outcome: without the boot before
+    it, nothing says where this one would have stopped unpatched.
+    """
+    from hyperloom.orchestrator.bringup.observe import round_outcome_unchanged
+
+    crash = _engine_core_crash("AttributeError: 'MambaSpec' object has no attribute 'x'")
+    before, after = (
+        ladder.classify(ladder.BootStreams(crash), server_elapsed_sec=elapsed, trees=_trees("/opt/vllm"))
+        for elapsed in (1.0, 2.0)
+    )
+
+    assert round_outcome_unchanged(before, after)
+    assert not round_outcome_unchanged(None, after)
+    assert not round_outcome_unchanged(before, None)
 
 
 def test_a_traceback_logged_below_error_does_not_key_the_failure() -> None:
@@ -121,7 +148,9 @@ def test_a_traceback_logged_below_error_does_not_key_the_failure() -> None:
         f"{caught}RuntimeError: Triton kernel compilation failed\n"
     )
     before, after = (
-        ladder.classify(server_log=warmup + _engine_core_crash(error), server_elapsed_sec=1.0, trees=["/opt/vllm"])
+        ladder.classify(
+            ladder.BootStreams(warmup + _engine_core_crash(error)), server_elapsed_sec=1.0, trees=_trees("/opt/vllm")
+        )
         for error in (
             "AttributeError: 'MambaSpec' object has no attribute 'x'",
             "AttributeError: 'MambaSpec' object has no attribute 'y'",
@@ -139,7 +168,9 @@ def test_the_digest_keys_on_the_failure_line_not_the_log_printed_before_it() -> 
     def boot(interleaved: str, error: str = root) -> BootObservation:
         crash = _engine_core_crash(error)
         head, tail = crash.split("\n", 1)
-        return ladder.classify(server_log=f"{head}\n{interleaved}{tail}", server_elapsed_sec=1.0, trees=["/opt/vllm"])
+        return ladder.classify(
+            ladder.BootStreams(f"{head}\n{interleaved}{tail}"), server_elapsed_sec=1.0, trees=_trees("/opt/vllm")
+        )
 
     quiet = boot("")
     noisy = boot("(Worker_TP3 pid=91) INFO 10-02 12:54:56 [gpu_model_runner.py:4120] profiling run done\n")
@@ -152,7 +183,7 @@ def test_the_digest_keys_on_the_failure_line_not_the_log_printed_before_it() -> 
 
 def test_a_traceback_whose_header_was_cut_off_still_keys_the_failure() -> None:
     observation = ladder.classify(
-        server_log=(
+        ladder.BootStreams(
             '  File "/opt/vllm/model_executor/layers/mla.py", line 88, in forward\n'
             "UnboundLocalError: cannot access local variable 'q'\n"
             "Traceback (most recent call last):\n"
@@ -160,11 +191,46 @@ def test_a_traceback_whose_header_was_cut_off_still_keys_the_failure() -> None:
             "RuntimeError: Engine core initialization failed.\n"
         ),
         server_elapsed_sec=1.0,
-        trees=["/opt/vllm"],
+        trees=_trees("/opt/vllm"),
     )
     assert observation.terminal_frame is not None
     assert observation.terminal_frame.file_rel == "model_executor/layers/mla.py"
     assert observation.terminal_frame.exc_type == "UnboundLocalError"
+
+
+def test_a_rule_match_the_process_ran_past_does_not_name_the_failure() -> None:
+    """An autotuner's rejected config precedes a later milestone; the native line before the traceback does not."""
+    from hyperloom.orchestrator.bringup import observe_bringup
+
+    log = (
+        "(Worker_TP3 pid=91) Autotuning failed with out of resource: shared memory, "
+        "Required: 69632, Hardware limit: 65536. Reducing block sizes or `num_stages` may help.\n"
+        "INFO: Application startup complete.\n"
+        "host:1667128:1667733 [0] [FATAL ERROR]: HIP failure: 'out of memory'\n"
+        "Traceback (most recent call last):\n"
+        '  File "/opt/venv/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 4969, in barrier\n'
+        "torch.distributed.DistBackendError: NCCL error in: NCCLUtils.cpp:93, unhandled cuda error\n"
+    )
+    verdict = observe_bringup(server_log=log)
+
+    assert verdict.observation.matched_marker == "resource_constraint"
+    assert verdict.observation.env_fault == "resource_constraint"
+    assert verdict.observation.failure_text == "out of memory'"
+    assert verdict.signature.kind == "resource_constraint"
+
+
+def test_a_milestone_another_rank_repeats_after_the_failing_line_keeps_it_in_the_region() -> None:
+    from hyperloom.orchestrator.bringup import observe_bringup
+
+    log = (
+        "(Worker_TP0 pid=90) INFO: GPU KV cache size: 1,048,576 tokens\n"
+        "host:1667128:1667733 [0] [FATAL ERROR]: HIP failure: 'out of memory'\n"
+        "(Worker_TP5 pid=95) INFO: GPU KV cache size: 1,048,576 tokens\n"
+    )
+    verdict = observe_bringup(server_log=log)
+
+    assert verdict.observation.env_fault == "resource_constraint"
+    assert verdict.signature.kind == "resource_constraint"
 
 
 def test_digest_ignores_stage_reached_noise() -> None:
@@ -197,10 +263,7 @@ _INVALID_CHOICE = (
 
 def test_argv_failure_classifies_from_server_log() -> None:
     observation = ladder.classify(
-        server_log=_ARGV_ERROR,
-        server_elapsed_sec=0.4,
-        wrapper_stderr="server exited with code 2\n",
-        trees=[],
+        ladder.BootStreams(_ARGV_ERROR, "server exited with code 2\n"), server_elapsed_sec=0.4, trees=[]
     )
     assert observation.stage_failed is LadderStage.ARGV_PARSE
     assert observation.stage_reached is LadderStage.ARGV_PARSE
@@ -211,10 +274,7 @@ def test_argv_failure_classifies_from_server_log() -> None:
 
 def test_invalid_choice_classifies_from_server_log() -> None:
     observation = ladder.classify(
-        server_log=_INVALID_CHOICE,
-        server_elapsed_sec=0.4,
-        wrapper_stderr="server exited with code 2\n",
-        trees=[],
+        ladder.BootStreams(_INVALID_CHOICE, "server exited with code 2\n"), server_elapsed_sec=0.4, trees=[]
     )
     assert observation.stage_failed is LadderStage.ARGV_PARSE
     assert observation.matched_marker == "serve_flag"
@@ -223,9 +283,8 @@ def test_invalid_choice_classifies_from_server_log() -> None:
 def test_wrapper_stream_alone_never_reaches_the_argv_rule() -> None:
     """The wrapper reports the child's death, not its cause."""
     observation = ladder.classify(
-        server_log="",
+        ladder.BootStreams("", "ERROR launcher: server process exited with code 2 after 0.4s\n"),
         server_elapsed_sec=0.4,
-        wrapper_stderr="ERROR launcher: server process exited with code 2 after 0.4s\n",
         trees=[],
     )
     assert observation.matched_marker != "serve_flag"
@@ -233,7 +292,7 @@ def test_wrapper_stream_alone_never_reaches_the_argv_rule() -> None:
 
 def test_progress_witness_advances_the_failure_stage() -> None:
     observation = ladder.classify(
-        server_log=(
+        ladder.BootStreams(
             "server_args=ServerArgs(model_path='m')\n"
             "Loading weights took 40.2s\n"
             "KV cache is allocated\n"
@@ -251,7 +310,7 @@ def test_progress_witness_advances_the_failure_stage() -> None:
 
 def test_resource_constraint_is_marked_an_env_fault() -> None:
     observation = ladder.classify(
-        server_log="torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB\n",
+        ladder.BootStreams("torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB\n"),
         server_elapsed_sec=30.0,
         trees=[],
     )
@@ -260,21 +319,18 @@ def test_resource_constraint_is_marked_an_env_fault() -> None:
 
 def test_clean_boot_has_no_failed_stage() -> None:
     observation = ladder.classify(
-        server_log="server_args=ServerArgs(model_path='m')\nApplication startup complete.\nUvicorn running on 0.0.0.0\n",
+        ladder.BootStreams(
+            "server_args=ServerArgs(model_path='m')\nApplication startup complete.\nUvicorn running on 0.0.0.0\n"
+        ),
         server_elapsed_sec=55.0,
         trees=[],
     )
     assert observation.stage_failed is None
     assert observation.stage_reached is LadderStage.HTTP_READY
-    assert observation.booted
 
 
 def test_observation_round_trips_through_json_types() -> None:
-    observation = ladder.classify(
-        server_log=_ARGV_ERROR,
-        server_elapsed_sec=0.4,
-        trees=[],
-    )
+    observation = ladder.classify(ladder.BootStreams(_ARGV_ERROR), server_elapsed_sec=0.4, trees=[])
     assert BootObservation.from_dict(observation.to_dict()) == observation
     assert ladder.observation_summary(observation)["failure_digest"] == failure_digest(observation)
 
@@ -294,7 +350,7 @@ def test_render_excerpt_is_anchored_not_a_tail_slice() -> None:
 def test_excerpt_redacts_the_session_root() -> None:
     root = "/data/sessions/model/20260101T000000-abcd1234"
     observation = ladder.classify(
-        server_log=f"RuntimeError: cannot open {root}/runs/baseline/server.log\n",
+        ladder.BootStreams(f"RuntimeError: cannot open {root}/runs/baseline/server.log\n"),
         server_elapsed_sec=1.0,
         trees=[],
         session_root=root,
@@ -335,7 +391,6 @@ def test_resolve_trees_marks_a_git_checkout(tmp_path: Path) -> None:
     resolved = trees.resolve_trees([str(checkout)])
 
     assert len(resolved) == 1
-    assert resolved[0].vcs == trees.VCS_GIT
     assert Path(resolved[0].root) == checkout.resolve()
     assert resolved[0].tree_id.startswith("vllm-")
 
@@ -349,9 +404,7 @@ def test_resolve_trees_does_not_borrow_an_enclosing_repo(tmp_path: Path) -> None
     resolved = trees.resolve_trees([str(package)])
 
     assert len(resolved) == 1
-    assert resolved[0].vcs == trees.VCS_NONE
     assert Path(resolved[0].root) == package
-    assert resolved[0].package_dirs == (str(package),)
 
 
 def test_resolve_trees_skips_absent_roots_and_groups_by_root(tmp_path: Path) -> None:
@@ -361,7 +414,7 @@ def test_resolve_trees_skips_absent_roots_and_groups_by_root(tmp_path: Path) -> 
     resolved = trees.resolve_trees([str(package), str(package) + "/", str(tmp_path / "absent")])
 
     assert len(resolved) == 1
-    assert resolved[0].package_dirs == (str(package),)
+    assert resolved[0].root == str(package)
 
 
 def test_trees_round_trip_through_the_session_artifact(tmp_path: Path) -> None:
@@ -376,10 +429,4 @@ def test_trees_round_trip_through_the_session_artifact(tmp_path: Path) -> None:
 
 
 def test_tree_roots_orders_longest_first(tmp_path: Path) -> None:
-    identity = trees.TreeIdentity(
-        tree_id="t",
-        root="/a",
-        package_dirs=("/a/pkg/deeper", "/a/pkg"),
-        vcs=trees.VCS_NONE,
-    )
-    assert trees.tree_roots([identity]) == ("/a/pkg/deeper", "/a/pkg", "/a")
+    assert trees.tree_roots(_trees("/a", "/a/pkg/deeper", "/a/pkg/", "/a/pkg")) == ("/a/pkg/deeper", "/a/pkg", "/a")

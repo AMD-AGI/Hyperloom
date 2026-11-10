@@ -10,7 +10,8 @@ import logging
 import os
 import random
 import time
-from typing import Any, Callable
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
 
 from kernelforge.agent_backends.base import (
     AgentProviderUnavailableError,
@@ -104,6 +105,25 @@ RESUME_PROMPT = (
 )
 
 
+@dataclass(frozen=True)
+class ResumePolicy:
+    """How often and how long a session is retried; ``None`` reads the ``FORGE_AGENT_API_*`` override."""
+
+    max_resumes: int | None = None
+    base_delay_sec: float | None = None
+    max_delay_sec: float | None = None
+    deadline_sec: float | None = None
+
+
+@dataclass(frozen=True)
+class ResumeClock:
+    """The time sources the retry chain reads, waits on and draws jitter from."""
+
+    monotonic: Callable[[], float] = time.monotonic
+    sleep: Callable = asyncio.sleep
+    rng: Callable[[], float] = random.random
+
+
 def _env_number(name: str, default: float, *, cast: Callable[[str], Any]) -> Any:
     """Read one operator override, ignoring anything unparseable."""
     raw = os.environ.get(name, "").strip()
@@ -115,6 +135,11 @@ def _env_number(name: str, default: float, *, cast: Callable[[str], Any]) -> Any
         log.warning("ignoring unparseable %s=%r", name, raw)
         return default
     return value if value >= 0 else default
+
+
+def _policy_or_env(value: float | None, name: str, default: float, *, cast: Callable[[str], Any]) -> Any:
+    """``value`` when the policy sets it, else the operator override ``name`` or ``default``."""
+    return value if value is not None else _env_number(name, default, cast=cast)
 
 
 def is_api_failure(result: Any) -> bool:
@@ -223,8 +248,7 @@ async def _start(
     *,
     usage: Any,
     max_retries: int,
-    sleep: Callable,
-    delay: Callable[[int], float],
+    wait: Callable[[int], Awaitable[None]],
 ) -> AgentRunResult:
     """Open the session, retrying a start that never reached the model."""
     attempt = 0
@@ -253,7 +277,46 @@ async def _start(
                 type(exc).__name__,
                 exc,
             )
-            await sleep(delay(attempt))
+            await wait(attempt)
+
+
+async def _resume_once(
+    backend: Any,
+    spec: AgentRunSpec,
+    result: AgentRunResult,
+    session_id: str,
+    *,
+    usage: Any,
+) -> AgentRunResult:
+    """Resume ``session_id`` once; a retryable failure returns ``result`` holding the newest handle."""
+    try:
+        resumed = await backend.resume(spec, session_id, RESUME_PROMPT, usage=usage)
+    except Exception as exc:
+        if not is_retryable_api_error(exc):
+            raise
+        log.warning(
+            "resume of session %s failed (%s: %s); will retry while budget remains",
+            session_id,
+            type(exc).__name__,
+            exc,
+        )
+        # Keep the newest handle: a resume that got as far as re-opening the thread may report a different id, and
+        # that is the one to continue.
+        result.session_id = resumable_session_id(exc) or session_id
+        return result
+    return _merged(result, resumed, session_id)
+
+
+def _mark_exhausted(result: AgentRunResult, attempts: int) -> None:
+    """Log the give-up and relabel ``result`` so no caller records it as an agent decision."""
+    log.error(
+        "agent session gave up after %d API failure(s); reporting %s so no "
+        "caller records this as an agent decision: %s",
+        attempts,
+        EXHAUSTED_END_REASON,
+        result.stderr_tail or result.end_reason,
+    )
+    result.end_reason = EXHAUSTED_END_REASON
 
 
 async def run_session_with_api_resume(
@@ -261,51 +324,38 @@ async def run_session_with_api_resume(
     spec: AgentRunSpec,
     *,
     usage: Any = None,
-    max_resumes: int | None = None,
-    base_delay_sec: float | None = None,
-    max_delay_sec: float | None = None,
-    deadline_sec: float | None = None,
-    monotonic: Callable[[], float] = time.monotonic,
-    sleep: Callable = asyncio.sleep,
-    rng: Callable[[], float] = random.random,
+    policy: ResumePolicy = ResumePolicy(),
+    clock: ResumeClock = ResumeClock(),
 ) -> AgentRunResult:
     """Run one agent session, resuming it whenever the API — not the agent — fails."""
     resume_budget = int(
-        max_resumes
-        if max_resumes is not None
-        else _env_number("FORGE_AGENT_API_MAX_RESUMES", DEFAULT_MAX_RESUMES, cast=int)
+        _policy_or_env(policy.max_resumes, "FORGE_AGENT_API_MAX_RESUMES", DEFAULT_MAX_RESUMES, cast=int)
     )
     base = float(
-        base_delay_sec
-        if base_delay_sec is not None
-        else _env_number("FORGE_AGENT_API_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float)
+        _policy_or_env(policy.base_delay_sec, "FORGE_AGENT_API_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float)
     )
     ceiling = float(
-        max_delay_sec
-        if max_delay_sec is not None
-        else _env_number("FORGE_AGENT_API_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float)
+        _policy_or_env(policy.max_delay_sec, "FORGE_AGENT_API_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float)
     )
 
     budget_sec = float(
-        deadline_sec
-        if deadline_sec is not None
-        else _env_number("FORGE_AGENT_API_RETRY_DEADLINE_SEC", DEFAULT_DEADLINE_SEC, cast=float)
+        _policy_or_env(policy.deadline_sec, "FORGE_AGENT_API_RETRY_DEADLINE_SEC", DEFAULT_DEADLINE_SEC, cast=float)
     )
+    monotonic = clock.monotonic
     started_at = monotonic()
 
     def out_of_time() -> bool:
         return budget_sec > 0 and (monotonic() - started_at) >= budget_sec
 
-    def delay(attempt: int) -> float:
-        return _delay_for(attempt, base_sec=base, max_sec=ceiling, rng=rng)
+    async def wait(attempt: int) -> None:
+        await clock.sleep(_delay_for(attempt, base_sec=base, max_sec=ceiling, rng=clock.rng))
 
     result = await _start(
         backend,
         spec,
         usage=usage,
         max_retries=resume_budget,
-        sleep=sleep,
-        delay=delay,
+        wait=wait,
     )
 
     attempt = 0
@@ -328,7 +378,7 @@ async def run_session_with_api_resume(
             )
             break
         attempt += 1
-        await sleep(delay(attempt))
+        await wait(attempt)
         log.warning(
             "resuming session %s after an API failure (attempt %d/%d): %s",
             session_id,
@@ -336,32 +386,10 @@ async def run_session_with_api_resume(
             resume_budget,
             result.stderr_tail or result.end_reason,
         )
-        try:
-            resumed = await backend.resume(spec, session_id, RESUME_PROMPT, usage=usage)
-        except Exception as exc:
-            if not is_retryable_api_error(exc):
-                raise
-            log.warning(
-                "resume of session %s failed (%s: %s); will retry while budget remains",
-                session_id,
-                type(exc).__name__,
-                exc,
-            )
-            # Keep the newest handle: a resume that got as far as re-opening the thread may report a different id, and
-            # that is the one to continue.
-            result.session_id = resumable_session_id(exc) or session_id
-            continue
-        result = _merged(result, resumed, session_id)
+        result = await _resume_once(backend, spec, result, session_id, usage=usage)
 
     if is_api_failure(result):
-        log.error(
-            "agent session gave up after %d API failure(s); reporting %s so no "
-            "caller records this as an agent decision: %s",
-            attempt,
-            EXHAUSTED_END_REASON,
-            result.stderr_tail or result.end_reason,
-        )
-        result.end_reason = EXHAUSTED_END_REASON
+        _mark_exhausted(result, attempt)
     return result
 
 
@@ -369,6 +397,8 @@ __all__ = [
     "DEFAULT_DEADLINE_SEC",
     "EXHAUSTED_END_REASON",
     "RESUME_PROMPT",
+    "ResumeClock",
+    "ResumePolicy",
     "TERMINAL_END_REASONS",
     "is_api_failure",
     "is_retryable_api_error",

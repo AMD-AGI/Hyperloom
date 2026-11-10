@@ -5,14 +5,90 @@
 
 from __future__ import annotations
 
+import pytest
+
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 from hyperloom.orchestrator.state.failure_evidence import (
+    FAILURE_ATTRIBUTION_CANDIDATE,
+    FAILURE_ATTRIBUTION_ENVIRONMENT,
+    FAILURE_ATTRIBUTION_HARNESS,
+    FAILURE_ATTRIBUTION_UNKNOWN,
     FAILURE_STAGE_DECISION,
     FAILURE_STAGE_WARMUP,
+    classify_failure_attribution,
     failure_from_variant_outcome,
     make_failure_id,
     render_failure_line,
     tail_excerpt,
 )
+
+
+class TestClassifyFailureAttribution:
+    def test_known_invalid_measurement_is_harness_failure(self):
+        assert (
+            classify_failure_attribution(error_class="magpie_nonzero_invalid_measurement")
+            == FAILURE_ATTRIBUTION_HARNESS
+        )
+
+    def test_explicit_candidate_class_is_publishable(self):
+        assert classify_failure_attribution(error_class="capability_unsupported") == FAILURE_ATTRIBUTION_CANDIDATE
+
+    def test_an_argv_the_server_refused_is_the_candidates(self):
+        assert classify_failure_attribution(error_class=ARGV_INVALID) == FAILURE_ATTRIBUTION_CANDIDATE
+
+    def test_candidate_specific_cli_error_is_publishable(self):
+        assert (
+            classify_failure_attribution(
+                error_class="server_init_dead",
+                error_excerpt="error: unrecognized argument --unsupported-fast-path",
+            )
+            == FAILURE_ATTRIBUTION_CANDIDATE
+        )
+
+    def test_environment_evidence_overrides_generic_failure_class(self):
+        assert (
+            classify_failure_attribution(
+                error_class="server_init_dead",
+                error_excerpt="memory reservation failed because a concurrent GPU holder remained",
+            )
+            == FAILURE_ATTRIBUTION_ENVIRONMENT
+        )
+
+    def test_a_taken_server_port_is_the_environments(self):
+        assert (
+            classify_failure_attribution(
+                error_class="magpie_nonzero_invalid_measurement",
+                error_excerpt="AgentX server port 8888 is unavailable; existing servers are not reused",
+            )
+            == FAILURE_ATTRIBUTION_ENVIRONMENT
+        )
+
+    @pytest.mark.parametrize(
+        "excerpt",
+        [
+            "AgentX server exited before becoming healthy (-9)",
+            "AgentX server exited during its health check (1)",
+            "Memory access fault by GPU node-2 (Agent handle: 0x5d0) on address 0x7f00. Reason: Unknown.",
+            "ray_actor_error: The actor died unexpectedly before finishing this task.",
+        ],
+    )
+    def test_a_server_that_died_is_not_the_harnesss(self, excerpt):
+        assert (
+            classify_failure_attribution(error_class="magpie_nonzero_invalid_measurement", error_excerpt=excerpt)
+            == FAILURE_ATTRIBUTION_UNKNOWN
+        )
+
+    def test_ambiguous_failure_remains_unknown(self):
+        assert classify_failure_attribution(error_class="server_init_dead") == FAILURE_ATTRIBUTION_UNKNOWN
+
+    def test_valid_explicit_attribution_wins(self):
+        assert (
+            classify_failure_attribution(
+                error_class="magpie_timeout",
+                explicit=FAILURE_ATTRIBUTION_CANDIDATE,
+            )
+            == FAILURE_ATTRIBUTION_CANDIDATE
+        )
 
 
 class TestTailExcerpt:
@@ -77,6 +153,7 @@ class TestFailureFromVariantOutcome:
             "error_class": "server_init_dead",
             "error_excerpt": "AssertionError: batch_size == 1",
             "reason": "warmup_failed",
+            "failure_attribution": FAILURE_ATTRIBUTION_UNKNOWN,
             "server_log_path": "/runs/v00/server.log",
             "workspace": "/runs/v00",
             "raw_result_path": None,
@@ -101,6 +178,7 @@ class TestFailureFromVariantOutcome:
             "stage",
             "outcome",
             "error_class",
+            "attribution",
             "error_excerpt",
             "reason",
             "server_log_path",
@@ -108,6 +186,11 @@ class TestFailureFromVariantOutcome:
             "variant",
         ):
             assert key in fe, f"missing key: {key}"
+
+    def test_attribution_is_the_one_the_producer_classified(self):
+        vo = self._make_vo(error_class="capability_unsupported", failure_attribution=FAILURE_ATTRIBUTION_ENVIRONMENT)
+        fe = failure_from_variant_outcome(task_id="t1", round_id="r1", vo=vo)
+        assert fe["attribution"] == FAILURE_ATTRIBUTION_ENVIRONMENT
 
     def test_stage_defaults_to_decision_when_absent(self):
         vo = self._make_vo()

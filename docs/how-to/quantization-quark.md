@@ -20,13 +20,13 @@ export HYPERLOOM_QUANTIZE_ENABLED=1
 Then choose one request style:
 
 ```bash
-# Free-text power-user path. Failure hard-stops the run with exit code 3.
-python3 -m hyperloom.inference_optimizer.cli optimize \
+# Free-text power-user path. Failure hard-stops the run with exit code 4.
+python3 -m hyperloom optimize \
   --model /models/source \
   --quantize "fp8 global scheme, fp8 kv_cache, exclude lm_head"
 
 # Structured path. `none` or omit means no quantization.
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
   --model /models/source \
   --quantize-scheme fp8
 ```
@@ -50,11 +50,11 @@ also published on PyPI (`pip install amd-quark`). The
 the `release/0.12` branch (and later), so clone that branch when you need the
 agent-driven prelude.
 
-When you run `python -m hyperloom.inference_optimizer.cli optimize`, set the
+When you run `python -m hyperloom optimize`, set the
 Quark checkout explicitly with `QUARK_ROOT`:
 
-`python -m hyperloom.inference_optimizer.cli optimize` has no `--quark-root`
-flag; that argument only exists on the standalone `quantization-agent` CLI. For
+`python -m hyperloom optimize` has no `--quark-root`
+flag; that argument only exists on the standalone `hyperloom quantize` command. For
 the `optimize` path, set `QUARK_ROOT` explicitly. The path must contain
 `.claude/skills/quark-torch-ptq/SKILL.md` plus the validator and eval skills. If
 the resolved checkout is missing after quantization is enabled, the run fails

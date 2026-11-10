@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -14,11 +15,17 @@ from typing import Any
 from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.url_safety import require_http_url as _base_require_http_url
 
+from ..models import PRMonitorConfig
 from ._shared import GitHubPr
 
 
 class PRMonitorError(RuntimeError):
     """Raised when a pr_monitor request cannot be completed (CLI exit code 2)."""
+
+
+# Merged/closed PRs are the backport-relevant ones that may already be in the local dev build; semantic audit
+# downstream judges + dedups them.
+_PR_STATE = "all"
 
 
 def _require_http_url(url: str) -> None:
@@ -52,8 +59,8 @@ def _build_url(base_url: str, path: str, query: dict[str, Any] | None = None) ->
     return base + path + qs
 
 
-def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
-    """Return ``(status, body_bytes, content_type)``; raise on transport errors."""
+def _http_get(url: str, *, timeout_sec: float) -> bytes:
+    """Return the response body; raise PRMonitorError on HTTP or transport errors."""
     _require_http_url(url)
     req = urllib.request.Request(
         url,
@@ -64,14 +71,11 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - URL scheme checked above.
-            status = int(getattr(resp, "status", 200) or 200)
-            body = resp.read()
-            content_type = resp.headers.get("Content-Type", "") if resp.headers else ""
-            return status, body, content_type
+            return resp.read()
     except urllib.error.HTTPError as exc:
         try:
             err_body = exc.read().decode("utf-8", errors="replace")[:512]
-        except Exception:  # noqa: BLE001 - read can raise OSError on closed body
+        except (OSError, http.client.HTTPException):  # the error body may be unreadable or truncated
             err_body = ""
         raise PRMonitorError(f"pr_monitor HTTP {exc.code} at {url}: {err_body}") from exc
     except urllib.error.URLError as exc:
@@ -81,21 +85,16 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
 
 
 def _http_get_json(url: str, *, timeout_sec: float) -> Any:
-    """GET and parse JSON body; raise PRMonitorError on >=400 or bad JSON."""
-    status, body, _ = _http_get(url, timeout_sec=timeout_sec)
-    if status >= 400:
-        raise PRMonitorError(f"pr_monitor HTTP {status} at {url}")
-    text = body.decode("utf-8", errors="replace")
+    """GET and parse JSON body; raise PRMonitorError on bad JSON."""
+    text = _http_get(url, timeout_sec=timeout_sec).decode("utf-8", errors="replace")
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise PRMonitorError(f"pr_monitor returned non-JSON at {url}: {exc}; body[:200]={text[:200]!r}") from exc
 
 
-def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:
+def _coerce_pr_item(item: dict[str, Any], *, source_url: str) -> GitHubPr:
     """Coerce a pr_monitor list item into the shared GitHubPr record."""
-    if not isinstance(item, dict):
-        raise PRMonitorError(f"pr_monitor item at {source_url} is not a JSON object: {type(item).__name__}")
     # ``/v1/search/prs`` returns match records shaped as ``{"summary": {...pr fields...}, "matched_field": ...,
     # "snippet": ...}``.
     summary = item.get("summary")
@@ -142,20 +141,18 @@ def _extract_pr_list(payload: Any, *, source_url: str) -> list[dict[str, Any]]:
 def list_perf_prs(
     repo_url: str,
     *,
-    base_url: str,
+    monitor: PRMonitorConfig,
     limit: int = 5,
-    state: str = "open",
-    timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
-    """List PRs from pr_monitor."""
+    """List PRs in every state from pr_monitor."""
     try:
         slug = repo_slug(repo_url)
     except ValueError as exc:
         raise PRMonitorError(f"cannot derive repo slug from repo_url={repo_url!r}: {exc}") from exc
 
-    query: dict[str, Any] = {"state": state, "limit": limit}
-    url = _build_url(base_url, f"/v1/repos/{slug}/prs", query)
-    payload = _http_get_json(url, timeout_sec=timeout_sec)
+    query: dict[str, Any] = {"state": _PR_STATE, "limit": limit}
+    url = _build_url(monitor.base_url, f"/v1/repos/{slug}/prs", query)
+    payload = _http_get_json(url, timeout_sec=monitor.timeout_sec)
     items = _extract_pr_list(payload, source_url=url)
     out: list[GitHubPr] = []
     for item in items[:limit]:
@@ -166,11 +163,9 @@ def list_perf_prs(
 def search_perf_prs_via_pr_monitor_search(
     repo_url: str,
     *,
-    base_url: str,
+    monitor: PRMonitorConfig,
     query: str,
     limit: int = 5,
-    state: str = "open",
-    timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
     """Free-text search via ``/v1/search/prs``; alternate to ``list_perf_prs``."""
     try:
@@ -179,11 +174,11 @@ def search_perf_prs_via_pr_monitor_search(
         raise PRMonitorError(f"cannot derive repo slug from repo_url={repo_url!r}: {exc}") from exc
 
     url = _build_url(
-        base_url,
+        monitor.base_url,
         "/v1/search/prs",
-        {"q": query, "repo": slug, "state": state, "limit": limit},
+        {"q": query, "repo": slug, "state": _PR_STATE, "limit": limit},
     )
-    payload = _http_get_json(url, timeout_sec=timeout_sec)
+    payload = _http_get_json(url, timeout_sec=monitor.timeout_sec)
     items = _extract_pr_list(payload, source_url=url)
     return [_coerce_pr_item(item, source_url=url) for item in items[:limit]]
 

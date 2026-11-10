@@ -12,7 +12,10 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
-from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml, GridRecipe
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
+
+from ._baseline_fakes import write_sglang_yaml
 
 
 def _write_model_config(dir_path: Path, config: dict) -> str:
@@ -49,37 +52,16 @@ def plain_moe_model(tmp_path) -> str:
     )
 
 
-def _base_yaml(path: Path, model: str) -> Path:
-    cfg = {
-        "benchmark": {
-            "framework": "sglang",
-            "model": model,
-            "precision": "bf16",
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "timeout_seconds": 600,
-            "profiler": {
-                "torch_profiler": {"enabled": False},
-                "system_profiler": {"enabled": False},
-                "tracelens": {"enabled": False},
-            },
-            "gpu_selection": {"auto": False},
-        }
-    }
-    with path.open("w") as f:
-        yaml.safe_dump(cfg, f)
-    return path
-
-
 def _variant_args(tmp_path: Path, *, model: str, base_extra_args: str, variant_args: str = "") -> str:
-    base = _base_yaml(tmp_path / "base.yaml", model)
+    base = write_sglang_yaml(tmp_path / "base.yaml", model)
     out = _build_variant_yaml(
-        base,
-        base_extra_args,
+        GridRecipe(
+            base_yaml_path=base,
+            base=LaunchLayer(extra_server_args=base_extra_args),
+            target=BenchmarkTarget(model_path=model, gpu_type="mi300x"),
+        ),
         GridVariant(name="v00", extra_server_args=variant_args, extra_envs={}),
         output_subdir=tmp_path / "v00",
-        model_path=model,
-        gpu_type="mi300x",
     )
     cfg = yaml.safe_load(out.read_text())
     return str(cfg["benchmark"]["envs"].get("EXTRA_SGLANG_ARGS", ""))

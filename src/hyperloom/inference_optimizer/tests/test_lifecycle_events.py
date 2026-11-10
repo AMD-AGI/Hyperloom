@@ -10,8 +10,8 @@ from hyperloom.orchestrator.phases.machine_state import (
     lifecycle_label,
     make_lifecycle_event,
     record_lifecycle_event,
+    LifecycleMark,
 )
-
 from hyperloom.orchestrator.state.shared_state import (
     _LIFECYCLE_CAP,
     SharedState,
@@ -22,7 +22,6 @@ def test_lifecycle_label_resolves_human_labels():
     # Pipeline names map to the internal step/handler names.
     assert lifecycle_label("trace_analyze") == "TraceLens"
     assert lifecycle_label("roofline") == "TraceLens"
-    assert lifecycle_label("run_optimization") == "GEAK"
     assert lifecycle_label("integrate") == "Integrate"
     assert lifecycle_label("apply_patch") == "Integrate"
     assert lifecycle_label("report") == "Report"
@@ -39,13 +38,14 @@ def test_lifecycle_label_falls_back_to_phase_then_verbatim():
 
 def test_make_lifecycle_event_shape():
     event = make_lifecycle_event(
-        step="trace_analyze",
-        status="start",  # lower-cased on purpose
-        phase="kernel_agent",  # lower-cased on purpose
-        label=None,  # default from step
-        artifacts={"out_dir": "/tmp/run", "empty": "", "none": None},
-        detail="  starting  ",
-        duration_s=1.23456,
+        LifecycleMark(
+            step="trace_analyze",
+            status="start",
+            artifacts={"out_dir": "/tmp/run", "empty": "", "none": None},
+            detail="  starting  ",
+            duration_s=1.23456,
+        ),
+        phase="kernel_agent",
         seq=3,
         ts="2026-06-09T00:00:00+00:00",
     )
@@ -63,13 +63,8 @@ def test_make_lifecycle_event_shape():
 
 def test_make_lifecycle_event_omits_duration_when_none():
     event = make_lifecycle_event(
-        step="report",
-        status="START",
+        LifecycleMark(step="report", status="START"),
         phase="CLOSE",
-        label=None,
-        artifacts=None,
-        detail="",
-        duration_s=None,
         seq=0,
         ts="2026-06-09T00:00:00+00:00",
     )
@@ -83,41 +78,22 @@ def test_record_lifecycle_event_appends_and_defaults_phase():
     s.phase = PHASE_KERNEL_AGENT
     row = record_lifecycle_event(
         s,
-        step="run_optimization",
-        status="START",
-        artifacts={"workspace": "/tmp/ws"},
-        detail="kernel tg001",
+        LifecycleMark(step="trace_analyze", status="START", artifacts={"workspace": "/tmp/ws"}, detail="kernel tg001"),
     )
     assert len(s.lifecycle) == 1
     assert row is s.lifecycle[0]
     assert row["phase"] == "KERNEL_AGENT"  # defaulted from current phase
-    assert row["label"] == "GEAK"  # defaulted from step
+    assert row["label"] == "TraceLens"  # defaulted from step
     assert row["status"] == "START"
     assert row["artifacts"] == {"workspace": "/tmp/ws"}
     assert row["seq"] == 0
-
-
-def test_record_lifecycle_event_explicit_phase_and_label_override():
-    s = SharedState(session_id="abc")
-    s.phase = PHASE_KERNEL_AGENT
-    row = record_lifecycle_event(
-        s,
-        step="custom",
-        status="END",
-        phase="EXPLORE",
-        label="Custom Label",
-        duration_s=2.0,
-    )
-    assert row["phase"] == "EXPLORE"
-    assert row["label"] == "Custom Label"
-    assert row["duration_s"] == 2.0
 
 
 def test_record_lifecycle_event_monotonic_seq_and_cap():
     s = SharedState(session_id="abc")
     total = _LIFECYCLE_CAP + 25
     for i in range(total):
-        record_lifecycle_event(s, step="trace_analyze", status="END", detail=f"#{i}")
+        record_lifecycle_event(s, LifecycleMark(step="trace_analyze", status="END", detail=f"#{i}"))
     # Cap is enforced ...
     assert len(s.lifecycle) == _LIFECYCLE_CAP
     # ... but seq stays monotonic across the trim.
@@ -131,11 +107,7 @@ def test_lifecycle_persists_round_trip(tmp_path):
     s = SharedState(session_id="abc")
     s.phase = PHASE_KERNEL_AGENT
     record_lifecycle_event(
-        s,
-        step="trace_analyze",
-        status="END",
-        artifacts={"candidates": "/tmp/kc.json"},
-        duration_s=42.0,
+        s, LifecycleMark(step="trace_analyze", status="END", artifacts={"candidates": "/tmp/kc.json"}, duration_s=42.0)
     )
     s.save(tmp_path)
 

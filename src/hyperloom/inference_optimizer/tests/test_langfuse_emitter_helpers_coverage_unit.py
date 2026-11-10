@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.trace import langfuse_emitter as lfe
+from hyperloom.inference_optimizer.trace.trajectory_trace import load_shard
 
 
 def test_to_ns_none_and_non_datetime() -> None:
@@ -40,7 +41,7 @@ class _ParentRejectsStartTime:
 
 def test_start_obs_retries_without_start_time() -> None:
     parent = _ParentRejectsStartTime()
-    out = lfe._start_obs(parent, name="x", start_time=datetime.now())
+    out = lfe._start_obs(parent, name="x", start_time=datetime.now(timezone.utc))
     assert out == "obs"
     assert "start_time" not in parent.calls[-1]
 
@@ -86,7 +87,7 @@ def test_end_time_wants_int_unreadable_signature_defaults_false() -> None:
 
 
 def test_end_obs_none_observation_is_noop() -> None:
-    lfe._end_obs(None, datetime.now())  # must not raise
+    lfe._end_obs(None, datetime.now(timezone.utc))  # must not raise
 
 
 def test_end_obs_none_end_dt_calls_bare_end() -> None:
@@ -120,7 +121,7 @@ def test_end_obs_typed_call_rejected_falls_back_to_bare() -> None:
             self.bare += 1
 
     obs = _Rejects()
-    lfe._end_obs(obs, datetime.now())
+    lfe._end_obs(obs, datetime.now(timezone.utc))
     assert obs.bare == 1
 
 
@@ -206,18 +207,18 @@ def test_set_trace_attrs_v4_no_otel_span_is_noop() -> None:
     lfe._set_trace_attrs(_SpanNoOtel(), name="n")  # must not raise
 
 
-def test_load_jsonl_missing_file(tmp_path: Path) -> None:
-    assert lfe._load_jsonl(tmp_path / "absent.jsonl") == []
+def test_load_shard_missing_file(tmp_path: Path) -> None:
+    assert load_shard(tmp_path / "absent.jsonl") == []
 
 
-def test_load_jsonl_skips_blank_and_malformed(tmp_path: Path) -> None:
+def test_load_shard_skips_blank_and_malformed(tmp_path: Path) -> None:
     p = tmp_path / "x.jsonl"
     p.write_text(
         '{"a": 1}\n\n  \nnot-json\n[1,2,3]\n{"b": 2}\n',
         encoding="utf-8",
     )
     # blank / malformed / non-dict lines skipped
-    assert lfe._load_jsonl(p) == [{"a": 1}, {"b": 2}]
+    assert load_shard(p) == [{"a": 1}, {"b": 2}]
 
 
 def test_load_json_missing_and_malformed(tmp_path: Path) -> None:
@@ -232,3 +233,61 @@ def test_load_json_missing_and_malformed(tmp_path: Path) -> None:
     ok = tmp_path / "ok.json"
     ok.write_text('{"k": "v"}', encoding="utf-8")
     assert lfe._load_json(ok) == {"k": "v"}
+
+
+def test_end_obs_propagates_failure_of_the_bare_end_fallback() -> None:
+    import pytest
+
+    class _EndAlwaysFails:
+        def end(self, end_time: "datetime | None" = None) -> None:
+            if end_time is not None:
+                raise ValueError("rejected typed end")
+            raise RuntimeError("bare end failed")
+
+    with pytest.raises(RuntimeError):
+        lfe._end_obs(_EndAlwaysFails(), datetime.now(timezone.utc))
+
+
+def test_set_trace_attrs_propagates_update_trace_failure() -> None:
+    import pytest
+
+    class _UpdateFails:
+        def update_trace(self, **kwargs: Any) -> None:
+            raise RuntimeError("sdk down")
+
+    with pytest.raises(RuntimeError):
+        lfe._set_trace_attrs(_UpdateFails(), name="n")
+
+
+def test_set_trace_attrs_propagates_otel_failure() -> None:
+    import pytest
+
+    class _OtelFails:
+        def set_attribute(self, key: str, value: Any) -> None:
+            raise RuntimeError("otel down")
+
+    class _SpanV4OtelFails:
+        _otel_span = _OtelFails()
+
+        def update_trace(self, **kwargs: Any) -> None:
+            raise AttributeError("v4")
+
+    with pytest.raises(RuntimeError):
+        lfe._set_trace_attrs(_SpanV4OtelFails(), name="n")
+
+
+def test_set_trace_attrs_propagates_metadata_otel_failure() -> None:
+    import pytest
+
+    class _OtelFails:
+        def set_attribute(self, key: str, value: Any) -> None:
+            raise RuntimeError("otel rejected metadata")
+
+    class _SpanV4OtelFails:
+        _otel_span = _OtelFails()
+
+        def update_trace(self, **kwargs: Any) -> None:
+            raise AttributeError("v4")
+
+    with pytest.raises(RuntimeError, match="otel rejected metadata"):
+        lfe._set_trace_attrs(_SpanV4OtelFails(), metadata={"k": "v"})

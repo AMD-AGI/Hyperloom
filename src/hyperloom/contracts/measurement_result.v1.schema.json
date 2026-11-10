@@ -1,0 +1,397 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyperloom.amd.com/contracts/measurement_result.v1.schema.json",
+  "title": "MeasurementResult v1",
+  "description": "The manifest a runner writes to /out/manifest.json; manifest.sig signs its raw bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "request_id",
+    "spec_fingerprint",
+    "spec_sha256",
+    "surface_sha256",
+    "runner",
+    "outcome",
+    "platform_env_changed",
+    "timing",
+    "files"
+  ],
+  "properties": {
+    "schema": {
+      "const": "hyperloom.measurement-result/v1"
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "spec_fingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "spec_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "surface_sha256": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      ]
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sandbox_id",
+        "signing_key_fingerprint",
+        "hyperloom_version",
+        "magpie_commit",
+        "inferencex_commit",
+        "gpu_ids"
+      ],
+      "properties": {
+        "sandbox_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "signing_key_fingerprint": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "node_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "image_digest": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "gpu_model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "power_cap_w": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "partition_mode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "hyperloom_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "magpie_commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inferencex_commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gpu_ids": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "ecc_delta": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "correctable",
+                "uncorrectable"
+              ],
+              "properties": {
+                "correctable": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "uncorrectable": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        "rule_pack": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "version",
+                "digest"
+              ],
+              "properties": {
+                "version": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                }
+              }
+            }
+          ]
+        },
+        "card_occupancy": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "state",
+                "checks"
+              ],
+              "properties": {
+                "state": {
+                  "enum": [
+                    "clean",
+                    "unknown",
+                    "foreign",
+                    "unobservable"
+                  ]
+                },
+                "reason": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  ]
+                },
+                "checks": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "method": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "returncode",
+        "timed_out",
+        "error_class",
+        "failure_class",
+        "failure_reason",
+        "stdout_tail",
+        "stderr_tail"
+      ],
+      "properties": {
+        "returncode": {
+          "type": "integer"
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "error_class": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "failure_class": {
+          "enum": [
+            "infra",
+            "unclear",
+            "candidate",
+            null
+          ]
+        },
+        "failure_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "stdout_tail": {
+          "type": "string"
+        },
+        "stderr_tail": {
+          "type": "string"
+        }
+      }
+    },
+    "platform_env_changed": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runner_started_unix",
+        "spec_received_unix",
+        "finished_unix"
+      ],
+      "properties": {
+        "runner_started_unix": {
+          "type": "number",
+          "minimum": 0
+        },
+        "spec_received_unix": {
+          "type": "number",
+          "minimum": 0
+        },
+        "server_ready_unix": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "finished_unix": {
+          "type": "number",
+          "minimum": 0
+        },
+        "jit_compile_sec": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "model_load_sec": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "phases": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 4096,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "started_unix",
+              "seconds"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{0,47}(\\.[a-z][a-z0-9_]{0,47})?$"
+              },
+              "started_unix": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000000000
+              },
+              "seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 31622400
+              },
+              "point": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "size",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!/)(?!.*\\\\)(?!.*(^|/)(\\.|\\.\\.|)(/|$))[^\\x00]+$",
+            "not": {
+              "enum": [
+                "manifest.json",
+                "manifest.sig"
+              ]
+            }
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  }
+}

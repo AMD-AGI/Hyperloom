@@ -21,10 +21,14 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_PARAM,
     OUTCOME_KEEP,
     OUTCOME_NO_PROMOTE,
+    OUTCOME_RECORDED,
     OUTCOME_REVERT,
     OUTCOME_SKIP,
+    Verdict,
     classify_change_kind,
     derive_journal_outcome,
+    journal_path,
+    read_journal_entries,
     summarize_change,
 )
 
@@ -41,11 +45,13 @@ def session_dir(tmp_path: Path) -> Path:
 def test_load_or_create_mints_new_when_absent(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="sid-1",
-        model="m",
-        hardware="mi300x",
-        framework="sglang",
-        baseline_throughput=600.0,
+        Journal(
+            session_id="sid-1",
+            model="m",
+            hardware="mi300x",
+            framework="sglang",
+            baseline_throughput=600.0,
+        ),
     )
     assert j.session_id == "sid-1"
     assert j.model == "m"
@@ -62,10 +68,12 @@ def test_load_or_create_mints_new_when_absent(session_dir: Path):
 def test_load_or_create_round_trips_existing_file(session_dir: Path):
     j1 = Journal.load_or_create(
         session_dir,
-        session_id="sid-1",
-        model="m",
-        hardware="mi300x",
-        baseline_throughput=600.0,
+        Journal(
+            session_id="sid-1",
+            model="m",
+            hardware="mi300x",
+            baseline_throughput=600.0,
+        ),
     )
     j1.append_entry(
         JournalEntry(
@@ -81,10 +89,12 @@ def test_load_or_create_round_trips_existing_file(session_dir: Path):
 
     j2 = Journal.load_or_create(
         session_dir,
-        session_id="sid-1",
-        model="m",
-        hardware="mi300x",
-        baseline_throughput=600.0,
+        Journal(
+            session_id="sid-1",
+            model="m",
+            hardware="mi300x",
+            baseline_throughput=600.0,
+        ),
     )
     assert j2.final_throughput == 900.0
     assert j2.total_gain_pct == 50.0
@@ -99,10 +109,12 @@ def test_load_or_create_keeps_existing_header_when_caller_passes_defaults(
     """Header fields from disk win over empty-string defaults on resume."""
     j1 = Journal.load_or_create(
         session_dir,
-        session_id="sid-1",
-        model="m",
-        hardware="mi300x",
-        baseline_throughput=700.0,
+        Journal(
+            session_id="sid-1",
+            model="m",
+            hardware="mi300x",
+            baseline_throughput=700.0,
+        ),
     )
     j1.append_entry(
         JournalEntry(
@@ -115,10 +127,12 @@ def test_load_or_create_keeps_existing_header_when_caller_passes_defaults(
     )
     j2 = Journal.load_or_create(
         session_dir,
-        session_id="",
-        model="",
-        hardware="",
-        baseline_throughput=0.0,
+        Journal(
+            session_id="",
+            model="",
+            hardware="",
+            baseline_throughput=0.0,
+        ),
     )
     assert j2.session_id == "sid-1"
     assert j2.model == "m"
@@ -134,22 +148,48 @@ def test_load_or_create_recovers_from_corrupt_file(
     path.write_text("{ not json", encoding="utf-8")
     j = Journal.load_or_create(
         session_dir,
-        session_id="sid-x",
-        model="m",
-        hardware="h",
+        Journal(
+            session_id="sid-x",
+            model="m",
+            hardware="h",
+        ),
     )
     assert j.entries == []
     assert j.session_id == "sid-x"
+
+
+# Reading without a writer
+def test_read_journal_entries_returns_what_the_writer_flushed(session_dir: Path):
+    j = Journal.load_or_create(session_dir, Journal(session_id="s", model="m", hardware="h"))
+    j.append_entry(JournalEntry(phase="EXPLORE", iter=2, kind=KIND_PARAM, change="X", outcome=OUTCOME_REVERT, tick=7))
+    [entry] = read_journal_entries(session_dir)
+    assert (entry.phase, entry.iter, entry.change, entry.outcome, entry.tick) == ("EXPLORE", 2, "X", OUTCOME_REVERT, 7)
+
+
+def test_read_journal_entries_on_a_session_without_a_journal_creates_nothing(session_dir: Path):
+    assert read_journal_entries(session_dir) == []
+    assert not (session_dir / "reports").exists()
+
+
+def test_read_journal_entries_reports_a_corrupt_file_and_reads_empty(session_dir: Path):
+    path = journal_path(session_dir)
+    path.parent.mkdir(parents=True)
+    path.write_text("{ not json", encoding="utf-8")
+    errors: list[BaseException] = []
+    assert read_journal_entries(session_dir, on_error=errors.append) == []
+    assert len(errors) == 1
 
 
 # Journal — mutation + persistence
 def test_append_entry_flushes_to_disk(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
-        baseline_throughput=600.0,
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+            baseline_throughput=600.0,
+        ),
     )
     j.append_entry(
         JournalEntry(
@@ -170,9 +210,11 @@ def test_append_entry_flushes_to_disk(session_dir: Path):
 def test_append_entry_dedupes_on_resume_replay(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+        ),
     )
     e = JournalEntry(
         phase="EXPLORE",
@@ -191,9 +233,11 @@ def test_append_entry_dedupe_per_variant(session_dir: Path):
     """variant_name breaks the dedupe tie for two variants of the same round."""
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+        ),
     )
     base_kwargs = dict(
         phase="EXPLORE",
@@ -215,9 +259,11 @@ def test_append_entry_dedupe_per_task_id(session_dir: Path):
 
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+        ),
     )
     base_kwargs = dict(
         phase="KERNEL",
@@ -237,10 +283,12 @@ def test_append_entry_dedupe_per_task_id(session_dir: Path):
 def test_finalize_updates_only_summary_fields(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
-        baseline_throughput=600.0,
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+            baseline_throughput=600.0,
+        ),
     )
     j.append_entry(
         JournalEntry(
@@ -263,9 +311,11 @@ def test_finalize_updates_only_summary_fields(session_dir: Path):
 def test_finalize_with_partial_args_only_updates_given_fields(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+        ),
     )
     j.finalize(total_gain_pct=44.9)
     assert j.total_gain_pct == 44.9
@@ -278,10 +328,12 @@ def test_finalize_with_partial_args_only_updates_given_fields(session_dir: Path)
 def test_update_baseline_ignores_non_positive(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
-        baseline_throughput=600.0,
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+            baseline_throughput=600.0,
+        ),
     )
     j.update_baseline(0.0)
     assert j.baseline_throughput == 600.0
@@ -303,10 +355,12 @@ def test_a_run_that_anchors_no_baseline_reports_no_baseline(session_dir: Path, n
     """
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
-        baseline_throughput=never_anchored,
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+            baseline_throughput=never_anchored,
+        ),
     )
     j.update_baseline(never_anchored)
 
@@ -317,11 +371,11 @@ def test_a_run_that_anchors_no_baseline_reports_no_baseline(session_dir: Path, n
 
 def test_a_journal_on_disk_without_a_baseline_stays_without_one(session_dir: Path):
     """Resume reads the same absence back rather than minting a zero for it."""
-    j1 = Journal.load_or_create(session_dir, session_id="s", model="m", hardware="h")
+    j1 = Journal.load_or_create(session_dir, Journal(session_id="s", model="m", hardware="h"))
     j1.finalize(total_gain_pct=None)
     assert j1.path.exists()
 
-    j2 = Journal.load_or_create(session_dir, session_id="", model="", hardware="")
+    j2 = Journal.load_or_create(session_dir, Journal(session_id="", model="", hardware=""))
 
     assert j2.baseline_throughput is None
 
@@ -329,9 +383,11 @@ def test_a_journal_on_disk_without_a_baseline_stays_without_one(session_dir: Pat
 def test_to_dict_strips_none_in_entries(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+        ),
     )
     j.append_entry(
         JournalEntry(
@@ -397,94 +453,25 @@ def test_summarize_change_falls_back_to_task_kind():
 
 
 # derive_journal_outcome
-def test_derive_journal_outcome_integrate_patch_reverted_is_revert():
-    """A reverted integrate_patch is promotable (status != failed) but must journal as REVERT, not KEEP."""
-    out = derive_journal_outcome(
-        "integrate_patch",
-        {"status": "reverted", "delta_pct": -0.44},
-        promotable=True,
-    )
-    assert out == OUTCOME_REVERT
-
-
-def test_derive_journal_outcome_integrate_patch_kept_is_keep():
-    out = derive_journal_outcome(
-        "integrate_patch",
-        {"status": "kept", "delta_pct": 7.5},
-        promotable=True,
-    )
-    assert out == OUTCOME_KEEP
-
-
-def test_derive_journal_outcome_refused_promotion_is_no_promote():
-    """A KEEP the anchor gate declined to lift adopted nothing, so it is not a KEEP."""
-    from hyperloom.inference_optimizer.session.optimization_journal import PROMOTION_REFUSED_KEY
-
-    out = derive_journal_outcome(
-        "integrate_patch",
-        {"status": "kept", "delta_pct": 7.5, PROMOTION_REFUSED_KEY: True},
-        promotable=True,
-    )
-    assert out == OUTCOME_NO_PROMOTE
-
-
-def test_derive_journal_outcome_accuracy_unavailable_reject_is_revert():
-    out = derive_journal_outcome(
-        "integrate_patch",
-        {"status": "accuracy_unavailable_reject"},
-        promotable=True,
-    )
-    assert out == OUTCOME_REVERT
-
-
-def test_derive_journal_outcome_patch_failures_are_no_promote():
-    # A patch that never reached a KEEP/REVERT measurement is no_promote.
-    for status in (
-        "apply_failed",
-        "no_patch",
-        "no_patches",
-        "failed",
-        "applied_no_bench",
-        "rejected_by_critic",
-        "skipped",
-    ):
-        out = derive_journal_outcome("integrate_patch", {"status": status}, promotable=True)
-        assert out == OUTCOME_NO_PROMOTE, status
-
-
-def test_derive_journal_outcome_integrate_patch_follows_status():
-    """The patch kind reads the executor's verdict, not the promotable flag."""
-    assert derive_journal_outcome("integrate_patch", {"status": "kept"}, promotable=True) == OUTCOME_KEEP
-    assert derive_journal_outcome("integrate_patch", {"status": "reverted"}, promotable=True) == OUTCOME_REVERT
-    assert (
-        derive_journal_outcome("integrate_patch", {"status": "no_result_failed"}, promotable=False)
-        == OUTCOME_NO_PROMOTE
-    )
-
-
-def test_derive_journal_outcome_other_kinds_keep_binary_behaviour():
-    # Non-patch kinds use the promotable->KEEP / else->REVERT map.
-    assert derive_journal_outcome("baseline", {"status": "succeeded"}, promotable=True) == OUTCOME_KEEP
-    assert derive_journal_outcome("explore", {}, promotable=False) == OUTCOME_REVERT
-    assert derive_journal_outcome("profile", {"status": "reverted"}, promotable=True) == OUTCOME_KEEP
-
-
-def test_a_step_that_declined_to_run_is_neither_a_keep_nor_a_dead_end():
-    """A conc_sweep with nothing to compare succeeds without doing anything."""
-    out = derive_journal_outcome(
-        "conc_sweep",
-        {"status": "succeeded", "was_skipped": True, "skip_reason": "no_optimization_to_compare"},
-        promotable=True,
-    )
-    assert out == OUTCOME_SKIP
-
-
-def test_a_stray_was_skipped_cannot_demote_a_kept_patch():
-    """No integrate_patch producer sets the key; a future one must not silently rewrite the verdict."""
-    assert (
-        derive_journal_outcome("integrate_patch", {"status": "kept", "was_skipped": True}, promotable=True)
-        == OUTCOME_KEEP
-    )
+@pytest.mark.parametrize(
+    ("verdict", "result", "expected"),
+    [
+        (Verdict.ADOPTED, {}, OUTCOME_KEEP),
+        # Only a step with nothing to adopt can read as skipped.
+        (Verdict.ADOPTED, {"status": "kept", "was_skipped": True}, OUTCOME_KEEP),
+        (Verdict.REFUSED, {"status": "kept", "delta_pct": 7.5}, OUTCOME_NO_PROMOTE),
+        (Verdict.REVERTED, {"status": "reverted", "delta_pct": -0.44}, OUTCOME_REVERT),
+        (Verdict.FAILED, {"status": "apply_failed"}, OUTCOME_NO_PROMOTE),
+        (Verdict.RECORDED, {"status": "succeeded"}, OUTCOME_RECORDED),
+        (
+            Verdict.RECORDED,
+            {"status": "succeeded", "was_skipped": True, "skip_reason": "no_optimization_to_compare"},
+            OUTCOME_SKIP,
+        ),
+    ],
+)
+def test_the_journal_outcome_is_derived_from_the_verdict(verdict, result, expected):
+    assert derive_journal_outcome(verdict, result) == expected
 
 
 def test_operation_kind_for_maps_kind_and_action():

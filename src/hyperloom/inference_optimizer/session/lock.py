@@ -14,7 +14,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from hyperloom_common.shared_storage import make_shared_dirs, open_shared, open_shared_append, ownership
+from hyperloom_common.timeutil import now_iso
 
 from . import session_paths
 
@@ -40,22 +41,6 @@ def _pid_alive(pid: int | None) -> bool:
     except OSError:
         return False
     return True
-
-
-def read_owner(session_dir: Path) -> dict[str, Any] | None:
-    """Read the lock file's owner metadata without acquiring the lock."""
-    path = session_paths.optimizer_lock_path(session_dir)
-    try:
-        raw = path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError):
-        return None
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
 
 
 class SessionAlreadyRunning(RuntimeError):
@@ -88,19 +73,19 @@ class SessionLock:
         self.session_dir = Path(session_dir)
         self.path = session_paths.optimizer_lock_path(self.session_dir)
         self._fd: int | None = None
-        self._started_at: str = ""
 
     def acquire(self) -> SessionLock:
         """Acquire the session lock or raise :class:`SessionAlreadyRunning`."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Non-inheritable fd (PEP 446) so serving subprocesses don't keep the lock alive past the optimizer. 0o600:
-        # owner-only.
-        open_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        make_shared_dirs(self.path.parent)
+        # Group-writable and opened in place, never replaced: the next leg of a run may be another account of the
+        # group, and a replaced file would leave a live holder's flock on an unlinked inode.
         try:
-            fd = os.open(self.path, open_flags, 0o600)
+            fd = open_shared(self.path, os.O_RDWR)
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise SessionLockPathError(self.path, "lock file must not be a symlink") from exc
+            if isinstance(exc, PermissionError):
+                raise PermissionError(exc.errno, f"{exc.strerror}: {self.path}{ownership(self.path)}") from exc
             raise
         if fcntl is not None:
             try:
@@ -118,17 +103,14 @@ class SessionLock:
                 os.close(fd)
                 raise SessionAlreadyRunning(self.session_dir, owner)
         self._fd = fd
-        owner = self._now_owner(started_at=now_iso(timespec="seconds"))
+        owner = {
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "started_at": now_iso(timespec="seconds"),
+        }
         self._write_owner(owner)
         self._append_pod_history(owner)
         return self
-
-    def heartbeat(self) -> None:
-        """Refresh ``heartbeat_at`` in the lock body (best-effort, never raises)."""
-        if self._fd is None:
-            return
-        with suppress(OSError):
-            self._write_owner(self._now_owner(started_at=self._started_at))
 
     def release(self) -> None:
         """Release the lock and close the fd. The file body is left in place."""
@@ -141,17 +123,6 @@ class SessionLock:
             os.close(self._fd)
         self._fd = None
 
-    def _now_owner(self, *, started_at: str) -> dict[str, Any]:
-        """Build the owner document written into the lock body."""
-        now = now_iso(timespec="seconds")
-        self._started_at = started_at or now
-        return {
-            "pid": os.getpid(),
-            "hostname": socket.gethostname(),
-            "started_at": self._started_at,
-            "heartbeat_at": now,
-        }
-
     def _append_pod_history(self, owner: dict[str, Any]) -> None:
         """Append this acquisition to the pod-ownership ledger (never raises)."""
         record = {
@@ -161,8 +132,7 @@ class SessionLock:
         }
         try:
             path = session_paths.pod_history_path(self.session_dir)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as fh:
+            with os.fdopen(open_shared_append(path, make_parents=True), "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, sort_keys=True) + "\n")
         except OSError:
             log.debug("session lock: pod history append failed", exc_info=True)
@@ -206,4 +176,4 @@ class SessionLock:
         self.release()
 
 
-__all__ = ["SessionAlreadyRunning", "SessionLock", "read_owner"]
+__all__ = ["SessionAlreadyRunning", "SessionLock"]

@@ -5,11 +5,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from types import SimpleNamespace
 
+import pytest
+
 from hyperloom.orchestrator.knowledge import static_recon_checklist as src
-from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.phases import machine_state
+from hyperloom.orchestrator.phases.internal import InternalTasksPhase
 from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAIN_KEYS,
     get_domain,
@@ -18,15 +23,15 @@ from hyperloom.orchestrator.specialists.domains import (
 
 # --- checklist lookup -------------------------------------------------------
 def test_checklist_fp8_rocm_matches_cutlass_guard():
-    ids = [e.id for e in src.entries_for(gpu_type="MI300X", precision="fp8")]
+    ids = [e.id for e in src.entries_for(framework="vllm", gpu_type="MI300X", precision="fp8")]
     assert "rocm.fp8.cutlass_only_guard" in ids
     assert "rocm.mxfp8.smallm_dispatch_gap" not in ids
 
 
 def test_checklist_precision_is_token_exact_not_substring():
     """``fp8`` must not match ``mxfp8`` and vice versa."""
-    fp8 = {e.id for e in src.entries_for(gpu_type="MI300X", precision="fp8")}
-    mxfp8 = {e.id for e in src.entries_for(gpu_type="MI355X", precision="mxfp8")}
+    fp8 = {e.id for e in src.entries_for(framework="vllm", gpu_type="MI300X", precision="fp8")}
+    mxfp8 = {e.id for e in src.entries_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")}
     assert "rocm.mxfp8.smallm_dispatch_gap" in mxfp8
     assert "rocm.mxfp8.smallm_dispatch_gap" not in fp8
     assert "rocm.fp8.cutlass_only_guard" in fp8
@@ -35,33 +40,33 @@ def test_checklist_precision_is_token_exact_not_substring():
 
 def test_checklist_precision_tokenizes_compound_value():
     """A compound precision like ``fp8_e4m3`` still matches the ``fp8`` entry."""
-    ids = {e.id for e in src.entries_for(gpu_type="MI300X", precision="fp8_e4m3")}
+    ids = {e.id for e in src.entries_for(framework="vllm", gpu_type="MI300X", precision="fp8_e4m3")}
     assert "rocm.fp8.cutlass_only_guard" in ids
 
 
 def test_checklist_non_rocm_gpu_yields_nothing():
-    assert src.entries_for(gpu_type="H100", precision="fp8") == []
+    assert src.entries_for(framework="vllm", gpu_type="H100", precision="fp8") == []
 
 
 def test_checklist_any_precision_entry_applies_to_rocm_bf16():
-    ids = [e.id for e in src.entries_for(gpu_type="MI300X", precision="bf16")]
+    ids = [e.id for e in src.entries_for(framework="vllm", gpu_type="MI300X", precision="bf16")]
     assert ids == ["rocm.moe.aiter_backend_activation_gap"]
 
 
 def test_source_hint_directories_dedup_and_ordered():
-    dirs = src.source_hint_directories_for(gpu_type="MI300X", precision="fp8")
+    dirs = src.source_hint_directories_for(framework="vllm", gpu_type="MI300X", precision="fp8")
     assert dirs
     assert len(dirs) == len(set(dirs))
     assert "vllm/model_executor/layers/quantization/" in dirs
 
 
 def test_render_checklist_for_prompt_empty():
-    assert src.render_checklist_for_prompt([]) == ""
+    assert src.render_checklist_for_prompt([], framework="vllm") == ""
 
 
 def test_render_checklist_for_prompt_includes_id_and_bridge():
-    entries = src.entries_for(gpu_type="MI300X", precision="fp8")
-    text = src.render_checklist_for_prompt(entries)
+    entries = src.entries_for(framework="vllm", gpu_type="MI300X", precision="fp8")
+    text = src.render_checklist_for_prompt(entries, framework="vllm")
     assert "rocm.fp8.cutlass_only_guard" in text
     assert "bridge:" in text
 
@@ -71,27 +76,30 @@ def test_render_checklist_for_prompt_includes_id_and_bridge():
 
 def test_shared_expert_fusion_entry_in_mxfp8_rocm():
     """rocm.moe.shared_expert_fusion must appear for ROCm + mxfp8 runs."""
-    ids = [e.id for e in src.entries_for(gpu_type="MI355X", precision="mxfp8")]
+    ids = [e.id for e in src.entries_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")]
     assert "rocm.moe.shared_expert_fusion" in ids
 
 
 def test_shared_expert_fusion_entry_not_in_fp8():
     """rocm.moe.shared_expert_fusion must NOT appear for plain fp8 (mxfp8-only entry)."""
-    ids = [e.id for e in src.entries_for(gpu_type="MI300X", precision="fp8")]
+    ids = [e.id for e in src.entries_for(framework="vllm", gpu_type="MI300X", precision="fp8")]
     assert "rocm.moe.shared_expert_fusion" not in ids
 
 
-def test_shared_expert_fusion_source_dirs_include_vllm_and_sglang():
-    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
-    fusion = next(e for e in entries if e.id == "rocm.moe.shared_expert_fusion")
-    dirs = " ".join(fusion.source_dirs)
-    assert "vllm/model_executor/layers/fused_moe/" in dirs
-    assert "python/sglang/srt/layers/moe/" in dirs
+def test_an_entry_applies_only_to_the_frameworks_it_names():
+    sglang = src.entries_for(framework="sglang", gpu_type="MI355X", precision="mxfp8")
+    assert [e.id for e in sglang] == ["rocm.moe.shared_expert_fusion"]
+    assert src.source_hint_directories_for(framework="sglang", gpu_type="MI355X", precision="mxfp8") == (
+        "python/sglang/srt/layers/moe/",
+        "python/sglang/srt/models/",
+    )
+    vllm = src.source_hint_directories_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")
+    assert "vllm/model_executor/layers/fused_moe/" in vllm
 
 
 def test_filter_entries_for_model_keeps_entry_when_has_shared_expert():
     """filter_entries_for_model passes the shared-expert entry through when flag is set."""
-    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
+    entries = src.entries_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")
     filtered = src.filter_entries_for_model(entries, {"has_shared_expert": True})
     ids = [e.id for e in filtered]
     assert "rocm.moe.shared_expert_fusion" in ids
@@ -99,7 +107,7 @@ def test_filter_entries_for_model_keeps_entry_when_has_shared_expert():
 
 def test_filter_entries_for_model_removes_entry_when_no_shared_expert():
     """Core anti-noise assertion: entry is dropped for plain MoE / non-MoE models."""
-    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
+    entries = src.entries_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")
     for model_info in ({}, {"has_shared_expert": False}, {"is_moe": True}):
         filtered = src.filter_entries_for_model(entries, model_info)
         ids = [e.id for e in filtered]
@@ -108,7 +116,7 @@ def test_filter_entries_for_model_removes_entry_when_no_shared_expert():
 
 def test_filter_entries_for_model_preserves_other_entries():
     """Other checklist entries must not be affected by the filter."""
-    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
+    entries = src.entries_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")
     filtered = src.filter_entries_for_model(entries, {})
     other_ids = {e.id for e in filtered}
     all_ids = {e.id for e in entries}
@@ -117,9 +125,9 @@ def test_filter_entries_for_model_preserves_other_entries():
 
 def test_render_checklist_for_prompt_includes_shared_expert_fusion():
     """render_checklist_for_prompt emits the entry id and bridge text."""
-    entries = src.entries_for(gpu_type="MI355X", precision="mxfp8")
+    entries = src.entries_for(framework="vllm", gpu_type="MI355X", precision="mxfp8")
     shared = [e for e in entries if e.id == "rocm.moe.shared_expert_fusion"]
-    text = src.render_checklist_for_prompt(shared)
+    text = src.render_checklist_for_prompt(shared, framework="vllm")
     assert "rocm.moe.shared_expert_fusion" in text
     assert "bridge:" in text
 
@@ -157,7 +165,7 @@ def test_consume_static_recon_seeds_gaps(tmp_path):
             ],
         },
     }
-    Coordinator._consume_static_recon(stub, payload)
+    InternalTasksPhase.consume_static_recon(stub, payload)
     gap = stub.shared_state.find_gap("gap.static_recon.rocm.fp8.cutlass_only_guard")
     assert gap is not None
     assert gap["layer"] == "static_recon"
@@ -177,13 +185,13 @@ def test_consume_static_recon_drops_incomplete_candidates(tmp_path):
             ],
         },
     }
-    Coordinator._consume_static_recon(stub, payload)
+    InternalTasksPhase.consume_static_recon(stub, payload)
     assert stub.shared_state.gaps == []
 
 
 def test_consume_static_recon_handles_missing_recon_block(tmp_path):
     stub = _stub_coord(tmp_path)
-    Coordinator._consume_static_recon(stub, {"domain": "static_recon_specialist"})
+    InternalTasksPhase.consume_static_recon(stub, {"domain": "static_recon_specialist"})
     assert stub.shared_state.gaps == []
 
 
@@ -200,11 +208,46 @@ def test_consume_static_recon_sanitizes_id_into_canonical(tmp_path):
             ],
         },
     }
-    Coordinator._consume_static_recon(stub, payload)
+    InternalTasksPhase.consume_static_recon(stub, payload)
     cids = [g["canonical_id"] for g in stub.shared_state.gaps]
     assert len(cids) == 1
     assert cids[0].startswith("gap.static_recon.")
     assert " " not in cids[0] and "/" not in cids[0]
+
+
+_SEED_PAYLOAD = {"recon": {"bridge_candidates": [{"id": "g1", "predicate_file": "a.py", "why_disabled_here": "w"}]}}
+
+
+def _consume_site(session_dir):
+    stub = _stub_coord(session_dir)
+    return stub.shared_state, lambda: InternalTasksPhase.consume_static_recon(stub, _SEED_PAYLOAD)
+
+
+def test_static_recon_save_os_error_is_logged_and_the_bookkeeping_stays(tmp_path, monkeypatch, caplog):
+    state, run = _consume_site(tmp_path)
+    err = OSError("disk full")
+    monkeypatch.setattr(state, "save", _raiser(err))
+
+    with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.phases.internal"):
+        run()
+
+    assert [g["canonical_id"] for g in state.gaps] == ["gap.static_recon.g1"]
+    assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
+
+
+def test_static_recon_save_serialization_defect_propagates(tmp_path, monkeypatch):
+    state, run = _consume_site(tmp_path)
+    monkeypatch.setattr(state, "save", _raiser(TypeError("not JSON serializable")))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        run()
+
+
+def _raiser(exc: BaseException):
+    def _save(session_dir=None) -> None:
+        raise exc
+
+    return _save
 
 
 # -- workload precision -----------------------------------------------------
@@ -229,7 +272,53 @@ def test_workload_precision_falls_back_to_shared_state():
 def test_mxfp8_checkpoint_gets_the_mxfp8_focus_directories():
     """An MXFP8 model labelled fp8 by $PRECISION must not get the fp8 entries."""
     precision = src.workload_precision(_PrecisionState("fp8", {"quantization": "mxfp8"}))
-    dirs = src.source_hint_directories_for(gpu_type="MI355X", precision=precision)
+    dirs = src.source_hint_directories_for(framework="vllm", gpu_type="MI355X", precision=precision)
     assert "vllm/model_executor/kernels/linear/mxfp8/" in dirs
     assert "vllm/model_executor/layers/fused_moe/experts/" in dirs
     assert "vllm/model_executor/layers/quantization/" not in dirs
+
+
+# --- config-arm plateau re-dispatch -----------------------------------------
+def _recon_recorder(*, phase: str, plateaued: bool, monkeypatch):
+    """Stub whose ``_enqueue_internal_static_recon_task`` records its kwargs."""
+    calls: list[dict] = []
+
+    async def _enqueue(**kwargs):
+        calls.append(kwargs)
+
+    state = SharedState(session_id="t", model_name="m")
+    state.phase = phase
+    state.macro_cycle = 2
+    monkeypatch.setattr(
+        machine_state,
+        "per_lever_dryness",
+        lambda _state: (False, {"config_arm_plateaued": plateaued}),
+    )
+    stub = SimpleNamespace(shared_state=state, _enqueue_internal_static_recon_task=_enqueue)
+    return stub, calls
+
+
+def test_config_plateau_recon_dispatches_under_its_own_idempotency_key(monkeypatch):
+    """The plateau pass must not be deduplicated against the PRELUDE one."""
+    stub, calls = _recon_recorder(phase="FRAMEWORK_AGENT", plateaued=True, monkeypatch=monkeypatch)
+    asyncio.run(InternalTasksPhase.maybe_enqueue_config_plateau_static_recon(stub))
+    assert calls == [{"reason": "config_arm_plateau", "slug": "cycle2"}]
+
+
+def test_config_plateau_recon_silent_while_the_config_arm_still_pays(monkeypatch):
+    stub, calls = _recon_recorder(phase="FRAMEWORK_AGENT", plateaued=False, monkeypatch=monkeypatch)
+    asyncio.run(InternalTasksPhase.maybe_enqueue_config_plateau_static_recon(stub))
+    assert calls == []
+
+
+def test_config_plateau_recon_is_scoped_to_the_optimisation_phase(monkeypatch):
+    stub, calls = _recon_recorder(phase="SWEEP", plateaued=True, monkeypatch=monkeypatch)
+    asyncio.run(InternalTasksPhase.maybe_enqueue_config_plateau_static_recon(stub))
+    assert calls == []
+
+
+def test_config_plateau_recon_respects_the_disable_switch(monkeypatch):
+    stub, calls = _recon_recorder(phase="FRAMEWORK_AGENT", plateaued=True, monkeypatch=monkeypatch)
+    stub.shared_state.static_recon_enabled = False
+    asyncio.run(InternalTasksPhase.maybe_enqueue_config_plateau_static_recon(stub))
+    assert calls == []

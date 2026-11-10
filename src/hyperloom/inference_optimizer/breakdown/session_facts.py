@@ -79,9 +79,13 @@ def recovery_block(state: Any) -> dict[str, Any]:
             "type": raw_exception.get("type"),
             "message": (str(raw_exception.get("message") or "")[:500] or None),
         }
-    resume_pending = bool(_field(state, "resume_pending_revalidation", False))
+    stack_len = len(_field(state, "optimization_stack", None) or [])
+    validated_len = int(_field(state, "cumulative_gain_validated_stack_len", 0) or 0)
+    working_gen = int(_field(state, "working_recipe_generation", 0) or 0)
+    validated_gen = int(_field(state, "validated_recipe_generation", 0) or 0)
+    resume_pending = stack_len > validated_len or working_gen != validated_gen
     return {
-        "recovered": bool(crash_count > 0 or crash_timestamps or resume_pending or last_exception),
+        "recovered": bool(crash_count > 0 or crash_timestamps or last_exception),
         "crash_count": crash_count,
         "crash_timestamps": crash_timestamps,
         "degraded_mode": bool(_field(state, "degraded_mode", False)),
@@ -91,26 +95,19 @@ def recovery_block(state: Any) -> dict[str, Any]:
 
 
 def grading_block(state: Any) -> dict[str, Any]:
-    """The axis this session was configured to grade on, and the band it grades under.
+    """The grading mode this session started in, and the band it grades under.
 
     Prefers ``state.grading`` recorded at seed. A mapping snapshot with no
     recorded axis is absence, not the exporting process's environment. A live
     object without a recorded axis still uses :func:`resolved_grading`.
     """
     from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT
-    from hyperloom.inference_optimizer.grading import resolved_grading
+    from hyperloom.inference_optimizer.grading import recorded_grading, resolved_grading
 
-    recorded = _field(state, "grading", None)
-    recorded = recorded if isinstance(recorded, dict) else {}
-    objective = str(recorded.get("objective") or "").strip()
-    if objective:
-        noise_pct = recorded.get("noise_pct")
-        on_intvty = objective == GRADED_INTVTY
-        noise = float(noise_pct) if isinstance(noise_pct, (int, float)) else None
-    elif isinstance(state, Mapping):
+    grading = recorded_grading(state.get("grading")) if isinstance(state, Mapping) else resolved_grading(state)
+    if grading is None:
         return {}
-    else:
-        on_intvty, noise = resolved_grading(state)
+    on_intvty, noise = grading
     return {
         "benchmark_mode": str(_field(state, "benchmark_mode", "") or "").strip() or "synthetic",
         "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,

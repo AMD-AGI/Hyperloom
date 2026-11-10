@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from contextvars import ContextVar, Token
 from pathlib import Path
 
@@ -15,6 +15,7 @@ __all__ = [
     "bind_session",
     "bound_session",
     "bound_session_or_none",
+    "named_session_scope",
     "session_is_bound",
     "session_scope",
     "unbind_session",
@@ -56,6 +57,20 @@ def session_scope(session_dir: Path | str) -> Iterator[Path]:
         yield _CURRENT_SESSION.get() or _canonical(session_dir)
     finally:
         unbind_session(token)
+
+
+@contextmanager
+def named_session_scope(session_dir: Path | str | None) -> Iterator[None]:
+    """Bind ``session_dir`` for the block when it names a session other than the bound one; else bind nothing.
+
+    A session that cannot be resolved or bound leaves the block unbound; errors raised inside the block propagate.
+    """
+    with ExitStack() as stack:
+        with suppress(OSError, RuntimeError):
+            session = Path(session_dir).resolve() if session_dir else None
+            if session is not None and bound_session_or_none() != session:
+                stack.enter_context(session_scope(session))
+        yield
 
 
 def bound_session() -> Path:

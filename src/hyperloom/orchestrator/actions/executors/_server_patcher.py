@@ -1,32 +1,32 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Idempotent run-time patcher for vLLM and SGLang server installs."""
+"""TraceLens's profiling patches for the vLLM, SGLang and xDiT a profile runs: which patch set fits the installed
+version, and where it is laid (:mod:`._patch_laying`).
+
+vLLM and SGLang get the patch in a copy of the installed package, which the server that profiles imports first
+(:func:`ensure_vllm_patched_for_tracelens`, :func:`ensure_sglang_patched_for_tracelens`), or in a test's farm
+(:func:`lay_tracelens_patch`); their installed trees are never written. xDiT's checkout is still patched in place:
+Magpie's xDiT script starts its process, and where that script imports ``xfuser`` from is not set here.
+"""
 
 from __future__ import annotations
 
 import logging
 import os
 import re
-import shutil
 import subprocess
-import tempfile
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Sequence
 
-from hyperloom.common.unified_diff import parse_unified_diff
+from hyperloom_common.unified_diff import parse_unified_diff
+from hyperloom.inference_optimizer.session import paths
 
-from ._file_lock import best_effort_file_lock
+from ._git import _git_head_sha
+from ._patch_laying import PatchedServer, _ensure_patched, _ensure_patched_in_place, _lay_in, _PatchPlan
 
 log = logging.getLogger(__name__)
 
-
-# System-wide lock file.
-_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_server_patcher.lock")
-
-# Per-``git`` invocation timeout (defensive against hung NFS).
-_GIT_TIMEOUT_SEC = 30
 
 # SGLang version gate: a minor-version allowlist (not an exact pin).
 _SGLANG_DEFAULT_ALLOWED_MINORS: tuple[str, ...] = ("0.5",)
@@ -44,6 +44,33 @@ _VLLM_PROFILER_SENTINELS: tuple[str, ...] = (
 _VLLM_GRAPH_CAPTURE_MIN_VERSION: tuple[int, ...] = (0, 26)
 _VLLM_GRAPH_CAPTURE_SENTINEL: tuple[str, ...] = ("vllm", "profiler", "graph_capture.py")
 _VLLM_GRAPH_CAPTURE_MARKERS: tuple[str, ...] = ("graph_capture_profiler", "capture_traces")
+# From 0.32 the patch builds the capture profiler in ``wrapper.py``, so ``capture_traces`` is written there and
+# ``graph_capture.py`` keeps only the context manager.
+_VLLM_WRAPPER_MIN_VERSION: tuple[int, ...] = (0, 32)
+_VLLM_WRAPPER_SENTINEL: tuple[str, ...] = ("vllm", "profiler", "wrapper.py")
+_VLLM_WRAPPER_MARKERS: tuple[str, ...] = ("capture_traces",)
+
+# xDiT: SHA-based version gating.  ``pip show xfuser`` always reports
+# ``0.4.5`` regardless of the actual commit, so version detection reads
+# ``git rev-parse HEAD`` from the editable install and matches against
+# known image SHAs.
+_XDIT_PATCH_RE = re.compile(r"^config_xdit_v(\d+(?:\.\d+)*)\.patch$")
+_XDIT_PATCHES_LEAF = "xdit_patches"
+
+
+def _xdit_default_source_root() -> Path:
+    from hyperloom.inference_optimizer import framework_registry
+
+    return Path(framework_registry.source_root("xdit") or "/app/xDiT")
+
+
+_XDIT_SENTINEL_REL: tuple[str, ...] = ("xfuser", "config", "args.py")
+_XDIT_SENTINEL_MARKERS: tuple[str, ...] = ("profile_capture_phase",)
+# Known image tag → head commit SHA (full 40-char).
+_XDIT_SHA_TO_VERSION: dict[str, str] = {
+    "c30266378c815c2f31f95b9d21d2818276050547": "26.7",
+    "2f74acb12830163d1fe0dd1abb5422f0bff7acf0": "26.8",
+}
 
 # Vendor-shipped manifest filename(s).
 _SUPPORTED_VERSIONS_MANIFEST_NAMES: tuple[str, ...] = (
@@ -182,6 +209,18 @@ def _subdir_is_release_branch(name: str) -> bool:
     return name.endswith(f"_{_RELEASE_BRANCH_SUFFIX}")
 
 
+def _nearest_not_newer(available: dict[tuple[int, ...], Path], running: tuple[int, ...]) -> Path | None:
+    """The newest entry not newer than ``running``, preferring its own minor series."""
+    if len(running) >= 2:
+        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
+        if same_minor:
+            return available[max(same_minor)]
+    not_higher = [vt for vt in available if vt <= running]
+    if not_higher:
+        return available[max(not_higher)]
+    return None
+
+
 def _resolve_versioned_patches_dir(
     patches_root: Path,
     version: str,
@@ -217,48 +256,79 @@ def _resolve_versioned_patches_dir(
         if vt in available and _subdir_is_release_branch(d.name) is not want_branch:
             continue
         available[vt] = d
-    if not available:
-        return None
-    if len(running) >= 2:
-        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
-        if same_minor:
-            return available[max(same_minor)]
-    not_higher = [vt for vt in available if vt <= running]
-    if not_higher:
-        return available[max(not_higher)]
-    return None
+    return _nearest_not_newer(available, running)
 
 
 # Public API
 
 
-def ensure_vllm_patched_for_tracelens(
-    tracelens_root: Path | str | None = None,
-) -> bool:
-    """Ensure the installed vLLM accepts the TraceLens profiler flags."""
+def ensure_vllm_patched_for_tracelens(checkout: Path | None = None) -> PatchedServer | None:
+    """This host's copy of the installed vLLM with the TraceLens patch laid in, whose server accepts the TraceLens
+    profiler flags; ``None`` when the patch cannot be laid.
+
+    ``checkout`` is the vLLM source checkout the server imports ahead of the installed vLLM (the image source
+    ``install.sh`` prepares, whose files a session changes): the copy then mirrors its ``vllm``, as the copy goes ahead of
+    it and would otherwise put the installed files back in front of the server.
+    """
+    return ensure_patched_copy("vllm", checkout)
+
+
+def ensure_sglang_patched_for_tracelens() -> PatchedServer | None:
+    """This host's copy of the installed SGLang with the roofline set (< 0.5.18) or ``sglang_gc_patch`` (>= 0.5.18)
+    laid in; ``None`` when it cannot be laid."""
+    if resolve_sglang_shape_mode() == "sitecustomize":
+        return _ensure_sglang_gc_patched()
+    plan = _discover_sglang_plan()
+    return None if plan is None else _ensure_patched(plan)
+
+
+def ensure_patched_copy(package: str, checkout: Path | None = None) -> PatchedServer | None:
+    """This host's patched copy of the installed package named ``package``, or of a vLLM ``checkout`` the server imports
+    ahead of it (:func:`ensure_vllm_patched_for_tracelens`); ``None`` when it cannot be laid, or this module patches no
+    package of that name."""
+    plan = _plan_for(package, checkout)
+    return None if plan is None else _ensure_patched(plan)
+
+
+def lay_tracelens_patch(package: str, site: Path) -> bool:
+    """Lay TraceLens's patch for the installed package named ``package`` in ``site``, the directory holding a test's own
+    mirror of that package (its farm); whether the mirror carries the patch.
+
+    A link of the mirror to an installed file or directory the patch writes is first replaced by a copy of its own, so
+    nothing is written but the mirror."""
+    plan = _plan_for(package)
+    return plan is not None and _lay_in(plan, site)
+
+
+def _vllm_plan(checkout: Path | None = None) -> _PatchPlan | None:
+    """The plan for the installed vLLM, laid in the ``vllm`` of ``checkout`` instead when it holds one: ``install.sh``
+    activates a checkout only at the installed wheel's commit, so the wheel's version picks its patch."""
     install = _discover_vllm_install()
-    if install is None:
-        return False
-    plan = _discover_vllm_plan(tracelens_root, install=install)
-    if plan is None:
-        return False
-    return _ensure_patched(plan)
+    if install is not None and checkout is not None and (checkout / "vllm" / "__init__.py").is_file():
+        install = (install[0], checkout)
+    return None if install is None else _discover_vllm_plan(install=install)
 
 
-def ensure_sglang_patched_for_tracelens(
-    tracelens_root: Path | str | None = None,
-) -> bool:
-    """SGLang counterpart of :func:`ensure_vllm_patched_for_tracelens`."""
-    plan = _discover_sglang_plan(tracelens_root)
-    if plan is None:
-        return False
-    return _ensure_patched(plan)
+def _sglang_plan() -> _PatchPlan | None:
+    """The plan for the installed SGLang: the roofline set, or ``sglang_gc_patch`` in sitecustomize mode."""
+    if resolve_sglang_shape_mode() != "sitecustomize":
+        return _discover_sglang_plan()
+    version = _detect_installed_sglang_version()
+    return None if version is None else _discover_sglang_gc_plan(version)
+
+
+def _plan_for(package: str, checkout: Path | None = None) -> _PatchPlan | None:
+    """The plan for the installed package named ``package``; ``None`` for a package this module does not patch."""
+    if package == "vllm":
+        return _vllm_plan(checkout)
+    if package == "sglang":
+        return _sglang_plan()
+    return None
 
 
 # SGLang shape-discovery gate: >= 0.5.18 uses the no-patch TraceLens tool
 # (PYTHONPATH + sitecustomize + TRACELENS_SHAPE_DISCOVERY); older uses git-apply.
 _SGLANG_SITECUSTOMIZE_MIN_VERSION: tuple[int, ...] = (0, 5, 18)
-_SGLANG_SHAPE_MODE_ENV = "HYPERLOOM_SGLANG_SHAPE_MODE"
 # No-patch tool location, relative to TRACELENS_ROOT.
 _KERNEL_SHAPE_TOOL_REL: tuple[str, ...] = ("TraceLens", "TraceUtils", "kernel_shape_tool")
 
@@ -268,14 +338,7 @@ def sglang_shape_mode(version: str) -> str:
 
     ``"sitecustomize"`` (>= 0.5.18) uses the no-patch TraceLens tool;
     ``"patched"`` (< 0.5.18) uses the legacy ``git apply`` flow.
-    ``HYPERLOOM_SGLANG_SHAPE_MODE=patch|sitecustomize`` overrides the gate
-    (``auto`` / unset = version-based).
     """
-    override = os.environ.get(_SGLANG_SHAPE_MODE_ENV, "auto").strip().lower()
-    if override in {"patch", "patched"}:
-        return "patched"
-    if override == "sitecustomize":
-        return "sitecustomize"
     vt = _version_tuple(version)
     if vt is None:
         # Unparseable version: keep the safe legacy mechanism.
@@ -283,9 +346,9 @@ def sglang_shape_mode(version: str) -> str:
     return "sitecustomize" if vt >= _SGLANG_SITECUSTOMIZE_MIN_VERSION else "patched"
 
 
-def kernel_shape_tool_dir(tracelens_root: Path | str | None = None) -> Path | None:
+def kernel_shape_tool_dir() -> Path | None:
     """Resolve the no-patch ``kernel_shape_tool`` dir under TRACELENS_ROOT, or None."""
-    root = _resolve_tracelens_root(tracelens_root)
+    root = _resolve_tracelens_root()
     if root is None:
         return None
     tool = root.joinpath(*_KERNEL_SHAPE_TOOL_REL)
@@ -295,57 +358,155 @@ def kernel_shape_tool_dir(tracelens_root: Path | str | None = None) -> Path | No
 def _detect_installed_sglang_version() -> str | None:
     """Return the locally-installed SGLang version, or ``None`` if unimportable."""
     try:
-        import sglang  # type: ignore
-    except Exception:  # noqa: BLE001
+        import sglang  # type: ignore[import-not-found]
+    except (ImportError, OSError):
         return None
     return (getattr(sglang, "__version__", "") or "").strip() or None
 
 
 def resolve_sglang_shape_mode() -> str:
-    """Resolve the SGLang shape mode from override -> local install -> MN version pin.
+    """Resolve the SGLang shape mode from the local install, else the MN version pin.
 
-    ``HYPERLOOM_SGLANG_SHAPE_MODE`` wins; otherwise the version comes from the
-    locally-installed SGLang (single-node / sandbox) or, when SGLang is not
-    importable in the controller (multi-node), ``HYPERLOOM_SGLANG_VERSION_PIN``.
+    The version comes from the locally-installed SGLang (single-node / sandbox)
+    or, when SGLang is not importable in the controller (multi-node),
+    ``HYPERLOOM_SGLANG_VERSION_PIN``.
     Falls back to ``"patched"`` (legacy) when the version cannot be determined.
     """
     version = _detect_installed_sglang_version() or os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
     return sglang_shape_mode(version)
 
 
-def ensure_sglang_patched_for_ck_blockscale(
-    kernelforge_root: Path | str | None = None,
-) -> bool:
-    """Apply the KernelForge fp8 block-scale CK-routing patch to SGLang."""
-    plan = _discover_sglang_ck_plan(kernelforge_root)
+def resolve_sglang_patch_set() -> str:
+    """Patch set the multi-node pods must apply: ``graph-capture`` in sitecustomize mode, else ``roofline``.
+
+    Resolved on the controller and passed to every pod, which cannot see the
+    controller's version pin and would otherwise decide alone.
+    """
+    return "graph-capture" if resolve_sglang_shape_mode() == "sitecustomize" else "roofline"
+
+
+def _gc_patch_deferred_to_pods() -> bool:
+    """True on a multi-node controller, where the pod fan-out applies the patch."""
+    from ._multi_node_env import is_multi_node
+
+    return is_multi_node()
+
+
+def _ensure_sglang_gc_patched() -> PatchedServer | None:
+    """This host's copy of the installed SGLang with ``sglang_gc_patch`` laid in."""
+    version = _detect_installed_sglang_version()
+    if version is None:
+        if _gc_patch_deferred_to_pods():
+            log.info(
+                "_server_patcher: sglang not importable on this controller; graph-capture patch is applied on the pods"
+            )
+            return PatchedServer(None)
+        log.warning("_server_patcher: sglang not importable; skip graph-capture patch")
+        return None
+    plan = _discover_sglang_gc_plan(version)
+    return None if plan is None else _ensure_patched(plan)
+
+
+def ensure_xdit_patched_for_tracelens() -> bool:
+    """Apply TraceLens profiling patches to the xDiT installation.
+
+    xDiT is an editable install at ``/app/xDiT`` (no pip version);
+    version detection matches ``git rev-parse HEAD`` against known
+    image SHAs.  Unknown SHAs are skipped (no patch attempted).
+    The nearest-lower fallback applies only when a known version
+    has no exact patch file.
+    """
+    plan = _discover_xdit_plan()
     if plan is None:
         return False
-    return _ensure_patched(plan)
+    return _ensure_patched_in_place(plan)
+
+
+def _resolve_xdit_patch_file(patches_dir: Path, version: str) -> Path | None:
+    """Pick the TraceLens xDiT patch for ``version`` with nearest-lower fallback."""
+    exact = patches_dir / f"config_xdit_v{version}.patch"
+    if exact.is_file():
+        return exact
+    if not patches_dir.is_dir():
+        return None
+    available: dict[tuple[int, ...], Path] = {}
+    for p in patches_dir.glob("config_xdit_v*.patch"):
+        m = _XDIT_PATCH_RE.match(p.name)
+        if not m:
+            continue
+        vt = _version_tuple(m.group(1))
+        if vt:
+            available[vt] = p
+    if not available:
+        return None
+    running = _version_tuple(version)
+    if running is None:
+        return None
+    not_higher = [vt for vt in available if vt <= running]
+    if not_higher:
+        return available[max(not_higher)]
+    return None
+
+
+def _discover_xdit_plan() -> _PatchPlan | None:
+    """Build the xDiT patch plan for the installed xDiT version.
+
+    Only attempts patching when the HEAD SHA matches a known image.
+    Unknown SHAs are skipped — no patch is attempted.
+    """
+    source_root = Path(os.environ.get("XDIT_PATH", "").strip() or str(_xdit_default_source_root()))
+    if not source_root.is_dir():
+        log.info("_server_patcher: xDiT source root %s not found; skip patch", source_root)
+        return None
+
+    sha = _git_head_sha(source_root)
+    if not sha:
+        log.info("_server_patcher: cannot read xDiT HEAD SHA at %s; skip patch", source_root)
+        return None
+
+    version = _XDIT_SHA_TO_VERSION.get(sha)
+    if version is None:
+        log.warning(
+            "_server_patcher: xDiT SHA %s not in known image table; capture-phase profiling will be unavailable",
+            sha[:12],
+        )
+        return None
+
+    tracelens_root = _resolve_tracelens_root()
+    if tracelens_root is None:
+        log.info("_server_patcher: TRACELENS_ROOT unset/missing — skip xDiT patch")
+        return None
+
+    patches_dir = _patch_tree(tracelens_root, _XDIT_PATCHES_LEAF)
+    patch_file = _resolve_xdit_patch_file(patches_dir, version)
+    if patch_file is None:
+        log.warning(
+            "_server_patcher: no TraceLens patch for xDiT %s "
+            "(searched %s); capture-phase profiling will be unavailable",
+            version,
+            patches_dir,
+        )
+        return None
+
+    sentinel = source_root.joinpath(*_XDIT_SENTINEL_REL)
+    if not sentinel.is_file():
+        log.info(
+            "_server_patcher: xDiT layout unexpected (no %s); skip patch",
+            sentinel,
+        )
+        return None
+
+    return _PatchPlan(
+        framework="xdit",
+        version=version,
+        package=source_root / _XDIT_SENTINEL_REL[0],
+        patches=(patch_file,),
+        sentinel_file=sentinel,
+        sentinel_text=_XDIT_SENTINEL_MARKERS,
+    )
 
 
 # Plan discovery
-
-
-@dataclass(frozen=True)
-class _PatchPlan:
-    """All information needed to apply (or verify) a patch set."""
-
-    framework: str
-    version: str
-    apply_root: Path  # cwd for ``git apply``
-    patches: tuple[Path, ...]  # in apply order
-    sentinel_file: Path  # file we grep to detect "already patched"
-    # Substrings that must ALL be present in ``sentinel_file`` to count as patched; multi-element tuples lower the
-    # false-positive risk.
-    sentinel_text: tuple[str, ...]
-    # Extra file-local markers required for a multi-file set to count as complete (SGLang can partial-patch while
-    # leaving the historical sentinel).
-    extra_sentinels: tuple[tuple[Path, tuple[str, ...]], ...] = ()
-    # Per-plan ``-p<N>`` strip count: ``-p1`` for editable / vLLM, ``-p3`` for wheel SGLang.
-    apply_strip: int = 1
-    # Patch names that may fail ``git apply --check`` and be skipped instead of rolling back the whole atomic set
-    # (e.g. eagle-draft patches whose context drifted across same-version different-commit sglang builds).
-    optional_patches: frozenset[str] = frozenset()
 
 
 #: Annotation-pipeline sentinels as ``(path under the sglang package, markers)``.
@@ -378,15 +539,9 @@ def _patch_set_writes(targets: frozenset[str], parts: tuple[str, ...]) -> bool:
     return any(target.endswith(suffix) for target in targets)
 
 
-def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
-    """Resolve TRACELENS_ROOT from arg → env → None; fail-soft when unset or missing on disk."""
-    if arg:
-        root = Path(arg)
-    else:
-        env = os.environ.get("TRACELENS_ROOT", "").strip()
-        if not env:
-            return None
-        root = Path(env)
+def _resolve_tracelens_root() -> Path | None:
+    """Resolve :func:`paths.tracelens_root`; ``None`` when it is not on disk."""
+    root = paths.tracelens_root()
     return root if root.is_dir() else None
 
 
@@ -430,16 +585,7 @@ def _resolve_vllm_patch_file(patches_dir: Path, version: str) -> Path | None:
             if vt and vt in available:
                 return available[vt]
     running = _version_tuple(version)
-    if running is None:
-        return None
-    if len(running) >= 2:
-        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
-        if same_minor:
-            return available[max(same_minor)]
-    not_higher = [vt for vt in available if vt <= running]
-    if not_higher:
-        return available[max(not_higher)]
-    return None
+    return _nearest_not_newer(available, running) if running else None
 
 
 def _probe_isolated_vllm() -> tuple[str, Path] | None:
@@ -500,7 +646,13 @@ def _vllm_graph_capture_sentinel(version: str, install_root: Path) -> tuple[tupl
     vt = _version_tuple(version)
     if vt is None or vt < _VLLM_GRAPH_CAPTURE_MIN_VERSION:
         return ()
-    return ((install_root.joinpath(*_VLLM_GRAPH_CAPTURE_SENTINEL), _VLLM_GRAPH_CAPTURE_MARKERS),)
+    graph_capture = install_root.joinpath(*_VLLM_GRAPH_CAPTURE_SENTINEL)
+    if vt < _VLLM_WRAPPER_MIN_VERSION:
+        return ((graph_capture, _VLLM_GRAPH_CAPTURE_MARKERS),)
+    return (
+        (graph_capture, _VLLM_GRAPH_CAPTURE_MARKERS[:1]),
+        (install_root.joinpath(*_VLLM_WRAPPER_SENTINEL), _VLLM_WRAPPER_MARKERS),
+    )
 
 
 def _discover_vllm_install() -> tuple[str, Path] | None:
@@ -508,11 +660,11 @@ def _discover_vllm_install() -> tuple[str, Path] | None:
     version = ""
     install_root: Path | None = None
     try:
-        import vllm  # type: ignore
+        import vllm  # type: ignore[import-not-found]
 
         version = (getattr(vllm, "__version__", "") or "").strip()
         install_root = Path(vllm.__file__).resolve().parent.parent
-    except Exception as e:  # noqa: BLE001 - any import failure → isolated-venv fallback
+    except (ImportError, OSError, RuntimeError, TypeError) as e:
         probed = _probe_isolated_vllm()
         if probed is None:
             log.info(
@@ -533,21 +685,14 @@ def _discover_vllm_install() -> tuple[str, Path] | None:
     return version, install_root
 
 
-def _discover_vllm_plan(
-    arg: Path | str | None,
-    *,
-    install: tuple[str, Path] | None = None,
-) -> _PatchPlan | None:
+def _discover_vllm_plan(*, install: tuple[str, Path]) -> _PatchPlan | None:
     """Build the vLLM patch plan for the installed vLLM version."""
-    tracelens_root = _resolve_tracelens_root(arg)
+    tracelens_root = _resolve_tracelens_root()
     if tracelens_root is None:
         log.info("_server_patcher: TRACELENS_ROOT (public) unset/missing — skip vLLM patch")
         return None
 
-    resolved = install if install is not None else _discover_vllm_install()
-    if resolved is None:
-        return None
-    version, install_root = resolved
+    version, install_root = install
 
     patches_dir = _patch_tree(tracelens_root, "vllm_patches")
     patch_file = _resolve_vllm_patch_file(patches_dir, version)
@@ -582,7 +727,7 @@ def _discover_vllm_plan(
     return _PatchPlan(
         framework="vllm",
         version=version,
-        apply_root=install_root,
+        package=install_root / "vllm",
         patches=(patch_file,),
         sentinel_file=sentinel,
         sentinel_text=_VLLM_PROFILER_SENTINELS,
@@ -598,9 +743,9 @@ def _discover_vllm_plan(
 _SGLANG_OPTIONAL_PATCH_MARKERS = ("eagle",)
 
 
-def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
+def _discover_sglang_plan() -> _PatchPlan | None:
     """Build the SGLang patch plan for the installed SGLang version."""
-    tracelens_root = _resolve_tracelens_root(arg)
+    tracelens_root = _resolve_tracelens_root()
     if tracelens_root is None:
         log.warning(
             "_server_patcher: TRACELENS_ROOT (public) unset/missing — skip SGLang patch "
@@ -609,8 +754,8 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         return None
 
     try:
-        import sglang  # type: ignore
-    except Exception as e:  # noqa: BLE001
+        import sglang  # type: ignore[import-not-found]
+    except (ImportError, OSError, RuntimeError) as e:
         log.warning("_server_patcher: sglang not importable (%s); skip patch", e)
         return None
 
@@ -628,35 +773,12 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     # Resolved before the patch set so its git dir can tell a source checkout
     # from a point release when the version string cannot.
     sglang_module = Path(sglang.__file__).resolve()
-    apply_resolution = _resolve_sglang_apply_root(sglang_module)
-    if apply_resolution is None:
+    source_root = _sglang_source_root(sglang_module)
+    if source_root is None:
         return None
-    apply_root, apply_strip = apply_resolution
 
-    # Per-version subdir layout required.
-    patches_dir = _resolve_versioned_patches_dir(patches_root, version, apply_root)
+    patches_dir = _supported_sglang_patches_dir(patches_root, version, source_root)
     if patches_dir is None:
-        log.warning(
-            "_server_patcher: no SGLang patches found under %s/%s/ for "
-            "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+ — "
-            "kernel shape profiling will be unavailable",
-            patches_root,
-            _versioned_patches_subdir_name(version, apply_root) or "<unknown>",
-            version,
-        )
-        return None
-
-    if not _version_accepted(version, patches_dir=patches_dir):
-        log.warning(
-            "_server_patcher: SGLang %s not in supported version list "
-            "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
-            "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
-            "then built-in minor allowlist %s); skip — kernel shape profiling "
-            "will be unavailable",
-            version,
-            patches_dir,
-            _SGLANG_DEFAULT_ALLOWED_MINORS,
-        )
         return None
     patches = tuple(sorted(patches_dir.glob("*.patch")))
     if not patches:
@@ -681,24 +803,60 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     return _PatchPlan(
         framework="sglang",
         version=version,
-        apply_root=apply_root,
+        package=sglang_pkg,
         patches=patches,
         sentinel_file=sentinel,
         # Sentinel file alone is insufficient; extra_sentinels require the annotation pipeline.
         sentinel_text=("kernel_shape_profiler",),
         extra_sentinels=extra_sentinels,
-        apply_strip=apply_strip,
+        apply_strip=_SGLANG_PATCH_STRIP,
         optional_patches=optional_patches,
     )
 
 
-def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
-    """Pick ``(apply_root, strip_count)`` for the active SGLang install."""
+def _supported_sglang_patches_dir(patches_root: Path, version: str, source_root: Path) -> Path | None:
+    """The versioned SGLang patches dir, or ``None`` (logged) when absent or the version is unsupported."""
+    # Per-version subdir layout required.
+    patches_dir = _resolve_versioned_patches_dir(patches_root, version, source_root)
+    if patches_dir is None:
+        log.warning(
+            "_server_patcher: no SGLang patches found under %s/%s/ for "
+            "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+ — "
+            "kernel shape profiling will be unavailable",
+            patches_root,
+            _versioned_patches_subdir_name(version, source_root) or "<unknown>",
+            version,
+        )
+        return None
+
+    if not _version_accepted(version, patches_dir=patches_dir):
+        log.warning(
+            "_server_patcher: SGLang %s not in supported version list "
+            "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
+            "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
+            "then built-in minor allowlist %s); skip — kernel shape profiling "
+            "will be unavailable",
+            version,
+            patches_dir,
+            _SGLANG_DEFAULT_ALLOWED_MINORS,
+        )
+        return None
+    return patches_dir
+
+
+#: TraceLens cuts its SGLang patches in the checkout (``a/python/sglang/...``); two components off, their paths are
+#: relative to the directory holding ``sglang``, in a checkout and an installed wheel alike.
+_SGLANG_PATCH_STRIP = 2
+
+
+def _sglang_source_root(sglang_module: Path) -> Path | None:
+    """The checkout the active SGLang is installed from, or its package directory when it is a wheel; ``None`` for an
+    unexpected layout."""
     if sglang_module.parent.parent.name == "python":
-        return sglang_module.parent.parent.parent, 1
+        return sglang_module.parent.parent.parent
     sglang_dir = sglang_module.parent
     if sglang_dir.name == "sglang":
-        return sglang_dir, 3
+        return sglang_dir
     log.info(
         "_server_patcher: SGLang install at %s has unexpected layout (parent dir name=%r); skip patching",
         sglang_module,
@@ -707,496 +865,86 @@ def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
     return None
 
 
-# CK fp8 block-scale routing markers added to ``fp8_utils.py`` by the KernelForge-owned patch; all three must be
-# present to count as patched.
-_SGLANG_CK_BLOCKSCALE_SENTINELS: tuple[str, ...] = (
-    "_fp8_blockscale_ck_max_m",
-    "SGLANG_FP8_BLOCKSCALE_CK_MAX_M",
-    "ck_gemm_a8w8_blockscale",
+_SGLANG_GC_SENTINELS: tuple[str, ...] = (
+    "_set_profile_trace_tag",
+    "_profile_runner_name",
 )
 
 
-def _resolve_serving_patches_root(arg: Path | str | None) -> Path | None:
-    """Resolve KernelForge's ``serving_patches`` tree; fail-soft."""
-    if arg:
-        candidate = Path(arg) / "serving_patches"
-        if candidate.is_dir():
-            log.warning(
-                "_server_patcher: patching SGLang from an explicit serving_patches tree at %s, "
-                "not the one packaged with kernelforge",
-                candidate,
-            )
-            return candidate
-        # An override that does not resolve falls through to the packaged tree, which is the right fail-soft behaviour
-        # but the wrong silence: the caller asked for a specific tree and got a different one.
+def _discover_sglang_gc_plan(version: str) -> _PatchPlan | None:
+    """Build the ``sglang_gc_patch`` plan for an exact ``sglang_<X_Y_Z>`` dir; strict ``git apply`` only.
+
+    No nearest-version fallback and no fuzzy apply: the patch adds an unconditional
+    ``_set_profile_trace_tag`` call to the capture loop, so a drifted apply could
+    break CUDA-graph capture, and newer releases may already carry the upstream fix.
+    """
+    tracelens_root = _resolve_tracelens_root()
+    if tracelens_root is None:
         log.warning(
-            "_server_patcher: explicit KernelForge root %s has no serving_patches directory; "
-            "falling back to the packaged tree, so the requested patches are NOT the ones applied",
-            arg,
-        )
-
-    try:
-        from kernelforge.resources import default_project_root, packaged_data_root, resource_path
-
-        resolved = resource_path("serving_patches", default_project_root(), missing_ok=True)
-        packaged_root = packaged_data_root()
-    except ImportError:
-        return None
-    if not resolved.is_dir():
-        return None
-    if resolved.parent != packaged_root:
-        log.warning(
-            "_server_patcher: patching SGLang from %s (KERNELFORGE_PROJECT_ROOT override), "
-            "not the tree packaged with kernelforge at %s",
-            resolved,
-            packaged_root / "serving_patches",
-        )
-    return resolved
-
-
-def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
-    """Build the SGLang fp8 block-scale CK-routing patch plan."""
-    serving_patches_root = _resolve_serving_patches_root(arg)
-    if serving_patches_root is None:
-        log.info(
-            "_server_patcher: no KernelForge serving_patches tree resolved from the packaged "
-            "kernelforge — skip SGLang fp8 block-scale CK patch "
-            "(SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched tree)"
+            "_server_patcher: TRACELENS_ROOT unset/missing — skip SGLang graph-capture "
+            "patch (per-batch-size CUDA-graph capture can IndexError on multi-variant models)"
         )
         return None
 
     try:
-        import sglang  # type: ignore
-    except Exception as e:  # noqa: BLE001 - any import failure → fail-soft
-        log.warning(
-            "_server_patcher: sglang not importable (%s); skip CK block-scale patch",
-            e,
-        )
+        import sglang  # type: ignore[import-not-found]
+    except (ImportError, OSError, RuntimeError) as e:
+        log.warning("_server_patcher: sglang not importable (%s); skip graph-capture patch", e)
+        return None
+    if not getattr(sglang, "__file__", None):
+        log.warning("_server_patcher: sglang.__file__ is unset; skip graph-capture patch")
         return None
 
-    version = (getattr(sglang, "__version__", "") or "").strip()
-
-    # KernelForge layout: ``serving_patches/sglang/`` holds the per-version subdirs plus the SUPPORTED_VERSIONS
-    # manifest.
-    patches_root = serving_patches_root / "sglang"
+    patches_root = _patch_tree(tracelens_root, "sglang_gc_patch")
     if not patches_root.is_dir():
         log.warning(
-            "_server_patcher: KernelForge SGLang patches root missing (%s); skip CK block-scale patch",
+            "_server_patcher: SGLang graph-capture patches root missing (%s); skip",
             patches_root,
-        )
-        return None
-
-    patches_dir = _resolve_versioned_patches_dir(patches_root, version)
-    if patches_dir is None:
-        log.warning(
-            "_server_patcher: no KernelForge CK block-scale patch found under %s/%s/ for sglang %s; skip",
-            patches_root,
-            _versioned_patches_subdir_name(version) or "<unknown>",
-            version,
-        )
-        return None
-
-    # KernelForge ships the manifest at patches_root (one level above the per-version subdir), so consult patches_root
-    # for the version gate.
-    if not _version_accepted(version, patches_dir=patches_root):
-        log.warning(
-            "_server_patcher: SGLang %s not in supported version list "
-            "(consulted: $HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS, "
-            "$HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS, %s/SUPPORTED_VERSIONS, "
-            "then built-in minor allowlist %s); skip CK block-scale patch",
-            version,
-            patches_root,
-            _SGLANG_DEFAULT_ALLOWED_MINORS,
-        )
-        return None
-
-    patches = tuple(sorted(patches_dir.glob("*.patch")))
-    if not patches:
-        log.warning(
-            "_server_patcher: KernelForge CK block-scale patches directory empty; skip",
         )
         return None
 
     sglang_module = Path(sglang.__file__).resolve()
-    apply_resolution = _resolve_sglang_apply_root(sglang_module)
-    if apply_resolution is None:
+    source_root = _sglang_source_root(sglang_module)
+    if source_root is None:
         return None
-    apply_root, apply_strip = apply_resolution
 
-    # Sentinel: the patch edits ``sglang/srt/layers/quantization/fp8_utils.py`` in place (both layouts).
-    sentinel = sglang_module.parent / "srt" / "layers" / "quantization" / "fp8_utils.py"
+    candidates = [patches_root / name for name in _versioned_patches_subdir_names(version, source_root)]
+    patches_dir = next((d for d in candidates if d.is_dir() and any(d.glob("*.patch"))), None)
+    if patches_dir is None:
+        log.warning(
+            "_server_patcher: no sglang_gc_patch set for SGLang %s under %s (exact version dir required, "
+            "tried %s); skip — per-batch-size CUDA-graph capture can IndexError on multi-variant models",
+            version,
+            patches_root,
+            [d.name for d in candidates] or "<unparseable version>",
+        )
+        return None
+    patches = tuple(sorted(patches_dir.glob("*.patch")))
+
+    sentinel = sglang_module.parent / "srt" / "model_executor" / "runner" / "decode_cuda_graph_runner.py"
     if not sentinel.is_file():
         log.warning(
-            "_server_patcher: SGLang install layout unexpected (no %s); skip CK block-scale patch",
+            "_server_patcher: SGLang install layout unexpected (no %s); skip graph-capture patch",
             sentinel,
         )
         return None
 
     return _PatchPlan(
-        framework="sglang-ck",
+        framework="sglang-gc",
         version=version,
-        apply_root=apply_root,
+        package=sglang_module.parent,
         patches=patches,
         sentinel_file=sentinel,
-        sentinel_text=_SGLANG_CK_BLOCKSCALE_SENTINELS,
-        apply_strip=apply_strip,
+        sentinel_text=_SGLANG_GC_SENTINELS,
+        apply_strip=_SGLANG_PATCH_STRIP,
+        allow_fuzzy=False,
     )
-
-
-# Application core
-
-
-def _ensure_patched(plan: _PatchPlan) -> bool:
-    """Drive a plan to patched state: fast check, lock, re-check, apply."""
-    if _is_patched(plan):
-        return True
-    with best_effort_file_lock(_LOCK_PATH, label="_server_patcher"):
-        if _is_patched(plan):
-            return True
-        return _apply_atomic(plan)
-
-
-def _markers_present(path: Path, markers: Sequence[str]) -> bool:
-    """True iff ``path`` exists and contains every marker substring."""
-    try:
-        if not path.exists():
-            return False
-        content = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    return all(marker in content for marker in markers)
-
-
-def _is_patched(plan: _PatchPlan) -> bool:
-    """True iff the sentinel file (and every extra_sentinel) exists with all of its marker substrings present."""
-    if not _markers_present(plan.sentinel_file, plan.sentinel_text):
-        return False
-    # The plan only keeps sentinels this patch set writes, so an absent file is an incomplete apply, not an
-    # inapplicable layout.
-    return all(_markers_present(path, markers) for path, markers in plan.extra_sentinels)
-
-
-def _apply_atomic(plan: _PatchPlan) -> bool:
-    """Apply every patch in ``plan.patches`` as a transaction."""
-    git = shutil.which("git")
-    if git is None:
-        log.warning(
-            "_server_patcher: `git` not on PATH — cannot apply %s patches "
-            "(install git in the runtime image to enable TraceLens flags)",
-            plan.framework,
-        )
-        return False
-    patch_bin = shutil.which("patch")  # may be ``None`` — fuzzy fallback then disabled
-
-    # Per-patch precheck: each must pass ``git apply --check`` (strict) OR the fuzzy ``patch --fuzz=2 --dry-run``
-    # fallback; if neither accepts a patch the whole set fail-softs.
-    strip_arg = f"-p{plan.apply_strip}"
-
-    apply_modes: dict[Path, str] = {}
-    for p in plan.patches:
-        if _git(git, ("apply", "--check", strip_arg, str(p)), plan.apply_root):
-            apply_modes[p] = "git"
-            continue
-        if patch_bin and _patch_dry_run(patch_bin, p, plan.apply_root, plan.apply_strip):
-            log.warning(
-                "_server_patcher: %s patch %s did not apply cleanly with "
-                "`git apply --check %s`; falling back to `patch %s --fuzz=2` "
-                "(TraceLens patch may lag deployed %s by a point release)",
-                plan.framework,
-                p.name,
-                strip_arg,
-                strip_arg,
-                plan.framework,
-            )
-            apply_modes[p] = "patch"
-            continue
-        # Forward apply fails: check whether this patch is ALREADY APPLIED (a clean ``git apply -R --check`` succeeds
-        # iff the tree already contains its post-image).
-        if _git(git, ("apply", "-R", "--check", strip_arg, str(p)), plan.apply_root):
-            log.info(
-                "_server_patcher: %s patch %s already applied (reverse "
-                "`git apply -R --check %s` is clean); skipping it from the "
-                "transaction so the remaining patches still apply",
-                plan.framework,
-                p.name,
-                strip_arg,
-            )
-            apply_modes[p] = "skip"
-            continue
-        # Symmetric check for patches previously applied via fuzzy `patch` (git reverse may fail on fuzzy-applied
-        # hunks).
-        if patch_bin and _patch_reverse_dry_run(
-            patch_bin,
-            p,
-            plan.apply_root,
-            plan.apply_strip,
-        ):
-            log.info(
-                "_server_patcher: %s patch %s already applied (fuzzy reverse dry-run clean); skipping it",
-                plan.framework,
-                p.name,
-            )
-            apply_modes[p] = "skip"
-            continue
-        if p.name in plan.optional_patches:
-            log.warning(
-                "_server_patcher: optional %s patch %s does not apply "
-                "(`git apply --check %s` + fuzzy both failed, not already "
-                "applied) — skipping it so the critical patches still apply "
-                "atomically (version %s; non-critical to kernel shape profiling)",
-                plan.framework,
-                p.name,
-                strip_arg,
-                plan.version,
-            )
-            apply_modes[p] = "skip"
-            continue
-        log.warning(
-            "_server_patcher: `git apply --check %s` AND fuzzy `patch %s "
-            "--dry-run` both failed for %s (version %s, patch %s), and it is "
-            "not already applied (reverse check failed); fail-soft skip",
-            strip_arg,
-            strip_arg,
-            plan.framework,
-            plan.version,
-            p.name,
-        )
-        return False
-
-    applied: list[tuple[Path, str]] = []
-    skipped = 0
-    for p in plan.patches:
-        mode = apply_modes[p]
-        if mode == "skip":
-            # Already applied; nothing to do and nothing to roll back.
-            skipped += 1
-            continue
-        if mode == "git":
-            ok = _git(git, ("apply", strip_arg, str(p)), plan.apply_root)
-        else:
-            ok = _patch_apply(
-                patch_bin,
-                p,
-                plan.apply_root,
-                plan.apply_strip,  # type: ignore[arg-type]
-            )
-        if ok:
-            applied.append((p, mode))
-            continue
-        log.error(
-            "_server_patcher: %s patch %s failed during apply after "
-            "passing precheck (mode=%s); rolling back %d previously-applied "
-            "patches",
-            plan.framework,
-            p.name,
-            mode,
-            len(applied),
-        )
-        _rollback_applied(applied, plan, git, patch_bin, strip_arg)
-        return False
-
-    fuzzy_count = sum(1 for _, mode in applied if mode == "patch")
-    log.info(
-        "_server_patcher: applied %d patch(es) for %s %s "
-        "(strict=%d, fuzzy=%d, already-applied/skipped=%d) (issue #194 §4/§5)",
-        len(applied),
-        plan.framework,
-        plan.version,
-        len(applied) - fuzzy_count,
-        fuzzy_count,
-        skipped,
-    )
-    # Post-apply sentinel verification: confirm all sentinel markers are present (catches all-skipped,
-    # semantically-wrong fuzzy apply, or missing annotation-pipeline markers).
-    if not _is_patched(plan):
-        log.error(
-            "_server_patcher: post-apply sentinel check FAILED for %s %s — "
-            "patches were applied/skipped (%d applied, %d skipped) but the "
-            "sentinel markers are not all present; rolling back %d "
-            "applied patch(es) so the framework tree matches the reported "
-            "failure (no half-patched fallback)",
-            plan.framework,
-            plan.version,
-            len(applied),
-            skipped,
-            len(applied),
-        )
-        _rollback_applied(applied, plan, git, patch_bin, strip_arg)
-        return False
-    return True
-
-
-def _rollback_applied(
-    applied: list[tuple[Path, str]],
-    plan: _PatchPlan,
-    git: str,
-    patch_bin: str | None,
-    strip_arg: str,
-) -> None:
-    """Reverse-apply ``applied`` patches (newest first) to restore the tree."""
-    for prev, prev_mode in reversed(applied):
-        if prev_mode == "git":
-            rolled_back = _git(
-                git,
-                ("apply", "-R", strip_arg, str(prev)),
-                plan.apply_root,
-            )
-        else:
-            rolled_back = patch_bin is not None and _patch_apply(
-                patch_bin,
-                prev,
-                plan.apply_root,
-                plan.apply_strip,
-                reverse=True,
-            )
-        if not rolled_back:
-            log.error(
-                "_server_patcher: rollback of %s (mode=%s) also failed — "
-                "install may be in inconsistent state; manual review "
-                "required",
-                prev.name,
-                prev_mode,
-            )
-
-
-# fuzz=2 tolerates whitespace / single-line drift but rejects multi-line drift hard (a higher fuzz could apply hunks
-# to a semantically wrong location).
-_FUZZ = 2
-
-
-def _run_patch(
-    patch_bin: str,
-    patch_file: Path,
-    cwd: Path,
-    *extra_flags: str,
-    strip: int = 1,
-    spawn_log: Callable[..., None],
-    log_stderr: bool = False,
-    reverse_label: str = "",
-) -> bool:
-    """Run ``patch -p<strip> --fuzz=2 <extra_flags>`` with ``patch_file`` on stdin."""
-    try:
-        with patch_file.open("rb") as fh:
-            result = subprocess.run(
-                (patch_bin, f"-p{strip}", f"--fuzz={_FUZZ}", *extra_flags),
-                cwd=str(cwd),
-                stdin=fh,
-                capture_output=True,
-                timeout=_GIT_TIMEOUT_SEC,
-            )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        spawn_log(
-            "_server_patcher: patch%s in %s failed to spawn (%s)",
-            reverse_label,
-            cwd,
-            e,
-        )
-        return False
-    if result.returncode != 0:
-        if log_stderr:
-            err = result.stderr.decode("utf-8", errors="replace")[:500] if result.stderr else ""
-            log.debug(
-                "_server_patcher: patch%s rc=%d stderr=%r",
-                reverse_label,
-                result.returncode,
-                err,
-            )
-        return False
-    return True
-
-
-def _patch_dry_run(
-    patch_bin: str,
-    patch_file: Path,
-    cwd: Path,
-    strip: int = 1,
-) -> bool:
-    """Probe ``patch -p<strip> --fuzz=2 --dry-run`` for a single patch."""
-    return _run_patch(
-        patch_bin,
-        patch_file,
-        cwd,
-        "--dry-run",
-        "--silent",
-        strip=strip,
-        spawn_log=log.warning,
-        reverse_label=" --dry-run",
-    )
-
-
-def _patch_reverse_dry_run(
-    patch_bin: str,
-    patch_file: Path,
-    cwd: Path,
-    strip: int = 1,
-) -> bool:
-    """Probe ``patch -R -p<strip> --fuzz=2 --dry-run`` for a single patch."""
-    return _run_patch(
-        patch_bin,
-        patch_file,
-        cwd,
-        "-R",
-        "--dry-run",
-        "--silent",
-        strip=strip,
-        spawn_log=log.debug,
-        reverse_label=" -R --dry-run",
-    )
-
-
-def _patch_apply(
-    patch_bin: str,
-    patch_file: Path,
-    cwd: Path,
-    strip: int = 1,
-    *,
-    reverse: bool = False,
-) -> bool:
-    """Real ``patch -p<strip> --fuzz=2`` apply (or reverse)."""
-    flags = ("--reverse", "--silent") if reverse else ("--silent",)
-    return _run_patch(
-        patch_bin,
-        patch_file,
-        cwd,
-        *flags,
-        strip=strip,
-        spawn_log=log.warning,
-        log_stderr=True,
-        reverse_label=" --reverse" if reverse else "",
-    )
-
-
-def _git(git: str, args: Sequence[str], cwd: Path) -> bool:
-    """Run ``git <args>`` in ``cwd``."""
-    try:
-        result = subprocess.run(
-            (git, *args),
-            cwd=str(cwd),
-            capture_output=True,
-            timeout=_GIT_TIMEOUT_SEC,
-        )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        log.warning(
-            "_server_patcher: git %s in %s failed to spawn (%s)",
-            list(args),
-            cwd,
-            e,
-        )
-        return False
-    if result.returncode != 0:
-        err = result.stderr.decode("utf-8", errors="replace")[:500] if result.stderr else ""
-        log.debug(
-            "_server_patcher: git %s rc=%d stderr=%r",
-            list(args),
-            result.returncode,
-            err,
-        )
-        return False
-    return True
 
 
 __all__ = [
+    "ensure_patched_copy",
     "ensure_vllm_patched_for_tracelens",
     "ensure_sglang_patched_for_tracelens",
-    "ensure_sglang_patched_for_ck_blockscale",
+    "ensure_xdit_patched_for_tracelens",
+    "lay_tracelens_patch",
 ]

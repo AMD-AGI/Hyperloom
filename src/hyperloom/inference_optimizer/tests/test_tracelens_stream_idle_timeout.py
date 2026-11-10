@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from hyperloom.agents.kernel.tools import tracelens_skill_runner as tr
+from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner as tr
 
 
 class ToolUseBlock:

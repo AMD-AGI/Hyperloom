@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: Code changes
+
+# Called by tests-coverage.yml and lint.yml. Those workflows start on every push and pull request, so the checks the
+# main ruleset requires always report; this job tells them whether the event changed anything beyond the
+# documentation-only list in CONTRIBUTING.md (scripts/ci_code_changed.py), and their expensive jobs run only when it
+# did. A pull request is measured as its merge commit against the base it merges into; a push as its before..after.
+on:
+  workflow_call:
+    outputs:
+      code:
+        description: "'true' unless every changed path is documentation-only"
+        value: ${{ jobs.classify.outputs.code }}
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    name: classify
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The pull request merge commit and its first parent, the base it merges into.
+          fetch-depth: 2
+
+      - name: Classify the changed paths
+        id: classify
+        env:
+          BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: |
+          set -euo pipefail
+          base="${BEFORE:-HEAD^1}"
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
+            git fetch --no-tags --depth=1 origin "$BEFORE"
+          fi
+          python3 scripts/ci_code_changed.py "$base" HEAD | tee -a "$GITHUB_OUTPUT"

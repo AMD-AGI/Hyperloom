@@ -11,14 +11,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
+from kernelforge.workflows.rewrite_controller.paths import ControllerLayout, operator_directory_name
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import STACK_EVENT_SECTIONS
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
 from hyperloom.orchestrator.kernel import controller_patch_integration as integration
 from hyperloom.orchestrator.kernel.controller_patch_integration import (
+    KeepSession,
     integrate_controller_patches,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -167,7 +170,7 @@ def test_patch_directories_follow_controller_task_priority(tmp_path: Path, monke
     alphabetical = tuple(root / name for name in ("first", "second", "third"))
     priorities = {"first": 2, "second": 0, "third": 1}
 
-    monkeypatch.setattr(integration, "discover_controller_patch_dirs", lambda _root: alphabetical)
+    monkeypatch.setattr(integration, "published_operator_dirs", lambda _layout: alphabetical)
     monkeypatch.setattr(
         integration,
         "load_task",
@@ -176,7 +179,7 @@ def test_patch_directories_follow_controller_task_priority(tmp_path: Path, monke
         ),
     )
 
-    ordered = integration._priority_ordered_patch_dirs(root)
+    ordered = integration._priority_ordered_patch_dirs(ControllerLayout(tmp_path / "cycle"))
     assert [path.name for path in ordered] == ["second", "third", "first"]
 
 
@@ -201,6 +204,7 @@ async def _integrate(
     session_dir: Path,
     shared_state: SharedState,
     validator,
+    **options,
 ):
     """Integrate through the production KEEP recorder bound to *shared_state*.
 
@@ -211,10 +215,13 @@ async def _integrate(
     coordinator.shared_state = shared_state
     return await integrate_controller_patches(
         patches_root=patches_root,
-        session_dir=session_dir,
-        shared_state=shared_state,
-        record_keep=coordinator._record_integrate_keep,
+        session=KeepSession(
+            session_dir=session_dir,
+            shared_state=shared_state,
+            record_keep=coordinator.writeback.record_integrate_keep,
+        ),
         validator=validator,
+        **options,
     )
 
 
@@ -265,6 +272,48 @@ async def test_multiple_patches_are_kept_and_committed_one_by_one(tmp_path: Path
     assert int(_git(repo, "rev-list", "--count", "HEAD")) == 3
     assert len(state.optimization_stack) == 2
     assert state.current_best["tput"] == 112.0
+
+
+@pytest.mark.asyncio
+async def test_a_patch_whose_round_the_phase_cannot_fit_is_left_unapplied(tmp_path: Path, monkeypatch) -> None:
+    """The Controller's reserve pays for the first round; a later one the KERNEL budget cannot fit never starts."""
+    from hyperloom.orchestrator.phases import machine_state
+    from hyperloom.orchestrator.phases.kernel_round_budget import controller_round_stop
+
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    for name, value in (("first", 2), ("second", 3)):
+        _publish(
+            patches,
+            repo,
+            base,
+            kernel_name=name,
+            kernel_path=f"{name}.py",
+            patch=_patch(repo, f"{name}.py", f"VALUE = {value}\n"),
+        )
+    seen: list[str] = []
+
+    async def _validate(publication):
+        seen.append(publication.identity["kernel_name"])
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = _state(session_dir, repo)
+    state.baseline_runtime_sec = 600.0
+    monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: 60.0)
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_validate,
+        admit_round=lambda rounds_run: controller_round_stop(state, rounds_run),
+    )
+
+    assert seen == ["first"]
+    assert [result.status for result in summary.results] == ["kept", "phase_time_exhausted"]
+    assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert summary.status == "completed"
 
 
 @pytest.mark.asyncio
@@ -927,7 +976,7 @@ async def test_a_commit_that_lands_is_reported_even_if_the_ledger_write_fails(tm
     state = _state(session_dir, repo)
 
     def _boom(*_args, **_kwargs):
-        raise RuntimeError("state file is read-only")
+        raise PermissionError("state file is read-only")
 
     state.save = _boom  # type: ignore[method-assign]
     summary = await _integrate(
@@ -1193,21 +1242,71 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
     session_dir.mkdir()
     coordinator = _coordinator(session_dir, repo)
     coordinator.shared_state.benchmark_mode = mode
-    monkeypatch.setattr(coordinator, "_kernel_rewrite_controller_timeouts", lambda: (60, 90))
-    monkeypatch.setattr(controller_submit, "run_controller_subprocess", lambda **kwargs: {"patch_count": 1})
+    phase = coordinator.phase_kernel
+    monkeypatch.setattr(phase, "_kernel_rewrite_controller_timeouts", lambda: (60, 90))
+    monkeypatch.setattr(
+        controller_submit, "run_controller_subprocess", lambda **kwargs: {"status": "completed", "patch_count": 1}
+    )
     monkeypatch.setattr(controller_submit, "record_controller_llm_usage", lambda **kwargs: None)
     callbacks = []
 
     async def capture_callback(**kwargs):
-        callbacks.append(kwargs["record_keep"])
+        callbacks.append(kwargs["session"].record_keep)
         return integration.ControllerIntegrationSummary("completed", (), 0, 0, 0, "")
 
     monkeypatch.setattr(integration, "integrate_controller_patches", capture_callback)
-    await coordinator._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output")
+    await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output", {})
 
     assert len(callbacks) == 1
-    assert callbacks[0].__func__ is WritebackCollaborator._record_integrate_keep
+    assert callbacks[0].__func__ is WritebackCollaborator.record_integrate_keep
     assert callbacks[0].__self__.shared_state is coordinator.shared_state
+
+
+@pytest.mark.asyncio
+async def test_a_controller_the_orchestrator_cancelled_is_not_this_cycles_result(tmp_path, monkeypatch):
+    """A stop mid-Controller leaves the cycle unsettled, so the resumed entry runs a fresh Controller."""
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE
+    from hyperloom.orchestrator.kernel import controller_submit
+    from hyperloom.orchestrator.phases.controller_settlement import kernel_controller_settled
+
+    repo, base = _repo(tmp_path)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coordinator = _coordinator(session_dir, repo)
+    coordinator.shared_state.kernel_optimizer = "forge"
+    phase = coordinator.phase_kernel
+    output = tmp_path / "cycle"
+    _publish(
+        ControllerLayout(output).patches_root,
+        repo,
+        base,
+        kernel_name="published",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+    monkeypatch.setattr(phase, "_kernel_rewrite_controller_timeouts", lambda: (60, 90))
+    monkeypatch.setattr(
+        controller_submit,
+        "run_with_session_kill",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, ORCHESTRATOR_CANCELLED_RETURNCODE, "", ""),
+    )
+    monkeypatch.setattr(controller_submit, "record_controller_llm_usage", lambda **kwargs: None)
+    integrated: list[dict] = []
+
+    async def _integrate(**kwargs):
+        integrated.append(kwargs)
+        return integration.ControllerIntegrationSummary("completed", (), 0, 0, 0, "")
+
+    monkeypatch.setattr(integration, "integrate_controller_patches", _integrate)
+    await phase._run_kernel_rewrite_controller(tmp_path / "handoff", output, {})
+
+    read = controller_submit.read_controller_result(
+        output_dir=output, returncode=ORCHESTRATOR_CANCELLED_RETURNCODE, timed_out=False
+    )
+    assert (read["status"], read["patch_count"]) == ("cancelled", 1)
+    assert integrated == []
+    assert coordinator.shared_state.kernel_rewrite_controller_result == {}
+    assert kernel_controller_settled(coordinator.shared_state) is False
 
 
 @pytest.mark.asyncio
@@ -1250,31 +1349,41 @@ async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path
         stack_event.record_adoption(
             stack_index=0,
             entry=state.optimization_stack[0],
-            throughput_before=100.0,
-            throughput_after=110.0,
             baseline_tput=100.0,
-            objective="output_throughput",
+            graded=GradedComparison(
+                objective="output_throughput",
+                candidate=110.0,
+                reference=100.0,
+                verdict=VERDICT_KEEP,
+            ),
         )
         stack_event.record_validation(
-            stack_len=1,
-            baseline_tput=100.0,
-            validated_tput=110.0,
-            validated_gain_pct=10.0,
-            source="writeback",
-            measurement_basis="e2e_decision_round",
-            graded_objective="output_throughput",
-            ts=state.cumulative_gain_validated_ts,
+            stack_event.StackValidation(
+                stack_len=1,
+                graded=GradedComparison(
+                    objective="output_throughput",
+                    candidate=110.0,
+                    reference=100.0,
+                    verdict=VERDICT_KEEP,
+                ),
+                validated_gain_pct=10.0,
+                source="writeback",
+                measurement_basis="e2e_decision_round",
+                ts=state.cumulative_gain_validated_ts,
+            ),
         )
 
         summary = await integrate_controller_patches(
             patches_root=patches,
-            session_dir=session_dir,
-            shared_state=state,
-            record_keep=coordinator._record_integrate_keep,
+            session=KeepSession(
+                session_dir=session_dir,
+                shared_state=state,
+                record_keep=coordinator.writeback.record_integrate_keep,
+            ),
             validator=_validate,
         )
         ledger, _status = stack_event.assemble_stack_ext(
-            stack_event_parts(),
+            event_parts(STACK_EVENT_SECTIONS),
             event=stack_event.stack_event_id(),
         )
 
@@ -1524,3 +1633,92 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
     assert _git(repo, "rev-parse", "HEAD").lower() != base
     assert state.current_best["tput"] == 150.0
     assert state.optimization_stack == []
+
+
+def _git_failing_with(exc: BaseException):
+    def _fail(_repo: Path, *_args: str) -> str:
+        raise exc
+
+    return _fail
+
+
+# probe -> result when git cannot answer
+_GIT_PROBES = {
+    "head_commit": (lambda: integration._head_commit(Path("repo")), ""),
+    "tracked_at_head": (lambda: integration._tracked_at_head(Path("repo"), "first.py"), False),
+}
+
+
+@pytest.mark.parametrize("probe", list(_GIT_PROBES))
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("git not installed"),
+        subprocess.TimeoutExpired(cmd="git", timeout=60),
+        subprocess.CalledProcessError(128, ["git"]),
+    ],
+    ids=["oserror", "timeout", "called-process"],
+)
+def test_a_git_probe_reads_a_git_failure_as_no_answer(monkeypatch: pytest.MonkeyPatch, probe, failure) -> None:
+    monkeypatch.setattr(integration, "_git_output", _git_failing_with(failure))
+    call, expected = _GIT_PROBES[probe]
+    outcome = call()
+    assert outcome == expected
+
+
+@pytest.mark.parametrize("probe", list(_GIT_PROBES))
+def test_a_git_probe_propagates_an_unexpected_failure(monkeypatch: pytest.MonkeyPatch, probe) -> None:
+    monkeypatch.setattr(integration, "_git_output", _git_failing_with(TypeError("bad repo")))
+    with pytest.raises(TypeError, match="bad repo"):
+        _GIT_PROBES[probe][0]()
+
+
+@pytest.mark.asyncio
+async def test_a_controller_keep_is_reinstalled_on_a_fresh_tree(tmp_path: Path) -> None:
+    """A KEEP the Controller committed is part of current_best, so a resume onto a stock tree has to put it back."""
+    from hyperloom.orchestrator.source_snapshot import install_source_layers, source_layer_overlay_dir
+
+    repo, base = _repo(tmp_path)
+    source = repo / "python" / "sglang" / "first.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add sglang package")
+    base = _git(repo, "rev-parse", "HEAD").lower()
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="reinstall",
+        kernel_path="python/sglang/first.py",
+        patch=_patch(repo, "python/sglang/first.py", "VALUE = 2\n"),
+    )
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coordinator = _coordinator(session_dir, repo)
+    coordinator.shared_state.framework = "sglang"
+
+    async def _validate(_publication):
+        return {"status": "ok", "decision": "KEEP", "base_tput": 100.0, "new_tput": 130.0, "gain_pct": 30.0}
+
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session=KeepSession(
+            session_dir=session_dir,
+            shared_state=coordinator.shared_state,
+            record_keep=coordinator.writeback.record_integrate_keep,
+        ),
+        validator=_validate,
+    )
+    assert summary.kept_count == 1
+    entry = coordinator.shared_state.optimization_stack[-1]
+    assert entry["source_import_root"] == "python"
+    assert source_layer_overlay_dir(entry) == str(Path(entry["source_snapshot"]) / "files" / "python")
+    _git(repo, "reset", "--hard", base)
+    _git(repo, "clean", "-fdq")
+    installed = install_source_layers(coordinator.shared_state.optimization_stack)
+
+    assert installed.failed == []
+    assert installed.unreproducible == []
+    assert source.read_text(encoding="utf-8") == "VALUE = 2\n"

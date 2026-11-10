@@ -20,15 +20,15 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
+from hyperloom.orchestrator.actions.executors import _subprocess_kill
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
-    _scan_logs_increment,
+    RoundWatch,
+    _LogCursor,
     _scan_server_log_increment,
-    _server_log_shows_death,
     kill_my_spawned_server,
-    new_session_kwargs,
     run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
@@ -36,8 +36,22 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
 )
 
 
-@pytest.mark.parametrize("text", [True, False])
-def test_capture_partial_utf8_records_bytes_before_newline(text):
+class _FakeCapture:
+    """A capture whose child wrote ``out`` and ``err`` and nothing the watchdog could see arrive."""
+
+    last_activity_at = None
+
+    def __init__(self, out: str = "", err: str = "") -> None:
+        self._captured = (out, err)
+
+    def note_output(self) -> None:
+        pass
+
+    def finish(self) -> tuple[str, str]:
+        return self._captured
+
+
+def test_capture_partial_utf8_records_bytes_before_newline():
     from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
 
     proc = subprocess.Popen(
@@ -49,7 +63,7 @@ def test_capture_partial_utf8_records_bytes_before_newline(text):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    capture = sk._StreamCapture(proc, text=text)
+    capture = sk._StreamCapture(proc)
     capture.start()
     try:
         deadline = time.monotonic() + 0.35
@@ -59,8 +73,8 @@ def test_capture_partial_utf8_records_bytes_before_newline(text):
         assert proc.poll() is None
         proc.wait(timeout=5)
         stdout, stderr = capture.finish()
-        assert stdout == ("€" if text else b"\xe2\x82\xac")
-        assert stderr == ("" if text else b"")
+        assert stdout == "€"
+        assert stderr == ""
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -103,10 +117,7 @@ def test_reused_server_with_buffered_client_needs_current_ready_evidence(tmp_pat
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", wrapper, client],
-        server_log_path=str(watched),
-        server_already_ready=True,
-        silence_timeout_sec=0.4,
-        timeout=8,
+        watch=RoundWatch(timeout=8, server_log_path=str(watched), silence_timeout_sec=0.4, server_already_ready=True),
     )
     assert cp.returncode == 0
     assert cp.stdout.splitlines() == ["progress"] * 8
@@ -121,10 +132,9 @@ def test_ready_server_quiet_log_active_partial_pipe_survives(tmp_path, stream):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(tmp_path / "server.log")],
-        server_log_path=str(tmp_path / "server.log"),
-        server_already_ready=True,
-        silence_timeout_sec=0.5,
-        timeout=5,
+        watch=RoundWatch(
+            timeout=5, server_log_path=str(tmp_path / "server.log"), silence_timeout_sec=0.5, server_already_ready=True
+        ),
     )
     assert cp.returncode == 0
 
@@ -133,8 +143,7 @@ def test_benchmark_launch_forces_python_unbuffered():
     cp = run_with_session_kill(
         [sys.executable, "-c", "import os; print(os.environ['PYTHONUNBUFFERED'])"],
         env={**os.environ, "PYTHONUNBUFFERED": "0"},
-        silence_timeout_sec=600,
-        timeout=5,
+        watch=RoundWatch(timeout=5, silence_timeout_sec=600),
     )
     assert cp.stdout.strip() == "1"
 
@@ -156,21 +165,27 @@ def test_watchdog_clock_boundaries(monkeypatch, tmp_path, reused, ready, log, no
         def poll(self):
             return None
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             waited.append(now[0])
             now[0] += timeout
             raise subprocess.TimeoutExpired(self.args, timeout)
 
     monkeypatch.setattr(sk.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(sk, "_scan_logs_increment", lambda *args: sk._LogScan(ready, False, False, noise, False))
+    monkeypatch.setattr(sk._LogCursor, "advance", lambda *args: sk._LogScan(ready, False, False, noise, False))
     error = sk._ServerStalledDetected if expected == 600 else subprocess.TimeoutExpired
     with pytest.raises(error):
         sk._communicate_with_watchdog(
             Proc(),
-            hard_timeout=7800,
-            silence_timeout_sec=600,
-            server_log_path=str(tmp_path / "server.log") if log else None,
-            server_already_ready=reused,
+            sk._WatchedRound(
+                sk.RoundWatch(
+                    timeout=7800,
+                    server_log_path=str(tmp_path / "server.log") if log else None,
+                    silence_timeout_sec=600,
+                    server_already_ready=reused,
+                ),
+            ),
+            recorders=sk._RecorderFanout([]),
+            capture=_FakeCapture(),
         )
     assert now[0] == expected
     assert 599.0 in waited
@@ -192,7 +207,7 @@ def test_unobserved_reuse_keeps_other_stop_gates_and_telemetry(monkeypatch, tmp_
         def poll(self):
             return None
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             now[0] += timeout
             if gate == "cancel" and now[0] >= 4:
                 scope.cancel(reason="test")
@@ -208,13 +223,18 @@ def test_unobserved_reuse_keeps_other_stop_gates_and_telemetry(monkeypatch, tmp_
     with pytest.raises(error[gate]):
         sk._communicate_with_watchdog(
             Proc(),
-            hard_timeout=10,
-            silence_timeout_sec=1,
-            server_log_path=str(tmp_path / "server.log"),
-            server_already_ready=True,
-            session_deadline_sec=3 if gate == "session" else None,
+            sk._WatchedRound(
+                sk.RoundWatch(
+                    timeout=10,
+                    server_log_path=str(tmp_path / "server.log"),
+                    silence_timeout_sec=1,
+                    server_already_ready=True,
+                    session_deadline_sec=3 if gate == "session" else None,
+                ),
+            ),
             cancel_scope=scope,
-            kv_recorder=recorder,
+            recorders=sk._RecorderFanout([recorder]),
+            capture=_FakeCapture(),
         )
     assert now[0] == {"hard": 10, "session": 3, "cancel": 4}[gate]
     recorder.note_phase.assert_called_once_with("measured", 0)
@@ -228,10 +248,13 @@ def test_exited_process_wins_over_expired_gates(monkeypatch):
         def poll(self):
             return 7
 
-        def communicate(self):
-            return "finished", ""
-
-    assert sk._communicate_with_watchdog(Proc(), hard_timeout=0, session_deadline_sec=-1) == ("finished", "")
+    out = sk._communicate_with_watchdog(
+        Proc(),
+        sk._WatchedRound(sk.RoundWatch(timeout=0, session_deadline_sec=-1)),
+        recorders=sk._RecorderFanout([]),
+        capture=_FakeCapture("finished"),
+    )
+    assert out == ("finished", "")
 
 
 def test_log_rotation_and_truncation_do_not_invent_activity(tmp_path):
@@ -239,25 +262,25 @@ def test_log_rotation_and_truncation_do_not_invent_activity(tmp_path):
 
     path = tmp_path / "server.log"
     path.write_text("x" * 100, encoding="utf-8")
-    offsets, residuals, identities = {}, {}, {}
-    sk._scan_logs_increment(str(path), offsets, residuals, identities)
+    cursor = sk._LogCursor()
+    cursor.advance(str(path))
     path.write_text("Application startup complete\n", encoding="utf-8")
-    scan = sk._scan_logs_increment(str(path), offsets, residuals, identities)
+    scan = cursor.advance(str(path))
     assert not scan.grew and not scan.saw_ready
     path.rename(tmp_path / "old.log")
     path.write_text("Application startup complete\n" * 100, encoding="utf-8")
-    scan = sk._scan_logs_increment(str(path), offsets, residuals, identities)
+    scan = cursor.advance(str(path))
     assert not scan.grew and not scan.saw_ready
     with path.open("a", encoding="utf-8") as stream:
         stream.write("new bytes\n")
-    assert sk._scan_logs_increment(str(path), offsets, residuals, identities).grew
+    assert cursor.advance(str(path)).grew
 
 
 def test_hard_timeout_preserves_partial_captured_output():
     with pytest.raises(subprocess.TimeoutExpired) as error:
         run_with_session_kill(
             [sys.executable, "-c", "import os,time; os.write(1,b'partial'); os.write(2,b'error'); time.sleep(20)"],
-            timeout=0.4,
+            watch=RoundWatch(timeout=0.4),
         )
     assert error.value.stdout == "partial"
     assert error.value.stderr == "error"
@@ -278,10 +301,12 @@ def test_previous_nested_server_cannot_keep_new_round_alive(tmp_path):
         )
         cp = run_with_session_kill(
             [sys.executable, "-c", script, str(tmp_path / "server.log")],
-            timeout=5,
-            server_log_path=str(tmp_path / "server.log"),
-            server_already_ready=True,
-            silence_timeout_sec=0.4,
+            watch=RoundWatch(
+                timeout=5,
+                server_log_path=str(tmp_path / "server.log"),
+                silence_timeout_sec=0.4,
+                server_already_ready=True,
+            ),
         )
         assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
     finally:
@@ -299,7 +324,7 @@ def test_kill_my_spawned_server_handles_already_exited():
         [sys.executable, "-c", "import sys; sys.exit(0)"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **new_session_kwargs(),
+        start_new_session=True,
     )
     proc.wait(timeout=10)
     kill_my_spawned_server(proc)
@@ -336,7 +361,7 @@ def test_kill_my_spawned_server_sigterm_then_sigkill_for_ignorer():
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **new_session_kwargs(),
+        start_new_session=True,
     )
     # Let the child install its SIGTERM handler before we signal.
     time.sleep(0.3)
@@ -370,7 +395,9 @@ def test_completed_warmup_keeps_its_persistent_server(tmp_path):
     )
     server_pid = None
     try:
-        result = run_with_session_kill([sys.executable, "-c", wrapper_code, str(pidfile), server_code], timeout=10)
+        result = run_with_session_kill(
+            [sys.executable, "-c", wrapper_code, str(pidfile), server_code], watch=RoundWatch(timeout=10)
+        )
         assert result.returncode == 0
         server_pid = int(pidfile.read_text())
         assert os.getpgid(server_pid) == server_pid
@@ -411,7 +438,7 @@ def test_kill_my_spawned_server_reaps_grandchildren():
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **new_session_kwargs(),
+        start_new_session=True,
     )
     pid_file = Path("/tmp/hyperloom_test_grandchild.pid")
     try:
@@ -504,7 +531,7 @@ async def test_baseline_executor_kills_grandchild_on_timeout(tmp_path, monkeypat
         [sys.executable, str(script)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **new_session_kwargs(),
+        start_new_session=True,
     )
     try:
         deadline = time.monotonic() + 5.0
@@ -545,8 +572,7 @@ def test_accuracy_never_extends_the_hard_cap(tmp_path, eval_marker):
     with pytest.raises(subprocess.TimeoutExpired):
         run_with_session_kill(
             [sys.executable, "-c", script, str(tmp_path / "server.log"), eval_marker],
-            timeout=0.3,
-            server_log_path=str(tmp_path / "server.log"),
+            watch=RoundWatch(timeout=0.3, server_log_path=str(tmp_path / "server.log")),
         )
 
 
@@ -562,8 +588,7 @@ class TestSessionDeadline:
         start = time.monotonic()
         cp = run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(30)"],
-            timeout=60,
-            session_deadline_sec=time.monotonic() - 1.0,
+            watch=RoundWatch(timeout=60, session_deadline_sec=time.monotonic() - 1.0),
         )
         elapsed = time.monotonic() - start
         assert cp.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
@@ -580,9 +605,7 @@ class TestSessionDeadline:
         start = time.monotonic()
         cp = run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(30)"],
-            timeout=60,
-            server_log_path=str(log_path),
-            session_deadline_sec=time.monotonic() + 1.5,
+            watch=RoundWatch(timeout=60, server_log_path=str(log_path), session_deadline_sec=time.monotonic() + 1.5),
         )
         elapsed = time.monotonic() - start
         assert cp.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
@@ -592,8 +615,7 @@ class TestSessionDeadline:
         start = time.monotonic()
         cp = run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(2)"],
-            timeout=60,
-            session_deadline_sec=time.monotonic() + 3600.0,
+            watch=RoundWatch(timeout=60, session_deadline_sec=time.monotonic() + 3600.0),
         )
         elapsed = time.monotonic() - start
         assert cp.returncode == 0
@@ -602,8 +624,7 @@ class TestSessionDeadline:
     def test_no_session_deadline_keeps_the_previous_behaviour(self):
         cp = run_with_session_kill(
             [sys.executable, "-c", "print('done')"],
-            timeout=30,
-            session_deadline_sec=None,
+            watch=RoundWatch(timeout=30, session_deadline_sec=None),
         )
         assert cp.returncode == 0
         assert "done" in (cp.stdout or "")
@@ -624,7 +645,7 @@ class TestAnOrchestratorCancelReachesTheChild:
         with use_cancel_scope(scope):
             cp = run_with_session_kill(
                 [sys.executable, "-c", "import time; time.sleep(30)"],
-                timeout=60,
+                watch=RoundWatch(timeout=60),
             )
         elapsed = time.monotonic() - start
         assert cp.returncode == ORCHESTRATOR_CANCELLED_RETURNCODE
@@ -640,7 +661,7 @@ class TestAnOrchestratorCancelReachesTheChild:
             with use_cancel_scope(scope):
                 cp = run_with_session_kill(
                     [sys.executable, "-c", "import time; time.sleep(30)"],
-                    timeout=60,
+                    watch=RoundWatch(timeout=60),
                 )
         finally:
             timer.cancel()
@@ -653,7 +674,7 @@ class TestAnOrchestratorCancelReachesTheChild:
         with use_cancel_scope(CancelScope()):
             cp = run_with_session_kill(
                 [sys.executable, "-c", "import time; time.sleep(1); print('done')"],
-                timeout=60,
+                watch=RoundWatch(timeout=60),
             )
         assert cp.returncode == 0
         assert "done" in (cp.stdout or "")
@@ -669,8 +690,7 @@ class TestAnOrchestratorCancelReachesTheChild:
         with use_cancel_scope(scope):
             cp = run_with_session_kill(
                 [sys.executable, "-c", "import time; time.sleep(30)"],
-                timeout=60,
-                session_deadline_sec=time.monotonic() - 1.0,
+                watch=RoundWatch(timeout=60, session_deadline_sec=time.monotonic() - 1.0),
             )
         assert cp.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
 
@@ -687,7 +707,7 @@ class TestAnOrchestratorCancelReachesTheChild:
             with use_cancel_scope(scope):
                 run_with_session_kill(
                     [sys.executable, "-c", "import time; time.sleep(30)"],
-                    timeout=60,
+                    watch=RoundWatch(timeout=60),
                 )
         finally:
             timer.cancel()
@@ -738,7 +758,7 @@ def _sentinel_returncodes() -> dict[int, set[str]]:
         for name, value in vars(module).items():
             if not isinstance(value, int) or isinstance(value, bool):
                 continue
-            if not (name.endswith("_RETURNCODE") or name.endswith("_RC")):
+            if not (name.endswith(("_RETURNCODE", "_RC"))):
                 continue
             assigned.setdefault(value, set()).add(f"{short}.{name}")
     return assigned
@@ -777,7 +797,7 @@ def test_an_actor_timeout_is_not_recorded_as_a_failed_agentx_preflight():
 def test_run_with_session_kill_streams_child_output_to_parent(capsys):
     """Captured child output is also mirrored immediately to parent streams."""
     code = "import sys\nprint('child-out', flush=True)\nprint('child-err', file=sys.stderr, flush=True)\n"
-    cp = run_with_session_kill([sys.executable, "-c", code], timeout=10)
+    cp = run_with_session_kill([sys.executable, "-c", code], watch=RoundWatch(timeout=10))
 
     captured = capsys.readouterr()
     assert cp.returncode == 0
@@ -794,8 +814,8 @@ def test_run_with_session_kill_reports_each_line_of_child_output():
 
     cp = run_with_session_kill(
         [sys.executable, "-c", code],
-        timeout=10,
         on_output=lambda: lines.append(time.monotonic()),
+        watch=RoundWatch(timeout=10),
     )
 
     assert cp.returncode == 0
@@ -869,10 +889,8 @@ def test_run_with_session_kill_reports_a_silent_child_alive_only_on_real_progres
     try:
         cp = run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(2)"],
-            timeout=30,
-            server_log_path=str(log_path),
-            silence_timeout_sec=30.0,
             on_output=lambda: reported.append(1),
+            watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=30.0),
         )
     finally:
         stop.set()
@@ -906,30 +924,12 @@ def test_run_with_session_kill_reports_the_output_a_child_redirected_to_disk(tmp
 
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(bench / "benchmark_stderr.log")],
-        timeout=30,
-        server_log_path=str(tmp_path / "server.log"),
-        silence_timeout_sec=30.0,
         on_output=lambda: reported.append(1),
+        watch=RoundWatch(timeout=30, server_log_path=str(tmp_path / "server.log"), silence_timeout_sec=30.0),
     )
 
     assert cp.returncode == 0
     assert reported, "a child talking only through its redirected stderr was never reported alive"
-
-
-def test_run_with_session_kill_survives_a_broken_liveness_callback():
-    """Reporting is best-effort; a raising callback must not eat child output."""
-
-    def _boom() -> None:
-        raise RuntimeError("callback is broken")
-
-    cp = run_with_session_kill(
-        [sys.executable, "-c", "print('still-captured', flush=True)"],
-        timeout=10,
-        on_output=_boom,
-    )
-
-    assert cp.returncode == 0
-    assert "still-captured" in (cp.stdout or "")
 
 
 def test_run_with_session_kill_legacy_timeout_still_raises():
@@ -937,55 +937,11 @@ def test_run_with_session_kill_legacy_timeout_still_raises():
     with pytest.raises(subprocess.TimeoutExpired):
         run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(30)"],
-            timeout=1,
+            watch=RoundWatch(timeout=1),
         )
 
 
 # Server-liveness watchdog
-def test_server_log_shows_death_detects_marker(tmp_path):
-    """A ``server.log`` containing a terminal-init marker reads as dead;
-    a healthy / missing log reads as alive."""
-    log_path = tmp_path / "server.log"
-    assert _server_log_shows_death(str(log_path)) is None  # missing → alive
-    log_path.write_text("INFO loading shards 50%\nINFO graph capture\n")
-    assert _server_log_shows_death(str(log_path)) is None  # healthy → alive
-    log_path.write_text(
-        "ERROR core.py Exception: WorkerProc initialization failed due to an exception in a background process.\n"
-    )
-    # dead → returns the matched marker (truthy) rather than a bare bool
-    assert _server_log_shows_death(str(log_path)) is not None
-
-
-def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
-    """The vLLM v1 engine-core bootstrap tail must read as dead."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text(
-        "(APIServer pid=16160)   File '.../vllm/v1/engine/utils.py', line 1057, "
-        "in wait_for_engine_startup\n"
-        "(APIServer pid=16160) RuntimeError: Engine core initialization failed. "
-        "See root cause above. Failed core proc(s): {}\n"
-    )
-    assert _server_log_shows_death(str(log_path)) is not None
-
-
-def test_server_log_shows_death_detects_nested_benchmark_log(tmp_path):
-    """Magpie wrappers that ignore ``$SERVER_LOG`` write the real server log to a
-    nested ``benchmark_<fw>_<ts>/server.log``. The watchdog must still detect the
-    crash via that nested file even when the watched ``output_dir/server.log`` is absent."""
-    watched = tmp_path / "server.log"  # never written by the wrapper
-    nested_dir = tmp_path / "benchmark_vllm_20260625_003729"
-    nested_dir.mkdir()
-    nested_log = nested_dir / "server.log"
-    assert _server_log_shows_death(str(watched)) is None  # nothing yet → alive
-    nested_log.write_text("INFO loading shards 50%\nINFO graph capture\n")
-    assert _server_log_shows_death(str(watched)) is None  # healthy nested → alive
-    nested_log.write_text(
-        "(EngineCore pid=2581809) RuntimeError: Engine core initialization "
-        "failed. See root cause above. Failed core proc(s): {}\n"
-    )
-    assert _server_log_shows_death(str(watched)) is not None
-
-
 def test_server_log_death_excerpt_surfaces_nested_root_cause(tmp_path):
     """The excerpt helper also falls back to a nested ``benchmark_*/server.log``
     so the failure classifier still surfaces the real server fault."""
@@ -1061,9 +1017,7 @@ def test_fatal_text_does_not_kill_a_running_child(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(tmp_path / "server.log")],
-        timeout=5,
-        server_log_path=str(tmp_path / "server.log"),
-        silence_timeout_sec=0.2,
+        watch=RoundWatch(timeout=5, server_log_path=str(tmp_path / "server.log"), silence_timeout_sec=0.2),
     )
     assert cp.returncode == 0
 
@@ -1081,8 +1035,7 @@ def test_run_with_session_kill_watchdog_grace_lets_clean_exit_win(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        server_log_path=str(log_path),
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
     )
     assert cp.returncode == 7
 
@@ -1099,14 +1052,24 @@ def test_run_with_session_kill_watchdog_ignores_healthy_server(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        server_log_path=str(log_path),
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
     )
     assert cp.returncode == 0
     assert "ok" in (cp.stdout or "")
 
 
 # ── Detokenizer-stall watchdog ──
+def test_scan_server_log_increment_detects_vllm_rust_frontend_ready(tmp_path):
+    """vLLM's Rust frontend (`vllm serve`, VLLM_USE_RUST_FRONTEND=1) runs no uvicorn; its own ready line is the ready
+    marker, colour codes included, or the boot guard ends the round at its boot share."""
+    log_path = tmp_path / "server.log"
+    log_path.write_text(
+        "\x1b[36m(RustFrontend pid=4242)\x1b[0m \x1b[32mINFO\x1b[0m 10-29 06:18:45 [server/src/lib.rs:331] "
+        'OpenAI server is ready to accept requests bind_address="0.0.0.0:45369"\n'
+    )
+    assert _scan_server_log_increment(str(log_path), 0).saw_ready is True
+
+
 def test_scan_server_log_increment_detects_ready_and_progress(tmp_path):
     """The incremental scanner advances its offset and flags ready/progress
     markers only in the newly appended bytes."""
@@ -1140,7 +1103,7 @@ def test_scan_server_log_increment_detects_ready_and_progress(tmp_path):
     assert fifth.saw_progress is False and fifth.offset == log_path.stat().st_size
 
 
-def test_scan_logs_increment_reads_nested_stderr_for_eval_start(tmp_path):
+def test_log_cursor_reads_nested_stderr_for_eval_start(tmp_path):
     """The real Magpie layout: the caller passes ``<output_dir>/server.log``,
     which does not exist, while the engine log and the eval-start marker live in
     a ``benchmark_*/`` subdir -- the marker only ever reaching stderr."""
@@ -1152,22 +1115,22 @@ def test_scan_logs_increment_reads_nested_stderr_for_eval_start(tmp_path):
     passed = str(output_dir / "server.log")
     assert not Path(passed).exists()
 
-    offsets: dict[str, int] = {}
-    first = _scan_logs_increment(passed, offsets)
+    cursor = _LogCursor()
+    first = cursor.advance(passed)
     assert first.saw_ready is True and first.saw_eval_start is False and first.grew is True
 
     # The marker lands in stderr, never in server.log.
     with (bench / "benchmark_stderr.log").open("a") as f:
         f.write("HYPERLOOM_EVAL_START\n")
-    second = _scan_logs_increment(passed, offsets)
+    second = cursor.advance(passed)
     assert second.saw_eval_start is True and second.saw_ready is False and second.grew is True
 
     # Nothing new appended: no re-trigger, offsets stay put.
-    third = _scan_logs_increment(passed, offsets)
+    third = cursor.advance(passed)
     assert third.saw_eval_start is False and third.grew is False
 
 
-def test_scan_logs_increment_tells_the_childs_own_log_from_the_servers(tmp_path):
+def test_log_cursor_tells_the_childs_own_log_from_the_servers(tmp_path):
     """Only one of the resolved logs is written by the process being waited on.
 
     ``server.log`` is the inference server's; ``benchmark_stderr.log`` is where
@@ -1183,17 +1146,17 @@ def test_scan_logs_increment_tells_the_childs_own_log_from_the_servers(tmp_path)
     server_log.write_text("Application startup complete\n")
     child_log.write_text("running benchmark\n")
     passed = str(tmp_path / "server.log")
-    offsets: dict[str, int] = {}
-    _scan_logs_increment(passed, offsets)
+    cursor = _LogCursor()
+    cursor.advance(passed)
 
     with server_log.open("a") as f:
         f.write("[atom 22:29:41] Scheduled prefill batch: 4 reqs, 3707 new tokens\n")
-    server_only = _scan_logs_increment(passed, offsets)
+    server_only = cursor.advance(passed)
     assert server_only.grew is True and server_only.child_spoke is False
 
     with child_log.open("a") as f:
         f.write("bench: 128/2000 requests done\n")
-    child_only = _scan_logs_increment(passed, offsets)
+    child_only = cursor.advance(passed)
     assert child_only.grew is True and child_only.child_spoke is True
 
 
@@ -1207,18 +1170,18 @@ def test_health_probe_lines_are_not_server_activity(tmp_path):
     """
     log_path = tmp_path / "server.log"
     log_path.write_text("Application startup complete\n", encoding="utf-8")
-    offsets: dict[str, int] = {}
-    _scan_logs_increment(str(log_path), offsets)
+    cursor = _LogCursor()
+    cursor.advance(str(log_path))
 
     with log_path.open("a", encoding="utf-8") as f:
         f.write('INFO:     127.0.0.1:45518 - "GET /metrics HTTP/1.1" 200 OK\n')
         f.write('INFO:     127.0.0.1:45520 - "GET /health HTTP/1.1" 200 OK\n')
-    assert _scan_logs_increment(str(log_path), offsets).grew is False
+    assert cursor.advance(str(log_path)).grew is False
 
     with log_path.open("a", encoding="utf-8") as f:
         f.write('INFO:     127.0.0.1:45522 - "GET /metrics HTTP/1.1" 200 OK\n')
         f.write("[atom 23:29:42] Request 639 arrived, input tokens: 1295, pending requests: 64\n")
-    assert _scan_logs_increment(str(log_path), offsets).grew is True
+    assert cursor.advance(str(log_path)).grew is True
 
 
 def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_path):
@@ -1233,9 +1196,7 @@ def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_pat
     start = time.monotonic()
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=60,
-        server_log_path=str(log_path),
-        silence_timeout_sec=1.0,
+        watch=RoundWatch(timeout=60, server_log_path=str(log_path), silence_timeout_sec=1.0),
     )
     elapsed = time.monotonic() - start
     assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
@@ -1254,9 +1215,7 @@ def test_run_with_session_kill_detok_stall_not_armed_before_ready(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        server_log_path=str(log_path),
-        silence_timeout_sec=0.5,
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=0.5),
     )
     assert cp.returncode == 0
 
@@ -1276,9 +1235,7 @@ def test_run_with_session_kill_detok_stall_progress_keeps_it_alive(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        server_log_path=str(log_path),
-        silence_timeout_sec=1.0,
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=1.0),
     )
     assert cp.returncode == 0
 
@@ -1299,11 +1256,144 @@ def test_run_with_session_kill_detok_stall_compile_logs_keep_it_alive(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        server_log_path=str(log_path),
-        silence_timeout_sec=1.0,
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=1.0),
     )
     assert cp.returncode == 0
+
+
+#: A server ready and then quiet inside an aiter JIT build (aiter writes nothing between ``start build`` and ``finish
+#: build``), as the first request after ready reaches a module it lacks; ``{seconds}`` is how long the build takes.
+_BUILDING_AFTER_READY = (
+    "import sys, time\n"
+    "f = open(sys.argv[1], 'w')\n"
+    "f.write('Application startup complete\\n'); f.flush()\n"
+    "f.write('[aiter] [pid=7 pname=Process-1] start build [module_gemm_a8w8_bpreshuffle_cktile] under /j\\n')\n"
+    "f.flush(); time.sleep({seconds})\n"
+    "f.write('gen throughput (token/s): 250.0, #queue-req: 0\\n'); f.flush()\n"
+    "time.sleep(0.3)\n"
+    "raise SystemExit(0)\n"
+)
+
+
+def test_a_quiet_aiter_build_after_ready_is_not_a_stall_while_its_module_has_time(tmp_path):
+    """The build takes 2.5 s against a 1 s silence window; a CK-tile module is given 2700 s."""
+    log_path = tmp_path / "server.log"
+    cp = run_with_session_kill(
+        [sys.executable, "-c", _BUILDING_AFTER_READY.format(seconds=2.5), str(log_path)],
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=1.0),
+    )
+    assert cp.returncode == 0
+
+
+def test_an_aiter_build_that_hangs_after_ready_is_a_stall_once_its_module_has_had_its_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(_subprocess_kill, "_aiter_build_limit_sec", lambda module: 1.0)
+    log_path = tmp_path / "server.log"
+    start = time.monotonic()
+    cp = run_with_session_kill(
+        [sys.executable, "-c", _BUILDING_AFTER_READY.format(seconds=60), str(log_path)],
+        watch=RoundWatch(timeout=60, server_log_path=str(log_path), silence_timeout_sec=1.0),
+    )
+    assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
+    assert time.monotonic() - start < 15.0, "the build's 1 s and the 1 s window, not the round's 60 s"
+
+
+def test_health_probes_answered_during_the_build_do_not_end_its_excuse(tmp_path):
+    """uvicorn answers a monitor's ``GET /health`` while the engine builds; those lines are neither activity nor news."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys, time\n"
+        "f = open(sys.argv[1], 'w')\n"
+        "f.write('Application startup complete\\n')\n"
+        "f.write('[aiter] start build [module_rmsnorm] under /j\\n'); f.flush()\n"
+        "for _ in range(5):\n"
+        "    time.sleep(0.5)\n"
+        "    f.write('INFO:     127.0.0.1:4 - \"GET /health HTTP/1.1\" 200 OK\\n'); f.flush()\n"
+        "f.write('gen throughput (token/s): 250.0, #queue-req: 0\\n'); f.flush()\n"
+        "raise SystemExit(0)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=1.0),
+    )
+    assert cp.returncode == 0
+
+
+def test_a_line_after_the_build_line_ends_its_excuse(tmp_path):
+    """A server that went on past ``start build`` (here an import of a built module) is judged by its log again. The two
+    lines arrive in polls of their own (the launcher polls every half second at most): a build line that never ended
+    would otherwise be missed, as the later line replaces it in the one poll."""
+    log_path = tmp_path / "server.log"
+    script = (
+        "import sys, time\n"
+        "f = open(sys.argv[1], 'w')\n"
+        "f.write('Application startup complete\\n')\n"
+        "f.write('[aiter] start build [module_rmsnorm] under /j\\n'); f.flush()\n"
+        "time.sleep(1.5)\n"
+        "f.write('[aiter] import [module_rmsnorm] under /j\\n'); f.flush()\n"
+        "time.sleep(60)\n"
+    )
+    start = time.monotonic()
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script, str(log_path)],
+        watch=RoundWatch(timeout=60, server_log_path=str(log_path), silence_timeout_sec=1.0),
+    )
+    assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
+    assert time.monotonic() - start < 15.0
+
+
+class _Round:
+    """A round's activity tracker over a server log the test writes to, polled at the clock the test names."""
+
+    def __init__(self, log: Path) -> None:
+        self.log = log
+        self.activity = _subprocess_kill._RoundActivity(started_at=0.0, cursor=_LogCursor({}), last_activity_at=0.0)
+
+    def poll(self, now: float, written: str = "") -> float:
+        """The last activity after a poll at ``now`` that finds ``written`` appended to the log."""
+        with open(self.log, "a", encoding="utf-8") as handle:
+            handle.write(written)
+        self.activity.note_log_progress(str(self.log), _subprocess_kill._RecorderFanout([]), _FakeCapture(), now)
+        return self.activity.last_activity_at
+
+
+_READY = "Application startup complete\n"
+_START = "[aiter] [pid=7 pname=Process-1] start build [{module}] under /j\n"
+
+
+def test_a_quiet_build_is_activity_until_its_module_has_had_its_time(tmp_path):
+    light, cktile = _Round(tmp_path / "light.log"), _Round(tmp_path / "cktile.log")
+
+    assert light.poll(100, _READY + _START.format(module="module_rmsnorm")) == 100
+    assert [light.poll(now) for now in (400, 700, 900, 5000)] == [400, 700, 700, 700], "600 s from 100"
+    assert cktile.poll(100, _READY + _START.format(module="module_gemm_a8w8_bpreshuffle_cktile")) == 100
+    assert [cktile.poll(now) for now in (400, 2800, 2900, 9000)] == [400, 2800, 2800, 2800], "2700 s from 100"
+
+
+def test_a_line_after_the_build_line_ends_its_excuse_at_the_poll_it_arrives_in(tmp_path):
+    server = _Round(tmp_path / "server.log")
+    server.poll(100, _READY + _START.format(module="module_rmsnorm"))
+
+    assert server.poll(150, "[aiter] import [module_rmsnorm] under /j\n") == 150
+    assert server.poll(400) == 150, "no build is under way, so the quiet since 150 is no one's excuse"
+
+
+def test_a_second_build_has_its_own_time_from_the_poll_that_names_it(tmp_path):
+    """One module's build ends and another's starts between two polls: the second is not charged the first's time."""
+    server = _Round(tmp_path / "server.log")
+    server.poll(100, _READY + _START.format(module="module_rmsnorm"))
+
+    assert server.poll(500, _START.format(module="module_moe_ck2stages")) == 500
+    assert [server.poll(now) for now in (900, 1100, 1500)] == [900, 1100, 1100], "600 s from 500, not from 100"
+
+
+def test_the_build_limits_the_launcher_copies_equal_the_measurement_layers():
+    from hyperloom.measure.jit import modules
+
+    assert _subprocess_kill._aiter_build_limit_sec("module_gemm_a8w8_bpreshuffle_cktile") == (
+        modules.module_build_limit_sec("module_gemm_a8w8_bpreshuffle_cktile")
+    )
+    assert _subprocess_kill._AITER_BUILD_LIMIT_SEC == modules.MODULE_BUILD_LIMIT_SEC
+    assert _subprocess_kill._AITER_CKTILE_BUILD_LIMIT_SEC == modules.CKTILE_MODULE_BUILD_LIMIT_SEC
 
 
 def test_shared_helper_does_not_enable_silence_without_a_policy(tmp_path):
@@ -1317,9 +1407,7 @@ def test_shared_helper_does_not_enable_silence_without_a_policy(tmp_path):
     )
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
-        timeout=30,
-        server_log_path=str(log_path),
-        silence_timeout_sec=None,
+        watch=RoundWatch(timeout=30, server_log_path=str(log_path), silence_timeout_sec=None),
     )
     assert cp.returncode == 0
 

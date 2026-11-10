@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
+
+from hyperloom.orchestrator.measurement.runtime_findings import render_runtime_findings
+from hyperloom.orchestrator.mcp_tool_names import (
+    CONTEXT_MCP_SERVER_NAME as MCP_SERVER_NAME,
+)
+from hyperloom.orchestrator.mcp_tool_names import (
+    CONTEXT_TOOL_NAMES,
+    CONTEXT_TOOL_QUALIFIED_NAMES,
+    qualified_context_tool_name,
+)
+
+from .mcp_sdk import build_sdk_mcp_server
 
 log = logging.getLogger(__name__)
-
-
-MCP_SERVER_NAME = "inference_optimizer_context"
-
-
-def _qualified(tool_name: str) -> str:
-    """Return the fully-qualified MCP tool name."""
-    return f"mcp__{MCP_SERVER_NAME}__{tool_name}"
 
 
 @dataclass
@@ -24,24 +27,15 @@ class ContextProvider:
     """Read-only accessor over live session context for the pull tools."""
 
     shared_state: Any
-    # Optional callables for context outside SharedState; ``None`` => absent.
-    inbox_reader: Callable[[int], str] | None = None
-    analysis_reader: Callable[[], str] | None = None
-    denial_reader: Callable[[int], str] | None = None
-    recent_outcomes_reader: Callable[[int], str] | None = None
-    running_tasks_reader: Callable[[], str] | None = None
-    # Whitelisted lane-light action runner; ``None`` => unavailable.
-    action_runner: Callable[[str, dict[str, Any]], Awaitable[str]] | None = None
-    # On-demand reference documents directory; ``None`` => unavailable.
-    reference_reader: Callable[[str], str] | None = None
+    inbox_reader: Callable[[int], str]
+    analysis_reader: Callable[[], str]
+    recent_outcomes_reader: Callable[[int], str]
+    running_tasks_reader: Callable[[], str]
+    reference_reader: Callable[[str], str]
 
     def _safe(self, fn: Callable[[], str], label: str) -> str:
-        """Invoke a projection callable, never letting it crash the reactor."""
-        try:
-            out = fn()
-        except Exception as exc:
-            log.exception("context tool %s failed", label)
-            return f"(context tool {label} unavailable: {exc!r})"
+        """Invoke a projection callable; an empty result reads as empty."""
+        out = fn()
         return out if isinstance(out, str) and out else f"({label}: empty)"
 
     def mission_status(self) -> str:
@@ -70,56 +64,33 @@ class ContextProvider:
 
     def why_denied(self, top_k: int = 6) -> str:
         """Return a summary of recent policy denials."""
-        if self.denial_reader is not None:
-            return self._safe(lambda: self.denial_reader(top_k), "why_denied")
-        return self._safe(
-            lambda: self.shared_state.to_policy_denial_summary(top_k=top_k),
-            "why_denied",
-        )
+        return self._safe(lambda: self.shared_state.to_policy_denial_summary(top_k=top_k), "why_denied")
 
     def analysis_md(self) -> str:
         """Return the current ``analysis.md`` contents."""
-        if self.analysis_reader is None:
-            return "(analysis.md reader not wired)"
         return self._safe(self.analysis_reader, "analysis_md")
+
+    def runtime_findings(self) -> str:
+        """Return the runtime findings scanned from the current best's server log."""
+        return self._safe(
+            lambda: render_runtime_findings(self.shared_state.current_best_measurement),
+            "runtime_findings",
+        )
 
     def inbox(self, since_seq: int = 0) -> str:
         """Return inbox messages newer than a sequence number."""
-        if self.inbox_reader is None:
-            return "(inbox reader not wired)"
         return self._safe(lambda: self.inbox_reader(since_seq), "inbox")
 
     def recent_outcomes(self, top_k: int = 8) -> str:
         """Return a summary of recent action outcomes."""
-        if self.recent_outcomes_reader is None:
-            return "(recent outcomes reader not wired)"
         return self._safe(lambda: self.recent_outcomes_reader(top_k), "recent_outcomes")
 
     def running_tasks(self) -> str:
         """Return the in-flight task set with the resources each one holds."""
-        if self.running_tasks_reader is None:
-            return "(running tasks reader not wired)"
         return self._safe(self.running_tasks_reader, "running_tasks")
-
-    async def run_action_now(
-        self,
-        action_name: str = "",
-        params: dict[str, Any] | None = None,
-    ) -> str:
-        """Await a whitelisted lane-light action without occupying a worker."""
-        if self.action_runner is None:
-            return "(run_action_now not wired)"
-        try:
-            out = await self.action_runner(action_name, dict(params or {}))
-        except Exception as exc:
-            log.exception("context tool %s failed", "run_action_now")
-            return f"(context tool run_action_now unavailable: {exc!r})"
-        return out if isinstance(out, str) and out else "(run_action_now: empty)"
 
     def read_reference(self, name: str = "") -> str:
         """Return the full text of a named on-demand reference document."""
-        if self.reference_reader is None:
-            return "(read_reference not wired)"
         return self._safe(lambda: self.reference_reader(name), "read_reference")
 
     def get_failure(self, failure_id: str = "") -> str:
@@ -168,15 +139,6 @@ _TOPK_SCHEMA: dict[str, Any] = {
 _SINCE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"since_seq": {"type": "integer", "minimum": 0}},
-    "additionalProperties": False,
-}
-_RUN_ACTION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "action_name": {"type": "string"},
-        "params": {"type": "object"},
-    },
-    "required": ["action_name"],
     "additionalProperties": False,
 }
 _REFERENCE_SCHEMA: dict[str, Any] = {
@@ -255,11 +217,18 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
     ),
     (
         "show_analysis_md",
-        "Return the latest TraceLens analysis.md snapshot (executive "
-        "summary, top operations with kernel_ids, recommendations, "
-        "priority markers).",
+        "Return the latest TraceLens report snapshot (analysis.md, or analysis.json on the non-llm route).",
         _NO_ARGS_SCHEMA,
         "analysis_md",
+    ),
+    (
+        "get_runtime_findings",
+        "Return what the current best's server.log shows the server actually "
+        "did: unknown env vars, features the framework disabled, capability "
+        "fallbacks, settings the engine adjusted, AITER tuned-config misses, "
+        "tracebacks. Each rule is detected / not_detected / unknown(reason).",
+        _NO_ARGS_SCHEMA,
+        "runtime_findings",
     ),
     (
         "get_inbox",
@@ -280,27 +249,13 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
     ),
     (
         "get_running_tasks",
-        "Return the tasks currently in flight and what each one holds: "
-        "elapsed running seconds, specialist domain / gap, idempotency key, "
-        "lease TTL and remaining time, held lanes, leased GPU ids, and "
-        "heartbeat age. A dispatched task is otherwise invisible until it "
-        "terminates, so use this to judge whether to keep waiting on it, "
-        "plan around it, or escalate.",
+        "Re-read the turn's Tasks in flight block: each running task and "
+        "queued explore round with its elapsed seconds, specialist domain / "
+        "gap, idempotency key, lease TTL and remaining time, held lanes, "
+        "leased GPU ids, heartbeat age and explore grid. Use it when a "
+        "decision later in the turn depends on whether that work has moved.",
         _NO_ARGS_SCHEMA,
         "running_tasks",
-    ),
-    (
-        "run_action_now",
-        "Run a CHEAP, lane-light action synchronously and get its result "
-        "back IN THIS TURN (closes the act->observe loop without waiting "
-        "for the next tick). Only a small whitelist of fast, non-GPU / "
-        "non-serving actions is eligible; anything heavy must still go "
-        "through emit_intent delegate (async). PolicyGate still gates the "
-        "run (phase / role / paths). Args: action_name (str), optional "
-        "params (object). For deep multi-step investigation, delegate to "
-        "a specialist sub-agent instead.",
-        _RUN_ACTION_SCHEMA,
-        "run_action_now",
     ),
     (
         "read_reference",
@@ -330,25 +285,11 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "optionally filtered to a single task_id.  Each entry is a JSON "
         "object with failure_id, variant_name, stage, error_class, "
         "error_excerpt, server_log_path, and workspace.  Use this to find "
-        "failure_ids you can then inspect with get_failure.",
+        f"failure_ids you can then inspect with {qualified_context_tool_name('get_failure')}.",
         _VARIANT_FAILURES_SCHEMA,
         "get_variant_failures",
     ),
 )
-
-
-CONTEXT_TOOL_NAMES: tuple[str, ...] = tuple(s[0] for s in CONTEXT_TOOL_SPECS)
-CONTEXT_TOOL_QUALIFIED_NAMES: tuple[str, ...] = tuple(_qualified(n) for n in CONTEXT_TOOL_NAMES)
-
-
-def _resolve_sdk(sdk_module: Any | None) -> Any | None:
-    """Resolve the Claude Agent SDK module."""
-    if sdk_module is not None:
-        return sdk_module
-    try:
-        return importlib.import_module("claude_agent_sdk")
-    except ImportError:
-        return None
 
 
 def _make_handler(
@@ -366,10 +307,6 @@ def _make_handler(
                 kwargs["top_k"] = int(args["top_k"])
             if "since_seq" in args:
                 kwargs["since_seq"] = int(args["since_seq"])
-            if "action_name" in args:
-                kwargs["action_name"] = str(args["action_name"])
-            if "params" in args and isinstance(args["params"], dict):
-                kwargs["params"] = args["params"]
             if "name" in args:
                 kwargs["name"] = str(args["name"])
             if "failure_id" in args:
@@ -377,10 +314,7 @@ def _make_handler(
             if "task_id" in args:
                 kwargs["task_id"] = str(args["task_id"])
         try:
-            if method_name == "run_action_now":
-                text = await method(**kwargs)
-            else:
-                text = method(**kwargs)
+            text = method(**kwargs)
         except Exception as exc:
             log.exception("context tool handler %s raised", method_name)
             return {
@@ -408,23 +342,16 @@ def build_context_tools_server(
     server_factory: Callable[..., Any] | None = None,
 ) -> Any | None:
     """Build the in-process MCP server exposing the read-only context tools."""
-    sdk = _resolve_sdk(sdk_module)
-    if tool_factory is None:
-        tool_factory = getattr(sdk, "tool", None) if sdk is not None else None
-    if server_factory is None:
-        server_factory = getattr(sdk, "create_sdk_mcp_server", None) if sdk is not None else None
-    if tool_factory is None or server_factory is None:
-        log.info(
-            "context-tools MCP server unavailable (sdk=%s).",
-            getattr(sdk, "__name__", "<none>"),
-        )
-        return None
-
-    decorated_tools = []
-    for tool_name, description, schema, method_name in CONTEXT_TOOL_SPECS:
-        decorator = tool_factory(tool_name, description, schema)
-        decorated_tools.append(decorator(_make_handler(provider, method_name)))
-    return server_factory(MCP_SERVER_NAME, "1.0.0", decorated_tools)
+    return build_sdk_mcp_server(
+        MCP_SERVER_NAME,
+        [
+            (tool_name, description, schema, _make_handler(provider, method_name))
+            for tool_name, description, schema, method_name in CONTEXT_TOOL_SPECS
+        ],
+        sdk_module=sdk_module,
+        tool_factory=tool_factory,
+        server_factory=server_factory,
+    )
 
 
 __all__ = [
@@ -434,4 +361,5 @@ __all__ = [
     "ContextProvider",
     "MCP_SERVER_NAME",
     "build_context_tools_server",
+    "qualified_context_tool_name",
 ]

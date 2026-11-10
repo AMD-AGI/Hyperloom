@@ -20,38 +20,18 @@ from typing import Any
 
 from .. import framework_registry
 from .. import gpu_types as _gpu_types
-from ...common.timeutil import now_iso
+from ...common.model_paths import resolve_local_model_dir
+from ..session import sbd_v6
+from hyperloom_common.timeutil import now_iso
 from ..model_config_utils import (
     GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
     _MAXPOS_CONFIG_KEYS,
-    _MX_FP4_GROUP_SIZE,
-    _NATIVE_MOE_RUNNER_QUANT_METHODS,
-    _QUARK_LAYER_CONFIG_KEYS,
     _config_architectures,
-    _is_quark_mx_fp4_entry,
-    _load_model_config_dict,
+    config_scopes,
+    load_model_config_dict,
     _load_model_max_position_embeddings,
-    _model_declared_quant_method,
     _model_has_dual_chunk_attention,
-    _model_moe_runner_requires_aiter,
-    resolve_local_model_dir,
 )
-
-# Re-exported from model_config_utils for callers/tests.
-__all__ = [
-    "_GEMMA2_ARCHITECTURES",
-    "_MAXPOS_CONFIG_KEYS",
-    "_MX_FP4_GROUP_SIZE",
-    "_NATIVE_MOE_RUNNER_QUANT_METHODS",
-    "_QUARK_LAYER_CONFIG_KEYS",
-    "_config_architectures",
-    "_is_quark_mx_fp4_entry",
-    "_load_model_config_dict",
-    "_load_model_max_position_embeddings",
-    "_model_declared_quant_method",
-    "_model_has_dual_chunk_attention",
-    "_model_moe_runner_requires_aiter",
-]
 
 log = logging.getLogger(__name__)
 
@@ -169,6 +149,19 @@ _TEXT_DECODER_CONFIG_KEYS = (
 _VERDICT_TEXT_COERCIBLE = "text_coercible"
 
 _VERDICT_VISION_ONLY = "vision_only"
+_UNKNOWN_MODEL_FIELD = "<unknown>"
+_UNSUPPORTED_ARCH_DEGRADED = (
+    "DEGRADED MODE: model '{name}' carries a multimodal signal "
+    "({signal}; architecture '{architecture}', model_type '{model_type}') but exposes a text-generation path. "
+    "Hyperloom is running it on the TEXT path only — any image/audio inputs are ignored, so "
+    "benchmark numbers reflect the text decoder alone. Pass --no-allow-mm-text-fallback to fail-fast instead."
+)
+_UNSUPPORTED_ARCH_REJECTED = (
+    "Unsupported model '{name}': architecture '{architecture}' (model_type '{model_type}') is not a supported "
+    "text-generation model. Hyperloom only supports decoder-only causal LM models (architectures "
+    "containing ForCausalLM or LMHeadModel). Rejected because: {signal}. Submit a text-generation "
+    "checkpoint instead."
+)
 
 _TEXT_COERCIBLE_MODEL_TYPES = frozenset(
     {
@@ -326,7 +319,7 @@ def _load_model_arch(
 
 def _load_model_config_tags(model_path: str) -> dict:
     """Best-effort loader for KB architecture-identity tags (``architectures`` + ``model_type``) from config.json."""
-    data = _load_model_config_dict(model_path)
+    data = load_model_config_dict(model_path)
     if data is None:
         return {}
     out: dict = {}
@@ -379,25 +372,29 @@ def _config_declares_text_decoder(config: dict, architectures: list[str], model_
     return False
 
 
+def _unsupported_hit(architecture: str, model_type: str, signal: str, verdict: str = _VERDICT_VISION_ONLY) -> dict:
+    """One ``_detect_unsupported_model`` hit: what matched, and whether the text path can still serve the model."""
+    return {
+        "architecture": architecture or _UNKNOWN_MODEL_FIELD,
+        "model_type": model_type or _UNKNOWN_MODEL_FIELD,
+        "signal": signal,
+        "verdict": verdict,
+    }
+
+
 def _detect_unsupported_model(model_path: str) -> dict | None:
     """Best-effort classify a model's text-serving viability."""
-    config = _load_model_config_dict(model_path)
+    config = load_model_config_dict(model_path)
     if config is None:
         return None
-    architectures = _config_architectures(config)
-    # Wrapper models may nest the real arch under text_config; merge so the unsupported-arch blocklist still matches.
     nested = config.get("text_config")
-    if isinstance(nested, dict):
-        for a in _config_architectures(nested):
-            if a not in architectures:
-                architectures.append(a)
+    nested = nested if isinstance(nested, dict) else {}
+    # Wrapper models may nest the real arch under text_config; merge so the unsupported-arch blocklist still matches.
+    architectures = list(dict.fromkeys(_config_architectures(config) + _config_architectures(nested)))
+    first_arch = architectures[0] if architectures else ""
     model_type = str(config.get("model_type") or "").strip()
     model_type_l = model_type.lower()
-    nested_model_type = ""
-    nested_model_type_l = ""
-    if isinstance(nested, dict):
-        nested_model_type = str(nested.get("model_type") or "").strip()
-        nested_model_type_l = nested_model_type.lower()
+    nested_model_type = str(nested.get("model_type") or "").strip()
 
     # Registry/config incompatibilities are handled by the model-config gate so they get the precise
     # model_config_incompatible stop reason.
@@ -408,26 +405,11 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     # marker.
     for arch in architectures:
         if arch in _UNSUPPORTED_ARCHITECTURES:
-            return {
-                "architecture": arch,
-                "model_type": model_type,
-                "signal": f"unsupported architecture '{arch}'",
-                "verdict": _VERDICT_VISION_ONLY,
-            }
+            return _unsupported_hit(arch, model_type, f"unsupported architecture '{arch}'")
     if model_type_l in _UNSUPPORTED_MODEL_TYPES:
-        return {
-            "architecture": architectures[0] if architectures else "",
-            "model_type": model_type,
-            "signal": f"unsupported model_type '{model_type}'",
-            "verdict": _VERDICT_VISION_ONLY,
-        }
-    if nested_model_type_l in _UNSUPPORTED_MODEL_TYPES:
-        return {
-            "architecture": architectures[0] if architectures else "",
-            "model_type": model_type,
-            "signal": f"unsupported text_config.model_type '{nested_model_type}'",
-            "verdict": _VERDICT_VISION_ONLY,
-        }
+        return _unsupported_hit(first_arch, model_type, f"unsupported model_type '{model_type}'")
+    if nested_model_type.lower() in _UNSUPPORTED_MODEL_TYPES:
+        return _unsupported_hit(first_arch, model_type, f"unsupported text_config.model_type '{nested_model_type}'")
 
     # A multimodal config key is only a degrade signal, not a hard block: if a text decoder exists we coerce to the
     # text path with a warning.
@@ -435,12 +417,7 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
     for key in _UNSUPPORTED_CONFIG_KEYS:
         if key in config:
             verdict = _VERDICT_TEXT_COERCIBLE if _has_text_decoder else _VERDICT_VISION_ONLY
-            return {
-                "architecture": architectures[0] if architectures else "",
-                "model_type": model_type,
-                "signal": f"multimodal config key '{key}'",
-                "verdict": verdict,
-            }
+            return _unsupported_hit(first_arch, model_type, f"multimodal config key '{key}'", verdict)
 
     if any(_arch_is_supported_text_generation(a) for a in architectures):
         return None
@@ -449,38 +426,24 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
         return None
 
     if architectures:
-        return {
-            "architecture": architectures[0],
-            "model_type": model_type,
-            "signal": (
-                f"architecture '{architectures[0]}' does not match any "
-                f"supported text-generation pattern "
-                f"({', '.join(_SUPPORTED_ARCH_MARKERS)})"
-            ),
-            "verdict": _VERDICT_VISION_ONLY,
-        }
-
+        return _unsupported_hit(
+            first_arch,
+            model_type,
+            f"architecture '{first_arch}' does not match any supported text-generation pattern "
+            f"({', '.join(_SUPPORTED_ARCH_MARKERS)})",
+        )
     if model_type:
-        return {
-            "architecture": "",
-            "model_type": model_type,
-            "signal": (f"model_type '{model_type}' is not in the supported text-generation allowlist"),
-            "verdict": _VERDICT_VISION_ONLY,
-        }
-
-    return {
-        "architecture": "",
-        "model_type": "",
-        "signal": "config.json has neither architectures nor model_type",
-        "verdict": _VERDICT_VISION_ONLY,
-    }
+        return _unsupported_hit(
+            "", model_type, f"model_type '{model_type}' is not in the supported text-generation allowlist"
+        )
+    return _unsupported_hit("", "", "config.json has neither architectures nor model_type")
 
 
 def _detect_amd_unsupported_quant(model_path: str) -> str | None:
     """Return a reason when the model ships a quant format unsupported on ROCm."""
     if not model_path:
         return None
-    cfg = _load_model_config_dict(model_path) or {}
+    cfg = load_model_config_dict(model_path) or {}
     qc = cfg.get("quantization_config")
     if isinstance(qc, dict):
         method = str(qc.get("quant_method") or "").strip().lower()
@@ -537,7 +500,7 @@ def _detect_mlx_quant_weights(model_path: str) -> str | None:
         ) or {}
     except (OSError, json.JSONDecodeError, ValueError):
         return None
-    if any(k.endswith(".biases") or k.endswith(".scales") for k in wm):
+    if any(k.endswith((".biases", ".scales")) for k in wm):
         return (
             "checkpoint ships MLX mx.quantize weights (per-tensor '.biases'/"
             "'.scales'); no vLLM/sglang loader handles this private format, so "
@@ -646,11 +609,7 @@ def _detect_gemma2_missing_hidden_act(data: dict) -> str | None:
     arches = {a.lower() for a in _config_architectures(data)}
     if model_type != "gemma2" and not (arches & _GEMMA2_ARCHITECTURES):
         return None
-    scopes = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        scopes.append(nested)
-    if any(s.get("hidden_act") for s in scopes):
+    if any(s.get("hidden_act") for s in config_scopes(data)):
         return None
     return (
         "config.json is a Gemma2 model but lacks hidden_act (only "
@@ -687,11 +646,7 @@ def _detect_diffusers_pipeline_model(model_path: str) -> str | None:
 
 def _detect_null_strict_bool_config(data: dict) -> str | None:
     """Return a reason for config fields that strict HF validators require bool."""
-    scopes = [("config", data)]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        scopes.append(("text_config", nested))
-    for scope_name, scope in scopes:
+    for scope_name, scope in zip(("config", "text_config"), config_scopes(data)):
         for key in _STRICT_BOOL_CONFIG_KEYS:
             if key in scope and scope.get(key) is None:
                 return (
@@ -715,15 +670,11 @@ _TOKENIZER_ARTIFACT_FILES = (
 
 def _detect_unrecognized_architecture(data: dict) -> str | None:
     """Return a reason when the architecture is unknown to Transformers/sglang."""
-    scopes = [(data, False)]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        scopes.append((nested, True))
-    for scope, is_nested in scopes:
+    for depth, scope in enumerate(config_scopes(data)):
         model_type = str(scope.get("model_type") or "").strip().lower()
         arches = {a.lower() for a in _config_architectures(scope)}
         unrecognized_types = _UNRECOGNIZED_MODEL_TYPES
-        if is_nested:
+        if depth:
             unrecognized_types = _UNRECOGNIZED_MODEL_TYPES | _NESTED_ONLY_UNRECOGNIZED_MODEL_TYPES
         if model_type in unrecognized_types or arches & _UNRECOGNIZED_ARCHITECTURES:
             label = model_type or (next(iter(arches), "") if arches else "?")
@@ -935,10 +886,7 @@ def _detect_amd_unsupported_architecture(data: dict) -> str | None:
 
 def _detect_rope_without_max_position(data: dict) -> str | None:
     """Return a reason when a RoPE block ships with no max-position field."""
-    scopes = [data]
-    nested = data.get("text_config")
-    if isinstance(nested, dict):
-        scopes.append(nested)
+    scopes = config_scopes(data)
     has_rope = any(s.get(k) for s in scopes for k in _ROPE_CONFIG_KEYS)
     has_maxpos = any(
         isinstance(s.get(k), int) and not isinstance(s.get(k), bool) and s.get(k) > 0
@@ -998,13 +946,12 @@ def _run_compat_detector(
     *,
     model_path: str,
     data: dict,
-    gpu_type: str | None,
 ) -> str | None:
     """Invoke a spec's detector sub-chain, returning the first non-None reason."""
     # Resolve a HF repo-id to its local cache dir ONCE so every disk-reading detector (hf_quant_config.json,
     # safetensors shards, tokenizer files, PEFT adapters, ...) sees a real directory.
     resolved_mp = str(resolve_local_model_dir(model_path) or model_path)
-    available = {"model_path": resolved_mp, "data": data, "gpu_type": gpu_type}
+    available = {"model_path": resolved_mp, "data": data}
     call_args = tuple(available[name] for name in spec.args)
     fns = spec.fn if isinstance(spec.fn, tuple) else (spec.fn,)
     for fn in fns:
@@ -1110,7 +1057,7 @@ def _detect_incompatible_model_config(
     cfg_path = (resolve_local_model_dir(model_path) or Path(model_path)) / "config.json"
     if not cfg_path.is_file():
         return None
-    data = _load_model_config_dict(model_path)
+    data = load_model_config_dict(model_path)
     if data is None:
         return (
             f"config.json at {cfg_path} is present but unparseable "
@@ -1128,7 +1075,6 @@ def _detect_incompatible_model_config(
             spec,
             model_path=model_path,
             data=data,
-            gpu_type=gpu_type,
         )
         if reason is not None:
             return reason
@@ -1147,7 +1093,6 @@ _MODEL_GATE_ORDER = (
     "model_config_compat",
     "context_window",
 )
-_MODEL_GATE_EVENT_ATTR = "_sbd_v6_model_gate_event"
 
 
 def _model_gate_workload(args: argparse.Namespace) -> dict[str, Any]:
@@ -1185,79 +1130,26 @@ def _new_model_gate_event(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _load_model_gate_event(args: argparse.Namespace, session_dir: Path) -> dict[str, Any]:
-    from ..session.sbd_v6 import read_timeline_event_for_update
-
-    event = getattr(args, _MODEL_GATE_EVENT_ATTR, None)
-    if not isinstance(event, dict):
-        event = read_timeline_event_for_update(session_dir, "model_gate")
-    if event is None or str(event.get("type") or "") != "model_gate":
-        event = _new_model_gate_event(args)
-    setattr(args, _MODEL_GATE_EVENT_ATTR, event)
-    event.setdefault("kind", "model_gate")
-    event.setdefault("status", "succeeded")
-    event.setdefault("start_time", now_iso(timespec="seconds"))
-    event.setdefault("end_time", "")
-    ext = event.get("ext")
-    if not isinstance(ext, dict):
-        ext = {}
-        event["ext"] = ext
-    ext.setdefault("run_kind", "fresh")
-    ext.setdefault("skip_reason", None)
-    ext.setdefault("failed_gate_id", None)
-    ext["workload"] = _model_gate_workload(args)
-    checks = ext.get("checks")
-    ext["checks"] = [row for row in checks if isinstance(row, dict)] if isinstance(checks, list) else []
-    degraded = ext.get("degraded")
-    if not isinstance(degraded, dict):
-        degraded = {}
-        ext["degraded"] = degraded
-    degraded["active"] = bool(degraded.get("active"))
-    warnings = degraded.get("warnings")
-    degraded["warnings"] = [row for row in warnings if isinstance(row, dict)] if isinstance(warnings, list) else []
-    return event
-
-
-def _write_model_gate_event(session_dir: Path, event: dict[str, Any]) -> bool:
-    from ..session.sbd_v6 import record_write_warning, write_timeline_event_at
-
-    try:
-        write_timeline_event_at(session_dir, event)
-    except Exception as exc:
-        log.warning("failed to persist SBD V6 model-gate event", exc_info=True)
-        if not record_write_warning(session_dir, component="model_gate.event", exc=exc):
-            log.debug("failed to persist SBD V6 model-gate write warning", exc_info=True)
-        return False
-    return True
+    return sbd_v6.read_timeline_event_for_update(session_dir, "model_gate") or _new_model_gate_event(args)
 
 
 def _record_model_gate_warning(session_dir: Path, *, component: str, exc: BaseException) -> None:
     """Best-effort retain a model-gate observability failure for export."""
-    from ..session.sbd_v6 import record_write_warning
-
-    if not record_write_warning(session_dir, component=component, exc=exc):
-        log.debug("failed to persist SBD V6 model-gate warning", exc_info=True)
+    if not sbd_v6.record_write_warning(session_dir, component=component, exc=exc):
+        log.debug("failed to persist SBD V6 model-gate warning", exc_info=exc)
 
 
-def _model_gate_status(
-    checks: list[dict[str, Any]],
-    *,
-    skip_reason: str | None = None,
-) -> str:
+def _model_gate_status(checks: list[dict[str, Any]]) -> str:
     statuses = {str(check.get("status") or "") for check in checks}
     if "failed" in statuses:
         return "failed"
     if "warned" in statuses or "unknown" in statuses:
         return "degraded"
-    if skip_reason:
-        return "skipped"
     return "succeeded"
 
 
 def _model_gate_check_order(check: dict[str, Any]) -> int:
-    try:
-        return int(check.get("order") or 0)
-    except (TypeError, ValueError):
-        return len(_MODEL_GATE_ORDER) + 1
+    return int(check["order"])
 
 
 def _record_model_gate_check(
@@ -1299,12 +1191,9 @@ def _record_model_gate_check(
             degraded["active"] = True
             degraded.setdefault("warnings", []).append(degraded_warning)
         ext["checks"] = checks
-        event["status"] = _model_gate_status(
-            checks,
-            skip_reason=str(ext.get("skip_reason") or "") or None,
-        )
-        _write_model_gate_event(session_dir, event)
-    except Exception as exc:
+        event["status"] = _model_gate_status(checks)
+        sbd_v6.write_timeline_event_at(session_dir, event)
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to record SBD V6 model-gate check", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.check", exc=exc)
 
@@ -1312,10 +1201,8 @@ def _record_model_gate_check(
 def _start_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
     """Create the model-gate event before the first check executes."""
     try:
-        event = _new_model_gate_event(args)
-        setattr(args, _MODEL_GATE_EVENT_ATTR, event)
-        _write_model_gate_event(session_dir, event)
-    except Exception as exc:
+        sbd_v6.write_timeline_event_at(session_dir, _new_model_gate_event(args))
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to initialize SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.start", exc=exc)
 
@@ -1324,14 +1211,10 @@ def _finish_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
     """Finalize a successfully completed three-check model-gate chain."""
     try:
         event = _load_model_gate_event(args, session_dir)
-        ext = event["ext"]
-        event["status"] = _model_gate_status(
-            ext["checks"],
-            skip_reason=str(ext.get("skip_reason") or "") or None,
-        )
+        event["status"] = _model_gate_status(event["ext"]["checks"])
         event["end_time"] = now_iso(timespec="seconds")
-        _write_model_gate_event(session_dir, event)
-    except Exception as exc:
+        sbd_v6.write_timeline_event_at(session_dir, event)
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to finalize SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.finish", exc=exc)
 
@@ -1363,9 +1246,8 @@ def _record_resumed_model_gate(
             }
             for order, gate_id in enumerate(_MODEL_GATE_ORDER, start=1)
         ]
-        setattr(args, _MODEL_GATE_EVENT_ATTR, event)
-        _write_model_gate_event(session_dir, event)
-    except Exception as exc:
+        sbd_v6.write_timeline_event_at(session_dir, event)
+    except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to record resumed SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.resume", exc=exc)
 
@@ -1380,7 +1262,8 @@ def _write_model_gate_breakdown(
         from ..breakdown import write_breakdown_json
 
         write_breakdown_json(session_dir)
-    except Exception as exc:  # noqa: BLE001 — never mask the gate failure
+    except (OSError, ValueError, TypeError) as exc:
+        log.warning("session_breakdown.json write failed on %s fail-fast", failure_label, exc_info=True)
         print(
             f"WARNING: failed to write session_breakdown.json on {failure_label} fail-fast: {exc!r}",
             file=sys.stderr,
@@ -1421,7 +1304,8 @@ def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
         flush_session(session_dir)
         patch_breakdown_langfuse(session_dir)
         record_session_breakdown(session_dir)
-    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
+    except (OSError, ValueError) as exc:
+        log.warning("session_breakdown Langfuse push failed on fail-fast", exc_info=True)
         print(
             f"WARNING: failed to emit session_breakdown to Langfuse on fail-fast: {exc!r}",
             file=sys.stderr,
@@ -1445,85 +1329,51 @@ def _persist_gate_stop_report(session_dir: Path, *, stop_reason: str, reason: st
         state.closing_phase = True
         state.save(session_dir)
         write_stop_report(session_dir, state, stop_detail=reason)
-    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+    except (OSError, ValueError, TypeError) as exc:
+        log.warning("%s stop report persist failed", warning_label, exc_info=True)
         print(
             f"WARNING: failed to persist {warning_label} stop report: {exc!r}",
             file=sys.stderr,
         )
 
 
-def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bool:
-    """Fail fast when ``max_position_embeddings < ISL+OSL+headroom`` (no --context-length stretch by policy)."""
-    isl = int(getattr(args, "isl", 0) or 0)
-    osl = int(getattr(args, "osl", 0) or 0)
-    if isl <= 0 or osl <= 0:
-        _record_model_gate_check(
-            args,
-            session_dir,
-            {
-                "gate_id": "context_window",
-                "order": 3,
-                "status": "skipped",
-                "skip_reason": "isl_osl_unset",
-                "detail": {
-                    "isl": isl,
-                    "osl": osl,
-                    "headroom": _context_headroom_tokens(),
-                    "required": None,
-                    "max_position_embeddings": None,
-                    "fits": None,
-                    "policy": "no_context_length_override",
-                },
+def _record_context_window_unset(args: argparse.Namespace, session_dir: Path, *, isl: int, osl: int) -> None:
+    """Record the context-window gate as skipped because ISL or OSL is unset."""
+    _record_model_gate_check(
+        args,
+        session_dir,
+        {
+            "gate_id": "context_window",
+            "order": 3,
+            "status": "skipped",
+            "skip_reason": "isl_osl_unset",
+            "detail": {
+                "isl": isl,
+                "osl": osl,
+                "headroom": _context_headroom_tokens(),
+                "required": None,
+                "max_position_embeddings": None,
+                "fits": None,
+                "policy": "no_context_length_override",
             },
-        )
-        return False
-    maxpos = _load_model_max_position_embeddings(str(getattr(args, "model", "") or ""))
-    if not maxpos:
-        headroom = _context_headroom_tokens()
-        _record_model_gate_check(
-            args,
-            session_dir,
-            {
-                "gate_id": "context_window",
-                "order": 3,
-                "status": "skipped",
-                "skip_reason": "max_position_unknown",
-                "detail": {
-                    "isl": isl,
-                    "osl": osl,
-                    "headroom": headroom,
-                    "required": isl + osl + headroom,
-                    "max_position_embeddings": None,
-                    "fits": None,
-                    "policy": "no_context_length_override",
-                },
-            },
-        )
-        return False
-    headroom = _context_headroom_tokens()
-    required = isl + osl + headroom
-    if maxpos >= required:
-        _record_model_gate_check(
-            args,
-            session_dir,
-            {
-                "gate_id": "context_window",
-                "order": 3,
-                "status": "passed",
-                "skip_reason": None,
-                "detail": {
-                    "isl": isl,
-                    "osl": osl,
-                    "headroom": headroom,
-                    "required": required,
-                    "max_position_embeddings": maxpos,
-                    "fits": True,
-                    "policy": "no_context_length_override",
-                },
-            },
-        )
-        return False
+        },
+    )
 
+
+@dataclass(frozen=True)
+class _ContextDemand:
+    """A workload's context demand measured against the model's context window."""
+
+    isl: int
+    osl: int
+    headroom: int
+    required: int
+    maxpos: int
+
+
+def _refuse_context_window(args: argparse.Namespace, session_dir: Path, demand: _ContextDemand) -> None:
+    """Record the context-window gate failure, persist its stop report and breakdown, and print the refusal."""
+    isl, osl, headroom, required, maxpos = demand.isl, demand.osl, demand.headroom, demand.required, demand.maxpos
     reason = (
         f"model max_position_embeddings={maxpos} < required {required} "
         f"(ISL={isl} + OSL={osl} + headroom={headroom}). The workload exceeds "
@@ -1574,42 +1424,72 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)
     print(f"ERROR: {reason}", file=sys.stderr)
-    return True
 
 
-def _preflight_model_config_compat(
-    args: argparse.Namespace,
-    session_dir: Path,
-) -> bool:
-    """Fail fast when the model config is statically known to be incompatible."""
-    model = str(getattr(args, "model", "") or "")
-    framework = (str(getattr(args, "framework", "") or "") or os.environ.get("FRAMEWORK", "")).strip().lower() or None
-    detail = _detect_incompatible_model_config(
-        model,
-        str(getattr(args, "gpu_type", "") or "") or None,
-        framework=framework,
-    )
-    if detail is None:
-        model_dir = resolve_local_model_dir(model) or Path(model)
-        config_path = model_dir / "config.json"
-        absent = not config_path.is_file()
+def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bool:
+    """Fail fast when ``max_position_embeddings < ISL+OSL+headroom`` (no --context-length stretch by policy)."""
+    isl = int(getattr(args, "isl", 0) or 0)
+    osl = int(getattr(args, "osl", 0) or 0)
+    if isl <= 0 or osl <= 0:
+        _record_context_window_unset(args, session_dir, isl=isl, osl=osl)
+        return False
+    maxpos = _load_model_max_position_embeddings(str(getattr(args, "model", "") or ""))
+    if not maxpos:
+        headroom = _context_headroom_tokens()
         _record_model_gate_check(
             args,
             session_dir,
             {
-                "gate_id": "model_config_compat",
-                "order": 2,
-                "status": "skipped" if absent else "passed",
-                "skip_reason": "config_absent_soft_pass" if absent else None,
+                "gate_id": "context_window",
+                "order": 3,
+                "status": "skipped",
+                "skip_reason": "max_position_unknown",
                 "detail": {
-                    "config_path": str(config_path) if config_path.is_file() else None,
-                    "incompatible": False,
-                    "reason": None,
-                    "detector": None,
+                    "isl": isl,
+                    "osl": osl,
+                    "headroom": headroom,
+                    "required": isl + osl + headroom,
+                    "max_position_embeddings": None,
+                    "fits": None,
+                    "policy": "no_context_length_override",
                 },
             },
         )
         return False
+    headroom = _context_headroom_tokens()
+    required = isl + osl + headroom
+    if maxpos >= required:
+        _record_model_gate_check(
+            args,
+            session_dir,
+            {
+                "gate_id": "context_window",
+                "order": 3,
+                "status": "passed",
+                "skip_reason": None,
+                "detail": {
+                    "isl": isl,
+                    "osl": osl,
+                    "headroom": headroom,
+                    "required": required,
+                    "max_position_embeddings": maxpos,
+                    "fits": True,
+                    "policy": "no_context_length_override",
+                },
+            },
+        )
+        return False
+
+    _refuse_context_window(
+        args,
+        session_dir,
+        _ContextDemand(isl=isl, osl=osl, headroom=headroom, required=required, maxpos=maxpos),
+    )
+    return True
+
+
+def _refuse_model_config(args: argparse.Namespace, session_dir: Path, *, model: str, detail: str) -> None:
+    """Record the model-config gate failure, persist its stop report and breakdown, and print the refusal."""
     name = Path(model).name or model
     reason = (
         f"Model '{name}' has an incompatible config: {detail} Refusing to run "
@@ -1653,7 +1533,129 @@ def _preflight_model_config_compat(
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)
     print(f"ERROR: {reason}", file=sys.stderr)
+
+
+def _preflight_model_config_compat(
+    args: argparse.Namespace,
+    session_dir: Path,
+) -> bool:
+    """Fail fast when the model config is statically known to be incompatible."""
+    model = str(getattr(args, "model", "") or "")
+    framework = (str(getattr(args, "framework", "") or "") or os.environ.get("FRAMEWORK", "")).strip().lower() or None
+    detail = _detect_incompatible_model_config(
+        model,
+        str(getattr(args, "gpu_type", "") or "") or None,
+        framework=framework,
+    )
+    if detail is None:
+        model_dir = resolve_local_model_dir(model) or Path(model)
+        config_path = model_dir / "config.json"
+        absent = not config_path.is_file()
+        _record_model_gate_check(
+            args,
+            session_dir,
+            {
+                "gate_id": "model_config_compat",
+                "order": 2,
+                "status": "skipped" if absent else "passed",
+                "skip_reason": "config_absent_soft_pass" if absent else None,
+                "detail": {
+                    "config_path": str(config_path) if config_path.is_file() else None,
+                    "incompatible": False,
+                    "reason": None,
+                    "detector": None,
+                },
+            },
+        )
+        return False
+    _refuse_model_config(args, session_dir, model=model, detail=detail)
     return True
+
+
+def _unsupported_arch_check_row(
+    status: str,
+    allow: bool,
+    detail: Mapping[str, Any],
+    skip_reason: str | None = None,
+    verdict: str | None = None,
+) -> dict[str, Any]:
+    """One ``unsupported_model_arch`` check row with the gate's fixed key order."""
+    return {
+        "gate_id": "unsupported_model_arch",
+        "order": 1,
+        "status": status,
+        "skip_reason": skip_reason,
+        "verdict": verdict,
+        "detail": {
+            "architecture": detail.get("architecture"),
+            "model_type": detail.get("model_type"),
+            "signal": detail.get("signal"),
+            "allow_mm_text_fallback": allow,
+            "action": detail.get("action", "proceed"),
+        },
+    }
+
+
+def _warn_text_coercible_arch(
+    args: argparse.Namespace,
+    session_dir: Path,
+    hit: Mapping[str, Any],
+    name: str,
+    allow: bool,
+) -> None:
+    """Persist degraded mode and record a warned unsupported_model_arch check."""
+    warning = _UNSUPPORTED_ARCH_DEGRADED.format(name=name, **hit)
+    print(f"WARNING: {warning}", file=sys.stderr)
+    log.warning(warning)
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    detail = {"architecture": hit["architecture"], "model_type": hit["model_type"], "signal": hit["signal"]}
+    try:
+        state = SharedState.load_or_init(session_dir)
+        state.degraded_mode = True
+        state.model_warnings = [
+            *state.model_warnings,
+            {"kind": "multimodal_text_fallback", "model_name": name, **detail, "detail": warning},
+        ]
+        state.save(session_dir)
+    except (OSError, ValueError) as exc:  # the marker is advisory; the run proceeds without it
+        print(f"WARNING: failed to persist degraded-mode marker: {exc!r}", file=sys.stderr)
+    _record_model_gate_check(
+        args,
+        session_dir,
+        _unsupported_arch_check_row("warned", allow, detail, verdict=hit["verdict"]),
+        degraded_warning={"kind": "multimodal_text_fallback", **detail},
+    )
+
+
+def _reject_unsupported_arch(
+    args: argparse.Namespace,
+    session_dir: Path,
+    hit: Mapping[str, Any],
+    name: str,
+    allow: bool,
+) -> None:
+    """Fail-fast: stop report, failed gate check, breakdown, Langfuse."""
+    reason = _UNSUPPORTED_ARCH_REJECTED.format(name=name, **hit)
+    _persist_gate_stop_report(
+        session_dir, stop_reason="unsupported_model_arch", reason=reason, warning_label="unsupported-model"
+    )
+    final_json = "reports/final.json" if (session_dir / "reports" / "final.json").is_file() else None
+    _record_model_gate_check(
+        args,
+        session_dir,
+        _unsupported_arch_check_row("failed", allow, {**hit, "action": "fail_fast"}, verdict=hit["verdict"]),
+        failure={
+            "gate_id": "unsupported_model_arch",
+            "stop_reason": "unsupported_model_arch",
+            "exit_code": 2,
+            "message": reason,
+            "artifacts": {"final_json": final_json},
+        },
+    )
+    _write_model_gate_breakdown(session_dir, failure_label="unsupported-model")
+    _emit_breakdown_to_langfuse(session_dir)
+    print(f"ERROR: {reason}", file=sys.stderr)
 
 
 def _preflight_unsupported_model_arch(
@@ -1661,163 +1663,38 @@ def _preflight_unsupported_model_arch(
     session_dir: Path,
 ) -> bool:
     """Gate multimodal/vision models before expensive bring-up."""
+    allow = bool(getattr(args, "allow_mm_text_fallback", True))
     # Scriptable diffusion frameworks (xDiT) are server-less image workloads, not decoder-only causal LMs.
     if framework_registry.is_scriptable(getattr(args, "framework", "")):
         _record_model_gate_check(
             args,
             session_dir,
-            {
-                "gate_id": "unsupported_model_arch",
-                "order": 1,
-                "status": "skipped",
-                "skip_reason": "scriptable_framework",
-                "verdict": None,
-                "detail": {
-                    "architecture": None,
-                    "model_type": None,
-                    "signal": None,
-                    "allow_mm_text_fallback": bool(getattr(args, "allow_mm_text_fallback", True)),
-                    "action": "proceed",
-                },
-            },
+            _unsupported_arch_check_row("skipped", allow, {}, skip_reason="scriptable_framework"),
         )
         return False
-
     model = str(getattr(args, "model", "") or "")
     hit = _detect_unsupported_model(model)
     if hit is None:
-        config = _load_model_config_dict(model)
-        architectures = _config_architectures(config) if isinstance(config, dict) else []
+        config = load_model_config_dict(model)
+        passed = config is not None
+        architectures = _config_architectures(config) if passed else []
         _record_model_gate_check(
             args,
             session_dir,
-            {
-                "gate_id": "unsupported_model_arch",
-                "order": 1,
-                "status": "passed" if isinstance(config, dict) else "unknown",
-                "skip_reason": None,
-                "verdict": "plain_text" if isinstance(config, dict) else None,
-                "detail": {
-                    "architecture": architectures[0] if architectures else None,
-                    "model_type": str(config.get("model_type") or "") if isinstance(config, dict) else None,
-                    "signal": None,
-                    "allow_mm_text_fallback": bool(getattr(args, "allow_mm_text_fallback", True)),
-                    "action": "proceed",
-                },
-            },
-        )
-        return False
-
-    name = Path(model).name or model
-    arch = hit.get("architecture") or "<unknown>"
-    mt = hit.get("model_type") or "<unknown>"
-    verdict = str(hit.get("verdict") or _VERDICT_VISION_ONLY)
-    allow_fallback = bool(getattr(args, "allow_mm_text_fallback", True))
-
-    if verdict == _VERDICT_TEXT_COERCIBLE and allow_fallback:
-        warning = (
-            f"DEGRADED MODE: model '{name}' carries a multimodal signal "
-            f"({hit.get('signal', 'multimodal config')}; architecture '{arch}', "
-            f"model_type '{mt}') but exposes a text-generation path. Hyperloom "
-            f"is running it on the TEXT path only — any image/audio inputs are "
-            f"ignored, so benchmark numbers reflect the text decoder alone. "
-            f"Pass --no-allow-mm-text-fallback to fail-fast instead."
-        )
-        print(f"WARNING: {warning}", file=sys.stderr)
-        log.warning(warning)
-        try:
-            from hyperloom.orchestrator.state.shared_state import SharedState
-
-            state = SharedState.load_or_init(session_dir)
-            state.degraded_mode = True
-            state.model_warnings = list(state.model_warnings or []) + [
+            _unsupported_arch_check_row(
+                "passed" if passed else "unknown",
+                allow,
                 {
-                    "kind": "multimodal_text_fallback",
-                    "model_name": name,
-                    "architecture": arch,
-                    "model_type": mt,
-                    "signal": str(hit.get("signal") or ""),
-                    "detail": warning,
-                }
-            ]
-            state.save(session_dir)
-        except Exception as exc:  # noqa: BLE001 — never block the run on advisory write
-            print(
-                f"WARNING: failed to persist degraded-mode marker: {exc!r}",
-                file=sys.stderr,
-            )
-        _record_model_gate_check(
-            args,
-            session_dir,
-            {
-                "gate_id": "unsupported_model_arch",
-                "order": 1,
-                "status": "warned",
-                "skip_reason": None,
-                "verdict": verdict,
-                "detail": {
-                    "architecture": arch,
-                    "model_type": mt,
-                    "signal": str(hit.get("signal") or ""),
-                    "allow_mm_text_fallback": allow_fallback,
-                    "action": "proceed",
+                    "architecture": architectures[0] if architectures else None,
+                    "model_type": str(config.get("model_type") or "") if passed else None,
                 },
-            },
-            degraded_warning={
-                "kind": "multimodal_text_fallback",
-                "architecture": arch,
-                "model_type": mt,
-                "signal": str(hit.get("signal") or ""),
-            },
+                verdict="plain_text" if passed else None,
+            ),
         )
         return False
-
-    reason = (
-        f"Unsupported model '{name}': architecture '{arch}' (model_type "
-        f"'{mt}') is not a supported text-generation model. Hyperloom only "
-        f"supports decoder-only causal LM models (architectures containing "
-        f"ForCausalLM or LMHeadModel). Rejected because: "
-        f"{hit.get('signal', 'unknown architecture')}. Submit a "
-        f"text-generation checkpoint instead."
-    )
-    # Persist the stop reason for CI and session diagnostics.
-    _persist_gate_stop_report(
-        session_dir,
-        stop_reason="unsupported_model_arch",
-        reason=reason,
-        warning_label="unsupported-model",
-    )
-    _record_model_gate_check(
-        args,
-        session_dir,
-        {
-            "gate_id": "unsupported_model_arch",
-            "order": 1,
-            "status": "failed",
-            "skip_reason": None,
-            "verdict": verdict,
-            "detail": {
-                "architecture": arch,
-                "model_type": mt,
-                "signal": str(hit.get("signal") or ""),
-                "allow_mm_text_fallback": allow_fallback,
-                "action": "fail_fast",
-            },
-        },
-        failure={
-            "gate_id": "unsupported_model_arch",
-            "stop_reason": "unsupported_model_arch",
-            "exit_code": 2,
-            "message": reason,
-            "artifacts": {
-                "final_json": "reports/final.json" if (session_dir / "reports" / "final.json").is_file() else None,
-            },
-        },
-    )
-    # Delivery-artifact parity: emit session_breakdown.json here too since fail-fast exits before coordinator.run()'s
-    # finally.
-    _write_model_gate_breakdown(session_dir, failure_label="unsupported-model")
-    # Langfuse parity: this gate exits before coordinator.run()'s finally, so push the breakdown to Langfuse here too.
-    _emit_breakdown_to_langfuse(session_dir)
-    print(f"ERROR: {reason}", file=sys.stderr)
+    name = Path(model).name or model
+    if hit["verdict"] == _VERDICT_TEXT_COERCIBLE and allow:
+        _warn_text_coercible_arch(args, session_dir, hit, name, allow)
+        return False
+    _reject_unsupported_arch(args, session_dir, hit, name, allow)
     return True

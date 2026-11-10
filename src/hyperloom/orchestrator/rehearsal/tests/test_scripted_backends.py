@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
 from hyperloom.common.bringup import LadderStage
+from hyperloom.orchestrator.actions.executors._subprocess_kill import RoundWatch
 from hyperloom.orchestrator.bringup import observe_bringup
 from hyperloom.orchestrator.rehearsal import (
     COMPLETED,
@@ -32,6 +35,19 @@ from hyperloom.orchestrator.rehearsal import (
     VirtualClock,
     installed_clock,
 )
+from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn, SpecialistSubprocessDispatcher
+
+
+def _spawn(task_id: str, workspace: Path) -> SpecialistSpawn:
+    """The dispatch the runner would hand the dispatcher; the script reads only the task id and workspace."""
+    return SpecialistSpawn(
+        task_id=task_id,
+        workspace=workspace,
+        worktree=None,
+        worktree_base=None,
+        system_prompt="",
+        user_prompt="",
+    )
 
 
 def _backend(*attempts: LaunchAttempt) -> ScriptedLaunchBackend:
@@ -39,9 +55,9 @@ def _backend(*attempts: LaunchAttempt) -> ScriptedLaunchBackend:
     return ScriptedLaunchBackend(scenario=LaunchScenario(attempts=attempts), clock=VirtualClock())
 
 
-def _play(backend: ScriptedLaunchBackend, slot, **kwargs) -> subprocess.CompletedProcess:
+def _play(backend: ScriptedLaunchBackend, slot, **gates) -> subprocess.CompletedProcess:
     """Run one launch against ``backend``, writing into ``slot``."""
-    return backend.run(["magpie", "bench.yaml"], server_log_path=str(slot / "server.log"), **kwargs)
+    return backend.run(["magpie", "bench.yaml"], watch=RoundWatch(server_log_path=str(slot / "server.log"), **gates))
 
 
 def test_a_clean_boot_serves_and_leaves_a_log_that_classifies_as_booted(tmp_path):
@@ -51,7 +67,8 @@ def test_a_clean_boot_serves_and_leaves_a_log_that_classifies_as_booted(tmp_path
 
     assert done.returncode == 0
     observed = observe_bringup(server_log=(tmp_path / "server.log").read_text(encoding="utf-8"))
-    assert observed.observation.booted
+    assert observed.observation.stage_failed is None
+    assert observed.observation.stage_reached >= LadderStage.HTTP_READY
     assert (tmp_path / "bench" / "benchmark_report.json").exists()
 
 
@@ -117,7 +134,7 @@ def test_a_session_deadline_the_attempt_runs_past_stops_the_round(tmp_path):
     backend = _backend(LaunchAttempt(outcome=READY, duration_sec=600.0))
 
     with installed_clock(backend.clock):
-        done = _play(backend, tmp_path, session_deadline_sec=backend.clock.deadline_in(60.0))
+        done = _play(backend, tmp_path, session_deadline_sec=backend.clock.monotonic() + 60.0)
 
     assert done.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
     assert backend.clock.elapsed == pytest.approx(60.0)
@@ -143,8 +160,7 @@ def test_a_hang_that_outlives_the_budget_stops_for_the_budget_in_both_backends(t
     hard_timeout = 0.4
     produced = run_with_session_kill(
         [sys.executable, "-c", "import time; time.sleep(30)"],
-        timeout=hard_timeout,
-        session_deadline_sec=time.monotonic() + hard_timeout,
+        watch=RoundWatch(timeout=hard_timeout, session_deadline_sec=time.monotonic() + hard_timeout),
     )
 
     backend = _backend(LaunchAttempt(outcome=HANG, duration_sec=30.0))
@@ -153,7 +169,7 @@ def test_a_hang_that_outlives_the_budget_stops_for_the_budget_in_both_backends(t
             backend,
             tmp_path,
             timeout=hard_timeout,
-            session_deadline_sec=backend.clock.deadline_in(hard_timeout),
+            session_deadline_sec=backend.clock.monotonic() + hard_timeout,
         )
 
     assert produced.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
@@ -165,23 +181,11 @@ def test_a_scenario_that_names_neither_spelling_is_rejected():
         LaunchScenario.from_dict({"name": "empty"})
 
 
-def test_a_scenario_file_round_trips(tmp_path):
-    import json
-
-    path = tmp_path / "round.json"
-    path.write_text(json.dumps({"name": "f", "blockers": ["import"]}), encoding="utf-8")
-
-    scenario = LaunchScenario.from_file(path)
-
-    assert scenario.name == "f"
-    assert [a.outcome for a in scenario.attempts] == [STAGE_FAILED, READY]
-
-
 @pytest.mark.asyncio
 async def test_a_completed_specialist_writes_the_done_file_the_runner_reads(tmp_path):
     scripted = ScriptedSpecialist(steps=(SpecialistStep(outcome=COMPLETED, done={"status": "patched"}),))
 
-    result = await scripted.run(task_id="spec-1", workspace=tmp_path / "ws")
+    result = await scripted.run(_spawn("spec-1", tmp_path / "ws"))
 
     assert result.done_payload == {"status": "patched"}
     assert (tmp_path / "ws" / "specialist_done.json").exists()
@@ -192,7 +196,7 @@ async def test_a_completed_specialist_writes_the_done_file_the_runner_reads(tmp_
 async def test_an_empty_completion_is_a_done_file_with_nothing_in_it(tmp_path):
     scripted = ScriptedSpecialist(steps=(SpecialistStep(outcome=EMPTY),))
 
-    result = await scripted.run(task_id="spec-1", workspace=tmp_path / "ws")
+    result = await scripted.run(_spawn("spec-1", tmp_path / "ws"))
 
     assert result.done_payload == {}
     assert (tmp_path / "ws" / "specialist_done.json").exists()
@@ -202,7 +206,7 @@ async def test_an_empty_completion_is_a_done_file_with_nothing_in_it(tmp_path):
 async def test_a_crash_leaves_no_done_file_for_the_runner_to_find(tmp_path):
     scripted = ScriptedSpecialist(steps=(SpecialistStep(outcome=CRASHED),))
 
-    result = await scripted.run(task_id="spec-1", workspace=tmp_path / "ws")
+    result = await scripted.run(_spawn("spec-1", tmp_path / "ws"))
 
     assert result.done_payload is None
     assert not (tmp_path / "ws" / "specialist_done.json").exists()
@@ -210,25 +214,26 @@ async def test_a_crash_leaves_no_done_file_for_the_runner_to_find(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_hang_reports_a_stale_heartbeat_and_never_wrote_one(tmp_path):
+async def test_a_hang_reports_a_stale_heartbeat_and_its_log_went_silent(tmp_path):
+    from hyperloom.orchestrator.specialists.reap_watch import newest_activity, specialist_activity_paths
+
     scripted = ScriptedSpecialist(steps=(SpecialistStep(outcome=HUNG),))
 
-    result = await scripted.run(task_id="spec-1", workspace=tmp_path / "ws")
+    result = await scripted.run(_spawn("spec-1", tmp_path / "ws"))
 
     assert result.stale_heartbeat
     assert result.exit_code is None
-    assert not (tmp_path / "ws" / "heartbeat.json").exists()
+    assert newest_activity(specialist_activity_paths(tmp_path / "ws")) == 0.0
 
 
 @pytest.mark.asyncio
 async def test_a_retry_under_a_new_task_id_is_visible_as_a_retry(tmp_path):
     scripted = ScriptedSpecialist(steps=(SpecialistStep(outcome=CRASHED), SpecialistStep(outcome=COMPLETED)))
 
-    await scripted.run(task_id="spec-1", workspace=tmp_path / "spec-1")
-    await scripted.run(task_id="spec-2", workspace=tmp_path / "spec-2")
+    await scripted.run(_spawn("spec-1", tmp_path / "spec-1"))
+    await scripted.run(_spawn("spec-2", tmp_path / "spec-2"))
 
     assert scripted.task_ids == ["spec-1", "spec-2"]
-    assert scripted.retried
 
 
 def test_the_virtual_clock_moves_only_when_something_charges_it():
@@ -237,11 +242,17 @@ def test_the_virtual_clock_moves_only_when_something_charges_it():
     start_wall = clock.wall()
 
     clock.advance(120.0)
-    clock.mark("boot")
     clock.advance(-5.0)
 
     # Both readings move by the same amount, so a watchdog arming on monotonic
     # time and an artifact stamped with wall time agree about the same step.
     assert clock.monotonic() - start_monotonic == pytest.approx(120.0)
     assert clock.wall() - start_wall == pytest.approx(120.0)
-    assert clock.marks == ((120.0, "boot"),)
+
+
+def test_the_scripted_specialist_takes_the_dispatch_the_real_dispatcher_takes():
+    real = inspect.signature(SpecialistSubprocessDispatcher.run)
+    scripted = inspect.signature(ScriptedSpecialist.run)
+
+    assert list(scripted.parameters) == list(real.parameters)
+    assert scripted.parameters["request"].annotation == real.parameters["request"].annotation

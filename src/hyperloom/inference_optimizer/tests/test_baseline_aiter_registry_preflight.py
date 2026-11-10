@@ -17,8 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import _aiter_jit
-from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+from hyperloom.orchestrator.actions.executors import _aiter_jit, _aiter_serving_once
+from hyperloom.orchestrator.actions.executors.benchmark_run import launch as launch_mod
+
+_PREPARE = "hyperloom.orchestrator.actions.executors._aiter_serving_once.prepare_serving_so_for_csvs"
 
 
 @pytest.fixture(autouse=True)
@@ -28,9 +30,11 @@ def _isolate_serving_package(tmp_path, monkeypatch):
     (package / "__init__.py").write_text("raise AssertionError('AITER must not be imported')\n", encoding="utf-8")
     monkeypatch.delitem(sys.modules, "aiter", raising=False)
     monkeypatch.syspath_prepend(str(tmp_path))
-    for name in ("AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR", "VLLM_VENV_ROOT"):
+    for name in ("AITER_JIT_DIR", "INFERENCE_OPTIMIZER_AITER_JIT_DIR", "VLLM_VENV_ROOT", "GPU_ARCHS", "CU_NUM"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(_aiter_jit, "AITER_JIT_PROBE_PATHS", ())
+    monkeypatch.setattr(_aiter_jit, "card_target", lambda: None)
+    monkeypatch.setattr(_aiter_serving_once, "HOST_DIR", tmp_path / "host")
 
 
 def _configs(tmp_path: Path) -> Path:
@@ -153,7 +157,7 @@ def test_unset_csvs_respect_package_and_wrapper_boundaries(tmp_path, monkeypatch
 
     assert "aiter" not in sys.modules
     if cache_location == "wrapper-override":
-        assert outcome == {"action": "skip", "jit_dir": str(jit)}
+        assert outcome == {"action": "skip", "jit_dir": str(jit), "targets": []}
         assert (jit / name).read_bytes() == b"a8w8_blockscale_bpreshuffle_old"
         assert (jit / "build" / "stamp").read_bytes() == b"runtime build"
         assert (jit / "module_attention.so").read_bytes() == b"unrelated"
@@ -246,44 +250,64 @@ def test_a_tree_without_a_configs_dir_still_checks_what_the_round_named(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_the_baseline_drop_stays_on_the_cache_filesystem(tmp_path, monkeypatch):
+    """Nothing restores what the baseline drops, so it is parked beside the cache, not copied off the host.
+
+    A run directory on NFS took a ~3.5 GB copy of ``jit/build`` and the modules on every session, kept forever.
+    """
+    jit = _aiter_tree(
+        tmp_path,
+        csv_rows="16,512,2048,a8w8_blockscale_bpreshuffle_never_built,ck\n",
+        so_contains=b"a8w8_blockscale_bpreshuffle_something_else",
+        overlay=True,
+    )
+    (jit / "build" / "module_gemm_a8w8_blockscale_bpreshuffle").mkdir(parents=True)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.chdir(run_dir)
+
+    await launch_mod._prepare_aiter_serving_so({})
+
+    assert not (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").exists()
+    assert list(run_dir.iterdir()) == []
+    parked = jit / "hyperloom_jit_backup"
+    assert [p.name for p in parked.glob("jit_modules_*/*")] == ["module_gemm_a8w8_blockscale_bpreshuffle.so"]
+    assert len(list(parked.glob("jit_build_*"))) == 1
+
+
+@pytest.mark.asyncio
 async def test_the_preflight_runs_even_when_the_round_names_no_csv(tmp_path, monkeypatch):
     """No env is exactly the case that needs the unset-branch check, not a reason to skip."""
-    seen: list[tuple[dict, Path]] = []
+    seen: list[dict] = []
 
-    def _prepare(envs, backup_dir=None):
-        seen.append((dict(envs), backup_dir))
+    def _prepare(envs, backup_dir=None, environ=None):
+        seen.append(dict(envs))
         return {"action": "skip"}
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._aiter_jit.prepare_serving_so_for_csvs",
-        _prepare,
-    )
+    monkeypatch.setattr(_PREPARE, _prepare)
 
-    await baseline_mod._prepare_aiter_serving_so({"RUN_EVAL": "false"}, tmp_path)
+    await launch_mod._prepare_aiter_serving_so({"RUN_EVAL": "false"})
 
-    assert seen == [({}, tmp_path / "aiter_jit_backup")]
+    assert seen == [{}]
 
 
 @pytest.mark.asyncio
 async def test_only_the_csv_variables_travel(tmp_path, monkeypatch):
     seen: list[dict] = []
 
-    def _prepare(envs, backup_dir=None):
+    def _prepare(envs, backup_dir=None, environ=None):
         seen.append(dict(envs))
         return {"action": "skip"}
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._aiter_jit.prepare_serving_so_for_csvs",
-        _prepare,
-    )
+    monkeypatch.setattr(_PREPARE, _prepare)
 
-    await baseline_mod._prepare_aiter_serving_so(
+    await launch_mod._prepare_aiter_serving_so(
         {
             "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "/tuned/bpreshuffle.csv",
             "AITER_CONFIG_GEMM_BF16": "  ",
             "RUN_EVAL": "false",
         },
-        tmp_path,
     )
 
     # A blank value is an unset variable, and the rest of the round's environment is not
@@ -295,22 +319,19 @@ async def test_only_the_csv_variables_travel(tmp_path, monkeypatch):
 async def test_a_preflight_failure_does_not_abort_the_round(tmp_path, monkeypatch):
     """A jit directory the check cannot read is not a reason to lose the measurement."""
 
-    def _prepare(envs, backup_dir=None):
+    def _prepare(envs, backup_dir=None, environ=None):
         raise OSError("jit dir is read-only")
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._aiter_jit.prepare_serving_so_for_csvs",
-        _prepare,
-    )
+    monkeypatch.setattr(_PREPARE, _prepare)
 
-    await baseline_mod._prepare_aiter_serving_so({"AITER_CONFIG_GEMM_BF16": "/tuned/bf16.csv"}, tmp_path)
+    await launch_mod._prepare_aiter_serving_so({"AITER_CONFIG_GEMM_BF16": "/tuned/bf16.csv"})
 
 
 def test_the_preflight_runs_before_the_config_is_materialized():
     """Ordering is the whole point: after the boot it is a classifier, not a fix."""
     import ast
 
-    source = Path(baseline_mod.__file__).read_text(encoding="utf-8")
+    source = Path(launch_mod.__file__).read_text(encoding="utf-8")
     run_once = next(
         node
         for node in ast.walk(ast.parse(source))
@@ -321,13 +342,13 @@ def test_the_preflight_runs_before_the_config_is_materialized():
         if not isinstance(node, ast.Call):
             continue
         name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
-        if name in ("_prepare_aiter_serving_so", "materialize_config_with_envs"):
+        if name in ("_prepare_aiter_serving_so", "materialize_benchmark_config"):
             called.append((node.lineno, name))
 
     ordered = [name for _lineno, name in sorted(called)]
-    assert ordered[:2] == ["_prepare_aiter_serving_so", "materialize_config_with_envs"]
-    preflight = source.index("await _prepare_aiter_serving_so(base_extra_envs, output_dir)")
-    materialize = source.index("config_path = materialize_config_with_envs(")
+    assert ordered[:2] == ["_prepare_aiter_serving_so", "materialize_benchmark_config"]
+    preflight = source.index("await _prepare_aiter_serving_so(base_extra_envs)")
+    materialize = source.index("config_path = materialize_benchmark_config(")
     assert preflight < materialize
 
 
@@ -348,9 +369,11 @@ def test_the_error_names_the_module_when_the_env_cannot(tmp_path):
     )
 
     assert registry_mismatch_modules(observed) == ("module_gemm_a8w8_blockscale_bpreshuffle",)
-    # A cktile kernel carries its libtype in its own name.
+    # A cktile kernel carries its libtype in its own name, but not its table: both blockscale
+    # tables name their cktile rows a8w8_blockscale_cktile_*.
     assert registry_mismatch_modules("kernel 'a8w8_blockscale_cktile_x' is not present") == (
         "module_gemm_a8w8_blockscale_cktile",
+        "module_gemm_a8w8_blockscale_bpreshuffle_cktile",
     )
     # Nothing named, nothing to unlink — the env-keyed drop stays the only behaviour.
     assert registry_mismatch_modules("Capture cuda graph failed: HIP error") == ()

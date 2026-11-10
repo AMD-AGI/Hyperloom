@@ -52,11 +52,12 @@ def _last_json(capsys) -> dict:
 
 
 def test_safe_name_sanitizes_truncates_and_falls_back():
-    k = _load("kno_safe")
-    assert k._safe_name("a/b c:d") == "a_b_c_d"
-    assert k._safe_name("ok.name-1_2") == "ok.name-1_2"
-    assert k._safe_name("") == "patch"
-    assert len(k._safe_name("x" * 200)) == 80
+    from hyperloom.inference_optimizer.multi_node.scripts import patch_path_safety as safety
+
+    assert safety._safe_name("a/b c:d") == "a_b_c_d"
+    assert safety._safe_name("ok.name-1_2") == "ok.name-1_2"
+    assert safety._safe_name("") == "patch"
+    assert len(safety._safe_name("x" * 200)) == 80
 
 
 def test_apply_non_py_target_skips_compile(patch_env, capsys):
@@ -149,18 +150,6 @@ def test_apply_bad_base64_fails(patch_env, capsys):
     assert "base64" in payload["error"]
 
 
-def test_revert_missing_backup_is_noop(tmp_path, capsys):
-    k = _load("kno_revert_noop")
-    ns = argparse.Namespace(
-        target_path=str(tmp_path / "t.py"),
-        backup_path=str(tmp_path / "nope.bak"),
-    )
-    rc = k._do_revert(ns)
-    payload = _last_json(capsys)
-    assert rc == 0
-    assert payload["status"] == "noop_missing_backup"
-
-
 def test_revert_invalid_records_json_is_structured(tmp_path, capsys):
     k = _load("kno_revert_invalid_json")
     rc = k._do_revert(argparse.Namespace(records_json="{"))
@@ -168,10 +157,9 @@ def test_revert_invalid_records_json_is_structured(tmp_path, capsys):
 
     assert rc == 1
     assert payload["status"] == "failed"
-    assert payload["restored_targets"] == []
 
 
-def test_revert_failure_reports_already_restored_targets(
+def test_revert_failure_stops_at_the_missing_backup(
     patch_env,
     capsys,
 ):
@@ -203,7 +191,7 @@ def test_revert_failure_reports_already_restored_targets(
 
     assert rc == 1
     assert payload["status"] == "failed"
-    assert payload["restored_targets"] == [str(restored_target)]
+    assert "backup missing" in payload["error"]
     assert restored_target.read_text(encoding="utf-8") == "baseline\n"
 
 
@@ -214,7 +202,7 @@ def test_revert_restores_from_backup(patch_env, capsys):
     backup.write_text("restored", encoding="utf-8")
     target = fw / "t.py"
     target.write_text("current", encoding="utf-8")
-    ns = argparse.Namespace(target_path=str(target), backup_path=str(backup))
+    ns = argparse.Namespace(records_json=json.dumps([{"target_path": str(target), "backup_path": str(backup)}]))
     rc = k._do_revert(ns)
     payload = _last_json(capsys)
     assert rc == 0 and payload["status"] == "restored"
@@ -228,7 +216,7 @@ def test_revert_rejects_backup_outside_root(patch_env, capsys):
     target.write_text("current", encoding="utf-8")
     outside = bak.parent / "evil.bak"
     outside.write_text("pwned", encoding="utf-8")
-    ns = argparse.Namespace(target_path=str(target), backup_path=str(outside))
+    ns = argparse.Namespace(records_json=json.dumps([{"target_path": str(target), "backup_path": str(outside)}]))
     rc = k._do_revert(ns)
     payload = _last_json(capsys)
     assert rc == 1 and payload["status"] == "failed"
@@ -250,57 +238,6 @@ def test_apply_rejects_backup_dir_outside_root(patch_env, capsys):
     payload = _last_json(capsys)
     assert rc == 1 and payload["status"] == "failed"
     assert "backup_dir" in payload["error"]
-
-
-def test_bench_rejects_absolute_and_parent_staging_paths(tmp_path, capsys):
-    # Staged files must be workspace-relative with no '..'.
-    k = _load("kno_bench_traversal")
-    ns = argparse.Namespace(
-        workspace=str(tmp_path / "ws"),
-        bench_command="true",
-        files_b64_json=json.dumps({"../escape.txt": _b64("x")}),
-        result_glob="*.json",
-        timeout_sec=10,
-    )
-    rc = k._do_bench(ns)
-    payload = _last_json(capsys)
-    assert rc == 1 and payload["status"] == "failed"
-    assert ".." in payload["error"] or "relative" in payload["error"]
-
-
-def test_bench_stages_files_runs_and_collects_artifacts(tmp_path, capsys):
-    k = _load("kno_bench_ok")
-    ns = argparse.Namespace(
-        workspace=str(tmp_path / "ws"),
-        bench_command="cat kernel.txt > /dev/null; echo '{\"tput\": 42}' > result.json",
-        files_b64_json=json.dumps({"kernel.txt": _b64("kernel body")}),
-        result_glob="*.json",
-        timeout_sec=30,
-    )
-    rc = k._do_bench(ns)
-    payload = _last_json(capsys)
-    assert rc == 0 and payload["status"] == "ok"
-    assert payload["returncode"] == 0
-    assert any(a["path"].endswith("result.json") for a in payload["artifacts"])
-    art = next(a for a in payload["artifacts"] if a["path"].endswith("result.json"))
-    assert art["content"] == {"tput": 42}  # JSON artifacts parsed inline
-    # The staged kernel file landed inside the workspace.
-    assert (tmp_path / "ws" / "kernel.txt").read_text(encoding="utf-8") == "kernel body"
-
-
-def test_bench_invalid_files_json_fails(tmp_path, capsys):
-    k = _load("kno_bench_badjson")
-    ns = argparse.Namespace(
-        workspace=str(tmp_path / "ws"),
-        bench_command="true",
-        files_b64_json="{not json",
-        result_glob="*.json",
-        timeout_sec=10,
-    )
-    rc = k._do_bench(ns)
-    payload = _last_json(capsys)
-    assert rc == 1 and payload["status"] == "failed"
-    assert "JSON" in payload["error"]
 
 
 def test_finalize_deletes_only_backups_inside_the_kernel_root(patch_env, capsys):
@@ -328,7 +265,7 @@ def test_finalize_deletes_only_backups_inside_the_kernel_root(patch_env, capsys)
 def test_emit_status_to_returncode_contract():
     k = _load("kno_emit")
     # Completed operations return zero; failures and unknown states do not.
-    for ok_status in ("ok", "restored", "finalized", "noop_missing_backup"):
+    for ok_status in ("ok", "restored", "finalized"):
         assert k._emit({"status": ok_status}) == 0
     for bad_status in ("failed", "error", ""):
         assert k._emit({"status": bad_status}) == 1

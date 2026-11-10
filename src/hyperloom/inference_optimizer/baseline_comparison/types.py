@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Literal
 
 BenchmarkMode = Literal["synthetic", "agentx"]
 BaselineReason = Literal[
@@ -23,6 +23,23 @@ BaselineReason = Literal[
 ]
 
 
+@dataclass(frozen=True)
+class TargetAnalysisRequest:
+    """The session's workload as configured; analysis maps it onto an InferenceX :class:`BaselineQuery`.
+
+    ``compare_against_gpu`` empty skips the lookup; ``framework`` is query metadata, not a row filter;
+    ``isl`` / ``osl`` are ignored in agentx mode.
+    """
+
+    model_path: str
+    compare_against_gpu: str
+    framework: str = ""
+    precision: str = ""
+    isl: int | None = 0
+    osl: int | None = 0
+    benchmark_mode: BenchmarkMode = "synthetic"
+
+
 @dataclass
 class BaselineQuery:
     """Fully-resolved query against the InferenceX upstream."""
@@ -34,18 +51,6 @@ class BaselineQuery:
     isl: int | None = 0
     osl: int | None = 0
     benchmark_mode: BenchmarkMode = "synthetic"
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise the query into a plain JSON-safe dict."""
-        return {
-            "model": self.model,
-            "gpu": self.gpu,
-            "framework": self.framework,
-            "precision": self.precision,
-            "isl": self.isl,
-            "osl": self.osl,
-            "benchmark_mode": self.benchmark_mode,
-        }
 
 
 @dataclass
@@ -63,21 +68,6 @@ class BaselinePoint:
     benchmark_id: str | None = None
     e2e_norm_intvty_p90: float | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise the data point into a plain JSON-safe dict."""
-        return {
-            "tput_per_gpu": self.tput_per_gpu,
-            "output_tput_per_gpu": self.output_tput_per_gpu,
-            "conc": self.conc,
-            "decode_tp": self.decode_tp,
-            "mean_ttft_ms": self.mean_ttft_ms,
-            "mean_tpot_ms": self.mean_tpot_ms,
-            "mean_e2el_ms": self.mean_e2el_ms,
-            "date": self.date,
-            "benchmark_id": self.benchmark_id,
-            "e2e_norm_intvty_p90": self.e2e_norm_intvty_p90,
-        }
-
 
 @dataclass
 class BaselineSummary:
@@ -93,20 +83,6 @@ class BaselineSummary:
     source: str = ""
     reason: BaselineReason = ""
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise the summary (and its nested points) to a JSON-safe dict."""
-        return {
-            "query": self.query.to_dict(),
-            "fetched_at": self.fetched_at,
-            "row_count": self.row_count,
-            "best": self.best.to_dict() if self.best else None,
-            "all_concurrencies": [p.to_dict() for p in self.all_concurrencies],
-            "status": self.status,
-            "reason": self.reason,
-            "warning": self.warning,
-            "source": self.source,
-        }
-
 
 __all__ = [
     "BenchmarkMode",
@@ -114,4 +90,5 @@ __all__ = [
     "BaselineQuery",
     "BaselinePoint",
     "BaselineSummary",
+    "TargetAnalysisRequest",
 ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -15,10 +16,14 @@ from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_tim
 from hyperloom.inference_optimizer.breakdown.critic_reviews import normalize_framework_reviews
 from hyperloom.inference_optimizer.session.sbd_v6 import (
     SCHEMA_VERSION_V6,
-    read_timeline_event,
     read_timeline_events,
     write_timeline_event_at,
 )
+
+
+def read_timeline_event(session_dir: Path, event_type: str) -> dict | None:
+    matching = [event for event in read_timeline_events(session_dir) if event["type"] == event_type]
+    return matching[-1] if matching else None
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -57,6 +62,7 @@ def _write_model_config(model: Path, payload: dict) -> None:
 def _model_gate_from_breakdown(session_dir: Path) -> dict:
     breakdown = json.loads((session_dir / "session_breakdown.json").read_text(encoding="utf-8"))
     assert breakdown["schema_version"] == SCHEMA_VERSION_V6
+    assert breakdown["schema_version"] == "hyperloom.session_breakdown.v6.1"
     assert breakdown["outcome"]["status"] == "failed"
     assert breakdown["outcome"]["stage_reached"] == "model_gate"
     return next(event for event in breakdown["timeline"] if event["type"] == "model_gate")
@@ -69,6 +75,8 @@ def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
         "model_path": "/models/qwen-test",
         "framework": "sglang",
         "gpu_type": "MI300X",
+        "ep": 4,
+        "compute_partition": {"mode": "CPX", "partitions": 8},
         "phase": "CLOSE",
         "start_ts": "2026-08-27T01:00:00+00:00",
         "stop_ts": "2026-08-27T02:00:00+00:00",
@@ -150,6 +158,11 @@ def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
     # The optimizer's revision is session identity, not a version block entry.
     assert after["metadata"]["session"]["code_revision"] == "abc1234"
     assert after["metadata"]["task_config"]["launch_env"] == {"TP": "8"}
+    assert after["metadata"]["task_config"]["ep"] == 4
+    assert after["metadata"]["task_config"]["compute_partition"] == {
+        "mode": "CPX",
+        "partitions": 8,
+    }
     assert after["outcome"]["status"] == "completed"
     assert after["outcome"]["stage_reached"] == "close"
     assert "token_usage" not in after["outcome"]
@@ -160,6 +173,51 @@ def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
     assert after["close"]["steps"] == []
     # ``close`` is a top-level key, never a timeline event.
     assert all(event["type"] != "close" for event in after["timeline"])
+
+
+def test_the_exported_launch_env_never_carries_a_credential(tmp_path):
+    _write_json(
+        tmp_path / "state.json",
+        {"session_id": "session-v6", "operator_extra_env": {"TP": "8", "OPENAI_API_KEY": "plaintext"}},
+    )
+    _write_json(tmp_path / "manifest.json", {"session_id": "session-v6"})
+
+    launch_env = exporter.build(tmp_path)["metadata"]["task_config"]["launch_env"]
+
+    assert launch_env == {"TP": "8", "OPENAI_API_KEY": "[REDACTED]"}
+
+
+def test_the_exported_launch_env_masks_a_generic_custom_headers_env(tmp_path):
+    headers = "Authorization: Bearer placeholder-not-a-secret"
+    _write_json(
+        tmp_path / "state.json",
+        {"session_id": "session-v6", "operator_extra_env": {"TP": "8", "SERVICE_CUSTOM_HEADERS": headers}},
+    )
+    _write_json(tmp_path / "manifest.json", {"session_id": "session-v6"})
+
+    document = exporter.build(tmp_path)
+
+    assert document["metadata"]["task_config"]["launch_env"] == {"TP": "8", "SERVICE_CUSTOM_HEADERS": "[REDACTED]"}
+    assert "placeholder-not-a-secret" not in json.dumps(document)
+
+
+def test_a_re_export_masks_a_credential_a_legacy_fragment_recorded_in_plaintext(tmp_path):
+    from hyperloom.inference_optimizer.breakdown.recorder.recorder import recorder_for
+
+    _write_json(
+        tmp_path / "state.json",
+        {"session_id": "session-v6", "operator_extra_env": {"TP": "8", "OPENAI_API_KEY": "plaintext-test-value"}},
+    )
+    _write_json(tmp_path / "manifest.json", {"session_id": "session-v6"})
+    # A fragment recorded before the recorder masked values: written raw, as the old snapshot did.
+    legacy_env = {"TP": "8", "OPENAI_API_KEY": "plaintext-test-value", "HF_TOKEN": "plaintext-test-value"}
+    recorder_for(tmp_path, producer="coordinator").record_upsert_singleton(
+        "metadata", {"task_config": {"launch_env": legacy_env}}
+    )
+
+    launch_env = exporter.build(tmp_path)["metadata"]["task_config"]["launch_env"]
+
+    assert launch_env == {"TP": "8", "OPENAI_API_KEY": "[REDACTED]", "HF_TOKEN": "[REDACTED]"}
 
 
 def test_an_invalid_v6_event_is_reported_without_disturbing_the_rest(tmp_path):
@@ -173,6 +231,27 @@ def test_an_invalid_v6_event_is_reported_without_disturbing_the_rest(tmp_path):
     assert after["outcome"] == before["outcome"]
     assert any("timeline.install" in warning for warning in after["metadata"]["warnings"])
     assert after["timeline"] == []
+
+
+def test_an_install_step_that_reports_no_status_is_recorded_applied():
+    from hyperloom.inference_optimizer.cli import preflight
+
+    event = preflight._begin_install_event(argparse.Namespace(resume_from=None, no_kernel=True, enable_roofline=False))
+    preflight._run_install_step(
+        event, step_id="validate_credentials", category="check", action=lambda: None, detail={"exit_code": 0}
+    )
+    preflight._run_install_step(event, step_id="check_gpu_visibility", category="check", action=lambda: {"status": ""})
+
+    assert event["ext"]["steps"] == [
+        {
+            "step_id": "validate_credentials",
+            "category": "check",
+            "status": "applied",
+            "skip_reason": None,
+            "detail": {"exit_code": 0},
+        },
+        {"step_id": "check_gpu_visibility", "category": "check", "status": "applied", "skip_reason": None},
+    ]
 
 
 def test_install_event_stays_pending_until_session_creation(tmp_path):
@@ -203,11 +282,13 @@ def test_install_event_stays_pending_until_session_creation(tmp_path):
     preflight._finish_install_event(
         event,
         args=args,
-        benchmark_backend="bypass",
-        benchmark_python="python",
-        magpie_python="python",
-        inferencex_path="/opt/InferenceX",
-        resolved_urls=("", "https://api.openai.com/v1"),
+        runtime=preflight.PreflightRuntime(
+            benchmark_backend="bypass",
+            benchmark_python="python",
+            magpie_python="python",
+            inferencex_path="/opt/InferenceX",
+            resolved_urls=("", "https://api.openai.com/v1"),
+        ),
     )
 
     assert not (tmp_path / "reports" / "sbd_v6" / "timeline").exists()
@@ -352,9 +433,29 @@ def test_unwrapped_preflight_failure_is_persisted_as_failed(tmp_path, monkeypatc
     assert breakdown["outcome"]["status"] == "failed"
 
 
-def test_resume_preflight_failure_uses_isolated_session(tmp_path, monkeypatch):
+def _resume_into_a_failing_preflight(monkeypatch, resume_dir: Path) -> None:
+    """Resume ``resume_dir`` through ``optimize`` with a preflight that opens its install event, then raises."""
     import hyperloom.inference_optimizer.cli as optimizer_cli
     from hyperloom.inference_optimizer.cli import preflight
+
+    monkeypatch.setattr(
+        optimizer_cli,
+        "clean_stale_aiter_locks",
+        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
+    )
+
+    def fail_preflight(args):
+        preflight._begin_install_event(args)
+        raise RuntimeError("resume preflight failed")
+
+    monkeypatch.setattr(optimizer_cli, "_preflight", fail_preflight)
+    args = optimizer_cli._build_parser().parse_args(["optimize", "--resume-from", str(resume_dir)])
+
+    with pytest.raises(RuntimeError, match="resume preflight failed"):
+        asyncio.run(optimizer_cli._run_optimize(args))
+
+
+def test_resume_preflight_failure_uses_isolated_session(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 
     workspace = tmp_path / "sessions"
@@ -376,21 +477,7 @@ def test_resume_preflight_failure_uses_isolated_session(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(workspace))
     monkeypatch.delenv("MODEL_PATH", raising=False)
     monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
-    monkeypatch.setattr(
-        optimizer_cli,
-        "clean_stale_aiter_locks",
-        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
-    )
-
-    def fail_preflight(args):
-        preflight._begin_install_event(args)
-        raise RuntimeError("resume preflight failed")
-
-    monkeypatch.setattr(optimizer_cli, "_preflight", fail_preflight)
-    args = optimizer_cli._build_parser().parse_args(["optimize", "--resume-from", str(resume_dir)])
-
-    with pytest.raises(RuntimeError, match="resume preflight failed"):
-        asyncio.run(optimizer_cli._run_optimize(args))
+    _resume_into_a_failing_preflight(monkeypatch, resume_dir)
 
     assert read_timeline_events(resume_dir) == [original_install_public]
     assert json.loads((resume_dir / "session_breakdown.json").read_text(encoding="utf-8")) == {"sentinel": "active"}
@@ -403,8 +490,6 @@ def test_resume_preflight_failure_uses_isolated_session(tmp_path, monkeypatch):
 
 
 def test_resume_preflight_failure_does_not_overwrite_completed_outcome(tmp_path, monkeypatch):
-    import hyperloom.inference_optimizer.cli as optimizer_cli
-    from hyperloom.inference_optimizer.cli import preflight
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -432,21 +517,7 @@ def test_resume_preflight_failure_does_not_overwrite_completed_outcome(tmp_path,
     original_breakdown = (resume_dir / "session_breakdown.json").read_bytes()
     monkeypatch.setenv("USER_DATA_PATH", str(workspace))
     monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
-    monkeypatch.setattr(
-        optimizer_cli,
-        "clean_stale_aiter_locks",
-        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
-    )
-
-    def fail_preflight(args):
-        preflight._begin_install_event(args)
-        raise RuntimeError("resume preflight failed")
-
-    monkeypatch.setattr(optimizer_cli, "_preflight", fail_preflight)
-    args = optimizer_cli._build_parser().parse_args(["optimize", "--resume-from", str(resume_dir)])
-
-    with pytest.raises(RuntimeError, match="resume preflight failed"):
-        asyncio.run(optimizer_cli._run_optimize(args))
+    _resume_into_a_failing_preflight(monkeypatch, resume_dir)
 
     assert (resume_dir / "session_breakdown.json").read_bytes() == original_breakdown
     assert [(event["type"], event["status"]) for event in read_timeline_events(resume_dir)] == [
@@ -652,10 +723,8 @@ def test_timeline_writer_does_not_migrate_flat_files(tmp_path):
     assert json.loads((tmp_path / "reports" / "sbd_v6" / "install.json").read_text(encoding="utf-8")) == (fresh_install)
 
 
-def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatch):
-    from hyperloom.agents.framework import kb as framework_kb
+def _stub_preflight_steps(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.cli import preflight
-    from hyperloom.inference_optimizer.session.sbd_v6 import pending_install_event
     from hyperloom.orchestrator.actions.executors import benchmark_backend
 
     inferencex = tmp_path / "InferenceX"
@@ -670,9 +739,8 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     monkeypatch.setattr(preflight, "_restore_provider_only_mode", lambda *_args: None)
     monkeypatch.setattr(preflight, "_normalize_legacy_deepseek_env", lambda: None)
     monkeypatch.setattr(preflight, "_validate_credentials", lambda: None)
-    monkeypatch.setattr(framework_kb, "prepare_kb_environment", lambda: None)
     monkeypatch.setattr(preflight, "_ensure_python_sdks", lambda *_args: None)
-    monkeypatch.setattr(preflight, "_resolve_llm_endpoints", lambda: ("", ""))
+    monkeypatch.setattr(preflight, "_export_llm_endpoints", lambda: ("", ""))
     monkeypatch.setattr(preflight, "_normalize_hip_visible_devices", lambda: None)
     monkeypatch.setattr(preflight, "_check_gpu_visibility", lambda: None)
     monkeypatch.setattr(preflight, "_check_shm_disk", lambda: None)
@@ -680,12 +748,11 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     monkeypatch.setattr(preflight, "_ensure_ray", lambda *_args: None)
     monkeypatch.setattr(preflight, "_ensure_bench_serving_deps", lambda *_args: None)
     monkeypatch.setattr(preflight, "_ensure_lm_eval_dep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(preflight, "_ensure_framework_deps", lambda *_args: None)
     monkeypatch.setattr(preflight, "_check_serving_framework", lambda *_args: None)
-    monkeypatch.setattr(preflight, "_inferencex_checkout_ok", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(preflight, "_inferencex_head_sha", lambda *_args: "abc123")
+    monkeypatch.setattr(preflight.inferencex_checkout, "checkout_ok", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(preflight.inferencex_checkout, "head_sha", lambda *_args: "abc123")
     monkeypatch.setattr(preflight, "_report_inferencex_patch_anchors", lambda *_args: True)
-    monkeypatch.setattr(preflight, "_check_node_claude_cli", lambda: None)
+    monkeypatch.setattr(preflight, "_check_agent_cli", lambda: None)
     monkeypatch.setattr(preflight.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
         preflight,
@@ -697,14 +764,20 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "_emit_preflight_diagnostics",
         lambda **_kwargs: {"status": "applied", "skip_reason": None},
     )
-    args = argparse.Namespace(
+    return argparse.Namespace(
         resume_from=None,
         degraded_kb=True,
         framework="sglang",
-        no_eval=True,
         no_kernel=True,
         enable_roofline=False,
     )
+
+
+def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.session.sbd_v6 import pending_install_event
+
+    args = _stub_preflight_steps(tmp_path, monkeypatch)
 
     preflight._preflight(args)
 
@@ -713,9 +786,9 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     assert [step["step_id"] for step in event["ext"]["steps"]] == [
         "load_dotenv",
         "load_kernel_agent_env",
+        "validate_server_args",
         "normalize_legacy_deepseek_env",
         "validate_credentials",
-        "prepare_kb_environment",
         "ensure_python_sdks",
         "check_gpu_visibility",
         "check_shm_disk",
@@ -723,20 +796,60 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "ensure_ray",
         "ensure_bench_serving_deps",
         "ensure_lm_eval",
-        "framework_deps",
         "check_serving_framework",
         "ensure_magpie",
         "clone_inferencex",
         "patch_magpie_eval_concurrency",
+        "check_kernel_tuning_clis",
         "check_tracelens_cli",
         "check_tracelens_root",
         "ir3_pr_monitor_probe",
         "diagnostics_snapshot",
     ]
     steps = {step["step_id"]: step for step in event["ext"]["steps"]}
-    assert steps["prepare_kb_environment"]["status"] == "skipped"
-    assert steps["prepare_kb_environment"]["skip_reason"] == "explicit_flag"
+    assert steps["check_kernel_tuning_clis"]["status"] == "skipped"
+    assert steps["check_kernel_tuning_clis"]["skip_reason"] == "no_kernel"
     assert steps["ensure_magpie"]["message"] == "benchmark backend is 'bypass'"
+
+
+def test_preflight_propagates_install_event_finalize_failure(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.cli import preflight
+
+    args = _stub_preflight_steps(tmp_path, monkeypatch)
+
+    def finish_fails(*_args, **_kwargs):
+        raise KeyError("install event finalize")
+
+    monkeypatch.setattr(preflight, "_finish_install_event", finish_fails)
+
+    with pytest.raises(KeyError):
+        preflight._preflight(args)
+
+
+def test_begin_install_event_propagates_pending_event_failure(monkeypatch):
+    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.session import sbd_v6
+
+    def attach_fails(*_args, **_kwargs):
+        raise RuntimeError("cannot attach install event")
+
+    monkeypatch.setattr(sbd_v6, "set_pending_install_event", attach_fails)
+
+    with pytest.raises(RuntimeError):
+        preflight._begin_install_event(argparse.Namespace(resume_from=None))
+
+
+def test_mark_pending_install_event_failed_propagates_lookup_failure(monkeypatch):
+    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.session import sbd_v6
+
+    def lookup_fails(*_args, **_kwargs):
+        raise RuntimeError("cannot read install event")
+
+    monkeypatch.setattr(sbd_v6, "pending_install_event", lookup_fails)
+
+    with pytest.raises(RuntimeError):
+        preflight._mark_pending_install_event_failed(argparse.Namespace(resume_from=None), ValueError("boom"))
 
 
 def test_ir3_unreachable_uses_v6_reason_without_changing_v5_state_reason(tmp_path, monkeypatch):
@@ -884,7 +997,79 @@ def test_model_gate_event_write_failure_does_not_change_gate_result(tmp_path, mo
 
     assert model_gate._preflight_unsupported_model_arch(args, tmp_path) is False
     breakdown = exporter.build(tmp_path)
-    assert any("sbd_v6.write.model_gate.event" in warning for warning in breakdown["metadata"]["warnings"])
+    assert any("sbd_v6.write.model_gate.start" in warning for warning in breakdown["metadata"]["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("record_event", "component", "message"),
+    [
+        ("_finish_model_gate", "model_gate.finish", "failed to finalize SBD V6 model-gate event"),
+        ("_record_resumed_model_gate", "model_gate.resume", "failed to record resumed SBD V6 model-gate event"),
+    ],
+)
+def test_a_model_gate_event_the_disk_refuses_is_kept_as_a_v6_warning(
+    tmp_path, monkeypatch, caplog, record_event, component, message
+):
+    from hyperloom.inference_optimizer.cli import model_gate
+    from hyperloom.inference_optimizer.session import sbd_v6
+
+    full = OSError(28, "No space left on device")
+
+    def disk_full(*_args, **_kwargs):
+        raise full
+
+    monkeypatch.setattr(sbd_v6, "write_timeline_event_at", disk_full)
+    with caplog.at_level(logging.WARNING, logger=model_gate.log.name):
+        getattr(model_gate, record_event)(_gate_args(tmp_path / "model"), tmp_path)
+
+    assert sbd_v6.read_write_warnings(tmp_path) == [
+        f"sbd_v6.write.{component}: OSError: [Errno 28] No space left on device"
+    ]
+    (record,) = [r for r in caplog.records if r.getMessage() == message]
+    assert record.exc_info[1] is full
+
+
+def test_fail_fast_writers_that_raise_do_not_mask_the_context_gate(tmp_path, monkeypatch, capsys, caplog):
+    from hyperloom.inference_optimizer import breakdown
+    from hyperloom.inference_optimizer.cli import model_gate
+    from hyperloom.inference_optimizer.session import sbd_v6
+    from hyperloom.orchestrator.actions.executors import report
+
+    monkeypatch.setattr(model_gate, "_emit_breakdown_to_langfuse", lambda _session_dir: None)
+    model = tmp_path / "short-context"
+    _write_model_config(
+        model,
+        {"architectures": ["LlamaForCausalLM"], "model_type": "llama", "max_position_embeddings": 2048},
+    )
+    session_dir = tmp_path / "session"
+    _seed_state(session_dir, monkeypatch, model)
+    stop_report_failed = OSError(28, "No space left on device")
+    breakdown_failed = OSError(5, "Input/output error")
+
+    def write_stop_report(*_args, **_kwargs):
+        raise stop_report_failed
+
+    def write_breakdown_json(_session_dir):
+        raise breakdown_failed
+
+    monkeypatch.setattr(report, "write_stop_report", write_stop_report)
+    monkeypatch.setattr(breakdown, "write_breakdown_json", write_breakdown_json)
+    args = _gate_args(model)
+    with caplog.at_level(logging.WARNING, logger=model_gate.log.name):
+        assert model_gate._preflight_context_window(args, session_dir) is True
+
+    stderr = capsys.readouterr().err.splitlines()
+    assert stderr[:2] == [
+        "WARNING: failed to persist context-window stop report: OSError(28, 'No space left on device')",
+        "WARNING: failed to write session_breakdown.json on context fail-fast: OSError(5, 'Input/output error')",
+    ]
+    assert stderr[2].startswith("ERROR: model max_position_embeddings=2048 < required ")
+    assert sbd_v6.read_write_warnings(session_dir) == [
+        "sbd_v6.write.model_gate.context.breakdown: OSError: [Errno 5] Input/output error"
+    ]
+    traced = {r.getMessage(): r.exc_info[1] for r in caplog.records if r.exc_info}
+    assert traced["context-window stop report persist failed"] is stop_report_failed
+    assert traced["session_breakdown.json write failed on context fail-fast"] is breakdown_failed
 
 
 def test_model_gate_fail_fast_writes_breakdown_once(tmp_path, monkeypatch):
@@ -947,41 +1132,6 @@ def test_missing_pending_install_event_is_exported_as_v6_warning(tmp_path):
     assert any("pending install event is unavailable" in warning for warning in breakdown["metadata"]["warnings"])
 
 
-def test_corrupt_model_gate_event_is_safely_normalized(tmp_path):
-    from hyperloom.inference_optimizer.cli import model_gate
-
-    path = tmp_path / "reports" / "sbd_v6" / "timeline" / "000001-model_gate.json"
-    _write_json(
-        path,
-        {
-            "type": "model_gate",
-            "ext": {
-                "checks": [{"gate_id": "legacy", "order": "invalid", "status": "unknown"}],
-                "degraded": [],
-            },
-        },
-    )
-    args = _gate_args(tmp_path / "model")
-
-    model_gate._record_model_gate_check(
-        args,
-        tmp_path,
-        {
-            "gate_id": "unsupported_model_arch",
-            "order": 1,
-            "status": "passed",
-            "skip_reason": None,
-            "detail": {},
-        },
-    )
-
-    event = read_timeline_event(tmp_path, "model_gate")
-    assert event is not None
-    assert event["status"] == "degraded"
-    assert event["ext"]["checks"][0]["gate_id"] == "unsupported_model_arch"
-    assert event["ext"]["degraded"] == {"active": False, "warnings": []}
-
-
 def test_fresh_model_gate_with_only_soft_skips_succeeds(tmp_path):
     from hyperloom.inference_optimizer.cli import model_gate
 
@@ -1036,3 +1186,31 @@ def test_framework_review_does_not_parse_macro_cycle_from_prompt():
     )
 
     assert reviews[0]["macro_cycle"] is None
+
+
+def test_preflight_failure_session_dir_error_reaches_the_caller(monkeypatch, tmp_path):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+
+    def new_session_dir(*_a, **_k):
+        raise OSError("no space left")
+
+    monkeypatch.setattr(optimizer_cli, "_mark_pending_install_event_failed", lambda args, exc: {})
+    monkeypatch.setattr(optimizer_cli, "_new_preflight_failure_session_dir", new_session_dir)
+
+    with pytest.raises(OSError, match="no space left"):
+        optimizer_cli._persist_preflight_failure_artifacts(argparse.Namespace(), RuntimeError("preflight"))
+
+
+def test_preflight_failure_breakdown_error_reaches_the_caller(monkeypatch, tmp_path):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+
+    def write_breakdown_json(*_a, **_k):
+        raise RuntimeError("breakdown writer bug")
+
+    monkeypatch.setattr(optimizer_cli, "_mark_pending_install_event_failed", lambda args, exc: {})
+    monkeypatch.setattr(optimizer_cli, "_new_preflight_failure_session_dir", lambda *_a, **_k: tmp_path)
+    monkeypatch.setattr(optimizer_cli, "_persist_install_event", lambda *_a, **_k: None)
+    monkeypatch.setattr("hyperloom.inference_optimizer.breakdown.write_breakdown_json", write_breakdown_json)
+
+    with pytest.raises(RuntimeError, match="breakdown writer bug"):
+        optimizer_cli._persist_preflight_failure_artifacts(argparse.Namespace(), RuntimeError("preflight"))

@@ -10,7 +10,7 @@ import json
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles.claude_requests import ClaudeRequestTracker
 from hyperloom.inference_optimizer.trace import context_events as ce
@@ -87,7 +87,7 @@ async def test_each_reactor_call_records_its_prompt_snapshot_under_the_call(sess
         backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(silent, name="c")},
     )
     try:
-        assert await c.run(max_ticks=2) == "max_ticks"
+        assert await c.run(options=RunOptions(max_ticks=2)) == "max_ticks"
     finally:
         await c.stop()
 
@@ -129,9 +129,10 @@ def test_specialist_stream_json_compactions_are_recorded(tmp_path):
         {"type": "assistant", "message": {"content": [{"type": "text", "text": "compact_boundary"}]}},
     ]
     log.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
-    assert ce.record_stream_json_compactions(log) == 0
+    ce.record_stream_json_compactions(log)
+    assert tt.load_events(tmp_path) == []
     with tt.trajectory_scope(session_dir=tmp_path, task_id="t-1"):
-        assert ce.record_stream_json_compactions(log) == 1
+        ce.record_stream_json_compactions(log)
     (row,) = _rows(tmp_path, tt.EVENT_CONTEXT_COMPACTION)
     assert row["task_id"] == "t-1"
     assert row["attributes"] == {"name": "manual", "trigger": "manual", "pre_tokens": 9, "timing_source": "none"}

@@ -139,6 +139,16 @@ missing `src/hyperloom/inference_optimizer/cli/` causes `ModuleNotFoundError`
 (see [Troubleshooting](#troubleshooting)). If `--source-dir` is omitted, the job
 clones `main` from GitHub at runtime, which requires GitHub egress on the node.
 
+A checkout on the shared mount is one another account can write when its
+directory or its `.env` is writable by a group or others, belongs to another
+account, or its `.env` is a link. The installer then keeps the Anthropic-side credentials it
+would persist there out of that `.env`, where those accounts could read or rewrite
+them: each job's `install.sh` writes the ones it gets from the job's environment
+(`proxy.env`) into the container's own `kernel-agent.env.sh` (`KERNEL_AGENT_ENV`)
+alone, and removes any an earlier install left in `.env`, with every other line
+that `.env` does not lend. Keep them in
+`proxy.env`, which every job exports. See [Credential precedence](../reference/authentication.md#credential-precedence).
+
 ## Step 4: Submit a job
 
 ```bash
@@ -202,7 +212,7 @@ The artifact directory `<data-root>/<model_key>/<CLAW_SESSION_ID>/` contains:
 - `manifest.json`: Session manifest;
 - `ci_metrics.json`: Baseline/optimized throughput plus `gain_pct`;
 - `optimizer_runs/`: `launch_<sid>.json` and logs;
-- `runtime/`: `kernel-agent.env.sh` and other files produced by the installer.
+- `runtime/`: files produced by the installer. The `kernel-agent.env.sh` it writes, which carries credentials, stays in the job container's own temporary directory (`KERNEL_AGENT_ENV`) and is not copied here.
 
 A healthy run logs in this order:
 
@@ -228,9 +238,9 @@ optimization. Model names must exist in your key's catalog:
 
 | Use | Environment variable | Allowed values | Notes |
 |---|---|---|---|
-| Orchestration | `CLAUDE_MODEL` / `LLM_MODEL` | Any model in the gateway catalog; `claude-opus-5` preferred, with `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6` as the AMD allowlist fallbacks | Validated against your gateway's `/models` catalog. |
-| GEAK (kernel optimization subprocess) | `GEAK_CLAUDE_MODEL` | For example `claude-opus-5` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different model. |
-| Forge (fusion / rewrite) | `CLAUDE_MODEL` / `CODEX_MODEL` | For example `claude-opus-5` / `gpt-5.6-sol` | Forge reads the platform variable for the backend it is on; it has no model variable of its own. |
+| Orchestration | `CLAUDE_MODEL` / `LLM_MODEL` | Any model in the gateway catalog; `claude-opus-5-5` preferred, with `claude-opus-5` / `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6` as the AMD allowlist fallbacks | Validated against your gateway's `/models` catalog. |
+| GEAK (kernel optimization subprocess) | `GEAK_CLAUDE_MODEL` | For example `claude-opus-5-5` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different model. |
+| Forge (fusion / rewrite) | `CLAUDE_MODEL` / `CODEX_MODEL` | For example `claude-opus-5-5` / `gpt-6-astra` | Forge reads the platform variable for the backend it is on; it has no model variable of its own. |
 
 - Do *not* append effort/thinking suffixes (for example
   `claude-opus-4-7-thinking-xhigh`); the gateway returns `Invalid model name`
@@ -269,7 +279,7 @@ The following items address common Slurm job and cluster configuration problems.
 - `CERTIFICATE_VERIFY_FAILED: unable to get local issuer` (huggingface/github): The CA bundle has only the internal cert. Use a combined CA bundle.
 - `ModuleNotFoundError: No module named '...cli'`: The source snapshot is incomplete or an old layout. Stage a complete src-layout checkout (`src/hyperloom/...`).
 - `--gpu-type: invalid choice: 'MI355X'`: The CLI is case-sensitive. Use lowercase (for example `mi355x`; `submit-vultr.sh` already does).
-- `--claude-model=... is not allowed`: The strict AMD allowlist is in force (`INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`). Use `claude-opus-5` for orchestration, or unset the variable to validate against the gateway catalog instead.
+- `--claude-model=... is not allowed`: The strict AMD allowlist is in force (`INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`). Use an allowlisted id (`claude-opus-5-5` first, then `claude-opus-5`) for orchestration, or unset the variable to validate against the gateway catalog instead.
 - `Invalid model name` / `401 missing subscription key`: The model name is not in the key catalog (often a suffixed variant). Use a name from `curl $OPENAI_BASE_URL/models`.
 - Server fails to start / OOM in shm: `/dev/shm` is too small. Raise `HL_SHM_SIZE` (default `64g`).
 - DNS failure / connection timeout to the gateway: The host alias was not applied. The docker path uses `--add-host`; confirm the node can reach the jump host on `:443`.

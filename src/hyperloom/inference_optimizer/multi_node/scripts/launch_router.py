@@ -108,11 +108,7 @@ def _wait_port_free(port: int, timeout_s: float) -> bool:
         time.sleep(0.2)
 
 
-def _build_sglang_router_cmd(
-    prefill_url: str,
-    decode_url: str,
-    public_port: int,
-) -> list[str]:
+def _build_sglang_router_cmd(prefill_url: str, decode_url: str) -> list[str]:
     """Compose the sglang_router PD-disaggregation launch command."""
     return [
         "python3",
@@ -126,22 +122,17 @@ def _build_sglang_router_cmd(
         "--host",
         "0.0.0.0",  # nosec B104 - router is the public multi-node endpoint.
         "--port",
-        str(public_port),
+        str(_PUBLIC_PORT),
     ]
 
 
-def _build_vllm_router_cmd(
-    prefill_url: str,
-    decode_url: str,
-    public_port: int,
-    override_cmd: str = "",
-) -> list[str]:
+def _build_vllm_router_cmd(prefill_url: str, decode_url: str, override_cmd: str = "") -> list[str]:
     """Compose the vllm router/proxy launch command (``override_cmd`` supports {prefill}/{decode}/{port} placeholders)."""
     if override_cmd:
         rendered = (
             override_cmd.replace("{prefill}", prefill_url)
             .replace("{decode}", decode_url)
-            .replace("{port}", str(public_port))
+            .replace("{port}", str(_PUBLIC_PORT))
         )
         return shlex.split(rendered)
     return [
@@ -155,7 +146,7 @@ def _build_vllm_router_cmd(
         "--host",
         "0.0.0.0",  # nosec B104 - router is the public multi-node endpoint.
         "--port",
-        str(public_port),
+        str(_PUBLIC_PORT),
     ]
 
 
@@ -235,12 +226,6 @@ def main() -> int:
     p.add_argument("--prefill-url", required=True, help="internal prefill HTTP endpoint, e.g. http://10.0.0.1:30000")
     p.add_argument("--decode-url", required=True, help="internal decode HTTP endpoint, e.g. http://10.0.0.2:30001")
     p.add_argument(
-        "--public-port",
-        type=int,
-        default=_PUBLIC_PORT,
-        help=f"port the router binds for the magpie client (default {_PUBLIC_PORT})",
-    )
-    p.add_argument(
         "--pid-file",
         default=_DEFAULT_PID_FILE,
         help=f"router PID file (default {_DEFAULT_PID_FILE}). kill_multinode.py picks up router*.pid here.",
@@ -257,18 +242,9 @@ def main() -> int:
 
     fw = args.framework.lower()
     if fw == "sglang":
-        cmd = _build_sglang_router_cmd(
-            args.prefill_url,
-            args.decode_url,
-            args.public_port,
-        )
+        cmd = _build_sglang_router_cmd(args.prefill_url, args.decode_url)
     else:
-        cmd = _build_vllm_router_cmd(
-            args.prefill_url,
-            args.decode_url,
-            args.public_port,
-            override_cmd=args.vllm_router_cmd,
-        )
+        cmd = _build_vllm_router_cmd(args.prefill_url, args.decode_url, override_cmd=args.vllm_router_cmd)
 
     _log(f"framework={fw} cmd={' '.join(cmd)}")
     _log(f"pid_file={args.pid_file} log_file={args.log_file}")
@@ -282,7 +258,7 @@ def main() -> int:
     summary = {
         "framework": fw,
         "router_pid": pid,
-        "router_url": f"http://0.0.0.0:{args.public_port}",
+        "router_url": f"http://0.0.0.0:{_PUBLIC_PORT}",
         "prefill_url": args.prefill_url,
         "decode_url": args.decode_url,
         "pid_file": args.pid_file,

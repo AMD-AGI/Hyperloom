@@ -6,9 +6,15 @@
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
+
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 
 # Injectable subprocess runner
 
@@ -22,9 +28,6 @@ class RunResult:
     returncode: int
     stdout_tail: str = ""
     stderr_tail: str = ""
-    timed_out: bool = False
-    command: list[str] = field(default_factory=list)
-    cwd: str = ""
 
 
 def run_argv(
@@ -49,14 +52,14 @@ def run_argv(
             returncode=int(completed.returncode),
             stdout_tail=(completed.stdout or "")[-4000:],
             stderr_tail=(completed.stderr or "")[-4000:],
-            command=list(argv),
-            cwd=str(cwd),
         )
     except subprocess.TimeoutExpired:
-        return RunResult(returncode=-1, timed_out=True, command=list(argv), cwd=str(cwd))
+        return RunResult(returncode=-1)
 
 
-# ROCm torch constraint file
+# ROCm constraint file
+
+ROCM_CONSTRAINTS_FILE = "rocm_constraints.txt"
 
 _TORCH_HIP_PROBE = (
     "import sys, importlib.metadata; "
@@ -64,21 +67,42 @@ _TORCH_HIP_PROBE = (
     "hip = getattr(torch.version, 'hip', None); "
     "sys.exit(0 if hip else 2); "
 )
-_VERSION_PROBE = "import sys, importlib.metadata; pkg=sys.argv[1]; print(importlib.metadata.version(pkg))"
+_ROCM_STACK_PROBE = (
+    "import re,sys\n"
+    "import importlib.metadata as m\n"
+    "norm=lambda n: re.sub(r'[-_.]+','-',n).lower()\n"
+    "free=norm(sys.argv[1])\n"
+    "named={'torch','torchvision','torchaudio','triton'}\n"
+    "pins={}\n"
+    # Distributions come in sys.path order, so the first of a name is the one imported.
+    "for d in m.distributions():\n"
+    "    name=norm(d.metadata['Name'] or '')\n"
+    "    if name and name!=free and (name in named or 'rocm' in (d.version or '').lower()):\n"
+    "        pins.setdefault(name, d.version)\n"
+    "print('\\n'.join(f'{n}=={v}' for n,v in sorted(pins.items())))\n"
+)
 
 
 class AbiMismatchError(RuntimeError):
     """Raised when the detected torch is not a ROCm build."""
 
 
-def write_rocm_torch_constraints(
+def write_rocm_constraints(
     python_exe: str,
     constraint_path: str | Path,
     *,
+    replacing: str,
     run: _RunCallable = subprocess.run,
-) -> str:
-    """Write a pip constraint file pinning the installed ROCm torch (and triton)."""
-    # Check ROCm
+) -> None:
+    """Write a pip constraint file pinning the ROCm stack ``python_exe`` imports.
+
+    torch and its companions by name, and every other distribution whose
+    version carries a ROCm build label: PyPI serves no ROCm build of any of
+    them, so a resolver free to move one swaps the GPU stack. ``replacing`` is
+    the distribution the install is there to change. Distributions built for
+    ROCm without saying so in their version (amd-aiter, sglang-kernel) cannot
+    be told apart and stay unpinned.
+    """
     hip_res = run(
         [python_exe, "-c", _TORCH_HIP_PROBE],
         capture_output=True,
@@ -88,29 +112,62 @@ def write_rocm_torch_constraints(
     rc = int(getattr(hip_res, "returncode", -1))
     if rc != 0:
         raise AbiMismatchError(f"installed torch at {python_exe!r} is not a ROCm build (probe rc={rc})")
-    # torch version
-    tv_res = run(
-        [python_exe, "-c", _VERSION_PROBE, "torch"],
+    pins_res = run(
+        [python_exe, "-c", _ROCM_STACK_PROBE, replacing],
         capture_output=True,
         text=True,
         timeout=30,
     )
-    torch_ver = (getattr(tv_res, "stdout", "") or "").strip()
-    if not torch_ver:
+    pins = (getattr(pins_res, "stdout", "") or "").split()
+    if not any(p.startswith("torch==") for p in pins):
         raise RuntimeError(f"could not determine torch version from {python_exe!r}")
-    lines = [f"torch=={torch_ver}"]
-    # triton version (optional)
-    tri_res = run(
-        [python_exe, "-c", _VERSION_PROBE, "triton"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    triton_ver = (getattr(tri_res, "stdout", "") or "").strip()
-    if triton_ver:
-        lines.append(f"triton=={triton_ver}")
-    Path(constraint_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return str(constraint_path)
+    Path(constraint_path).write_text("\n".join(pins) + "\n", encoding="utf-8")
+
+
+# SGLang's ROCm dependency set
+
+_SGLANG_ROCM_PYPROJECT = "pyproject_other.toml"
+_SGLANG_ROCM_EXTRA_PREFIX = "srt_hip"
+
+
+def _sglang_rocm_extra(pyproject: Path, torch_version: str) -> str:
+    """The ``srt_hip*`` extra whose torch requirement admits ``torch_version``; an exact pin beats none."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    extras = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {}).get("optional-dependencies", {})
+    torch = Version(torch_version)
+    fitting: list[tuple[bool, str]] = []
+    for name, reqs in extras.items():
+        if not name.startswith(_SGLANG_ROCM_EXTRA_PREFIX):
+            continue
+        spec = next((r.specifier for r in map(Requirement, reqs) if r.name == "torch"), SpecifierSet())
+        if spec.contains(torch, prereleases=True):
+            fitting.append((bool(spec), name))
+    if not fitting:
+        raise ValueError(f"no {_SGLANG_ROCM_EXTRA_PREFIX}* extra in {pyproject} admits torch {torch_version}")
+    return max(fitting)[1]
+
+
+@contextmanager
+def sglang_rocm_install_target(python_dir: Path, torch_version: str) -> Iterator[str]:
+    """Yield the pip target that installs the SGLang checkout at ``python_dir`` with its ROCm dependencies.
+
+    The checkout's ``pyproject.toml`` declares the CUDA stack; ROCm installs put
+    ``pyproject_other.toml`` in its place. The swap lasts only as long as the
+    install, because the checkout is also the tree patches are cut against.
+    """
+    pyproject = python_dir / "pyproject.toml"
+    original = pyproject.read_bytes()
+    rocm = python_dir / _SGLANG_ROCM_PYPROJECT
+    if rocm.is_file():
+        pyproject.write_bytes(rocm.read_bytes())
+    try:
+        yield f"{python_dir}[{_sglang_rocm_extra(pyproject, torch_version)}]"
+    finally:
+        pyproject.write_bytes(original)
 
 
 # ROCm toolchain alignment check
@@ -146,19 +203,6 @@ def check_rocm_toolchain_alignment(
     )
     hipcc_root = (getattr(hipcc_root_res, "stdout", "") or "").strip()
 
-    rocm_path = effective_env.get("ROCM_PATH", "").strip()
-    if rocm_path and hipcc_root:
-        rocm_real_res = run(
-            ["sh", "-c", f"cd {rocm_path!r} 2>/dev/null && pwd"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=effective_env,
-        )
-        rocm_real = (getattr(rocm_real_res, "stdout", "") or "").strip()
-        if rocm_real and hipcc_root != rocm_real:
-            pass  # warn-only, not fatal
-
     # hip version from hipcc_root
     hip_header = Path(hipcc_root) / "include" / "hip" / "hip_runtime_api.h" if hipcc_root else None
     if hip_header and hip_header.is_file():
@@ -169,6 +213,31 @@ def check_rocm_toolchain_alignment(
                 "set ROCM_PATH/HIP_PATH/PATH to a ROCm 7.x toolchain before building AITER"
             )
     return True, "ok"
+
+
+# vLLM ROCm platform probe
+
+#: Exits 0 and prints ``vllm_rocm_ok`` only when torch is a ROCm build and vLLM
+#: reports a ROCm platform.
+VLLM_ROCM_PROBE = """\
+import sys, torch
+if not getattr(torch.version, "hip", None):
+    print("torch is not a ROCm build", file=sys.stderr); raise SystemExit(1)
+import vllm
+try:
+    from vllm.platforms import current_platform
+except Exception as exc:
+    print(f"cannot import vllm platform: {exc}", file=sys.stderr); raise SystemExit(1)
+is_rocm = False
+checker = getattr(current_platform, "is_rocm", None)
+if callable(checker):
+    is_rocm = bool(checker())
+if "rocm" in f"{current_platform!r} {current_platform.__class__.__name__}".lower():
+    is_rocm = True
+if not is_rocm:
+    print("vLLM did not report ROCm platform", file=sys.stderr); raise SystemExit(1)
+print("vllm_rocm_ok")
+"""
 
 
 # Torch ABI probe
@@ -199,7 +268,7 @@ def probe_torch_abi(
         return {"torch_version": "", "hip_version": "", "python_version": "", "is_rocm": False}
     try:
         return json.loads(out)
-    except Exception:  # noqa: BLE001
+    except ValueError:
         return {"torch_version": "", "hip_version": "", "python_version": "", "is_rocm": False}
 
 
@@ -220,11 +289,14 @@ def sort_tags_desc(tags: list[str] | tuple[str, ...]) -> list[str]:
 
 
 __all__ = [
+    "ROCM_CONSTRAINTS_FILE",
     "AbiMismatchError",
+    "VLLM_ROCM_PROBE",
     "RunResult",
     "check_rocm_toolchain_alignment",
     "probe_torch_abi",
     "run_argv",
+    "sglang_rocm_install_target",
     "sort_tags_desc",
-    "write_rocm_torch_constraints",
+    "write_rocm_constraints",
 ]

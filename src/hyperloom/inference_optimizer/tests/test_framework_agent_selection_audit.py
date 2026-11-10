@@ -7,40 +7,26 @@ extraction, and the cyclic phase-budget dispatch guard.
 
 from __future__ import annotations
 
-import time
 import types
 import pytest
 
 from hyperloom.orchestrator.loop import coordinator as coord_mod
-from hyperloom.orchestrator.phases import framework as framework_mod
+from hyperloom.orchestrator.phases import framework_records
 from hyperloom.orchestrator.phases import machine_state as ps_mod
 from hyperloom.orchestrator.actions.executors import _patch_source_pr as fpr_mod
-from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
-
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-
-
-def _silent_plan() -> ScriptedPlan:
-    return ScriptedPlan(turns=[], default_intent=_heartbeat())
-
-
-def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
+from .conftest import make_coordinator
 
 
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
-    return Coordinator(session_dir, backends=_build_backends())
+    return make_coordinator(session_dir)
 
 
 # _framework_config_levers_from_done
 def test_config_levers_non_dict_and_missing() -> None:
-    f = framework_mod._framework_config_levers_from_done
+    f = framework_records._framework_config_levers_from_done
     assert f(None) == {}
     # A patch takes precedence over a lever that merely accompanies it, unless the
     # lane says the pair is inseparable.
@@ -52,7 +38,7 @@ def test_config_levers_non_dict_and_missing() -> None:
 
 
 def test_config_levers_preserve_envs_and_args() -> None:
-    f = framework_mod._framework_config_levers_from_done
+    f = framework_records._framework_config_levers_from_done
     extra_args = '--enable-x --compilation-config \'{"mode": "max-autotune"}\' --bare'
     levers = f(
         {
@@ -65,19 +51,20 @@ def test_config_levers_preserve_envs_and_args() -> None:
         }
     )
     assert levers == {
+        "name": "",
         "extra_server_args": '--enable-x --compilation-config {"mode":"max-autotune"} --bare',
         "extra_envs": {"VLLM_FOO": "1"},
     }
 
 
 def test_config_levers_args_as_list() -> None:
-    f = framework_mod._framework_config_levers_from_done
+    f = framework_records._framework_config_levers_from_done
     levers = f({"proposal_set": [{"extra_args": ["--flag", "value with space"]}]})
     assert levers == {}
 
 
 def test_invalid_config_args_preserve_independent_env_overrides() -> None:
-    f = framework_mod._framework_config_levers_from_done
+    f = framework_records._framework_config_levers_from_done
     levers = f(
         {
             "proposal_set": [
@@ -89,13 +76,14 @@ def test_invalid_config_args_preserve_independent_env_overrides() -> None:
         }
     )
     assert levers == {
+        "name": "",
         "extra_server_args": "",
         "extra_envs": {"SAFE_ENV": "1"},
     }
 
 
 def test_config_levers_json_args_as_list_stay_unquoted() -> None:
-    f = framework_mod._framework_config_levers_from_done
+    f = framework_records._framework_config_levers_from_done
     levers = f(
         {
             "proposal_set": [
@@ -109,6 +97,7 @@ def test_config_levers_json_args_as_list_stay_unquoted() -> None:
         }
     )
     assert levers == {
+        "name": "",
         "extra_server_args": '--json-model-override-args {"rope_scaling":null}',
         "extra_envs": {},
     }
@@ -132,12 +121,21 @@ def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
     assert denied["rationale"] == "off the bottleneck"
 
 
+def test_an_already_present_candidate_counts_as_tested() -> None:
+    """It reached the apply stage, so the phase summary does not read it as a discovery that found nothing."""
+    from hyperloom.orchestrator.framework.artifacts import summarize_candidate_outcomes
+
+    summary = summarize_candidate_outcomes([{"candidate_id": "c1", "status": "already_present", "kept": False}])
+    assert summary["tested"] == 1
+    assert summary["outcome_class"] == "tested_no_keep"
+
+
 # _match_framework_agent_candidate
 
 
 def _stub_sanctioned_async_client(monkeypatch, recorder: list[dict] | None = None):
     """Patch ``llm_config``'s async-client contract with a resolving stub."""
-    from hyperloom.common import llm_config
+    from hyperloom_common.llm import llm_config
 
     def _fake(**kwargs):
         kwargs.pop("timeout", None)
@@ -273,7 +271,7 @@ def test_materialize_pr_diff_ignores_an_unusable_pr_number(monkeypatch, tmp_path
 # Dispatch pause on a spent phase budget
 def test_dispatch_pause_phase_not_gated(coord: Coordinator) -> None:
     coord.shared_state.phase = "PRELUDE"
-    assert coord._dispatch_paused_for_phase_budget() is False
+    assert coord.dispatcher.dispatch_paused_for_phase_budget() is False
 
 
 def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
@@ -284,9 +282,9 @@ def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(
         coord_mod._phase_state,
         "phase_budget_remaining_seconds",
-        lambda _s, budget_pct=None: 0.0,
+        lambda _s: 0.0,
     )
-    assert coord._dispatch_paused_for_phase_budget() is True
+    assert coord.dispatcher.dispatch_paused_for_phase_budget() is True
 
 
 def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> None:
@@ -294,33 +292,12 @@ def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> Non
     monkeypatch.setattr(
         coord_mod._phase_state,
         "phase_budget_remaining_seconds",
-        lambda _s, budget_pct=None: 123.0,
+        lambda _s: 123.0,
     )
-    assert coord._dispatch_paused_for_phase_budget() is False
+    assert coord.dispatcher.dispatch_paused_for_phase_budget() is False
 
 
-def test_dispatch_pause_spends_the_share_a_disabled_kernel_freed(session_dir) -> None:
-    """``--no-kernel`` hands KERNEL_AGENT's share to FRAMEWORK_AGENT, and dispatch runs until that is spent too."""
-    seeded = SharedState.load_or_init(session_dir)
-    seeded.kernel_enabled = False
-    seeded.save(session_dir)
-    coord = Coordinator(session_dir, backends=_build_backends())
-    state = coord.shared_state
-    state.max_minutes = 100
-    state.phase = "FRAMEWORK_AGENT"
-
-    def _in_phase_for(minutes: float) -> None:
-        state.elapsed_charged_sec = minutes * 60.0
-        state.phase_started_unix = time.time() - minutes * 60.0
-
-    # Minute 50 of 100 is past FRAMEWORK_AGENT's default share and well inside the one --no-kernel leaves it.
-    _in_phase_for(50)
-    assert coord._dispatch_paused_for_phase_budget() is False
-    _in_phase_for(90)
-    assert coord._dispatch_paused_for_phase_budget() is True
-
-
-# maybe_autosubmit_config
+# maybe_autosubmit_framework_config
 def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
     return types.SimpleNamespace(
         task_id=task_id,
@@ -335,13 +312,13 @@ def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
 @pytest.mark.asyncio
 async def test_autosubmit_config_not_authoring_returns(coord: Coordinator) -> None:
     task = types.SimpleNamespace(task_id="x", params={})
-    await coord.phase_framework.maybe_autosubmit_config(task=task, done_payload={})
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=task, done_payload={})
     assert not coord.state.pending_proposals
 
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_patch_deliverable_returns(coord: Coordinator) -> None:
-    await coord.phase_framework.maybe_autosubmit_config(
+    await coord.phase_framework.maybe_autosubmit_framework_config(
         task=_authoring_task(),
         done_payload={"patches_written": ["p.patch"]},
     )
@@ -350,7 +327,7 @@ async def test_autosubmit_config_patch_deliverable_returns(coord: Coordinator) -
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_no_levers_returns(coord: Coordinator) -> None:
-    await coord.phase_framework.maybe_autosubmit_config(
+    await coord.phase_framework.maybe_autosubmit_framework_config(
         task=_authoring_task(),
         done_payload={"proposal_set": [{"name": "n"}]},  # no extra_args/envs -> no levers
     )
@@ -361,7 +338,7 @@ async def test_autosubmit_config_no_levers_returns(coord: Coordinator) -> None:
 async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -> None:
     done = {"proposal_set": [{"name": "mtp-toggle", "extra_envs": {"VLLM_MTP": "1"}, "extra_args": "--speculative 4"}]}
     before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     assert prop.action_name == "integrate_patch"
@@ -374,11 +351,104 @@ async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -
 
 
 @pytest.mark.asyncio
+async def test_autosubmit_config_names_the_round_after_the_lever_it_benches(coord: Coordinator) -> None:
+    done = {
+        "proposal_set": [
+            {"name": "research-notes"},
+            {"name": "eagle-spec", "extra_args": "--speculative-algorithm EAGLE --speculative-num-steps 3"},
+        ]
+    }
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    params = (next(iter(coord.state.pending_proposals.values())).payload or {}).get("params") or {}
+    assert (params["patch_name"], params["extra_server_args"]) == (
+        "eagle-spec",
+        "--speculative-algorithm EAGLE --speculative-num-steps 3",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "removals",
+    [["--disable-cuda-graph"], ["--disable-cuda-graph", "--disable-cuda-graph"]],
+    ids=["once", "repeated"],
+)
+async def test_a_removal_only_lever_is_benched_and_its_ledger_verdict_found_again(
+    coord: Coordinator, tmp_path, monkeypatch, removals
+) -> None:
+    from hyperloom.agents.framework.kb import KB_ROOT_ENV
+    from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
+    from hyperloom.orchestrator.actions.executors._integrate_perf_gate import _GateBasis, _weigh_gate
+    from hyperloom.orchestrator.knowledge.kb_writeback import (
+        OUTCOME_REVERTED_SMOKE_FAIL,
+        FrameworkOutcome,
+        write_framework_record,
+    )
+
+    monkeypatch.setenv(KB_ROOT_ENV, str(tmp_path / "kb"))
+    done = {"proposal_set": [{"name": "no-cuda-graph-off", "remove_args": removals}]}
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    (prop,) = coord.state.pending_proposals.values()
+    params = prop.payload["params"]
+    assert (params["patch_name"], params["remove_args"]) == ("no-cuda-graph-off", removals)
+
+    attempt = IntegrateAttempt(task_id="t-int", specialist_task_id="spec-1", shared_state=coord.shared_state)
+    measured = _weigh_gate(attempt, params, {}, {"accuracy": 0.5}, _GateBasis(100.0, 1.0)).measured
+    await write_framework_record(
+        FrameworkOutcome(
+            pr_url="cand-1",
+            pr_sha="",
+            patch_path="",
+            outcome=OUTCOME_REVERTED_SMOKE_FAIL,
+            tps_delta_pct=0.0,
+            session_id="s",
+            applicability=measured.cfg_fingerprint,
+            accuracy_delta_pct=-2.0,
+        )
+    )
+    coord.state.pending_proposals.clear()
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task("spec-2"), done_payload=done)
+    assert not coord.state.pending_proposals
+
+
+@pytest.mark.asyncio
 async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda _sid: "approve", raising=False)
     done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
-    await coord.phase_framework.maybe_autosubmit_config(task=_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
     assert not coord.state.pending_proposals
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_config_returns_when_review_in_flight(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
+
+    coord.state.pending_proposals["existing"] = PendingProposal(
+        proposal_msg_id="existing",
+        from_agent="coordinator",
+        action_name="integrate_patch",
+        predicted_gain_pct=0.0,
+        payload={"params": {"specialist_task_id": "spec-1"}},
+    )
+    done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    assert len(coord.state.pending_proposals) == 1
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_config_proceeds_for_a_different_specialist(coord: Coordinator) -> None:
+    """The scan keys on the specialist task id, so another specialist's review does not block this one."""
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
+
+    coord.state.pending_proposals["existing"] = PendingProposal(
+        proposal_msg_id="existing",
+        from_agent="coordinator",
+        action_name="integrate_patch",
+        predicted_gain_pct=0.0,
+        payload={"params": {"specialist_task_id": "spec-other"}},
+    )
+    done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_authoring_task(), done_payload=done)
+    assert len(coord.state.pending_proposals) == 2
 
 
 def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNamespace:
@@ -394,18 +464,19 @@ def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNa
 
 @pytest.mark.asyncio
 async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: Coordinator) -> None:
-    """Regression: a config-lever ENABLEMENT deliverable must carry the ``enablement`` marker + setup commands into integrate_patch, otherwise the integrate result never gets ``enablement=True`` and ``_maybe_rearm_enablement`` no-ops, the stall streak never advances, and the run spins until wall-clock."""
+    """Regression: a config-lever ENABLEMENT deliverable must carry the ``enablement`` marker + setup commands into integrate_patch, otherwise the integrate result never gets ``enablement=True`` and ``maybe_rearm_enablement`` no-ops, the stall streak never advances, and the run spins until wall-clock."""
     done = {
         "proposal_set": [{"name": "v4-serve-flags", "extra_args": "--tokenizer-mode deepseek_v4"}],
         # NEW setup command proposed by the specialist in this deliverable.
         "setup_commands": ["pip install -U aiter"],
     }
     before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_config(task=_enablement_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     params = (prop.payload or {}).get("params") or {}
     assert params.get("enablement") is True
+    assert params["framework_agent_authoring"] is True
     assert params["enablement_before_observation_path"] == "/s/reports/bringup/round-abc-000.json"
     # Base setup (from spec_params) + new setup (from done_payload), deduped/merged.
     assert params["enablement_setup_commands"] == ["pip install -U vllm==0.21.0", "pip install -U aiter"]
@@ -416,7 +487,7 @@ async def test_autosubmit_config_enablement_setup_only_still_routes(coord: Coord
     """An enablement deliverable with NO config levers (setup-only stack upgrade) must still reach integrate_patch so the stall accounting can advance."""
     done = {"proposal_set": [], "setup_commands": ["pip install -U vllm==0.21.0"]}
     before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_config(task=_enablement_authoring_task(), done_payload=done)
+    await coord.phase_framework.maybe_autosubmit_framework_config(task=_enablement_authoring_task(), done_payload=done)
     assert len(coord.state.pending_proposals) == before + 1
     prop = next(iter(coord.state.pending_proposals.values()))
     params = (prop.payload or {}).get("params") or {}
@@ -437,7 +508,7 @@ async def test_autosubmit_config_build_only_skips_integrate(coord: Coordinator) 
         },
     }
 
-    await coord.phase_framework.maybe_autosubmit_config(
+    await coord.phase_framework.maybe_autosubmit_framework_config(
         task=_enablement_authoring_task(),
         done_payload=done,
     )
@@ -451,11 +522,13 @@ def test_record_authored_outcome_non_dict_and_empty_status(coord: Coordinator) -
     coord.phase_framework._record_framework_agent_authored_outcome(
         task=types.SimpleNamespace(task_id="t", params={}),
         result=types.SimpleNamespace(result=None),
+        adopted=False,
     )
     # empty status -> no-op.
     coord.phase_framework._record_framework_agent_authored_outcome(
         task=types.SimpleNamespace(task_id="t", params={}),
         result=types.SimpleNamespace(result={"status": ""}),
+        adopted=False,
     )
     assert not (coord.shared_state.framework_agent_phase_progress or [])
 
@@ -481,7 +554,7 @@ def test_record_authored_outcome_kept_writes_progress(coord: Coordinator) -> Non
             "accuracy_pass": True,
         }
     )
-    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result)
+    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result, adopted=True)
     rows = coord.shared_state.framework_agent_phase_progress
     assert rows[-1]["candidate_id"] == "cand-1"
     assert rows[-1]["status"] == "kept" and rows[-1]["kept"] is True
@@ -497,7 +570,7 @@ def test_record_authored_outcome_uses_candidate_map_and_batch_fallback(coord: Co
         params={"framework_agent_authoring": True, "specialist_task_id": "spec-9"},
     )
     result = types.SimpleNamespace(result={"status": "reverted", "delta_pct": -1.0})
-    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result)
+    coord.phase_framework._record_framework_agent_authored_outcome(task=task, result=result, adopted=False)
     row = coord.shared_state.framework_agent_phase_progress[-1]
     assert row["candidate_id"] == "cand-from-map"
     assert row["batch_id"] == "latest-batch"
@@ -528,7 +601,7 @@ def test_record_authoring_empty_guards(coord: Coordinator) -> None:
     assert not (coord.shared_state.framework_agent_phase_progress or [])
 
 
-def test_record_authoring_empty_already_present(coord: Coordinator) -> None:
+def test_record_authoring_empty_stamps_author_empty_once(coord: Coordinator) -> None:
     _enter_fpr(coord)
     task = types.SimpleNamespace(
         task_id="spec-2",
@@ -536,48 +609,19 @@ def test_record_authoring_empty_already_present(coord: Coordinator) -> None:
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": "cand-2",
             "framework_batch_id": "b1",
-            "framework_audit": {"semantic_status": "already_equivalent"},
         },
     )
     coord.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=task, done_payload={"payload": {"patches_written": [], "summary": "already there"}}
+        task=task, done_payload={"payload": {"patches_written": [], "summary": "nothing to write"}}
     )
     row = coord.shared_state.framework_agent_phase_progress[-1]
     assert row["candidate_id"] == "cand-2"
-    assert row["status"] == "already_present"
+    assert row["status"] == "author_empty"
     # Idempotent: a second call does not append a duplicate.
     coord.phase_framework._record_framework_agent_authoring_empty_outcome(
         task=task, done_payload={"payload": {"patches_written": [], "summary": "again"}}
     )
     assert sum(1 for p in coord.shared_state.framework_agent_phase_progress if p["candidate_id"] == "cand-2") == 1
-
-
-def test_record_authoring_empty_status_variants(coord: Coordinator) -> None:
-    _enter_fpr(coord)
-    coord.shared_state.framework_agent_phase_progress = []
-    # not_present -> not_applicable.
-    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=types.SimpleNamespace(
-            task_id="s-a",
-            params={
-                "framework_agent_authoring": True,
-                "framework_agent_candidate_id": "na-1",
-                "framework_audit": {"semantic_status": "not_present"},
-            },
-        ),
-        done_payload={"patches_written": [], "summary": "missing"},
-    )
-    # no audit -> author_empty.
-    coord.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=types.SimpleNamespace(
-            task_id="s-b",
-            params={"framework_agent_authoring": True, "framework_agent_candidate_id": "ae-1"},
-        ),
-        done_payload={"patches_written": []},
-    )
-    statuses = {p["candidate_id"]: p["status"] for p in coord.shared_state.framework_agent_phase_progress}
-    assert statuses["na-1"] == "not_applicable"
-    assert statuses["ae-1"] == "author_empty"
 
 
 # Lenient ranker: an "applicable: false" reply never vetoes the phase

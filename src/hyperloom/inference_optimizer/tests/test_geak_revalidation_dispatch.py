@@ -13,36 +13,28 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant
-from hyperloom.orchestrator.actions.executors._proposal_identity import effective_fingerprint
+from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, GridRecipe
+from hyperloom.orchestrator.actions.executors._proposal_identity import BaseControls, effective_fingerprint
+from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
+from hyperloom.common.proctree import REAP_MARK_ENV
+from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 
+from .conftest import make_mock_critic_coordinator
+from ._geak_helpers import forbid_geak_launch, stop_geak_before_launch
+from hyperloom.orchestrator.state.task_registry import TaskSpec
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
+
 
 @pytest.fixture
-def coordinator(tmp_path, monkeypatch):
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    from hyperloom.inference_optimizer.session.paths import make_session_dir as _msd
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
-    from .conftest import seed_target_analysis_marker
-
-    sd = _msd()
-    seed_target_analysis_marker(sd)
-    backends = {
-        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "critic": MockCriticBackend(),
-    }
-    return Coordinator(sd, backends=backends)
+def coordinator(session_dir):
+    return make_mock_critic_coordinator(session_dir)
 
 
 def _geak_rebench_params(**extra: object) -> dict:
     return {
-        "source": "resume_stack_revalidate",
+        "source": "stack_revalidate",
         "geak_fallback": True,
         "reason": "geak_e2e_win",
         **extra,
@@ -52,7 +44,6 @@ def _geak_rebench_params(**extra: object) -> dict:
 def _arm_kernel_to_sweep(st) -> None:
     now = datetime.now(timezone.utc)
     st.phase = ps.PHASE_KERNEL_AGENT
-    st.phase_started_ts = (now - timedelta(minutes=5)).isoformat()
     st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
     st.start_ts = (now - timedelta(minutes=10)).isoformat()
     st.max_minutes = 96 * 60
@@ -66,10 +57,10 @@ def _record_revalidations(coordinator) -> list[str]:
     """Replace the 2b revalidation with a recorder of the reasons it was asked for."""
     reasons: list[str] = []
 
-    async def _record(*, reason: str) -> None:
+    async def _record(*, reason: str, handoff_cards: list[int] | None) -> None:
         reasons.append(reason)
 
-    coordinator._revalidate_geak_candidate = _record
+    coordinator.phase_kernel._revalidate_geak_candidate = _record
     return reasons
 
 
@@ -79,7 +70,6 @@ async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, 
     st = c.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
-    st.resume_pending_revalidation = True
     st.baseline_tput = 100.0
     st.current_best = {"action": "explore", "tput": 120.0}
     st.cumulative_gain_validated = 20.0
@@ -98,14 +88,13 @@ async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, 
         raise AssertionError("Direct dispatch fallback must refuse canonical AgentX replay")
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
-    c._record_geak_kernel_journey = lambda _result: None
-    summary = c._geak_rebench_params(reason="unit")
+    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    summary = c.writeback.geak_rebench_params(reason="unit")
     assert summary["fallback"] == "geak_harness"
-    await c._run_geak_kernel_phase(from_phase="KERNEL")
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert st.current_best == before_best
     assert st.cumulative_gain_validated == 20.0
-    assert st.resume_pending_revalidation is True
     assert "revalidation_task_id" not in st.geak_pending
     assert st.geak_pending["revalidation_error"] == "geak_harness_unsupported_canonical_workload"
     assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
@@ -126,7 +115,7 @@ async def test_agentx_2b_dispatch_uses_canonical_recipe_not_geak_client(coordina
         "accepted_config": {"flags": "--candidate", "env": ""},
     }
 
-    params = c._geak_rebench_params(reason="unit")
+    params = c.writeback.geak_rebench_params(reason="unit")
 
     assert params.get("geak_fallback") is True
     assert params["config_path"] == st.baseline_config_path
@@ -160,7 +149,7 @@ async def test_geak_rebench_preserves_native_base_removal_controls(
     if args_mode is not None:
         st.current_best.update(remove_args=remove_args, unset_envs=unset_envs, args_mode=args_mode)
     st.geak_result = {}
-    native = await c._enqueue_internal_stack_rebench(reason="resume")
+    native = await c.writeback.enqueue_internal_stack_rebench(reason="resume")
     native_row = await c.tasks.get(str(native["task_id"]))
     base_keys = {"base_remove_args", "base_unset_envs", "base_args_mode"}
     native_controls = {key: value for key, value in native_row.params.items() if key in base_keys}
@@ -179,7 +168,7 @@ async def test_geak_rebench_preserves_native_base_removal_controls(
             "env": "SGLANG_USE_AITER=1",
         },
     }
-    enqueued = c._geak_rebench_params(reason="geak_e2e_win")
+    enqueued = c.writeback.geak_rebench_params(reason="geak_e2e_win")
 
     assert enqueued.get("geak_fallback") is True
     assert enqueued["grid"][0]["extra_args"] == "--fp8-gemm-backend aiter"
@@ -199,8 +188,8 @@ async def test_geak_rebench_preserves_native_base_removal_controls(
                 "remove_args": ["--disable-radix-cache"],
                 "unset_envs": ["SGLANG_AITER_MLA_PERSIST"],
             },
-            {"flags": "--mem-fraction-static 0.9", "env_map": {}},
-            "--mem-fraction-static 0.9",
+            {"flags": "--mem-fraction-static 0.85", "env_map": {}},
+            "--mem-fraction-static 0.85",
             None,
         ),
         (
@@ -271,7 +260,8 @@ async def test_geak_launch_controls_reach_materialized_rebench(
 ) -> None:
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import ExploreExecutor, explore
+    from hyperloom.orchestrator.actions.executors import explore
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -300,11 +290,12 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     state = coordinator.shared_state
     state.baseline_config_path = str(baseline)
     state.baseline_tput = 100.0
-    state.baseline_double_run = False
     state.current_best = {"tput": 110.0, **current}
     state.geak_result = {"schema_version": 2, "status": "ok", "accepted_config": accepted}
-    enqueued = coordinator._geak_rebench_params(reason="launch_controls_regression")
-    task = await coordinator.tasks.create(kind="explore", params=enqueued, idempotency_key="geak-revalidate-c0")
+    enqueued = coordinator.writeback.geak_rebench_params(reason="launch_controls_regression")
+    task, _ = await coordinator.tasks.create_or_return_existing(
+        TaskSpec(kind="explore", params=enqueued, idempotency_key="geak-revalidate-c0")
+    )
     calls = []
     fingerprints = []
     original_fingerprint = explore.effective_fingerprint
@@ -318,25 +309,25 @@ async def test_geak_launch_controls_reach_materialized_rebench(
         output = tmp_path / f"materialized_{len(calls)}"
         output.mkdir()
         path = _build_variant_yaml(
-            kwargs["base_yaml_path"],
-            kwargs["base_extra_args"],
+            GridRecipe(
+                base_yaml_path=kwargs["recipe"].base_yaml_path,
+                base=LaunchLayer(
+                    extra_server_args=kwargs["recipe"].base.extra_server_args,
+                    args_mode=kwargs["recipe"].base.args_mode,
+                ),
+                target=kwargs["recipe"].target,
+            ),
             kwargs["grid"][0],
             output_subdir=output,
-            model_path=kwargs["model_path"],
-            gpu_type=kwargs["gpu_type"],
-            benchmark_script=kwargs["benchmark_script"],
-            base_args_mode=kwargs["base_args_mode"],
         )
         calls.append(yaml.safe_load(path.read_text())["benchmark"]["envs"])
-        if len(calls) > 1:
-            return []
         return [
             VariantResult(
                 name="geak_revalidate",
                 extra_server_args=kwargs["grid"][0].extra_server_args,
                 extra_envs=dict(kwargs["grid"][0].extra_envs),
-                status="succeeded",
-                output_throughput=120.0,
+                status="succeeded" if len(calls) == 1 else "failed",
+                output_throughput=120.0 if len(calls) == 1 else None,
             )
         ]
 
@@ -360,13 +351,13 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     if current.get("extra_envs", {}).get("SGLANG_USE_AITER"):
         assert envs["SGLANG_USE_AITER"] == "1"
     assert len(result["winners"]) == 1
-    assert coordinator._promote_geak_from_candidate(
+    assert coordinator.phase_kernel.promote_geak_from_candidate(
         state.geak_result, measured_tput=120.0, measurement_provenance=result["best_variant"], overlay_loaded=False
     )
     state.geak_result = {}
     state.save(coordinator.session_dir)
     coordinator.shared_state = SharedState.load_or_init(coordinator.session_dir)
-    resumed = await coordinator._enqueue_internal_stack_rebench(reason="launch_controls_resume")
+    resumed = await coordinator.writeback.enqueue_internal_stack_rebench(reason="launch_controls_resume")
     resume_task = await coordinator.tasks.get(str(resumed["task_id"]))
     await ExploreExecutor(session_dir=coordinator.session_dir)(
         SimpleNamespace(task=resume_task, extra={"shared_state": coordinator.shared_state})
@@ -408,8 +399,10 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     )
     st.current_best = {"extra_server_args": "--incumbent", **controls}
 
-    params = c._geak_rebench_params(reason="geak_e2e_win")
-    task = await c.tasks.create(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+    params = c.writeback.geak_rebench_params(reason="geak_e2e_win")
+    task, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+    )
     entry = task.params["grid"][0]
     ran = GridVariant(
         str(entry["name"]),
@@ -422,9 +415,11 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     assert task.params["expected_cfg_hash"] == effective_fingerprint(
         ran.extra_server_args,
         ran.extra_envs,
-        base_remove_args=controls.get("remove_args"),
-        base_unset_envs=controls.get("unset_envs"),
-        base_args_mode=controls.get("args_mode"),
+        base=BaseControls(
+            remove_args=controls.get("remove_args"),
+            unset_envs=controls.get("unset_envs"),
+            args_mode=controls.get("args_mode"),
+        ),
     )
 
 
@@ -434,7 +429,7 @@ async def test_structured_environment_alone_dispatches_geak_rebench(coordinator)
     st.baseline_tput = 100.0
     st.geak_result = {"status": "ok", "accepted_config": {"env_map": {"SGLANG_USE_AITER": "1"}}}
 
-    params = coordinator._geak_rebench_params(reason="geak_e2e_win")
+    params = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
     entry = params["grid"][0]
     ran = GridVariant(str(entry["name"]), str(entry["extra_args"]), dict(entry["extra_envs"]))
     assert params["geak_fallback"] is True
@@ -449,7 +444,7 @@ async def test_empty_structured_environment_does_not_rebench_legacy_values(coord
     st.baseline_tput = 100.0
     st.geak_result = {"status": "ok", "accepted_config": {"env_map": {}, "env": legacy_env}}
 
-    enqueued = coordinator._geak_rebench_params(reason="geak_e2e_win")
+    enqueued = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
     assert enqueued == {"skipped": True, "reason": "geak_no_material"}
     assert not await coordinator.tasks.queued()
 
@@ -458,7 +453,7 @@ async def test_empty_structured_environment_does_not_rebench_legacy_values(coord
 @pytest.mark.parametrize("env_map", [None, [], {"SGLANG_USE_AITER": 1}, {"BAD-NAME": "1"}, {"VALID": "a\0b"}])
 async def test_malformed_structured_environment_does_not_dispatch(coordinator, env_map) -> None:
     coordinator.shared_state.geak_result = {"status": "ok", "accepted_config": {"env_map": env_map}}
-    result = coordinator._geak_rebench_params(reason="geak_e2e_win")
+    result = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
     assert result == {"skipped": True, "reason": "geak_invalid_config"}
     assert coordinator.shared_state.geak_result["revalidation_status"] == "no_promote"
     assert not coordinator.shared_state.geak_pending
@@ -472,7 +467,7 @@ async def test_malformed_structured_environment_does_not_dispatch(coordinator, e
 )
 async def test_artifact_only_result_requires_its_own_harness(coordinator, material) -> None:
     coordinator.shared_state.geak_result = {"status": "ok", **material}
-    enqueued = coordinator._geak_rebench_params(reason="geak_e2e_win")
+    enqueued = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
     assert enqueued == {"skipped": True, "reason": "geak_material_requires_harness", "fallback": "geak_harness"}
     assert not await coordinator.tasks.queued()
 
@@ -490,66 +485,97 @@ async def test_recovered_empty_map_closes_without_fallback(coordinator, tmp_path
     async def _must_not_fallback(**_kwargs):
         pytest.fail("empty optimization must not launch a fallback")
 
-    monkeypatch.setattr(c, "_validate_geak_via_geak_harness", _must_not_fallback)
-    await c._run_geak_kernel_phase(from_phase="KERNEL")
+    monkeypatch.setattr(c.writeback, "validate_geak_via_geak_harness", _must_not_fallback)
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert c.shared_state.geak_result["revalidation_status"] == "no_material"
     assert not c.shared_state.geak_pending
-    assert not c.shared_state.resume_pending_revalidation
+    assert not c.shared_state.optimization_stack_has_unvalidated_keeps()
     assert not await c.tasks.queued()
 
 
-def test_material_check_ignores_untrusted_env_names() -> None:
-    """An untrusted key on one side only must not read as a config difference."""
-    from hyperloom.orchestrator.loop.coordinator_helpers import _geak_result_has_material
-
-    echoed = {
-        "status": "ok",
-        "accepted_config": {
-            "flags": "--fp8-gemm-backend aiter",
-            "env": "PATH=/opt/venv/bin SGLANG_USE_AITER=1",
-        },
-    }
-    assert not _geak_result_has_material(
-        echoed,
-        prev_best_flags="--fp8-gemm-backend aiter",
-        prev_best_envs={"SGLANG_USE_AITER": "1"},
-    )
-    # A real config delta still registers.
-    assert _geak_result_has_material(
-        echoed,
-        prev_best_flags="--fp8-gemm-backend triton",
-        prev_best_envs={"SGLANG_USE_AITER": "1"},
-    )
-
-
 @pytest.mark.parametrize(
-    ("accepted", "previous", "expected"),
+    ("current", "accepted", "settles"),
     [
-        ({"flags": "", "args_mode": "replace"}, {"flags": "--disable-radix-cache"}, True),
-        ({"flags": "", "args_mode": "replace"}, {"flags": "", "args_mode": "replace"}, False),
         (
-            {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"},
-            {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"},
+            {"extra_server_args": "--fp8-gemm-backend aiter", "extra_envs": {"SGLANG_USE_AITER": "1"}},
+            {"flags": "--fp8-gemm-backend aiter", "env": "PATH=/opt/venv/bin SGLANG_USE_AITER=1"},
+            True,
+        ),
+        (
+            {"extra_server_args": "--fp8-gemm-backend aiter", "extra_envs": {"SGLANG_USE_AITER": "1", "PATH": "/x"}},
+            {"flags": "--fp8-gemm-backend aiter", "env": "PATH=/x SGLANG_USE_AITER=1"},
+            True,
+        ),
+        (
+            {"extra_server_args": "--fp8-gemm-backend triton", "extra_envs": {"SGLANG_USE_AITER": "1"}},
+            {"flags": "--fp8-gemm-backend aiter", "env": "PATH=/opt/venv/bin SGLANG_USE_AITER=1"},
             False,
         ),
-        ({"flags": "--mem-fraction-static 0.9"}, {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"}, False),
-        ({"flags": "", "env_map": {}}, {"flags": "--disable-radix-cache", "args_mode": "replace"}, False),
-        ({"unset_envs": ["SGLANG_AITER_MLA_PERSIST"]}, {"env_map": {"SGLANG_AITER_MLA_PERSIST": "1"}}, True),
+        ({"extra_server_args": "--disable-radix-cache"}, {"flags": "", "args_mode": "replace"}, False),
+        (
+            {"extra_server_args": "--mem-fraction-static 0.9", "args_mode": "replace"},
+            {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"},
+            True,
+        ),
+        (
+            {"extra_server_args": "--mem-fraction-static 0.9", "args_mode": "replace"},
+            {"flags": "--mem-fraction-static 0.9"},
+            True,
+        ),
+        (
+            {"extra_server_args": "", "extra_envs": {"SGLANG_AITER_MLA_PERSIST": "1"}},
+            {"unset_envs": ["SGLANG_AITER_MLA_PERSIST"]},
+            False,
+        ),
+        ({"extra_server_args": "--a 1"}, {"flags": "--a 1", "remove_args": ["--disable-radix-cache"]}, False),
+    ],
+    ids=[
+        "untrusted-env-in-geak-only",
+        "untrusted-env-on-both-sides",
+        "real-flag-delta",
+        "empty-replacement-of-flags",
+        "complete-flags-restated",
+        "delta-over-complete-flags",
+        "unset-of-a-current-env",
+        "removal-the-flags-cannot-show",
     ],
 )
-def test_material_check_distinguishes_explicit_controls_from_empty_legacy(accepted, previous, expected):
-    from hyperloom.orchestrator.loop.coordinator_helpers import _geak_result_has_material
+def test_geak_launch_restates_current_best(coordinator, current, accepted, settles) -> None:
+    """Only a change to the launch current_best runs is worth a rebench; spelling and guarded keys are not."""
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "explore", "tput": 110.0, **current}
+    st.geak_result = {"status": "ok", "accepted_config": accepted}
 
-    assert (
-        _geak_result_has_material(
-            {"status": "ok", "accepted_config": accepted},
-            prev_best_flags=previous.get("flags", ""),
-            prev_best_envs=previous.get("env_map", {}),
-            prev_best_controls=previous,
-        )
-        is expected
-    )
+    params = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
+
+    if settles:
+        assert params == {"skipped": True, "reason": "geak_no_material"}
+    else:
+        assert params["grid"][0]["provenance"] == "geak_revalidate"
+
+
+@pytest.mark.parametrize("removals", [None, [], ["--disable-radix-cache"]])
+def test_complete_config_inherits_omitted_removals(coordinator, removals) -> None:
+    """A complete config that omits removals keeps current_best's; an explicit empty list clears them."""
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {
+        "action": "explore",
+        "tput": 110.0,
+        "extra_server_args": "--mem-fraction-static 0.95",
+        "args_mode": "replace",
+        "remove_args": ["--disable-radix-cache"],
+    }
+    config = {"flags": "--mem-fraction-static 0.95", "env_map": {}, "args_mode": "replace"}
+    if removals is not None:
+        config["remove_args"] = removals
+    st.geak_result = {"status": "ok", "accepted_config": config}
+
+    params = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
+
+    assert (params == {"skipped": True, "reason": "geak_no_material"}) is (removals != [])
 
 
 @pytest.mark.asyncio
@@ -570,15 +596,17 @@ async def test_resume_stack_revalidate_promotes_material_geak_candidate(coordina
         "accepted_kernels": ["replacement_kernel"],
     }
 
-    task = await c.tasks.create(
-        kind="explore",
-        params=_geak_rebench_params(),
-        idempotency_key="geak-revalidate-c0",
-        task_id="material-geak-rebench",
+    task, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params=_geak_rebench_params(),
+            idempotency_key="geak-revalidate-c0",
+            task_id="material-geak-rebench",
+        ),
     )
     st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
 
-    await c._promote_to_shared_state(
+    await c.writeback.promote_to_shared_state(
         task.kind,
         {
             "output_throughput": 120.0,
@@ -594,9 +622,20 @@ async def test_resume_stack_revalidate_promotes_material_geak_candidate(coordina
     assert st.geak_pending == {}
 
 
+def _forbid_rebench(coordinator, monkeypatch) -> None:
+    async def _must_not_measure(_task):
+        pytest.fail("a GEAK config that restates current_best must not be benchmarked")
+
+    async def _must_not_replay(**_kwargs):
+        pytest.fail("a GEAK config that restates current_best must not be replayed")
+
+    monkeypatch.setattr(coordinator.sub, "execute_covered", _must_not_measure)
+    monkeypatch.setattr(coordinator.writeback, "validate_geak_via_geak_harness", _must_not_replay)
+
+
 @pytest.mark.asyncio
-async def test_resume_stack_revalidate_rejects_same_config_noise(coordinator) -> None:
-    """A faster remeasure of unchanged config is not a GEAK optimization."""
+async def test_same_config_geak_result_settles_without_measurement(coordinator, monkeypatch) -> None:
+    """Re-measuring an unchanged config can only produce noise, so it is never measured."""
     c = coordinator
     st = c.shared_state
     st.baseline_tput = 100.0
@@ -613,24 +652,10 @@ async def test_resume_stack_revalidate_rejects_same_config_noise(coordinator) ->
             "env": "SGLANG_USE_AITER=1",
         },
     }
+    st.geak_pending = {"status": "awaiting_rebench"}
+    _forbid_rebench(c, monkeypatch)
 
-    task = await c.tasks.create(
-        kind="explore",
-        params=_geak_rebench_params(),
-        idempotency_key="geak-revalidate-c0",
-        task_id="same-config-geak-rebench",
-    )
-    st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
-
-    await c._promote_to_shared_state(
-        task.kind,
-        {
-            "output_throughput": 120.0,
-            "best_variant": {"fingerprint": "same-config-hash"},
-            "winners": [],
-        },
-        task=task,
-    )
+    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
 
     assert st.current_best["action"] == "explore"
     assert st.current_best["tput"] == pytest.approx(110.0)
@@ -639,75 +664,66 @@ async def test_resume_stack_revalidate_rejects_same_config_noise(coordinator) ->
     assert st.geak_pending == {}
 
 
+@pytest.mark.parametrize(
+    ("accepted_flags", "settles"),
+    [
+        ("--tp 8 --watchdog-timeout 1800 --same-config", True),
+        ("--tp 8 --watchdog-timeout 1800 --same-config --chunked-prefill-size 8192", False),
+        ("--same-config --tp 4", False),
+    ],
+    ids=["full-spelling", "added-flag", "changed-value"],
+)
+def test_geak_config_is_judged_on_the_launch_it_produces(coordinator, accepted_flags, settles) -> None:
+    """GEAK may hand back the incumbent launch spelled out in full; only a change to the launch is worth measuring."""
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "explore", "tput": 110.0, "extra_server_args": "--same-config", "extra_envs": {}}
+    st.current_best_measurement = {"resolved_server_launch_flags": "--tp 8 --watchdog-timeout 1800 --same-config"}
+    st.geak_result = {"status": "ok", "accepted_config": {"flags": accepted_flags, "env_map": {}}}
+
+    params = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
+
+    if settles:
+        assert params == {"skipped": True, "reason": "geak_no_material"}
+    else:
+        assert params["grid"][0]["provenance"] == "geak_revalidate"
+
+
 @pytest.mark.asyncio
-async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordinator) -> None:
+async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordinator, monkeypatch) -> None:
     """Dropping a candidate is not a revalidation of the stack behind it.
 
-    ``resume_pending_revalidation`` means the accepted stack still owes a
-    post-resume remeasure, and the contract everywhere else in this function is
-    that only a reconciled watermark clears it. Scoped to the canonical
-    workload; a replayable one keeps clearing the flag as it always has.
+    The accepted stack still owes a post-resume remeasure while the validation
+    watermark trails the optimization stack, so a ``no_material`` drop must
+    leave that watermark unreconciled. Scoped to the canonical workload.
     """
     c = coordinator
     st = c.shared_state
     st.benchmark_mode = "agentx"
     st.baseline_tput = 100.0
-    st.baseline_perf = {
-        "total_throughput": 1000.0,
-        "e2e_norm_intvty_p90": 30.0,
-        "e2e_norm_intvty_p50": 30.0,
-        "duration_seconds": 900.0,
-        "request_error_rate": 0.0,
-    }
     st.current_best = {
         "action": "explore",
         "tput": 110.0,
-        "total_throughput": 1100.0,
-        "e2e_norm_intvty_p90": 33.0,
-        "e2e_norm_intvty_p50": 33.0,
-        "duration_seconds": 900.0,
-        "request_error_rate": 0.0,
         "extra_server_args": "--same-config",
         "extra_envs": {"SGLANG_USE_AITER": "1"},
     }
     st.optimization_stack = [{"action": "explore", "tput": 110.0}]
     st.cumulative_gain_validated = 10.0
     st.cumulative_gain_validated_stack_len = 0
-    st.resume_pending_revalidation = True
     st.geak_result = {
         "status": "ok",
         "accepted_config": {"flags": "--same-config", "env": "SGLANG_USE_AITER=1"},
     }
+    st.geak_pending = {"status": "awaiting_rebench"}
+    _forbid_rebench(c, monkeypatch)
 
-    task = await c.tasks.create(
-        kind="explore",
-        params=_geak_rebench_params(),
-        idempotency_key="geak-revalidate-c0",
-        task_id="no-material-watermark",
-    )
-    st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
-
-    await c._promote_to_shared_state(
-        task.kind,
-        {
-            "output_throughput": 120.0,
-            "best_variant": {
-                "fingerprint": "same-config-hash",
-                "output_throughput": 120.0,
-                "total_throughput": 1200.0,
-                "e2e_norm_intvty_p90": 36.0,
-                "e2e_norm_intvty_p50": 36.0,
-                "duration_seconds": 900.0,
-                "request_error_rate": 0.0,
-            },
-            "winners": [],
-        },
-        task=task,
-    )
+    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
 
     assert st.geak_result["revalidation_status"] == "no_material"
+    assert st.cumulative_gain_validated == pytest.approx(10.0)
     assert not (
-        st.resume_pending_revalidation is False and st.cumulative_gain_validated_stack_len < len(st.optimization_stack)
+        not st.optimization_stack_has_unvalidated_keeps()
+        and st.cumulative_gain_validated_stack_len < len(st.optimization_stack)
     ), "no_material cleared the revalidation flag without reconciling the validation watermark"
 
 
@@ -722,8 +738,8 @@ def _render_final(
     section = render(
         {
             "outcome": {
-                "final": {"throughput_tok_s_per_gpu": 140.0, "gain_pct": 0.0},
-                "baseline": {"throughput_tok_s_per_gpu": 100.0},
+                "final": {"output_throughput": 140.0, "gain_pct": 0.0},
+                "baseline": {"output_throughput": 100.0},
                 "validation": {},
             },
             "close": {"geak_candidate": geak_candidate},
@@ -773,8 +789,8 @@ def test_final_report_reads_the_last_geak_visit_not_an_earlier_failure() -> None
     section = render(
         {
             "outcome": {
-                "final": {"throughput_tok_s_per_gpu": 140.0, "gain_pct": 0.0},
-                "baseline": {"throughput_tok_s_per_gpu": 100.0},
+                "final": {"output_throughput": 140.0, "gain_pct": 0.0},
+                "baseline": {"output_throughput": 100.0},
                 "validation": {},
             },
             "close": {"geak_candidate": {}},
@@ -788,15 +804,74 @@ def test_final_report_reads_the_last_geak_visit_not_an_earlier_failure() -> None
     assert not any("DROPPED" in fact for fact in section.key_facts)
 
 
+_AWAITING_FACT = (
+    "GEAK candidate (self-reported +12.50%) is AWAITING a main-flow rebench — excluded from the headline gain "
+    "and final stack until a measured rebench validates it."
+)
+_AWAITING_WARNING = (
+    "A GEAK(GEAK) e2e candidate self-reported a win but has NOT been confirmed by a same-harness main-flow "
+    "rebench, so it is intentionally kept out of current_best / action_path / the validated gain. Its "
+    "self-reported number is audit-only and must not be presented as the headline result."
+)
+_NO_VALIDATION_WARNING = (
+    "No validated gain is recorded while baseline/final throughput are set — no validation run completed."
+)
+
+
+@pytest.mark.parametrize(
+    ("gain", "gain_fact", "decision", "extra_warnings"),
+    [
+        (-1.5, "Validated cumulative gain: -1.50%.", ("attempted", -1.5), []),
+        (0.0, "Validated cumulative gain: 0.00%.", ("attempted", 0.0), []),
+        (None, None, None, [_NO_VALIDATION_WARNING]),
+        (3.0, "Validated cumulative gain: +3.00%.", ("kept", 3.0), []),
+    ],
+)
+def test_an_awaiting_geak_candidate_adds_only_its_own_lines(gain, gain_fact, decision, extra_warnings) -> None:
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render
+
+    section = render(
+        {
+            "outcome": {
+                "final": {"output_throughput": 140.0, "gain_pct": gain},
+                "baseline": {"output_throughput": 100.0},
+                "validation": {},
+            },
+            "close": {
+                "geak_candidate": {
+                    "status": "awaiting_rebench",
+                    "revalidation_pending": True,
+                    "self_reported_gain_pct": 12.5,
+                }
+            },
+            "timeline": [],
+        }
+    )
+
+    expected = ["Final: 140.00 tok/s.", "Delta vs baseline: +40.00 tok/s."]
+    if gain_fact:
+        expected.append(gain_fact)
+    assert list(section.key_facts) == [*expected, _AWAITING_FACT]
+    assert [(d.kind, d.subject, d.metric_pct) for d in section.decisions] == (
+        [(decision[0], "final", decision[1])] if decision else []
+    )
+    assert list(section.warnings) == [_AWAITING_WARNING, *extra_warnings]
+
+
 def test_final_report_still_flags_awaiting_geak_revalidation() -> None:
     facts, warnings = _render_final({"status": "awaiting_rebench", "self_reported_gain_pct": 12.5})
 
-    assert any("AWAITING" in f for f in facts)
-    assert warnings
+    assert facts == [
+        "Final: 140.00 tok/s.",
+        "Delta vs baseline: +40.00 tok/s.",
+        "Validated cumulative gain: 0.00%.",
+        _AWAITING_FACT,
+    ]
+    assert warnings == [_AWAITING_WARNING]
 
 
 @pytest.mark.asyncio
-async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path) -> None:
+async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path, monkeypatch) -> None:
     """An adjudicated no_promote result must not be recovered and re-enqueued."""
     c = coordinator
     st = c.shared_state
@@ -813,16 +888,9 @@ async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path
     st.geak_pending = {}
     revalidations = _record_revalidations(c)
 
-    c._record_geak_kernel_journey = lambda _result: None
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
-    )
-    try:
-        await c._run_geak_kernel_phase(from_phase="KERNEL")
-    finally:
-        monkeypatch.undo()
+    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    stop_geak_before_launch(monkeypatch)
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert revalidations == []
 
@@ -849,7 +917,7 @@ def _arm_settled_candidate(coordinator, tmp_path) -> dict:
         "revalidation_error": "geak_harness_unsupported_canonical_workload",
     }
     st.geak_pending = {}
-    coordinator._record_geak_kernel_journey = lambda _result: None
+    coordinator.phase_kernel._record_geak_kernel_journey = lambda _result: None
     return settled
 
 
@@ -862,30 +930,33 @@ def _assert_settled_candidate_survived(coordinator, tmp_path, revalidations: lis
     assert (tmp_path / "geak" / "result.json").is_file()
 
 
-def _stub_geak_runner_call(monkeypatch, tmp_path, outcome) -> list[str]:
+def _stub_geak_runner_call(monkeypatch, outcome) -> list[str]:
     """Replace only the GEAK runner's own thread call; every other one runs.
 
     ``asyncio.to_thread`` is shared, so the phase's bus and file work travels
-    through it too — dispatching on the runner closure keeps those real.
+    through it too — dispatching on the geak_runner launch keeps those real. The
+    hand-off's GPU check reports the cards free, so the outcome does not hang
+    on what the test host's GPUs hold. The launch must mark the run, or what it
+    leaves running survives it.
 
     Returns the list the interceptions are recorded in, so a test can prove the
     phase reached the runner rather than returning at an earlier gate.
     """
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: tmp_path / "geak_runner.py",
+        "hyperloom.orchestrator.actions.executors._server_lifecycle.free_gpus_for_handoff",
+        lambda *_args, **_kwargs: GpuHandoff(reaped=[], busy=[], holders=[], unverified=""),
     )
     original_to_thread = asyncio.to_thread
     calls: list[str] = []
 
     async def _to_thread(func, /, *args, **kwargs):
-        qualname = getattr(func, "__qualname__", "")
-        if qualname.endswith("_run_geak_kernel_phase.<locals>._run"):
-            calls.append(qualname)
+        if func is run_with_session_kill and "hyperloom.orchestrator.kernel.geak_runner" in args[0]:
+            assert kwargs["env"].get(REAP_MARK_ENV)
+            calls.append("geak_runner")
             return outcome()
         return await original_to_thread(func, *args, **kwargs)
 
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.asyncio.to_thread", _to_thread)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel_geak_dispatch.asyncio.to_thread", _to_thread)
     return calls
 
 
@@ -897,11 +968,10 @@ async def test_failed_runner_does_not_replay_the_settled_result(coordinator, tmp
     revalidations = _record_revalidations(c)
     calls = _stub_geak_runner_call(
         monkeypatch,
-        tmp_path,
-        lambda: subprocess.CompletedProcess(["geak_runner.py"], 1, "", "runner failed"),
+        lambda: subprocess.CompletedProcess(["geak_runner"], 1, "", "runner failed"),
     )
 
-    await c._run_geak_kernel_phase(from_phase="KERNEL")
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert len(calls) == 1
     _assert_settled_candidate_survived(c, tmp_path, revalidations)
@@ -913,16 +983,81 @@ async def test_runner_timeout_does_not_replay_the_settled_result(coordinator, tm
     c = coordinator
 
     def _timed_out():
-        raise subprocess.TimeoutExpired(["geak_runner.py"], 1)
+        raise subprocess.TimeoutExpired(["geak_runner"], 1)
 
     _arm_settled_candidate(c, tmp_path)
     revalidations = _record_revalidations(c)
-    calls = _stub_geak_runner_call(monkeypatch, tmp_path, _timed_out)
+    calls = _stub_geak_runner_call(monkeypatch, _timed_out)
 
-    await c._run_geak_kernel_phase(from_phase="KERNEL")
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert len(calls) == 1
     _assert_settled_candidate_survived(c, tmp_path, revalidations)
+
+
+def _arm_unsettled_geak_dispatch(coordinator) -> None:
+    """Reach the runner with no adjudicated candidate for a timeout to retire."""
+    st = coordinator.shared_state
+    _arm_kernel_to_sweep(st)
+    st.benchmark_mode = "agentx"
+    st.geak_result = {}
+    st.geak_pending = {}
+    coordinator.phase_kernel._record_geak_kernel_journey = lambda _result: None
+
+
+def _timeout_runner():
+    raise subprocess.TimeoutExpired(["geak_runner"], 1)
+
+
+@pytest.mark.asyncio
+async def test_outer_timeout_retains_the_classification_geak_flushed(coordinator, tmp_path, monkeypatch) -> None:
+    """A kill after GEAK wrote result.json keeps that result instead of a bare timeout."""
+    c = coordinator
+    _arm_unsettled_geak_dispatch(c)
+    flushed = {
+        "status": "no_gain",
+        "error_class": "no_gain",
+        "validation_status": "skipped_final_is_baseline",
+        "accepted_kernels": [],
+        "phase_reached": "report",
+        "error": "final bundle identical to baseline",
+    }
+    geak_dir = c.session_dir / "geak"
+    geak_dir.mkdir(exist_ok=True)
+    (geak_dir / "result.json").write_text(json.dumps(flushed), encoding="utf-8")
+    revalidations = _record_revalidations(c)
+    calls = _stub_geak_runner_call(monkeypatch, _timeout_runner)
+
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert calls == ["geak_runner"]
+    assert revalidations == []
+    recorded = c.shared_state.geak_result
+    assert recorded["status"] == "no_gain"
+    assert recorded["error_class"] == "no_gain"
+    assert recorded["validation_status"] == "skipped_final_is_baseline"
+    assert recorded["accepted_kernels"] == []
+    assert recorded["phase_reached"] == "report"
+    assert recorded["error"] == "final bundle identical to baseline"
+
+
+@pytest.mark.asyncio
+async def test_outer_timeout_without_result_json_records_an_unknown_phase(coordinator, tmp_path, monkeypatch) -> None:
+    """A kill before result.json exists is an external timeout, not an empty patch or no gain."""
+    c = coordinator
+    _arm_unsettled_geak_dispatch(c)
+    revalidations = _record_revalidations(c)
+    calls = _stub_geak_runner_call(monkeypatch, _timeout_runner)
+
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert calls == ["geak_runner"]
+    assert revalidations == []
+    recorded = c.shared_state.geak_result
+    assert recorded["status"] == "timeout"
+    assert recorded["error_class"] == "external_timeout"
+    assert recorded["phase_reached"] == "unknown"
+    assert "result.json" in recorded["error"]
 
 
 _SETTLED_GEAK_RESULT = {
@@ -951,7 +1086,7 @@ _SETTLED_GEAK_RESULT = {
     ids=["new_config", "same_config_new_evidence"],
 )
 @pytest.mark.asyncio
-async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path, fresh: dict) -> None:
+async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path, monkeypatch, fresh: dict) -> None:
     """A settled verdict tombstones its own candidate, not the next one.
 
     The crash window this recovery exists for is exactly the one where the
@@ -972,19 +1107,12 @@ async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path,
     st.geak_pending = {}
     revalidations = _record_revalidations(c)
 
-    c._record_geak_kernel_journey = lambda _result: None
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
-    )
-    try:
-        await c._run_geak_kernel_phase(from_phase="KERNEL")
-    finally:
-        monkeypatch.undo()
+    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    forbid_geak_launch(monkeypatch)
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert revalidations == ["geak_e2e_win_recovered"]
-    assert c._geak_rebench_params(reason="check")["grid"][0]["extra_args"] == fresh["accepted_config"]["flags"]
+    assert c.writeback.geak_rebench_params(reason="check")["grid"][0]["extra_args"] == fresh["accepted_config"]["flags"]
     assert st.geak_result["final_throughput_tok_s"] == pytest.approx(fresh["final_throughput_tok_s"])
 
 
@@ -1007,7 +1135,7 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
 ) -> None:
     import time
 
-    from hyperloom.orchestrator.actions.executors import ExploreExecutor
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
 
     baseline = tmp_path / "baseline.yaml"
     baseline.write_text(
@@ -1026,15 +1154,16 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
     state.explore_variant_timeout_sec_override = legacy_timeout_override
     state.explore_variant_timeout_safety_margin = 0.5
     state.explore_overtime_kill_ratio = 1.5
-    state.baseline_double_run = False
     monkeypatch.setattr(state, "session_budget_usable_sec", lambda **_kwargs: session_remaining_sec)
     if source == "geak":
         state.geak_result = {"status": "ok", "accepted_config": {"flags": "--mem-fraction-static 0.9"}}
-        params = coordinator._geak_rebench_params(reason="runtime_budget_regression")
-        task = await coordinator.tasks.create(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+        params = coordinator.writeback.geak_rebench_params(reason="runtime_budget_regression")
+        task, _ = await coordinator.tasks.create_or_return_existing(
+            TaskSpec(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+        )
     else:
         state.current_best = {"extra_server_args": "--mem-fraction-static 0.9"}
-        enqueued = await coordinator._enqueue_internal_stack_rebench(reason="runtime_budget_regression")
+        enqueued = await coordinator.writeback.enqueue_internal_stack_rebench(reason="runtime_budget_regression")
         task = await coordinator.tasks.get(str(enqueued["task_id"]))
     calls = []
 
@@ -1050,11 +1179,13 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
     finished = time.monotonic()
 
     assert len(calls) == 1
-    assert calls[0]["variant_expected_sec"] == (baseline_runtime or None)
+    assert calls[0]["stop"].variant_expected_sec == (baseline_runtime or None)
     if session_remaining_sec is None:
-        assert calls[0]["session_deadline_sec"] is None
+        assert calls[0]["stop"].session_deadline_sec is None
     else:
-        assert started + session_remaining_sec <= calls[0]["session_deadline_sec"] <= finished + session_remaining_sec
+        assert (
+            started + session_remaining_sec <= calls[0]["stop"].session_deadline_sec <= finished + session_remaining_sec
+        )
     assert task.params.get("baseline_runtime_sec", 0.0) == baseline_runtime
     for retired_param in ("variant_timeout_sec", "soft_deadline_sec", "overtime_kill_ratio"):
         assert retired_param not in calls[0]
@@ -1069,8 +1200,8 @@ async def test_internal_stack_rebench_preserves_baseline_script(
 ) -> None:
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import ExploreExecutor
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
 
     baseline = tmp_path / "baseline.yaml"
     baseline.write_text(
@@ -1080,21 +1211,24 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     )
     state = coordinator.shared_state
     state.baseline_tput = 0.0
-    state.baseline_double_run = True
     for name, tput in [("sglang_custom.sh", 100.0), ("rejected_script.sh", 90.0)]:
-        task = await coordinator.tasks.create(kind="baseline", params={"benchmark_script": name}, idempotency_key=name)
-        await coordinator._promote_to_shared_state(
+        task, _ = await coordinator.tasks.create_or_return_existing(
+            TaskSpec(kind="baseline", params={"benchmark_script": name}, idempotency_key=name)
+        )
+        await coordinator.writeback.promote_to_shared_state(
             "baseline", {"output_throughput": tput, "materialized_config": str(baseline)}, task=task
         )
     assert state.baseline_tput == 100.0
     assert state.last_baseline["extras"]["fingerprint"]["benchmark_script"] == "rejected_script.sh"
     if enablement_revalidation:
-        task = await coordinator.tasks.create(
-            kind="baseline",
-            params={"reason": "enablement_eval_revalidation", "benchmark_script": "sglang_custom.sh"},
-            idempotency_key="revalidate-baseline",
+        task, _ = await coordinator.tasks.create_or_return_existing(
+            TaskSpec(
+                kind="baseline",
+                params={"reason": "enablement_eval_revalidation", "benchmark_script": "sglang_custom.sh"},
+                idempotency_key="revalidate-baseline",
+            ),
         )
-        await coordinator._promote_to_shared_state(
+        await coordinator.writeback.promote_to_shared_state(
             "baseline", {"output_throughput": 105.0, "materialized_config": str(baseline)}, task=task
         )
     state.save(coordinator.session_dir)
@@ -1106,10 +1240,12 @@ async def test_internal_stack_rebench_preserves_baseline_script(
         state.current_best = {"extra_server_args": "--mem-fraction-static 0.9"}
     monkeypatch.setenv("GPU_TYPE", "mi355x")
     if source == "geak":
-        params = coordinator._geak_rebench_params(reason="script_regression")
-        task = await coordinator.tasks.create(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+        params = coordinator.writeback.geak_rebench_params(reason="script_regression")
+        task, _ = await coordinator.tasks.create_or_return_existing(
+            TaskSpec(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+        )
     else:
-        enqueued = await coordinator._enqueue_internal_stack_rebench(reason="script_regression")
+        enqueued = await coordinator.writeback.enqueue_internal_stack_rebench(reason="script_regression")
         task = await coordinator.tasks.get(str(enqueued["task_id"]))
     calls = []
 
@@ -1117,15 +1253,19 @@ async def test_internal_stack_rebench_preserves_baseline_script(
         output = tmp_path / f"variant_{len(calls)}"
         output.mkdir()
         variant_path = _build_variant_yaml(
-            kwargs["base_yaml_path"],
-            "",
+            GridRecipe(
+                base_yaml_path=kwargs["recipe"].base_yaml_path,
+                target=BenchmarkTarget(
+                    gpu_type=kwargs["recipe"].target.gpu_type,
+                    benchmark_script=kwargs["recipe"].target.benchmark_script,
+                ),
+            ),
             kwargs["grid"][0],
             output_subdir=output,
-            gpu_type=kwargs["gpu_type"],
-            benchmark_script=kwargs["benchmark_script"],
         )
         calls.append((kwargs, yaml.safe_load(variant_path.read_text())["benchmark"]))
-        return []
+        variant = kwargs["grid"][0]
+        return [VariantResult(variant.name, variant.extra_server_args, dict(variant.extra_envs), status="failed")]
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
@@ -1139,7 +1279,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     assert len(calls) == 1
     assert calls[0][1]["benchmark_script"] == "sglang_custom.sh"
     assert calls[0][1]["runner_type"] == "mi355x"
-    assert calls[0][0]["server_lifecycle"] is None
+    assert calls[0][0]["launch"].server_lifecycle is None
 
 
 @pytest.mark.asyncio
@@ -1155,8 +1295,8 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
     def must_not_launch(*_args, **_kwargs):
         pytest.fail("Invalid launch configuration must stop before runner invocation")
 
-    monkeypatch.setattr(coordinator, "build_env_spec", invalid_spec)
-    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", must_not_launch)
+    monkeypatch.setattr(coordinator.writeback, "build_env_spec", invalid_spec)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel_geak_dispatch.subprocess.Popen", must_not_launch)
     coordinator.shared_state.benchmark_mode = mode
     previous = {"status": "ok", "revalidation_status": "no_promote", "accepted_config": {"flags": "--old"}}
     if settled:
@@ -1164,8 +1304,8 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
     recorder = make_kernel_recorder(macro_cycle=0, route=ROUTE_GEAK)
     assert recorder is not None
     recorder.begin()
-    coordinator._kernel_timeline_recorder = recorder
-    await coordinator._run_geak_kernel_phase(from_phase="EXPLORE")
+    coordinator.phase_kernel._kernel_timeline_recorder = recorder
+    await coordinator.phase_kernel._run_geak_kernel_phase(from_phase="EXPLORE")
     if settled:
         assert coordinator.shared_state.geak_result == previous
     else:
@@ -1177,6 +1317,28 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
 
 
 @pytest.mark.asyncio
+async def test_native_geak_proxy_refusal_is_not_an_invalid_env_spec(coordinator, monkeypatch):
+    """A native-AgentX proposal refusing an unverified Magpie launch is its own fault, not a serialization one.
+
+    ``invalid_env_spec`` names exactly one failure: the accepted launch configuration could not be
+    serialized. A refusal raised further down the handoff build must reach the caller instead of being
+    relabelled as one.
+    """
+    refusal = "Native AgentX GEAK proposals require a Magpie-verified server launch"
+
+    def refuse(*_args, **_kwargs):
+        raise ValueError(refusal)
+
+    monkeypatch.setattr("hyperloom.inference_optimizer.agentx.geak_proxy.seed_native_geak_proxy", refuse)
+    coordinator.shared_state.benchmark_mode = "agentx"
+
+    with pytest.raises(ValueError, match=refusal):
+        await coordinator.phase_kernel._run_geak_kernel_phase(from_phase="EXPLORE")
+
+    assert (coordinator.shared_state.geak_result or {}).get("error_class") != "invalid_env_spec"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("config", [{"env_map": None}, {"unset_envs": ["PYTHONPATH"]}])
 async def test_invalid_config_with_real_artifact_is_rejected_before_rebench(coordinator, config):
     coordinator.shared_state.geak_result = {
@@ -1184,7 +1346,7 @@ async def test_invalid_config_with_real_artifact_is_rejected_before_rebench(coor
         "accepted_config": config,
         "accepted_kernels": ["real_kernel"],
     }
-    result = coordinator._geak_rebench_params(reason="invalid_config")
+    result = coordinator.writeback.geak_rebench_params(reason="invalid_config")
     assert result == {"skipped": True, "reason": "geak_invalid_config"}
     assert coordinator.shared_state.geak_result["revalidation_status"] == "no_promote"
     assert "accepted_config" in coordinator.shared_state.geak_result["revalidation_error"]
@@ -1225,7 +1387,7 @@ async def test_a_geak_win_is_measured_and_promoted_inside_the_calling_task(coord
 
     c.sub.register_executor("explore", _explore)
 
-    await c._revalidate_geak_candidate(reason="geak_e2e_win")
+    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
 
     assert st.current_best["action"] == "geak_e2e"
     assert st.current_best["tput"] == pytest.approx(120.0)
@@ -1238,7 +1400,6 @@ async def test_a_failed_revalidation_settles_the_verdict_and_keeps_the_stack(coo
     c = coordinator
     st = c.shared_state
     _arm_geak_win(st)
-    st.resume_pending_revalidation = True
     st.cumulative_gain_validated = 20.0
     st.cumulative_gain_validated_ts = "2026-09-08T00:00:00Z"
 
@@ -1247,14 +1408,13 @@ async def test_a_failed_revalidation_settles_the_verdict_and_keeps_the_stack(coo
 
     c.sub.register_executor("explore", _explore)
 
-    await c._revalidate_geak_candidate(reason="geak_e2e_win")
+    await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
 
     assert not st.geak_pending
     assert st.geak_result["revalidation_status"] == "failed"
     assert st.geak_result["revalidation_error_class"] == "subprocess_nonzero"
     assert st.geak_result["revalidation_error"] == "revalidation failed"
     assert st.current_best["action"] == "baseline"
-    assert st.resume_pending_revalidation is True
     assert st.cumulative_gain_validated == 20.0
     assert st.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
 
@@ -1268,19 +1428,85 @@ async def test_a_cancelled_revalidation_is_recorded_before_it_propagates(coordin
     _arm_geak_win(st)
 
     async def _explore(_ctx):
-        raise FuturesCancelledError("phase_transition:KERNEL_AGENT->SWEEP")
+        raise FuturesCancelledError("session_time_exhausted")
 
     c.sub.register_executor("explore", _explore)
 
     with pytest.raises(FuturesCancelledError):
-        await c._revalidate_geak_candidate(reason="geak_e2e_win")
+        await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
 
     assert st.geak_pending["status"] == "rebench_cancelled"
     assert st.current_best["action"] == "baseline"
 
 
 @pytest.mark.asyncio
-async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, tmp_path) -> None:
+async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coordinator, monkeypatch) -> None:
+    """A GEAK win measured at the end of KERNEL is settled, not dropped as ``rebench_cancelled``."""
+    c = coordinator
+    st = c.shared_state
+    _arm_geak_win(st)
+    now = datetime.now(timezone.utc)
+    st.phase = ps.PHASE_KERNEL_AGENT
+    st.start_ts = (now - timedelta(minutes=30)).isoformat()
+    st.max_minutes = 96 * 60
+    st.phase_budget_pct = dict(ps.DEFAULT_PHASE_BUDGET_PCT)
+    st.phase_started_unix = (now - timedelta(minutes=20)).timestamp()
+
+    async def _noop(**_kwargs):
+        return None
+
+    monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _noop)
+    measuring, release = asyncio.Event(), asyncio.Event()
+
+    async def _explore(ctx):
+        measuring.set()
+        await release.wait()
+        return {
+            "output_throughput": 120.0,
+            "best_variant": {"fingerprint": ctx.task.params["expected_cfg_hash"]},
+            "winners": [],
+        }
+
+    async def _kernel_agent(_ctx):
+        await c.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
+        return {"status": "ok", "route": "geak"}
+
+    c.sub.register_executor("explore", _explore)
+    c.sub.register_executor("kernel_agent", _kernel_agent)
+    lanes, _ttl = c.dispatcher.registry_lanes_ttl("kernel_agent")
+    task, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="kernel_agent",
+            params={"from_phase": ps.PHASE_FRAMEWORK_AGENT},
+            idempotency_key="kernel_agent_c0",
+            requires_lanes=lanes,
+            lease_ttl_sec=3600,
+        ),
+    )
+    await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
+    await asyncio.wait_for(measuring.wait(), timeout=2.0)
+    spent = now - timedelta(hours=30)
+    st.phase_started_unix = spent.timestamp()
+
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
+
+    assert st.phase == ps.PHASE_KERNEL_AGENT
+    assert st.geak_pending["status"] == "awaiting_rebench"
+
+    release.set()
+    entry = c.dispatcher._inflight_actions.get(task.task_id)
+    if entry is not None:
+        await asyncio.wait_for(entry.atask, timeout=5.0)
+    await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
+
+    assert st.phase == ps.PHASE_SWEEP
+    assert st.current_best["action"] == "geak_e2e"
+    assert st.current_best["tput"] == pytest.approx(120.0)
+    assert st.geak_pending == {}
+
+
+@pytest.mark.asyncio
+async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, tmp_path, monkeypatch) -> None:
     """A refusal the replay cannot change is a verdict, not a missed handback.
 
     Under AgentX the GEAK harness declines the canonical workload outright, so
@@ -1304,13 +1530,15 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
 
     # A config-identity miss makes 2b inconclusive, which hands the candidate to
     # the GEAK harness (2a), and that refuses the canonical AgentX workload.
-    rebench = await c.tasks.create(
-        kind="explore",
-        params=_geak_rebench_params(expected_cfg_hash="expected-hash"),
-        idempotency_key="geak-revalidate-c0",
-        task_id="refused-rebench",
+    rebench, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params=_geak_rebench_params(expected_cfg_hash="expected-hash"),
+            idempotency_key="geak-revalidate-c0",
+            task_id="refused-rebench",
+        ),
     )
-    await c._promote_to_shared_state(
+    await c.writeback.promote_to_shared_state(
         rebench.kind,
         {"output_throughput": 150.0, "best_variant": {"fingerprint": "mismatched-hash"}, "winners": []},
         task=rebench,
@@ -1321,27 +1549,20 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     geak_dir = tmp_path / "geak"
     geak_dir.mkdir(exist_ok=True)
     (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
-    c._record_geak_kernel_journey = lambda _result: None
+    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
     revalidations = _record_revalidations(c)
+    stop_geak_before_launch(monkeypatch)
 
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: (_ for _ in ()).throw(RuntimeError("geak runner unavailable")),
-    )
-    try:
-        # Twice: a failed GEAK run must not erase the verdict for the next entry.
-        await c._run_geak_kernel_phase(from_phase="KERNEL")
-        await c._run_geak_kernel_phase(from_phase="KERNEL")
-    finally:
-        monkeypatch.undo()
+    # Twice: a GEAK entry that ends without a run must not erase the verdict for the next entry.
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert revalidations == []
     assert st.geak_result["revalidation_error_class"] == "incomparable"
 
 
 @pytest.mark.asyncio
-async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordinator, tmp_path) -> None:
+async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordinator, tmp_path, monkeypatch) -> None:
     """A rebench that failed to run is a missing verdict, not a settled one."""
     c = coordinator
     st = c.shared_state
@@ -1362,18 +1583,11 @@ async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordina
         "revalidation_error_class": "subprocess_nonzero",
         "revalidation_error": "revalidation failed",
     }
-    c._record_geak_kernel_journey = lambda _result: None
+    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
     revalidations = _record_revalidations(c)
+    forbid_geak_launch(monkeypatch)
 
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool._kernel_agent_tool_path",
-        lambda _name: (_ for _ in ()).throw(RuntimeError("runner should not run")),
-    )
-    try:
-        await c._run_geak_kernel_phase(from_phase="KERNEL")
-    finally:
-        monkeypatch.undo()
+    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert revalidations == ["geak_e2e_win_recovered"]
     assert st.geak_pending["status"] == "awaiting_rebench"

@@ -6,12 +6,15 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import zipfile
 from pathlib import Path
 
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.session_package import (
+    ENV_PACKAGE_DEST_ROOT,
     ENV_PACKAGE_LOOSE,
     MANIFEST_JSON_NAME,
     MANIFEST_TXT_NAME,
@@ -19,6 +22,14 @@ from hyperloom.inference_optimizer.breakdown.session_package import (
     RESERVED_PATHS,
     package_session_artifacts,
 )
+
+
+@pytest.fixture(autouse=True)
+def dest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The package destination root every test in this module writes under."""
+    root = tmp_path / "ws"
+    monkeypatch.setenv(ENV_PACKAGE_DEST_ROOT, str(root))
+    return root
 
 
 def _write(p: Path, content: str = "x") -> None:
@@ -79,12 +90,10 @@ def _zip_names(zip_path: Path) -> set[str]:
         return set(zf.namelist())
 
 
-def test_package_includes_curated_excludes_noise(tmp_path: Path) -> None:
+def test_package_includes_curated_excludes_noise(tmp_path: Path, dest: Path) -> None:
     sd = tmp_path / "session"
     _build_session(sd)
-    dest = tmp_path / "workspace"
-
-    out = package_session_artifacts(sd, session_id="sid-123", dest_root=dest)
+    out = package_session_artifacts(sd, session_id="sid-123")
     assert out is not None
     assert out == dest / PACKAGE_SUBDIR / "sid-123.zip"
     assert out.exists()
@@ -148,9 +157,7 @@ def test_manifest_records_included_and_missing(tmp_path: Path) -> None:
     sd = tmp_path / "session"
     _build_session(sd)
     (sd / "reports" / "kernel_roofline.json").unlink()
-    dest = tmp_path / "workspace"
-
-    out = package_session_artifacts(sd, session_id="sid-x", dest_root=dest)
+    out = package_session_artifacts(sd, session_id="sid-x")
     assert out is not None
     with zipfile.ZipFile(out) as zf:
         manifest = json.loads(zf.read(MANIFEST_JSON_NAME))
@@ -170,42 +177,35 @@ def test_empty_session_returns_none(tmp_path: Path) -> None:
     sd = tmp_path / "session"
     sd.mkdir()
     (sd / "runs").mkdir()
-    out = package_session_artifacts(sd, session_id="empty", dest_root=tmp_path / "ws")
+    out = package_session_artifacts(sd, session_id="empty")
     assert out is None
 
 
 def test_missing_session_dir_returns_none(tmp_path: Path) -> None:
-    out = package_session_artifacts(
-        tmp_path / "does-not-exist",
-        session_id="x",
-        dest_root=tmp_path / "ws",
-    )
+    out = package_session_artifacts(tmp_path / "does-not-exist", session_id="x")
     assert out is None
 
 
 def test_session_id_falls_back_to_dirname(tmp_path: Path) -> None:
     sd = tmp_path / "Qwen_20260609T010022Z"
     _write(sd / "session_breakdown.json", "{}")
-    out = package_session_artifacts(sd, dest_root=tmp_path / "ws")
+    out = package_session_artifacts(sd)
     assert out is not None
     assert out.name == "Qwen_20260609T010022Z.zip"
 
 
-def test_atomic_no_tmp_left_behind(tmp_path: Path) -> None:
+def test_atomic_no_tmp_left_behind(tmp_path: Path, dest: Path) -> None:
     sd = tmp_path / "session"
     _write(sd / "session_breakdown.json", "{}")
-    dest = tmp_path / "ws"
-    package_session_artifacts(sd, session_id="sid", dest_root=dest)
+    package_session_artifacts(sd, session_id="sid")
     leftovers = list((dest / PACKAGE_SUBDIR).glob(".*tmp"))
     assert leftovers == []
 
 
-def test_loose_files_dropped_at_dest_root(tmp_path: Path) -> None:
+def test_loose_files_dropped_at_dest_root(tmp_path: Path, dest: Path) -> None:
     sd = tmp_path / "session"
     _build_session(sd)
-    dest = tmp_path / "workspace"
-
-    out = package_session_artifacts(sd, session_id="sid-123", dest_root=dest)
+    out = package_session_artifacts(sd, session_id="sid-123")
     assert out is not None
     assert out.exists()  # zip still under the package subdir
     assert out == dest / PACKAGE_SUBDIR / "sid-123.zip"
@@ -235,13 +235,11 @@ def test_loose_files_dropped_at_dest_root(tmp_path: Path) -> None:
     assert (dest / "session_breakdown.json").read_text(encoding="utf-8") == '{"a":1}'
 
 
-def test_loose_can_be_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_loose_can_be_disabled(tmp_path: Path, dest: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(ENV_PACKAGE_LOOSE, "0")
     sd = tmp_path / "session"
     _build_session(sd)
-    dest = tmp_path / "workspace"
-
-    out = package_session_artifacts(sd, session_id="sid-123", dest_root=dest)
+    out = package_session_artifacts(sd, session_id="sid-123")
     assert out is not None and out.exists()  # zip still written
     assert not (dest / "session_breakdown.json").exists()  # no loose copies
 
@@ -252,9 +250,7 @@ def test_truncation_is_flagged_in_manifest(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(sp, "_MAX_TOTAL_BYTES", 5)
     sd = tmp_path / "session"
     _build_session(sd)
-    dest = tmp_path / "workspace"
-
-    out = sp.package_session_artifacts(sd, session_id="sid-trunc", dest_root=dest)
+    out = sp.package_session_artifacts(sd, session_id="sid-trunc")
     assert out is not None
     with zipfile.ZipFile(out) as zf:
         manifest = json.loads(zf.read(MANIFEST_JSON_NAME))
@@ -269,7 +265,7 @@ def test_truncation_is_flagged_in_manifest(tmp_path: Path, monkeypatch: pytest.M
 def test_no_truncation_flag_when_under_cap(tmp_path: Path) -> None:
     sd = tmp_path / "session"
     _build_session(sd)
-    out = package_session_artifacts(sd, session_id="sid-ok", dest_root=tmp_path / "ws")
+    out = package_session_artifacts(sd, session_id="sid-ok")
     assert out is not None
     with zipfile.ZipFile(out) as zf:
         manifest = json.loads(zf.read(MANIFEST_JSON_NAME))
@@ -277,15 +273,14 @@ def test_no_truncation_flag_when_under_cap(tmp_path: Path) -> None:
     assert manifest["dropped_files"] == []
 
 
-def test_loose_does_not_wipe_dest_root(tmp_path: Path) -> None:
+def test_loose_does_not_wipe_dest_root(tmp_path: Path, dest: Path) -> None:
     sd = tmp_path / "session"
     _build_session(sd)
-    dest = tmp_path / "workspace"
     dest.mkdir()
     keep = dest / "unrelated-other-session.txt"
     keep.write_text("keep me", encoding="utf-8")
 
-    package_session_artifacts(sd, session_id="sid-123", dest_root=dest)
+    package_session_artifacts(sd, session_id="sid-123")
 
     assert keep.is_file()  # loose copy must never blow away the root
     assert keep.read_text(encoding="utf-8") == "keep me"
@@ -297,9 +292,7 @@ def test_current_setting_sh_is_included(tmp_path: Path) -> None:
     sd = tmp_path / "session"
     _write(sd / "session_breakdown.json", "{}")
     _write(sd / "current_setting.sh", "#!/usr/bin/env bash\nvllm serve $MODEL\n")
-    dest = tmp_path / "ws"
-
-    out = package_session_artifacts(sd, session_id="cs-sid", dest_root=dest)
+    out = package_session_artifacts(sd, session_id="cs-sid")
     assert out is not None
     assert "current_setting.sh" in _zip_names(out)
 
@@ -310,9 +303,7 @@ def test_enablement_artifacts_are_included(tmp_path: Path) -> None:
     _write(sd / "session_breakdown.json", "{}")
     _write(sd / "reports" / "enablement" / "tid-abc" / "patches" / "001_fix.patch", "diff\n")
     _write(sd / "reports" / "enablement" / "enablement_setting.sh", "#!/usr/bin/env bash\n")
-    dest = tmp_path / "ws"
-
-    out = package_session_artifacts(sd, session_id="en-sid", dest_root=dest)
+    out = package_session_artifacts(sd, session_id="en-sid")
     assert out is not None
     names = _zip_names(out)
     assert "reports/enablement/tid-abc/patches/001_fix.patch" in names
@@ -325,7 +316,7 @@ def _manifest(zip_path: Path) -> dict:
         return json.loads(zf.read(MANIFEST_JSON_NAME))
 
 
-def test_symlink_out_of_the_session_is_not_bundled(tmp_path: Path) -> None:
+def test_symlink_out_of_the_session_is_not_bundled(tmp_path: Path, dest: Path) -> None:
     """A link planted in the session must not pull outside content into the bundle."""
     sd = tmp_path / "session"
     _write(sd / "session_breakdown.json", "{}")
@@ -333,9 +324,7 @@ def test_symlink_out_of_the_session_is_not_bundled(tmp_path: Path) -> None:
     _write(outside, '{"secret":"OUTSIDE"}')
     (sd / "reports").mkdir(parents=True, exist_ok=True)
     (sd / "reports" / "final.json").symlink_to(outside)
-    dest = tmp_path / "workspace"
-
-    out = package_session_artifacts(sd, session_id="sid", dest_root=dest)
+    out = package_session_artifacts(sd, session_id="sid")
 
     assert out is not None
     names = _zip_names(out)
@@ -358,7 +347,7 @@ def test_symlink_staying_inside_the_session_is_still_bundled(tmp_path: Path) -> 
     (sd / "reports").mkdir(parents=True, exist_ok=True)
     (sd / "reports" / "final.json").symlink_to(real)
 
-    out = package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")
+    out = package_session_artifacts(sd, session_id="sid")
 
     assert out is not None
     assert "reports/final.json" in _zip_names(out)
@@ -374,7 +363,7 @@ def test_non_regular_files_are_refused(tmp_path: Path) -> None:
     (sd / "reports").mkdir(parents=True, exist_ok=True)
     os.mkfifo(sd / "reports" / "final.json")
 
-    out = package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")
+    out = package_session_artifacts(sd, session_id="sid")
 
     assert out is not None
     assert "reports/final.json" not in _zip_names(out)
@@ -394,7 +383,7 @@ def test_manifest_never_claims_a_file_the_zip_lacks(tmp_path: Path, monkeypatch:
 
     monkeypatch.setattr(zipfile.ZipFile, "write", _flaky)
 
-    out = package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")
+    out = package_session_artifacts(sd, session_id="sid")
 
     assert out is not None
     names = _zip_names(out)
@@ -407,13 +396,12 @@ def test_manifest_never_claims_a_file_the_zip_lacks(tmp_path: Path, monkeypatch:
     assert manifest["included_count"] == len(manifest["included_files"])
 
 
-def test_loose_manifest_describes_the_loose_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_loose_manifest_describes_the_loose_tree(tmp_path: Path, dest: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A loose copy failure is reported in the loose manifest, not the zip's."""
     from hyperloom.inference_optimizer.breakdown import session_package as sp
 
     sd = tmp_path / "session"
     _build_session(sd)
-    dest = tmp_path / "workspace"
     real_copy = sp.shutil.copy2
 
     def _flaky(src, dst, **kw):
@@ -423,7 +411,7 @@ def test_loose_manifest_describes_the_loose_tree(tmp_path: Path, monkeypatch: py
 
     monkeypatch.setattr(sp.shutil, "copy2", _flaky)
 
-    out = package_session_artifacts(sd, session_id="sid", dest_root=dest)
+    out = package_session_artifacts(sd, session_id="sid")
 
     assert out is not None
     assert "reports/final.json" in _zip_names(out)  # zip was fine
@@ -438,7 +426,7 @@ def test_complete_flag_set_on_a_clean_bundle(tmp_path: Path) -> None:
     sd = tmp_path / "session"
     _build_session(sd)
 
-    out = package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")
+    out = package_session_artifacts(sd, session_id="sid")
 
     assert out is not None
     manifest = _manifest(out)
@@ -455,7 +443,7 @@ def test_truncated_bundle_is_not_complete(tmp_path: Path, monkeypatch: pytest.Mo
     sd = tmp_path / "session"
     _build_session(sd)
 
-    out = sp.package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")
+    out = sp.package_session_artifacts(sd, session_id="sid")
 
     assert out is not None
     assert _manifest(out)["complete"] is False
@@ -469,7 +457,7 @@ def test_manifest_text_names_missing_files_for_a_human_reader(tmp_path: Path) ->
     (sd / "reports").mkdir(parents=True, exist_ok=True)
     (sd / "reports" / "final.json").symlink_to(outside)
 
-    out = package_session_artifacts(sd, session_id="sid", dest_root=tmp_path / "ws")
+    out = package_session_artifacts(sd, session_id="sid")
 
     assert out is not None
     with zipfile.ZipFile(out) as zf:
@@ -489,7 +477,6 @@ def _build_pressure_session(sd: Path) -> None:
         _write(sd / rel, "{}")
     # Curated but not must-ship, and above the bulk in the priority order.
     _write(sd / "current_setting.sh", "#!/usr/bin/env bash\nvllm serve $MODEL\n")
-    _write(sd / "reports" / "session_terminal.pre.json", "{}")
     _write(sd / "reports" / "bringup" / "measure_round-abc123def456-000.json", "{}")
     # Low-priority bulk: the last entries in the glob order.
     for i in range(4):
@@ -506,7 +493,7 @@ def test_must_ship_artifacts_survive_both_caps(tmp_path: Path, monkeypatch: pyte
     sd = tmp_path / "session"
     _build_pressure_session(sd)
 
-    out = sp.package_session_artifacts(sd, session_id="sid-cap", dest_root=tmp_path / "ws")
+    out = sp.package_session_artifacts(sd, session_id="sid-cap")
 
     assert out is not None
     names = _zip_names(out)
@@ -519,7 +506,6 @@ def test_must_ship_artifacts_survive_both_caps(tmp_path: Path, monkeypatch: pyte
     assert "manifest.json" in names
     assert "reports/final.json" in names
     assert "session_breakdown.json" in names
-    assert "reports/session_terminal.json" in names
     for rel in RESERVED_PATHS:
         assert rel in names, f"must-ship artifact dropped: {rel}"
 
@@ -532,7 +518,6 @@ def test_must_ship_artifacts_survive_both_caps(tmp_path: Path, monkeypatch: pyte
 
     # The curated non-bulk files ahead of the blobs kept their slots.
     assert "current_setting.sh" in names
-    assert "reports/session_terminal.pre.json" in names
     assert "reports/bringup/measure_round-abc123def456-000.json" in names
 
     included = {e["path"] for e in manifest["included_files"]}
@@ -544,7 +529,7 @@ def test_must_ship_partition_is_packed_first(tmp_path: Path) -> None:
     sd = tmp_path / "session"
     _build_pressure_session(sd)
 
-    out = package_session_artifacts(sd, session_id="sid-order", dest_root=tmp_path / "ws")
+    out = package_session_artifacts(sd, session_id="sid-order")
 
     assert out is not None
     order = [e["path"] for e in _manifest(out)["included_files"]]
@@ -563,7 +548,7 @@ def test_oversize_file_is_skipped_not_terminal(tmp_path: Path, monkeypatch: pyte
     # Selected after it, and tiny.
     _write(sd / "runs" / "recover" / "r1" / "result.json", '{"ok":true}')
 
-    out = sp.package_session_artifacts(sd, session_id="sid-skip", dest_root=tmp_path / "ws")
+    out = sp.package_session_artifacts(sd, session_id="sid-skip")
 
     assert out is not None
     names = _zip_names(out)
@@ -584,7 +569,7 @@ def test_reserved_overflow_fails_loudly(tmp_path: Path, monkeypatch: pytest.Monk
         _write(sd / rel, "{}")
     _write(sd / "storage" / "coordinator.db", "D" * 4096)
 
-    out = sp.package_session_artifacts(sd, session_id="sid-reserved", dest_root=tmp_path / "ws")
+    out = sp.package_session_artifacts(sd, session_id="sid-reserved")
 
     assert out is not None
     manifest = _manifest(out)
@@ -609,7 +594,7 @@ def test_double_star_matches_zero_directories(tmp_path: Path) -> None:
     _write(sd / "runs" / "benchmark_report.json", "{}")
     _write(sd / "runs" / "x" / "y" / "benchmark_report.json", "{}")
 
-    out = package_session_artifacts(sd, session_id="sid-glob", dest_root=tmp_path / "ws")
+    out = package_session_artifacts(sd, session_id="sid-glob")
 
     assert out is not None
     names = _zip_names(out)
@@ -623,7 +608,7 @@ def test_single_star_stays_within_one_segment(tmp_path: Path) -> None:
     _write(sd / "reports" / "trace" / "decision_trace.jsonl", "{}\n")
     _write(sd / "reports" / "trace" / "nested" / "deep.jsonl", "{}\n")
 
-    out = package_session_artifacts(sd, session_id="sid-seg", dest_root=tmp_path / "ws")
+    out = package_session_artifacts(sd, session_id="sid-seg")
 
     assert out is not None
     names = _zip_names(out)
@@ -631,8 +616,8 @@ def test_single_star_stays_within_one_segment(tmp_path: Path) -> None:
     assert "reports/trace/nested/deep.jsonl" not in names
 
 
-def test_bringup_and_terminal_artifacts_are_collected(tmp_path: Path) -> None:
-    """The bring-up tree and both terminal verdicts are in the curated set."""
+def test_bringup_artifacts_are_collected(tmp_path: Path) -> None:
+    """The bring-up tree is in the curated set; unproduced terminal files are not."""
     sd = tmp_path / "session"
     _write(sd / "session_breakdown.json", "{}")
     _write(sd / "reports" / "bringup" / "trees.json", '{"trees":[]}')
@@ -640,14 +625,13 @@ def test_bringup_and_terminal_artifacts_are_collected(tmp_path: Path) -> None:
     _write(sd / "reports" / "session_terminal.json", '{"verdict":"ok"}')
     _write(sd / "reports" / "session_terminal.pre.json", '{"verdict":"pending"}')
 
-    out = package_session_artifacts(sd, session_id="sid-bringup", dest_root=tmp_path / "ws")
+    out = package_session_artifacts(sd, session_id="sid-bringup")
 
     assert out is not None
-    names = _zip_names(out)
-    assert "reports/bringup/trees.json" in names
-    assert "reports/bringup/measure_round-abc123def456-001.json" in names
-    assert "reports/session_terminal.json" in names
-    assert "reports/session_terminal.pre.json" in names
+    assert {n for n in _zip_names(out) if n.startswith("reports/")} == {
+        "reports/bringup/trees.json",
+        "reports/bringup/measure_round-abc123def456-001.json",
+    }
 
 
 def test_per_attempt_server_logs_are_gzip(tmp_path: Path) -> None:
@@ -657,7 +641,7 @@ def test_per_attempt_server_logs_are_gzip(tmp_path: Path) -> None:
     _write(sd / "runs" / "measure" / "t1" / "attempts" / "000" / "server.log.gz", "GZ")
     _write(sd / "runs" / "measure" / "t1" / "server.log", "PLAINTEXT")
 
-    out = package_session_artifacts(sd, session_id="sid-logs", dest_root=tmp_path / "ws")
+    out = package_session_artifacts(sd, session_id="sid-logs")
 
     assert out is not None
     names = _zip_names(out)
@@ -685,3 +669,158 @@ def test_the_keep_source_overlay_every_snapshot_ref_points_at_is_packaged(tmp_pa
     assert "optimization_stack/enablement/roota/files/srt/module.py" in rels
     assert "optimization_stack/enablement/roota/manifest.json" in rels
     assert any(g.startswith("optimization_stack/") for g in PACKAGE_GLOBS)
+
+
+def test_exported_state_json_masks_extra_env_credentials_but_keeps_knobs(tmp_path: Path, dest: Path) -> None:
+    sd = tmp_path / "session"
+    _build_session(sd)
+    state = {
+        "session_id": "sid",
+        "operator_extra_env": {
+            "HF_TOKEN": "hf_plaintextvalue",
+            "SSH_PRIVATE_KEY": "plaintextvalue",
+            "EXTRA_ARGS": "--header Bearer plaintextvalue",
+            "VLLM_MAX_NUM_BATCHED_TOKENS": "8192",
+            "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+        },
+    }
+    on_disk = json.dumps(state)
+    _write(sd / "state.json", on_disk)
+    out = package_session_artifacts(sd, session_id="sid")
+
+    assert out is not None
+    with zipfile.ZipFile(out) as zf:
+        zipped = zf.read("state.json").decode("utf-8")
+    loose = (dest / "state.json").read_text(encoding="utf-8")
+    expected = {
+        "HF_TOKEN": "[REDACTED]",
+        "SSH_PRIVATE_KEY": "[REDACTED]",
+        "EXTRA_ARGS": "--header Bearer [REDACTED]",
+        "VLLM_MAX_NUM_BATCHED_TOKENS": "8192",
+        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+    }
+    for exported in (zipped, loose):
+        assert "plaintextvalue" not in exported
+        assert json.loads(exported)["operator_extra_env"] == expected
+        assert json.loads(exported)["session_id"] == "sid"
+    sizes = {e["path"]: e["bytes"] for e in _manifest(out)["included_files"]}
+    assert sizes["state.json"] == len(zipped.encode("utf-8"))
+    # --resume re-exports the pins from the session's own state.json, so that copy keeps them.
+    assert (sd / "state.json").read_text(encoding="utf-8") == on_disk
+
+
+def test_state_json_that_cannot_be_inspected_is_not_shipped(tmp_path: Path, dest: Path) -> None:
+    sd = tmp_path / "session"
+    _build_session(sd)
+    _write(sd / "state.json", '{"operator_extra_env": {"HF_TOKEN": "hf_plaintextvalue"')
+    out = package_session_artifacts(sd, session_id="sid")
+
+    assert out is not None
+    assert "state.json" not in _zip_names(out)
+    assert _manifest(out)["failed_files"] == ["state.json"]
+    assert _manifest(out)["complete"] is False
+    assert not (dest / "state.json").exists()
+
+
+def test_packaging_failure_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer.breakdown import session_package
+
+    sd = tmp_path / "session"
+    _write(sd / "session_breakdown.json", "{}")
+
+    def select_fails(_sd: Path) -> None:
+        raise RuntimeError("selector bug")
+
+    monkeypatch.setattr(session_package, "_select", select_fails)
+
+    with pytest.raises(RuntimeError):
+        package_session_artifacts(sd, session_id="sid")
+
+
+# -- a destination the accounts of one group share ----------------------------------------------------------------
+def _group_dest(dest: Path) -> Path:
+    dest.mkdir()
+    dest.chmod(0o2770)
+    if not dest.stat().st_mode & stat.S_ISGID:
+        pytest.skip("this filesystem does not keep the setgid bit for the test user")
+    return dest
+
+
+def test_below_a_setgid_root_each_directory_takes_its_mode_and_each_file_is_a_new_one_renamed_into_place(
+    tmp_path: Path, dest: Path
+) -> None:
+    """The hosted archive: the next leg may be another account of the group, which replaces what this one left."""
+    _group_dest(dest)
+    sd = tmp_path / "session"
+    _build_session(sd)
+    package_session_artifacts(sd, session_id="s")
+    loose = dest / "reports" / "final.md"
+    (tmp_path / "earlier-inode").hardlink_to(loose)
+    outside = tmp_path / "outside"
+    outside.write_text("kept")
+    planted = dest / "reports" / "final.json"
+    planted.unlink()
+    planted.symlink_to(outside)  # what a member of the group may put where a file goes
+
+    _write(sd / "reports" / "final.md", "# again")
+    out = package_session_artifacts(sd, session_id="s")
+
+    assert out is not None and stat.S_IMODE(out.stat().st_mode) == 0o660
+    assert outside.read_text() == "kept" and not planted.is_symlink()
+    assert (tmp_path / "earlier-inode").read_text() == "# final" and loose.read_text() == "# again"
+    made = [path for path in dest.rglob("*") if path.is_dir()]
+    assert made and {stat.S_IMODE(path.stat().st_mode) for path in made} == {0o2770}
+    files = [path for path in dest.rglob("*") if path.is_file()]
+    assert {stat.S_IMODE(path.stat().st_mode) for path in files} == {0o660}
+    assert not list(dest.rglob(".*.tmp"))
+
+
+def test_below_a_root_of_one_account_the_package_is_written_as_before(tmp_path: Path, dest: Path) -> None:
+    dest.mkdir()
+    dest.chmod(0o755)
+    sd = tmp_path / "session"
+    _build_session(sd)
+    (sd / "reports" / "final.md").chmod(0o640)
+    package_session_artifacts(sd, session_id="s")
+    assert stat.S_IMODE((dest / "reports").stat().st_mode) & stat.S_ISGID == 0
+    assert stat.S_IMODE((dest / "reports" / "final.md").stat().st_mode) == 0o640, "the source's mode, as copy2 keeps it"
+
+
+@pytest.mark.parametrize(
+    ("root_mode", "umask", "expected"),
+    [
+        (0o2777, 0o022, 0o644),  # setgid, but others write it: not shared, so the umask decides
+        (0o2755, 0o077, 0o600),  # setgid, but the group cannot write it: not shared
+        (0o2777, 0o002, 0o664),  # a directory made below it looks shared, and is given no more than 664 there
+        (0o2775, 0o022, 0o664),  # shared: the group's mode whatever the umask
+        (0o2775, 0o077, 0o664),
+    ],
+    ids=["2777-022", "2755-077", "2777-002", "2775-022", "2775-077"],
+)
+def test_the_zip_takes_the_mode_its_loose_copies_take_and_never_one_others_can_write(
+    tmp_path: Path, dest: Path, root_mode: int, umask: int, expected: int
+) -> None:
+    dest.mkdir()
+    dest.chmod(root_mode)
+    if stat.S_IMODE(dest.stat().st_mode) != root_mode:
+        pytest.skip("this filesystem does not keep the mode for the test user")
+    sd = tmp_path / "session"
+    _build_session(sd)
+    previous = os.umask(umask)
+    try:
+        out = package_session_artifacts(sd, session_id="s")
+    finally:
+        os.umask(previous)
+    assert out is not None
+    loose = {stat.S_IMODE(path.stat().st_mode) for path in dest.rglob("*") if path.is_file() and path != out}
+    assert loose == {expected}
+    assert stat.S_IMODE(out.stat().st_mode) == expected
+    assert not list(dest.rglob(".*.tmp"))
+
+
+def test_below_a_root_of_one_account_the_zip_is_the_accounts_alone(tmp_path: Path, dest: Path) -> None:
+    dest.mkdir(mode=0o755)
+    sd = tmp_path / "session"
+    _build_session(sd)
+    out = package_session_artifacts(sd, session_id="s")
+    assert out is not None and stat.S_IMODE(out.stat().st_mode) == 0o600

@@ -6,15 +6,16 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
+import stat
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 from hyperloom.inference_optimizer.session.paths import make_session_dir
-from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
+from hyperloom.orchestrator.tests._helpers import git_commit_all, init_git_repo  # noqa: F401
 from hyperloom.orchestrator.tests._fixtures import (  # noqa: F401
     NoLaunchBackendInstalled,
     _isolate_session_layout_env,
@@ -41,17 +42,29 @@ def _restore_recording_session_binding():
         session_binding._CURRENT_SESSION.reset(token)
 
 
-def _bootstrap_kernel_agent_env() -> None:
-    """Point HYPERLOOM_KERNEL_AGENT_ROOT at the in-repo kernel-agent checkout."""
-    if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
-        return
-    repo = Path(__file__).resolve().parents[4]
-    kernel_agent = repo / "src" / "hyperloom" / "agents" / "kernel"
-    if kernel_agent.is_dir():
-        os.environ["HYPERLOOM_KERNEL_AGENT_ROOT"] = str(kernel_agent)
+@pytest.fixture(autouse=True)
+def _kfd_nodes_in_pci_order(monkeypatch):
+    """No test reaches a real ``amd-smi list``: card N is the Nth KFD node, so a mask number is its amd-smi index.
+
+    A test of the mapping itself patches ``_read_gpu_kfd_nodes`` again with a board where the two orders differ.
+    """
+    from hyperloom.common import gpu_power_settings
+
+    monkeypatch.setattr(gpu_power_settings, "_read_gpu_kfd_nodes", lambda: {gpu: 8 + gpu for gpu in range(16)})
 
 
-_bootstrap_kernel_agent_env()
+@pytest.fixture(autouse=True)
+def _no_node_power_management(monkeypatch):
+    """No test reaches a real ``amd-smi node``: the node reads as an amd-smi without the command, which records nothing.
+
+    A test of the node settings patches ``read_node_power_settings`` again with the reading it needs.
+    """
+    from hyperloom.common import gpu_power_settings
+
+    def _absent():
+        raise gpu_power_settings.GpuPowerSettingsError("amd-smi node --power-management: no node command (test)")
+
+    monkeypatch.setattr(gpu_power_settings, "read_node_power_settings", _absent)
 
 
 def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
@@ -99,31 +112,88 @@ def seed_kernel_keep(
     artifact: str = "",
     task_group_key: str = "",
 ) -> str:
-    """Put one attempt row and, for a KEEP, its queued patch into ``state``."""
-    from hyperloom.orchestrator.kernel._kernel_decisions import (
-        _queue_kernel_keep,
-        _stable_kernel_task_key,
+    """Queue one KEEP patch in the shape the integrate lane stores it; a non-KEEP decision queues nothing."""
+    from hyperloom.orchestrator.kernel.kernel_decisions import _kernel_integration_id
+
+    if decision.upper() != "KEEP":
+        return ""
+    task_key = task_group_key or f"seed:{kernel_id}"
+    integration_id = _kernel_integration_id(
+        task_key=task_key,
+        source_file=source_file,
+        artifact_path=artifact,
+        artifact_bundle={},
+    )
+    state.pending_kernel_integrations[integration_id] = {
+        "integration_id": integration_id,
+        "task_key": task_key,
+        "task_group_key": task_group_key,
+        "kernel_id": kernel_id,
+        "source_file": source_file,
+        "artifact_path": artifact,
+        "artifact_bundle": {},
+        "deploy_patch_path": artifact,
+        "micro_speedup": micro,
+        "optimization_decision": "KEEP",
+        "trace_gpu_pct": 0.0,
+        "status": "pending",
+    }
+    return integration_id
+
+
+def seed_integrate_verdict(
+    state,
+    kernel_id: str,
+    *,
+    decision: str = "REVERT",
+    source_file: str = "",
+    task_group_key: str = "",
+) -> dict[str, Any] | None:
+    """Settle one end-to-end integrate verdict on ``kernel_id`` through the real ledger writer."""
+    return state.record_kernel_integrate_result(
+        {
+            "kernel_id": kernel_id,
+            "patch_path": f"/tmp/{kernel_id}.patch",
+            "target_file": source_file,
+            "task_group_key": task_group_key,
+            "decision": decision,
+            "status": "ok",
+        }
     )
 
-    task_key = _stable_kernel_task_key(
-        task_group_key=task_group_key,
-        kernel_id=kernel_id,
-        source_file=source_file,
-    )
-    entry = {
-        "current_kernel_id": kernel_id,
-        "task_group_key": task_group_key,
-        "last_decision": decision,
-        "last_status": "ok",
-        "last_micro_speedup": micro,
-        "last_source_file": source_file,
-        "last_artifact_path": artifact,
-        "attempts": 1,
-        "last_ts": f"2026-01-01T00:00:{len(state.kernel_opt_task_attempts):02d}+00:00",
+
+def make_coordinator(session_dir: Path, *, shared_state_overrides: dict[str, Any] | None = None, **coord_kwargs: Any):
+    """Build a real Coordinator with idle mock backends and optional state overrides.
+
+    Returns a fully initialised :class:`~hyperloom.orchestrator.loop.coordinator.Coordinator`.
+    Callers that need to replace collaborator state (``tasks``, ``bus``, etc.) may do so
+    by assigning to the returned instance directly after construction.
+    """
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
+    from hyperloom.orchestrator.roles.mock_backend import MockBackend, ScriptedPlan
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    def _idle_plan() -> ScriptedPlan:
+        return ScriptedPlan(
+            turns=[],
+            default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+        )
+
+    backends = coord_kwargs.pop("backends", None) or {
+        "orchestration": MockBackend(_idle_plan(), name="orchestration"),
+        "critic": MockBackend(_idle_plan(), name="critic"),
     }
-    state.kernel_opt_task_attempts[task_key] = entry
-    _queue_kernel_keep(state, task_key=task_key, kernel_id=kernel_id, entry=entry)
-    return task_key
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends=backends,
+        role_registry=coord_kwargs.pop("role_registry", None) or default_role_registry(),
+        **coord_kwargs,
+    )
+    if shared_state_overrides:
+        for k, v in shared_state_overrides.items():
+            setattr(coord.shared_state, k, v)
+    return coord
 
 
 @pytest.fixture
@@ -135,95 +205,220 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     return sd
 
 
-def init_git_repo(
-    path: Path,
+def make_fake_claude(
+    bin_dir: Path,
     *,
-    seed_file: str = "src.py",
-    seed_text: str = "def f():\n    return 1\n",
-) -> None:
-    """Initialise a minimal git repo with one commit under ``path``."""
-    path.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["GIT_AUTHOR_NAME"] = "Hyperloom Test"
-    env["GIT_AUTHOR_EMAIL"] = "hyperloom@test.local"
-    env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
-    env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
-    subprocess.run(
-        ["git", "init", "-b", "main", str(path)],
-        check=True,
-        capture_output=True,
-        env=env,
+    behavior: str,
+    payload: dict[str, Any] | None = None,
+) -> Path:
+    """Write a fake ``claude`` executable simulating one of: done_only / done_with_patch / done_with_env / crash / no_done."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    script_path = bin_dir / "claude"
+    payload_json = json.dumps(
+        payload
+        or {
+            "gap_canonical_id": "gap.test.example",
+            "domain": "serving_specialist",
+            "proposal_set": [
+                {
+                    "name": "fake_variant",
+                    "extra_args": "--fake",
+                    "extra_envs": {},
+                    "reason": "fake",
+                }
+            ],
+            "patches_written": [],
+            "summary": "fake claude subprocess output",
+            "confidence": 0.5,
+        }
     )
-    (path / seed_file).write_text(seed_text, encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(path), "add", "."],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "commit", "-m", "init"],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-
-
-def git_commit_all(path: Path, message: str) -> None:
-    """Stage everything under ``path`` and commit with a fixed non-interactive identity."""
-    env = os.environ.copy()
-    env["GIT_AUTHOR_NAME"] = "Hyperloom Test"
-    env["GIT_AUTHOR_EMAIL"] = "hyperloom@test.local"
-    env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
-    env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
-    subprocess.run(
-        ["git", "-C", str(path), "add", "."],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "commit", "-m", message],
-        check=True,
-        capture_output=True,
-        env=env,
-    )
-
-
-class _BuildFakeCoordinator(BuildLifecycleCollaborator):
-    """Minimal coordinator surface for off-loop targeted-build tests."""
-
-    def __init__(self, session_dir: Path, db) -> None:
-        from hyperloom.orchestrator.bus.resource_lock import (
-            ResourceLockManager,
-            SqliteLeaseBackend,
+    body = """#!/usr/bin/env bash
+set -e
+# Parse --add-dir paths (first is worktree, second is workspace).
+ADD_DIRS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --add-dir) ADD_DIRS+=("$2"); shift 2 ;;
+    *) shift ;;
+  esac
+done
+WORKTREE="${ADD_DIRS[0]:-}"
+WORKSPACE="${ADD_DIRS[1]:-}"
+if [[ -n "$WORKTREE" && -f "$WORKTREE/prompt.md" ]]; then
+  WORKSPACE="$WORKTREE"
+fi
+"""
+    if behavior == "done_only":
+        body += f"""
+cat > "$WORKSPACE/specialist_done.json" <<'EOF'
+{payload_json}
+EOF
+exit 0
+"""
+    elif behavior == "done_with_patch":
+        patch_payload = json.dumps(
+            {
+                **(payload or {}),
+                "gap_canonical_id": "gap.test.example",
+                "domain": "serving_specialist",
+                "proposal_set": [
+                    {
+                        "name": "patched_variant",
+                        "extra_args": "",
+                        "extra_envs": {},
+                        "reason": "see patch",
+                    }
+                ],
+                "patches_written": ["patches/001_test.patch"],
+                "summary": "fake patch-authoring specialist",
+                "confidence": 0.7,
+            }
         )
-        from hyperloom.orchestrator.state.shared_state import SharedState
-        from hyperloom.orchestrator.state.task_registry import TaskRegistry
+        body += f"""
+mkdir -p "$WORKTREE/patches"
+cat > "$WORKTREE/patches/001_test.patch" <<'EOF'
+diff --git a/dummy.txt b/dummy.txt
+new file mode 100644
+--- /dev/null
++++ b/dummy.txt
+@@ -0,0 +1 @@
++pr-a2 patch
+EOF
+cat > "$WORKSPACE/specialist_done.json" <<'EOF'
+{patch_payload}
+EOF
+exit 0
+"""
+    elif behavior == "done_with_env":
+        body += """
+cat > "$WORKSPACE/specialist_done.json" <<EOF
+{
+  "gap_canonical_id": "gap.test.example",
+  "domain": "serving_specialist",
+  "proposal_set": [],
+  "patches_written": [],
+  "summary": "env echo",
+  "confidence": 0.0,
+  "hip_visible": "$HIP_VISIBLE_DEVICES",
+  "cuda_visible": "$CUDA_VISIBLE_DEVICES",
+  "rocr_visible": "$ROCR_VISIBLE_DEVICES"
+}
+EOF
+exit 0
+"""
+    elif behavior == "done_with_llm_env":
+        # Echo the LLM-transport stability env for the dispatcher assertion.
+        body += """
+cat > "$WORKSPACE/specialist_done.json" <<EOF
+{
+  "gap_canonical_id": "gap.test.example",
+  "domain": "serving_specialist",
+  "proposal_set": [],
+  "patches_written": [],
+  "summary": "llm env echo",
+  "confidence": 0.0,
+  "api_timeout_ms": "$API_TIMEOUT_MS",
+  "disable_autoupdater": "$DISABLE_AUTOUPDATER",
+  "disable_nonessential": "$CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+}
+EOF
+exit 0
+"""
+    elif behavior == "done_with_stream_json":
+        # Zeroed per-message usage with the real counts only on the result row, as a GLM gateway streams it.
+        zeroed = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+        stream = [
+            {"type": "system", "subtype": "init", "model": "glm-5-3"},
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "m1",
+                    "model": "glm-5-3",
+                    "usage": zeroed,
+                    "content": [{"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "ls"}}],
+                },
+            },
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu1", "content": "ok"}]}},
+            {"type": "assistant", "message": {"id": "m2", "model": "glm-5-3", "usage": zeroed, "content": []}},
+            {
+                "type": "result",
+                "usage": {
+                    "input_tokens": 50632,
+                    "cache_read_input_tokens": 291392,
+                    "cache_creation_input_tokens": 0,
+                    "output_tokens": 7542,
+                },
+            },
+        ]
+        stream_lines = "\n".join(json.dumps(row) for row in stream)
+        body += f"""
+cat <<'EOF'
+{stream_lines}
+EOF
+cat > "$WORKSPACE/specialist_done.json" <<'EOF'
+{payload_json}
+EOF
+exit 0
+"""
+    elif behavior == "crash":
+        body += "exit 3\n"
+    elif behavior == "no_done":
+        body += "exit 0\n"
+    elif behavior == "partial_then_crash":
+        # Write only the partial checkpoint, then die before the final done.json.
+        body += f"""
+cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
+{payload_json}
+EOF
+exit 3
+"""
+    elif behavior == "partial_then_done":
+        # Checkpoint first, wait for the reaper to see it, then exit normally.
+        body += f"""
+cat > "$WORKSPACE/specialist_done.partial.json" <<'EOF'
+{payload_json}
+EOF
+sleep 1
+cat > "$WORKSPACE/specialist_done.json" <<'EOF'
+{payload_json}
+EOF
+exit 0
+"""
+    elif behavior == "hang":
+        # Sleep past any wall budget without writing done.json.
+        body += "sleep 600\n"
+    else:
+        raise ValueError(f"unknown behavior {behavior!r}")
+    script_path.write_text(body, encoding="utf-8")
+    script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return script_path
 
-        self.session_dir = session_dir
-        self.tasks = TaskRegistry(db)
-        self.locks = ResourceLockManager(SqliteLeaseBackend(db))
-        self.shared_state = SharedState()
+
+def use_fake_specialist_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, behavior: str, payload: dict[str, Any] | None = None
+) -> Path:
+    """Point the executor at a fake ``claude`` CLI and a git framework checkout under ``tmp_path``."""
+    import hyperloom.inference_optimizer.cli.executors as cli_mod
+
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
+    monkeypatch.setattr(cli_mod, "resolve_kernel_search_roots", lambda: (str(repo),))
+    fake = make_fake_claude(tmp_path / "bin", behavior=behavior, payload=payload)
+    monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(fake))
+    return fake
 
 
 @pytest.fixture
 def build_coord(tmp_path):
-    """Fake coordinator backed by a temp DB for targeted-build lifecycle tests."""
-    from hyperloom.orchestrator.bus.storage import SqliteConnection
-    from hyperloom.orchestrator.bus.storage.schema import ensure_schema
-
-    db = SqliteConnection(tmp_path / "coordinator.db")
-    ensure_schema(db.raw)
-    fc = _BuildFakeCoordinator(tmp_path, db)
-    yield fc
-    db.close()
+    """Real Coordinator for targeted-build lifecycle tests."""
+    return make_coordinator(tmp_path)
 
 
 def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:
     """Register common tmp_path framework repos as integrate_patch search roots."""
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
     from hyperloom.inference_optimizer import framework_paths as fp
+    from hyperloom.orchestrator.actions.executors import _patch_artifacts, _patch_sources
 
     real = fp.resolve_kernel_search_roots
 
@@ -241,7 +436,8 @@ def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:
                 merged.append(root)
         return tuple(merged)
 
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", _merged)
+    for module in (_patch_sources, _patch_artifacts):
+        monkeypatch.setattr(module, "resolve_kernel_search_roots", _merged)
 
 
 # Progress cadence: how long a long-running path may go unreported
@@ -365,13 +561,19 @@ class RayDouble:
     """A ``ray`` module stand-in that runs actor methods in real threads."""
 
     class exceptions:
-        class RayActorError(Exception):
+        class RayError(Exception):
             pass
 
-        class RayTaskError(Exception):
+        class RayActorError(RayError):
             pass
 
-        class GetTimeoutError(Exception):
+        class OutOfMemoryError(RayError):
+            pass
+
+        class RayTaskError(RayError):
+            pass
+
+        class GetTimeoutError(RayError):
             pass
 
     def __init__(self) -> None:
@@ -409,5 +611,266 @@ def serving_lease_on_a_ray_double(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "ray", RayDouble())
     monkeypatch.setattr(rb, "get_ray_backend", lambda: SimpleNamespace(ensure=lambda **_kw: None))
-    with rs.ServingLease(num_gpus=1) as lease:
+    lease = rs.ServingLease(num_gpus=1)
+    lease.ensure()
+    try:
         yield lease
+    finally:
+        lease.close()
+
+
+#: A ``ray`` package whose ``init`` answers as ``FAKE_RAY_HEAD`` says, logging each call with its pid.
+_FAKE_RAY_PACKAGE = """
+import ctypes, os, subprocess, sys, time
+
+from . import exceptions
+
+
+def _note(line):
+    with open(os.environ["FAKE_RAY_LOG"], "a", encoding="utf-8") as log:
+        log.write(line + "\\n")
+
+
+def init(address=None, **_kwargs):
+    _note(f"init {os.getpid()} {address}")
+    mode = os.environ["FAKE_RAY_HEAD"]
+    if mode in ("silent", "gilhold"):
+        # A raylet that never replies, after the driver started a process of its own.
+        daemon = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"])
+        _note(f"daemon {daemon.pid}")
+    if mode == "gilhold":
+        # Waiting the way Ray's registration does: in native code with the GIL held, so no other thread of the
+        # process runs until it returns. Bounded, so a test that connects to it in-process fails instead of hanging.
+        ctypes.PyDLL(None).sleep(int(os.environ.get("FAKE_RAY_GIL_HOLD_SEC", "3600")))
+        return
+    while mode == "silent":
+        time.sleep(3600)
+    if mode == "raises":
+        raise ConnectionError("the raylet refused the driver")
+    if mode == "mismatch":
+        raise RuntimeError("Version mismatch: The cluster was started with: Ray: 2.44.1")
+
+
+def shutdown():
+    _note(f"shutdown {os.getpid()}")
+"""
+
+#: The ``ray.exceptions`` of :data:`_FAKE_RAY_PACKAGE`.
+_FAKE_RAY_EXCEPTIONS = """
+class RayError(Exception):
+    pass
+"""
+
+#: A ``ray`` CLI whose every command succeeds, logging its arguments.
+_FAKE_RAY_CLI = """#!/bin/sh
+echo "$*" >> "$FAKE_RAY_CLI_LOG"
+"""
+
+
+class FakeRayHead:
+    """A Ray head as a driver sees it: a stand-in ``ray`` package on the child ``PYTHONPATH``, and a ``ray`` CLI.
+
+    The routing decision sees a running head (``ray status`` answers) and starts from no verdict, so the first
+    question about the Ray route runs the real connect probe against this package. ``ray start`` and ``ray stop``
+    succeed, so a head this process (re)starts is this one again.
+    """
+
+    def __init__(self, root: Path, monkeypatch) -> None:
+        import os
+
+        from hyperloom.orchestrator.actions.executors import _ray_runtime
+
+        package = root / "ray"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text(_FAKE_RAY_PACKAGE, encoding="utf-8")
+        (package / "exceptions.py").write_text(_FAKE_RAY_EXCEPTIONS, encoding="utf-8")
+        self._package = package
+        cli = root / "bin" / "ray"
+        cli.parent.mkdir()
+        cli.write_text(_FAKE_RAY_CLI, encoding="utf-8")
+        cli.chmod(0o755)
+        self._log = root / "ray_calls.log"
+        self._log.touch()
+        self._cli_log = root / "ray_cli.log"
+        self._cli_log.touch()
+        self._monkeypatch = monkeypatch
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(root), os.environ.get("PYTHONPATH")])))
+        monkeypatch.setenv("PATH", os.pathsep.join(filter(None, [str(cli.parent), os.environ.get("PATH")])))
+        monkeypatch.setenv("FAKE_RAY_LOG", str(self._log))
+        monkeypatch.setenv("FAKE_RAY_CLI_LOG", str(self._cli_log))
+        monkeypatch.setenv("FAKE_RAY_HEAD", "answers")
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RAY_EXEC", "1")
+        monkeypatch.setattr(_ray_runtime, "_HEAD_VERDICT", _ray_runtime._HeadVerdict())
+        monkeypatch.setattr(_ray_runtime, "ray_status_ok", lambda: True)
+
+    def answers(self, mode: str) -> None:
+        """Answer every later driver connect as ``mode``.
+
+        ``answers``, ``raises`` or ``mismatch``; ``silent`` never returns, and ``gilhold`` holds the GIL for
+        ``FAKE_RAY_GIL_HOLD_SEC`` and then connects.
+        """
+        self._monkeypatch.setenv("FAKE_RAY_HEAD", mode)
+
+    def import_in_process(self) -> Any:
+        """Make this package the ``ray`` this process imports, for the in-process connect."""
+        import importlib.util
+        import sys
+
+        # The submodule first, so the package's ``from . import exceptions`` finds it registered.
+        modules = {}
+        for name, path, search in (
+            ("ray.exceptions", self._package / "exceptions.py", None),
+            ("ray", self._package / "__init__.py", [str(self._package)]),
+        ):
+            spec = importlib.util.spec_from_file_location(name, path, submodule_search_locations=search)
+            modules[name] = importlib.util.module_from_spec(spec)
+            self._monkeypatch.setitem(sys.modules, name, modules[name])
+            spec.loader.exec_module(modules[name])
+        return modules["ray"]
+
+    def calls(self) -> list[tuple[str, int]]:
+        """Every ``init``, ``daemon`` and ``shutdown`` so far, with the pid it names."""
+        return [(kind, int(pid)) for kind, pid, *_ in (line.split() for line in self._log.read_text().splitlines())]
+
+    def connects(self) -> list[int]:
+        """The pid of every driver that called ``init``."""
+        return [pid for kind, pid in self.calls() if kind == "init"]
+
+    def cli_calls(self) -> list[str]:
+        """The arguments of every ``ray`` CLI command so far."""
+        return self._cli_log.read_text(encoding="utf-8").splitlines()
+
+    def kill_daemons(self) -> None:
+        """SIGKILL every process a driver started that still runs: a probe that worked leaves none."""
+        import contextlib
+        import os
+        import signal
+
+        for kind, pid in self.calls():
+            with contextlib.suppress(OSError):
+                if kind == "daemon" and b"time.sleep(3600)" in Path(f"/proc/{pid}/cmdline").read_bytes():
+                    os.kill(pid, signal.SIGKILL)
+
+
+@pytest.fixture
+def fake_ray_head(tmp_path: Path, monkeypatch):
+    """A running Ray head that answers a driver connect; tests switch it with :meth:`FakeRayHead.answers`."""
+    head = FakeRayHead(tmp_path / "fake_ray_head", monkeypatch)
+    yield head
+    head.kill_daemons()
+
+
+def cli_call_sequence(entry: str) -> list[str]:
+    """Every call ``entry`` makes, in source order, descending into the CLI package's own functions.
+
+    The optimize driver's phases live in sibling functions rather than in one
+    body, so an ordering contract that once read off a single function now spans
+    several. Flattening the path restores the only thing those contracts were
+    ever about -- what happens before what -- and keeps them readable from the
+    source, which is the point of asserting on it at all.
+
+    Recursion stops at a function already on the path, so a cycle cannot hang
+    the test.
+    """
+    import ast
+    import pathlib
+
+    from hyperloom.inference_optimizer import cli
+    from hyperloom.inference_optimizer.cli import launch_shape, model_catalog
+
+    functions = {}
+    for module in (cli, model_catalog, launch_shape):
+        tree = ast.parse(pathlib.Path(module.__file__).read_text(encoding="utf-8"))
+        functions.update(
+            {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        )
+
+    def own_calls(node: ast.AST) -> list[str]:
+        found = [
+            (call.lineno, call.col_offset, call.func.id)
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        ]
+        return [name for _lineno, _col, name in sorted(found)]
+
+    def walk(name: str, path: tuple[str, ...]) -> list[str]:
+        if name in path or name not in functions:
+            return []
+        sequence: list[str] = []
+        for called in own_calls(functions[name]):
+            sequence.append(called)
+            sequence.extend(walk(called, path + (name,)))
+        return sequence
+
+    assert entry in functions, f"{entry} is not a module-level function of the CLI any more"
+    return walk(entry, ())
+
+
+def write_benchmark_yaml(
+    path: Path,
+    *,
+    model: str = "/path/models/Qwen-Qwen3-8B",
+    framework: str = "sglang",
+    precision: str = "bf16",
+    benchmark_script: str | None = "sglang_mi300x.sh",
+) -> None:
+    """Write a single-GPU local benchmark config with profiling off; a ``None`` script leaves the key unset."""
+    benchmark: dict[str, Any] = {
+        "framework": framework,
+        "model": model,
+        "precision": precision,
+        "run_mode": "local",
+        "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
+        "timeout_seconds": 600,
+        "profiler": {
+            "torch_profiler": {"enabled": False},
+            "system_profiler": {"enabled": False},
+            "tracelens": {"enabled": False},
+        },
+        "gpu_selection": {"auto": False},
+    }
+    if benchmark_script is not None:
+        benchmark["benchmark_script"] = benchmark_script
+    with path.open("w") as f:
+        yaml.safe_dump({"benchmark": benchmark}, f)
+
+
+def make_mock_critic_coordinator(session_dir: Path):
+    """A real Coordinator whose orchestration plan is empty and whose critic is the mock critic."""
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+
+    backends = {
+        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
+        "critic": MockCriticBackend(),
+    }
+    return Coordinator(session_dir, backends=backends)
+
+
+def silent_backends() -> dict[str, object]:
+    """Orchestration and critic mock backends sharing one plan that only sends heartbeats."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+
+    silent = ScriptedPlan(
+        turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
+    )
+    return {
+        "orchestration": MockBackend(silent, name="o"),
+        "critic": MockBackend(silent, name="c"),
+    }
+
+
+def heartbeat_orchestration_with_mock_critic() -> dict[str, object]:
+    """A heartbeat-only orchestration backend beside the default mock critic."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+
+    silent = ScriptedPlan(
+        turns=[],
+        default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
+    )
+    return {
+        "orchestration": MockBackend(silent, name="orch"),
+        "critic": MockCriticBackend(),
+    }

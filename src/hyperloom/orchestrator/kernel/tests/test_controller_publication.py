@@ -8,10 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
+from kernelforge.workflows.rewrite_controller.paths import operator_directory_name
 from hyperloom.orchestrator.kernel.controller_publication import (
     ControllerPublicationError,
-    discover_controller_patch_dirs,
     load_controller_publication,
 )
 
@@ -49,17 +48,15 @@ def _publication(root: Path, repo: Path, kernel_name: str = "kernel") -> Path:
     return patch_dir
 
 
-def test_discovery_and_parser_accept_complete_v2_publications(tmp_path: Path) -> None:
+def test_parser_accepts_complete_v2_publications(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     root = tmp_path / "patches"
     second = _publication(root, repo, "second")
     first = _publication(root, repo, "first")
 
-    discovered = discover_controller_patch_dirs(root)
-    parsed = [load_controller_publication(path) for path in discovered]
+    parsed = [load_controller_publication(path) for path in (first, second)]
 
-    assert discovered == tuple(sorted((first, second), key=lambda path: path.name))
     assert [item.identity["kernel_name"] for item in parsed] == ["first", "second"]
     assert all(item.repo_root == repo.resolve() for item in parsed)
 
@@ -110,18 +107,6 @@ def test_a_publication_without_a_declared_scope_is_still_accepted(tmp_path: Path
     patch_dir = _publication(tmp_path / "patches", repo)
 
     assert load_controller_publication(patch_dir).changed_files == ()
-
-
-def test_discovery_ignores_incomplete_and_hidden_versions(tmp_path: Path) -> None:
-    root = tmp_path / "patches"
-    root.mkdir()
-    hidden = root / ".versions"
-    hidden.mkdir()
-    incomplete = root / "kernel:forge-loop:broken:standalone:unknown:triton:mi355x"
-    incomplete.mkdir()
-    (incomplete / "change.patch").write_text("diff\n", encoding="utf-8")
-
-    assert discover_controller_patch_dirs(root) == ()
 
 
 def _mutate(patch_dir: Path, **changes: object) -> None:

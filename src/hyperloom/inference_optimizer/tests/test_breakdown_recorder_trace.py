@@ -13,7 +13,6 @@ import pytest
 from hyperloom.inference_optimizer.breakdown.recorder import trace as trace_mod
 from hyperloom.inference_optimizer.breakdown.recorder.instrument import snapshot_state_sections
 from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
-from hyperloom.orchestrator.actions._recorder_trace import trace_recording_skipped
 
 
 def _record(session_dir, payload=None):
@@ -139,7 +138,7 @@ def test_a_trace_that_breaks_does_not_break_the_write(tmp_path, traced, monkeypa
     """A broken trace must never be why a fact went unrecorded."""
 
     def explode(*_args, **_kwargs):
-        raise RuntimeError("trace is broken")
+        raise TypeError("trace is broken")
 
     monkeypatch.setattr(trace_mod, "_entity", explode)
     recorder = Recorder(tmp_path, producer="kernel_agent")
@@ -267,9 +266,9 @@ def test_a_credential_in_a_skipped_record_is_masked(tmp_path, traced, monkeypatc
 
 def test_a_call_that_never_reached_the_recorder_says_so(traced):
     """The recorder can only trace calls that arrive."""
-    trace_recording_skipped(
-        "kernel_invocations",
+    trace_mod.trace_skip(
         reason="caller raised before the recorder",
+        section="kernel_invocations",
         entity="k001",
         error=RuntimeError("boom"),
     )

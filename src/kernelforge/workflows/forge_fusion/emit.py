@@ -1,0 +1,329 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Stage 5: export the authored change as a JSON change-manifest + a git patch."""
+
+from __future__ import annotations
+
+import contextlib
+import difflib
+import logging
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Sequence
+
+from .models import FusionArtifacts
+from kernelforge.utils.git import git
+
+log = logging.getLogger("forge_fusion")
+
+
+@dataclass(frozen=True)
+class FusionFiles:
+    """The files one fusion owns: its call-site file, further call-site files, its fused module, and repo scope."""
+
+    source_file: str
+    extra_files: Sequence[str] = ()
+    fused_module: str = ""
+    repo_scope: bool = False
+
+
+def _git(repo: str, *args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    return git("-C", repo, *args, check=False, timeout=timeout)
+
+
+def _is_git_repo(repo_root: str) -> bool:
+    """True when ``repo_root`` is inside a git work tree (so git diff/checkout work)."""
+    if not repo_root:
+        return False
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        r = _git(repo_root, "rev-parse", "--is-inside-work-tree", timeout=30)
+        return r.returncode == 0 and r.stdout.strip() == "true"
+    return False
+
+
+# Word-boundary aware so we do NOT match unrelated framework files such as ``diffusion*.py`` / ``confusion*.py`` (they
+# contain the bare substring "fusion" mid-word but are not author-created fusion kernels).
+_FUSED_MODULE_MARKERS = ("_fused", "_fusion")
+_FUSED_MODULE_PREFIXES = ("fused", "fusion")
+
+
+def _is_fused_module_name(name: str) -> bool:
+    """Whether ``name`` marks an author-created fused-kernel module."""
+    stem = Path(name).stem
+    if any(m in name for m in _FUSED_MODULE_MARKERS):
+        return True
+    return any(stem == p or stem.startswith(p + "_") for p in _FUSED_MODULE_PREFIXES)
+
+
+def _fused_module_candidates(source_file: str, fused_module: str = "") -> list[Path]:
+    """The fused modules an export may ship, beside ``source_file``."""
+    if fused_module:
+        f = Path(fused_module)
+        return [f] if f.is_file() else []
+    model_dir = Path(source_file).parent if source_file else None
+    if not (model_dir and model_dir.is_dir()):
+        return []
+    return [f for f in sorted(model_dir.glob("*.py")) if _is_fused_module_name(f.name)]
+
+
+def _git_tracks(repo_root: str, source_file: str) -> bool:
+    """True only when ``source_file`` is a git-TRACKED file under ``repo_root``."""
+    if not repo_root or not source_file:
+        return False
+    try:
+        rel = str(Path(source_file).resolve().relative_to(Path(repo_root).resolve()))
+    except ValueError:
+        return False
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        r = _git(repo_root, "ls-files", "--error-unmatch", "--", rel, timeout=30)
+        return r.returncode == 0
+    return False
+
+
+def _unified_file_diff(rel: str, old_text: str, new_text: str, *, created: bool) -> str:
+    """git-apply-compatible unified diff for one file (empty when unchanged)."""
+    if old_text == new_text:
+        return ""
+    body = "".join(
+        difflib.unified_diff(
+            old_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile="/dev/null" if created else f"a/{rel}",
+            tofile=f"b/{rel}",
+        )
+    )
+    if not body:
+        return ""
+    # `diff --git` header keeps it applyable by both `git apply` and `patch -p1`; `new file mode` + `--- /dev/null` is
+    # how a creation is declared.
+    new_file = "new file mode 100644\n" if created else ""
+    return f"diff --git a/{rel} b/{rel}\n{new_file}{body}"
+
+
+def _export_nongit(repo_root: str, files: FusionFiles, patch_path: Path, pristine_dir: Path) -> FusionArtifacts:
+    """Export ``patch_path`` without git, using a pre-authoring pristine snapshot."""
+    source_file = files.source_file
+    arts = FusionArtifacts()
+    root = Path(repo_root).resolve() if repo_root else None
+    parts: list[str] = []
+    names: list[str] = []
+
+    def _rel(p: Path) -> str:
+        # POSIX separators always: this string is interpolated straight into the ``diff --git a/<rel>`` header, and
+        # git rejects a backslash path as "invalid path" on every platform, so a Windows-side export would otherwise
+        # produce a patch nobody can apply.
+        if root:
+            with contextlib.suppress(ValueError):
+                return p.resolve().relative_to(root).as_posix()
+        return p.name
+
+    # Every edited framework file, then the fused modules beside the source: pristine snapshot vs current.
+    edited = [source_file, *files.extra_files]
+    first_by_rel: dict[str, Path] = {}
+    for path in edited:
+        if path and Path(path).is_file():
+            first_by_rel.setdefault(_rel(Path(path)), Path(path))
+    targets = list(first_by_rel.items())
+    edited_resolved = {Path(p).resolve() for p in edited if p and Path(p).is_file()}
+    for f in _fused_module_candidates(source_file, files.fused_module):
+        if f.resolve() not in edited_resolved:
+            targets.append((_rel(f), f))
+    for rel, path in targets:
+        snap = pristine_dir / rel
+        created = not snap.is_file()
+        old_text = "" if created else snap.read_text(encoding="utf-8", errors="replace")
+        new_text = path.read_text(encoding="utf-8", errors="replace")
+        d = _unified_file_diff(rel, old_text, new_text, created=created)
+        if d:
+            parts.append(d)
+            names.append(rel)
+
+    diff = "\n".join(p.rstrip("\n") for p in parts)
+    if diff:
+        patch_path.write_text(diff.rstrip("\n") + "\n", encoding="utf-8")
+        arts.patch = str(patch_path)
+        arts.repo_root = str(root) if root else ""
+    arts.changes = [{"path": n, "kind": _classify(n, source_file)} for n in names]
+    log.info(
+        "exported %d fusion file(s) (non-git); patch=%s repo_root=%s", len(arts.changes), arts.patch, arts.repo_root
+    )
+    return arts
+
+
+def _tracked_paths(repo_root: str, rel_paths: list[str]) -> set[str]:
+    """Return the subset of ``rel_paths`` already tracked by git."""
+    if not rel_paths:
+        return set()
+    out = _git(repo_root, "ls-files", "--", *rel_paths).stdout.split()
+    return set(out)
+
+
+def _classify(rel_path: str, source_file: str) -> str:
+    """Classify a changed file for the handoff manifest."""
+    name = Path(rel_path).name
+    if _is_fused_module_name(name):
+        return "new_kernel"
+    if source_file and Path(source_file).name == name:
+        return "framework_wiring_edit"
+    return "framework_wiring_edit"
+
+
+def _fusion_scoped_paths(repo_root: str, files: FusionFiles) -> list[str]:
+    """Repo-relative paths that belong to THIS fusion (not the whole dirty tree).
+
+    ``extra_files`` are the further call-site files a multi-file fusion edits. They
+    have to be named here or the export silently drops them: the campaign tracks
+    and keeps them, and the patch -- the only thing that leaves this pipeline --
+    would then contain a wiring edit missing the half that makes it work.
+
+    ``repo_scope`` additionally sweeps in every OTHER tracked file the campaign
+    modified. Repo scope tells the author the repository is editable, so the export
+    cannot go on believing the set of edited files was known in advance.
+    """
+    source_file = files.source_file
+    fused_module = files.fused_module
+    repo_scope = files.repo_scope
+    root = Path(repo_root).resolve()
+    paths: list[str] = []
+
+    def _add_rel(path: str) -> None:
+        with contextlib.suppress(ValueError):
+            # POSIX form to match what git itself reports, so the manifest's changed-file paths are comparable across
+            # platforms.
+            paths.append(Path(path).resolve().relative_to(root).as_posix())
+
+    for named in (source_file, *files.extra_files):
+        if named:
+            _add_rel(named)
+    if repo_scope:
+        paths.extend(_git(repo_root, "diff", "--name-only", "--", ".").stdout.split())
+    # Untracked fused-kernel modules: beside the source file, or anywhere the author put them under repo scope.
+    model_dir = (Path(source_file).parent if source_file else root).resolve()
+    scoped = {Path(fused_module).resolve()} if fused_module else None
+    others = _git(repo_root, "ls-files", "--others", "--exclude-standard").stdout.split()
+    for rel in others:
+        if not _is_fused_module_name(Path(rel).name):
+            continue
+        if repo_scope:
+            # Every sibling's placeholder is created and committed at the baseline, and the tree is reset to base
+            # before each recipe runs, so an UNTRACKED fused module can only be one this campaign just wrote.
+            paths.append(rel)
+            continue
+        if (root / rel).parent != model_dir:
+            continue
+        if scoped is not None and (root / rel).resolve() not in scoped:
+            continue
+        paths.append(rel)
+    # De-dupe, keep order.
+    seen: set[str] = set()
+    return [p for p in paths if not (p in seen or seen.add(p))]
+
+
+def export_artifacts(
+    repo_root: str,
+    files: FusionFiles,
+    patch_path: str | Path,
+    pristine_dir: str | Path | None = None,
+    snapshot_diff_only: bool = False,
+) -> FusionArtifacts:
+    """Export ``patch_path`` + a classified change list, scoped to the fusion."""
+    source_file = files.source_file
+    patch_path = Path(patch_path)
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    arts = FusionArtifacts()
+
+    def _nongit() -> FusionArtifacts | None:
+        if pristine_dir and source_file:
+            return _export_nongit(repo_root, files, patch_path, Path(pristine_dir))
+        return None
+
+    # Take the git path ONLY when the source file is actually git-TRACKED.
+    if snapshot_diff_only or not (_is_git_repo(repo_root) and _git_tracks(repo_root, source_file)):
+        return _nongit() or arts
+    if not repo_root:
+        return arts
+
+    try:
+        rel_paths = _fusion_scoped_paths(repo_root, files)
+        if not rel_paths:
+            return arts
+        tracked = _tracked_paths(repo_root, rel_paths)
+        parts: list[str] = []
+        names: list[str] = []
+        tracked_paths = [p for p in rel_paths if p in tracked]
+        if tracked_paths:
+            parts.append(_git(repo_root, "diff", "--", *tracked_paths).stdout)
+            names.extend(_git(repo_root, "diff", "--name-only", "--", *tracked_paths).stdout.split())
+        for rel in rel_paths:
+            if rel in tracked or not (Path(repo_root) / rel).is_file():
+                continue
+            cp = _git(repo_root, "diff", "--no-index", "--", "/dev/null", rel)
+            if cp.stdout:
+                parts.append(cp.stdout)
+                names.append(rel)
+        diff = "\n".join(p.rstrip("\n") for p in parts if p)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("artifact export failed: %s", exc)
+        return arts
+
+    if not diff:
+        # Tracked-but-empty (edits reverted, or CRLF/whitespace-only churn git ignores): try the pristine snapshot
+        # before giving up on the patch.
+        return _nongit() or arts
+
+    patch_path.write_text(diff.rstrip("\n") + "\n", encoding="utf-8")
+    arts.patch = str(patch_path)
+    arts.repo_root = str(Path(repo_root).resolve())
+    arts.changes = [{"path": n, "kind": _classify(n, source_file)} for n in names]
+    log.info("exported %d fusion file(s); patch=%s repo_root=%s", len(arts.changes), arts.patch, arts.repo_root)
+    return arts
+
+
+def restore_exported_changes(
+    repo_root: str,
+    artifacts: FusionArtifacts,
+    pristine_dir: str | Path | None = None,
+) -> None:
+    """Restore live framework repo changes after a successful export."""
+    if not repo_root or not artifacts.patch:
+        return
+    is_git = _is_git_repo(repo_root)
+    pdir = Path(pristine_dir) if pristine_dir else None
+
+    def _restore_nongit(rel: str) -> None:
+        """Restore from pristine snapshot, else unlink (author-created new module)."""
+        live = Path(repo_root) / rel
+        snap = pdir / rel if pdir else None
+        with contextlib.suppress(OSError):
+            if snap and snap.is_file():
+                live.write_text(snap.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+            elif pdir is not None:
+                live.unlink(missing_ok=True)
+
+    for change in artifacts.changes:
+        rel = str(change.get("path") or "")
+        if not rel:
+            continue
+        # Per-file: only git-checkout files git actually TRACKS.
+        if is_git and _git(repo_root, "ls-files", "--error-unmatch", rel).returncode == 0:
+            _git(repo_root, "checkout", "--", rel)
+            continue
+        if pdir is not None:
+            _restore_nongit(rel)
+            continue
+        path = Path(repo_root) / rel
+        try:
+            path.unlink(missing_ok=True)
+            # Best-effort prune empty directories left by fused helper modules.
+            parent = path.parent
+            root = Path(repo_root).resolve()
+            while parent.resolve() != root:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+        except OSError as exc:
+            log.warning("could not remove exported untracked fusion file %s: %s", path, exc)

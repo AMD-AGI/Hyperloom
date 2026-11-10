@@ -111,7 +111,7 @@ def _new_claude_backend_with_seams():
     return ClaudeBackend(
         sdk_query_factory=lambda *a, **kw: iter(()),
         sdk_options_cls=type("FakeOpts", (), {"__init__": lambda self, **kw: None}),
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
     )
 
 

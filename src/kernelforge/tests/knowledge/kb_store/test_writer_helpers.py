@@ -1,0 +1,276 @@
+"""Unit tests for experience_sink pure helpers (identity, signature, summary)."""
+
+from __future__ import annotations
+
+import pytest
+
+from kernelforge.knowledge.kb_store.identity import source_resolution
+from kernelforge.agent_backends import AgentRunResult
+from kernelforge.agent_backends.structured_output import StructuredOutputError
+from kernelforge.knowledge.kb_store import run_summary
+from kernelforge.knowledge.kb_store import writer as sink
+
+
+# --------------------------------------------------------------------------- # resolve_operation
+# --------------------------------------------------------------------------- #
+def test_resolve_operation_prefers_compute_kernel(monkeypatch):
+    monkeypatch.setattr(source_resolution, "derive_kernel_names", lambda _src: ["launch_wrapper", "my_gemm"])
+    assert source_resolution.resolve_operation("src", "/p/f.py") == "my_gemm"
+
+
+def test_resolve_operation_uses_first_when_all_launchers(monkeypatch):
+    monkeypatch.setattr(source_resolution, "derive_kernel_names", lambda _src: ["launch_a", "main"])
+    assert source_resolution.resolve_operation("src", "/p/f.py") == "launch_a"
+
+
+def test_resolve_operation_propagates_a_name_derivation_defect(monkeypatch):
+    def _boom(_src):
+        raise RuntimeError("derivation defect")
+
+    monkeypatch.setattr(source_resolution, "derive_kernel_names", _boom)
+    with pytest.raises(RuntimeError, match="^derivation defect$"):
+        source_resolution.resolve_operation("src", "/p/f.py", target_functions=["op_x"])
+
+
+def test_resolve_operation_falls_back_to_target_then_stem(monkeypatch):
+    monkeypatch.setattr(source_resolution, "derive_kernel_names", lambda _src: [])
+    assert source_resolution.resolve_operation("", "/p/f.py", target_functions=["", " op_x "]) == "op_x"
+    assert source_resolution.resolve_operation("", "/p/my_file.py", target_functions=[]) == "my_file"
+
+
+def test_resolve_operation_fallback_is_order_independent(monkeypatch):
+    # A producer and consumer may hand the same target-function set in different orders; the resolved op (and thus the
+    # slug) must not depend on that order.
+    monkeypatch.setattr(source_resolution, "derive_kernel_names", lambda _src: [])
+    a = source_resolution.resolve_operation("", "/p/f.py", target_functions=["gemm_kernel", "epilogue_kernel"])
+    b = source_resolution.resolve_operation("", "/p/f.py", target_functions=["epilogue_kernel", "gemm_kernel"])
+    assert a == b
+    # launchers/wrappers are de-prioritized even when they sort first
+    c = source_resolution.resolve_operation("", "/p/f.py", target_functions=["launch_gemm", "gemm_kernel"])
+    assert c == "gemm_kernel"
+
+
+# --------------------------------------------------------------------------- # detect_backend_language
+# --------------------------------------------------------------------------- #
+def test_detect_backend_language_kernel_backend_wins():
+    assert source_resolution.detect_backend_language("flydsl") == "flydsl"
+
+
+def test_detect_backend_language_requires_kernel_backend():
+    assert source_resolution.detect_backend_language("") == "unknown"
+
+
+def test_detect_framework_standalone_is_unknown():
+    assert source_resolution.detect_framework("/tmp/standalone/k.py") == "unknown"
+
+
+def test_detect_framework_from_path():
+    assert source_resolution.detect_framework("/repo/aiter/csrc/k.hip") == "aiter"
+    assert source_resolution.detect_framework("/x/sglang/y/k.py") == "sglang"
+
+
+def test_detect_framework_explicit_override_wins_over_path():
+    # A flattened/scratch workspace can drop the 'vllm/' dir from the path; an explicit --framework must still yield
+    # the right framework so the slug does not diverge between producer and consumer.
+    assert (
+        source_resolution.detect_framework(
+            "/tmp/scratch/k.py",
+            framework_override="vllm",
+        )
+        == "vllm"
+    )
+
+
+def test_detect_framework_canonicalizes_aiter_meta_owner():
+    assert (
+        source_resolution.detect_framework(
+            "/tmp/flattened/kernel.py",
+            framework_override="aiter_meta",
+        )
+        == "aiter"
+    )
+
+
+def test_detect_framework_standalone_sentinel_is_unknown():
+    # Explicit 'standalone' == a framework-less file == undetected path.
+    assert (
+        source_resolution.detect_framework(
+            "/x/vllm/y/k.py",
+            framework_override="standalone",
+        )
+        == "unknown"
+    )
+
+
+# --------------------------------------------------------------------------- # find_defining_source
+# --------------------------------------------------------------------------- #
+def test_find_defining_source_empty_op_returns_anchor():
+    assert source_resolution.find_defining_source("", "/a.py", "anchor body", None) == "anchor body"
+
+
+def test_find_defining_source_prefers_anchor_when_it_defines():
+    anchor = "def my_op(x):\n    return x\n"
+    assert source_resolution.find_defining_source("my_op", "/a.py", anchor, ["/other.py"]) == anchor
+
+
+def test_find_defining_source_scans_other_files(tmp_path):
+    other = tmp_path / "impl.py"
+    other.write_text("def real_op(a, b):\n    return a\n")
+    got = source_resolution.find_defining_source("real_op", "/a.py", "wrapper only", [str(other)])
+    assert "def real_op" in got
+
+
+def test_find_defining_source_falls_back_to_anchor(tmp_path):
+    missing = tmp_path / "nope.py"
+    got = source_resolution.find_defining_source("absent", "/a.py", "anchor", [str(missing)])
+    assert got == "anchor"
+
+
+def test_find_defining_source_matches_global_kernel():
+    anchor = "__global__ void my_kernel(float* a) {}\n"
+    assert source_resolution.find_defining_source("my_kernel", "/a.cu", anchor, None) == anchor
+
+
+# --------------------------------------------------------------------------- # signature -> dtype parsing
+# --------------------------------------------------------------------------- #
+def test_extract_input_dtypes_python():
+    src = "def f(x: float, y: int = 3, *args, self_unused=1):\n    pass\n"
+    dt = sink.extract_input_dtypes(src, "f", "triton")
+    assert dt["x"] == "float"
+    assert dt["y"] == "int"
+    assert "args" not in dt
+
+
+def test_extract_input_dtypes_python_untyped_is_unknown():
+    dt = sink.extract_input_dtypes("def g(a, b):\n    pass\n", "g", "torch")
+    assert dt == {"a": "unknown", "b": "unknown"}
+
+
+def test_extract_input_dtypes_c_pointer_folding():
+    src = "__global__ void k(const float* a, int n) { }"
+    dt = sink.extract_input_dtypes(src, "k", "hip")
+    assert dt["a"] == "const float*"
+    assert dt["n"] == "int"
+
+
+def test_extract_input_dtypes_c_array_subscript():
+    src = "void k(float a[16], int n) {\n  return;\n}"
+    dt = sink.extract_input_dtypes(src, "k", "cuda")
+    assert dt["a"] == "float[16]"
+
+
+def test_extract_input_dtypes_empty_on_missing_signature():
+    assert sink.extract_input_dtypes("no such func here", "ghost", "hip") == {}
+    assert sink.extract_input_dtypes("", "f", "hip") == {}
+    assert sink.extract_input_dtypes("def f(x):pass", "", "hip") == {}
+
+
+def test_extract_input_dtypes_strips_comments():
+    src = "def f(\n    x: float,  # the input\n    y: int,  # count\n):\n    pass\n"
+    dt = sink.extract_input_dtypes(src, "f", "triton")
+    assert dt == {"x": "float", "y": "int"}
+
+
+def test_extract_input_dtypes_c_comment_strip():
+    src = "void k(float* a /* NxM */, int n /* rows */) { }"
+    dt = sink.extract_input_dtypes(src, "k", "hip")
+    assert set(dt) == {"a", "n"}
+
+
+def test_signature_params_skips_call_site_finds_definition():
+    src = "some_call(1, 2);\nvoid some_call(int a, int b) {\n  return;\n}"
+    assert sink._signature_params(src, "some_call") == "int a, int b"
+
+
+def test_signature_params_none_when_absent():
+    assert sink._signature_params("nothing", "f") is None
+
+
+def test_split_top_level_respects_brackets():
+    assert sink._split_top_level("a, b[1, 2], c") == ["a", "b[1, 2]", "c"]
+
+
+def test_parse_param_c_void_and_empty():
+    assert sink._parse_param_c("void") == ("", "")
+    assert sink._parse_param_c("   ") == ("", "")
+
+
+def test_balanced_parens_unbalanced_returns_sentinel():
+    inner, close = sink._balanced_parens("f(a, b", 1)
+    assert close == -1
+
+
+def test_signature_params_skips_unbalanced_candidate():
+    # First call-like match is unbalanced (no closing paren) -> skipped; the real definition below is returned.
+    src = "k(a, b\nvoid k(int a) {\n  return;\n}"
+    assert sink._signature_params(src, "k") == "int a"
+
+
+def test_parse_param_c_no_identifier_returns_empty():
+    assert sink._parse_param_c("float*") == ("", "")
+
+
+def test_parse_param_c_reference_marker():
+    name, typ = sink._parse_param_c("Tensor& t")
+    assert name == "t"
+    assert "&" in typ
+
+
+# --------------------------------------------------------------------------- # LLM summary helpers
+# --------------------------------------------------------------------------- #
+def test_normalize_summary_defaults_and_category_clamp():
+    assert run_summary.normalize_summary({}) == {
+        "category": "others",
+        "strategy": "",
+        "recipe": "",
+        "lessons": "",
+    }
+    out = run_summary.normalize_summary({"category": "GEMM", "strategy": " s ", "recipe": 5, "lessons": ""})
+    assert out["category"] == "gemm"
+    assert out["strategy"] == "s"
+    assert out["recipe"] == ""
+
+
+def test_summarize_run_reads_the_answer_it_asked_for(monkeypatch):
+    """Read the summary back in its shape and forward the shared usage accumulator."""
+    captured = {}
+
+    async def reply(*_a, **kwargs):
+        captured.update(kwargs)
+        return AgentRunResult(
+            structured_output={"category": "attention", "strategy": "tile", "recipe": "", "lessons": ""}
+        )
+
+    monkeypatch.setattr(run_summary, "_query_llm", reply)
+    usage = object()
+    out = run_summary.summarize_run(
+        config=object(), workspace="/w", prompt=run_summary.summary_prompt("op", "d", "s"), usage=usage
+    )
+    assert out == {"category": "attention", "strategy": "tile", "recipe": "", "lessons": ""}
+    assert captured["usage"] is usage
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        AgentRunResult(text='{"category": "attention", "strategy": "tile"}'),
+        AgentRunResult(text='{"category": "GEMM", "strategy": "", "recipe": "", "lessons": ""}'),
+        AgentRunResult(text="no json here"),
+    ],
+    ids=["missing-fields", "category-not-in-vocabulary", "prose"],
+)
+def test_a_summary_in_no_usable_shape_is_no_summary(monkeypatch, result):
+    """A summary the LLM did not give is not filed as an empty one."""
+
+    async def reply(*_a, **_k):
+        return result
+
+    monkeypatch.setattr(run_summary, "_query_llm", reply)
+    with pytest.raises(StructuredOutputError):
+        run_summary.summarize_run(config=object(), workspace="/w", prompt="p")
+
+
+def test_summary_prompt_truncates_inputs():
+    prompt = run_summary.summary_prompt("op", "d" * 20000, "s" * 20000)
+    assert prompt.count("d") <= run_summary.MAX_DIGEST_CHARS + 50
+    assert "Operator under optimization: op" in prompt

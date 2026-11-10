@@ -7,9 +7,7 @@ These helpers are called from the producing code (the Coordinator's
 ``SharedState``) to record breakdown facts where they are born, instead of
 having the exporter re-walk artifacts later.
 
-What lives here: the Coordinator's state snapshots, the backend build
-provenance carried by a kernel-agent result (which reaches the optimizer
-through nothing else).
+What lives here: the Coordinator's state snapshots.
 
 Every helper is best-effort: spool failures degrade the section and never
 propagate into the run they are describing.
@@ -21,55 +19,22 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_float
-from hyperloom.common.timeutil import iso_z
+from hyperloom_common.timeutil import iso_z
 
-from . import tool_versions
-from .session_metadata import snapshot_metadata
+from .recorder import recorder_for
+from .session_metadata import PRODUCER_COORDINATOR, snapshot_metadata
 from .trace import trace_skip
 
-PRODUCER_COORDINATOR = "coordinator"
-PRODUCER_KERNEL_AGENT = "kernel-agent"
 
-
-def _recorder(session_dir: Path | str, producer: str):
-    """Return the process-cached recorder for ``session_dir`` and ``producer``."""
-    from .recorder import recorder_for
-
-    return recorder_for(session_dir, producer=producer)
-
-
-def snapshot_state_sections(
-    session_dir: Path | str | None,
-    state: Any,
-    *,
-    producer: str = PRODUCER_COORDINATOR,
-) -> None:
+def snapshot_state_sections(session_dir: Path | str | None, state: Any) -> None:
     """Snapshot every state-owned breakdown section from a live ``SharedState``."""
     if not session_dir or state is None:
         trace_skip(reason="no session_dir" if not session_dir else "no state", section="session")
         return
-    rec = _recorder(session_dir, producer)
+    rec = recorder_for(session_dir, producer=PRODUCER_COORDINATOR)
 
     _snapshot_session(rec, state)
     snapshot_metadata(rec, state)
-
-
-def _unset_or_int(st: Any, attr: str) -> int | None:
-    """The integer at ``attr``, or ``None`` when the state never set it.
-
-    A budget nobody set and a budget of zero are different facts, and writing
-    the first one as ``0`` destroys the difference: the export then has to
-    guess, and the only guess available -- treat zero as unset -- throws away
-    the sessions that really did run zero ticks.
-    """
-    value = getattr(st, attr, None)
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _snapshot_session(rec, st: Any) -> None:
@@ -88,199 +53,12 @@ def _snapshot_session(rec, st: Any) -> None:
         "ended_at_utc": iso_z(getattr(st, "stop_ts", "")) if stop_reason else "",
         "stop_reason": stop_reason,
         "phase": str(getattr(st, "phase", "") or ""),
+        "max_minutes": int(getattr(st, "max_minutes", 0) or 0),
+        "tick_count": int(getattr(st, "tick", 0) or 0),
     }
-    # Left off the row entirely when unset, so that a recorded number -- zero
-    # included -- always means the state actually carried it.
-    for key, attr in (("max_minutes", "max_minutes"), ("tick_count", "tick")):
-        value = _unset_or_int(st, attr)
-        if value is not None:
-            row[key] = value
     rec.record_singleton("session", row)
 
 
-def _to_bool(value: Any) -> bool | None:
-    """Coerce a loosely-typed truthy/falsy value to ``bool``."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    s = str(value).strip().lower()
-    if s in ("true", "1", "yes", "pass", "passed", "ok"):
-        return True
-    if s in ("false", "0", "no", "fail", "failed"):
-        return False
-    return None
-
-
-def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any]) -> None:
-    """Mirror the result's backend attempts into the open KERNEL timeline event.
-
-    The legacy ``kernel_backend_result`` fragment is session-wide; the V6 kernel
-    event is visit-scoped. This copies each attempt as its own
-    ``kernel_rewrites[]`` row while a KERNEL visit recorder is active.
-
-    Every backend the kernel agent dispatched lands here, GEAK included: the
-    lane is about a kernel having been rewritten, not about which backend did
-    it, and each row names its own. ``ext.geak`` stays reserved for the
-    delegated optimizer's own campaign, which is a different producer's account
-    of a different run.
-    """
-    from .kernel_event import LANE_FAULTED_STATUSES, active_kernel_recorder
-
-    recorder = active_kernel_recorder()
-    if recorder is None:
-        return
-    kid = str(result.get("kernel_id") or "")
-    if not kid:
-        return
-    run_id = str(result.get("run_id") or result.get("session_id") or "")
-    verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
-    proposal = result.get("proposal") if isinstance(result.get("proposal"), dict) else {}
-    attempts = result.get("attempts") if isinstance(result.get("attempts"), list) else []
-    all_backends = [
-        str(item.get("backend") or "") for item in attempts if isinstance(item, dict) and item.get("backend")
-    ]
-    adopted_attempt_id = str(verification.get("best_attempt_id") or "")
-    kernel_decision = str(proposal.get("decision") or "").upper()
-    kernel_artifact = str(verification.get("best_artifact_path") or "")
-    task_group = ""
-    candidate = result.get("candidate")
-    if isinstance(candidate, dict):
-        task_group = str(candidate.get("task_group") or "")
-
-    if attempts:
-        for att in attempts:
-            if not isinstance(att, dict):
-                continue
-            attempt_id = str(att.get("attempt_id") or att.get("id") or "")
-            backend = str(att.get("backend") or "")
-            is_adopted = bool(attempt_id) and attempt_id == adopted_attempt_id
-            status_lower = str(att.get("status") or "").lower()
-            decision = str(att.get("decision") or "").upper()
-            if not decision and status_lower in LANE_FAULTED_STATUSES:
-                decision = "FAILED"
-            if is_adopted and kernel_decision:
-                decision = kernel_decision
-            micro_speedup = to_float(att.get("micro_speedup") or att.get("speedup"))
-            if micro_speedup is None and is_adopted:
-                micro_speedup = to_float(verification.get("micro_speedup"))
-            compile_passed = _to_bool(att.get("compile_passed"))
-            correctness_passed = _to_bool(att.get("correctness_passed"))
-            if is_adopted and compile_passed is None:
-                compile_passed = _to_bool(verification.get("compile_passed"))
-            if is_adopted and correctness_passed is None:
-                correctness_passed = _to_bool(verification.get("correctness_passed"))
-            optimized = att.get("optimized_path") or att.get("optimized_file")
-            artifact_path = str(optimized or (kernel_artifact if is_adopted else "") or "")
-            recorder.record_kernel_rewrite(
-                run_id=attempt_id or f"{run_id}-{backend}",
-                kernel_id=kid,
-                kernel_name=str(result.get("kernel_name") or result.get("name") or ""),
-                status=status_lower or "unknown",
-                dispatched=True,
-                backends_tried=all_backends or ([backend] if backend else []),
-                adopted_backend=backend if is_adopted else "",
-                task_group=task_group,
-                speedup=micro_speedup,
-                compile_status="passed" if compile_passed is True else ("failed" if compile_passed is False else ""),
-                correctness=correctness_passed,
-                artifact_path=artifact_path,
-                micro_decision=decision,
-                integrate_ref=str(result.get("integration_id") or "") if is_adopted else "",
-                started_at=str(att.get("started_at") or att.get("created_at") or att.get("ts") or ""),
-                ended_at=str(att.get("ended_at") or ""),
-                duration_sec=to_float(att.get("duration_sec") or att.get("elapsed_sec") or att.get("elapsed_s")),
-                error_class=str(att.get("error_class") or ""),
-                failure_reason=str(att.get("error") or att.get("error_message") or ""),
-            )
-        return
-
-    status = str(result.get("status") or "").lower()
-    err_class = str(result.get("error_class") or "")
-    decision = str(proposal.get("decision") or "").upper()
-    failed = status in LANE_FAULTED_STATUSES or (decision == "REVERT" and bool(err_class))
-    skipped = status == "skipped"
-    if not failed and not skipped:
-        return
-    backend = str(result.get("backend") or "").lower() or "unknown"
-    recorder.record_kernel_rewrite(
-        # ``:`` is the fragment key's own separator, so a synthesized run id
-        # must not contain one or the row is dropped on the way to the event.
-        run_id=run_id or f"{kid}-predispatch",
-        kernel_id=kid,
-        status=status or "failed",
-        dispatched=False,
-        backends_tried=[backend] if backend != "unknown" else [],
-        # ``reason`` first: for an undispatched row it is the only field that
-        # names *which* gate declined -- below the GPU-share floor, merged into
-        # an op-fanout representative, a group already in flight. ``status`` is
-        # "skipped" for all of them, so reading it first collapses the
-        # distinction this row exists to draw.
-        skip_reason=str(result.get("reason") or result.get("skip_reason") or err_class or status or ""),
-        micro_decision=decision or ("SKIPPED" if skipped else "FAILED"),
-        error_class=err_class,
-        failure_reason=str(result.get("error") or err_class or ""),
-    )
-
-
-def record_backend_versions_and_timeline(
-    session_dir: Path | str | None,
-    result: dict[str, Any],
-    *,
-    producer: str = PRODUCER_KERNEL_AGENT,
-) -> None:
-    """Record what a kernel-agent result says about the backends that ran.
-
-    Two facts are recorded: the build of each backend, which reaches the
-    optimizer through nothing else, and the attempts themselves, which are
-    mirrored onto the kernel timeline event. A falsy ``session_dir``, or a
-    ``result`` that is not a dict, is a no-op.
-    """
-    if not session_dir or not isinstance(result, dict):
-        trace_skip(
-            reason="no session_dir" if not session_dir else "result is not a dict",
-            section="versions",
-        )
-        return
-    result_meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-    attempts = result.get("attempts")
-    attempts = attempts if isinstance(attempts, list) else []
-    recorded: set[str] = set()
-    for att in attempts:
-        if not isinstance(att, dict):
-            continue
-        backend = str(att.get("backend") or "").lower()
-        if not backend or backend in recorded:
-            continue
-        recorded.add(backend)
-        att_meta = att.get("metadata") if isinstance(att.get("metadata"), dict) else {}
-        tool_versions.record_tool_version(
-            session_dir,
-            tool=backend,
-            root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "") or None,
-            version=str(att_meta.get("version") or result_meta.get("version") or "") or None,
-            producer=producer,
-        )
-    # No attempts means the run failed before any backend launched. The
-    # backend the result names is still the one whose build was in play --
-    # unless it names none, which is the pre-dispatch gating case that
-    # never resolved a build to report.
-    if not recorded:
-        backend = str(result.get("backend") or "").lower()
-        if backend:
-            tool_versions.record_tool_version(
-                session_dir,
-                tool=backend,
-                root=str(result_meta.get("root_dir") or "") or None,
-                version=str(result_meta.get("version") or "") or None,
-                producer=producer,
-            )
-    _mirror_backend_attempts_to_kernel_timeline(result)
-
-
 __all__ = [
-    "PRODUCER_COORDINATOR",
-    "PRODUCER_KERNEL_AGENT",
-    "record_backend_versions_and_timeline",
     "snapshot_state_sections",
 ]

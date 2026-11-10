@@ -6,21 +6,23 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
-import types
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from hyperloom.inference_optimizer import framework_paths as fp
-from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.inference_optimizer import framework_registry as fr
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, FULL_ENABLED_ACTIONS
 from hyperloom.inference_optimizer.framework_paths import probe_framework_source_roots_for_env
 from hyperloom.orchestrator.prompts.prompt_builder import (
-    FULL_ENABLED_ACTIONS,
     build_orchestration_prompt,
+    PromptAssets,
+    SessionContext,
 )
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
+from hyperloom.orchestrator.kernel import patch_jit_cache, patch_rebuild
+from hyperloom.orchestrator.tests._helpers import git_repo_tracking
 
 
 @pytest.fixture(autouse=True)
@@ -166,14 +168,6 @@ class TestResolveKernelSearchRoots:
         checkout.mkdir()
         monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
         monkeypatch.setenv(fp.GENERIC_FRAMEWORK_ROOT_ENV, str(checkout))
-        assert f"{checkout}/" in fp.resolve_kernel_search_roots()
-
-    def test_includes_the_inferencex_checkout(self, monkeypatch, tmp_path):
-        """Its recipes decide how the server boots, so a patch has to reach them."""
-        checkout = tmp_path / "InferenceX"
-        checkout.mkdir()
-        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
-        monkeypatch.setenv("INFERENCEX_PATH", str(checkout))
         assert f"{checkout}/" in fp.resolve_kernel_search_roots()
 
 
@@ -356,18 +350,6 @@ class TestDefaultSourceRootsIncludesXdit:
         assert any("/app/xDiT" in r for r in fp._DEFAULT_SOURCE_ROOTS), (
             f"_DEFAULT_SOURCE_ROOTS missing xDiT entry: {fp._DEFAULT_SOURCE_ROOTS!r}"
         )
-
-    def test_xfuser_in_framework_packages(self):
-        """xfuser must be in _FRAMEWORK_PACKAGES for importlib discovery."""
-        assert "xfuser" in fp._FRAMEWORK_PACKAGES
-
-    def test_xdit_in_framework_buckets(self):
-        """xdit must be in _FRAMEWORK_BUCKETS for summarise_framework_root_discovery."""
-        assert "xdit" in fp._FRAMEWORK_BUCKETS
-
-    def test_custom_in_framework_buckets(self):
-        """custom must be in _FRAMEWORK_BUCKETS for root discovery summaries."""
-        assert "custom" in fp._FRAMEWORK_BUCKETS
 
 
 class TestScriptableRepoRootDiscovery:
@@ -574,6 +556,39 @@ class TestSummariseFrameworkRootDiscovery:
         out = fp.summarise_framework_root_discovery("/sgl-workspace/xdit_tools/")
         assert "xdit=missing" in out
 
+    @pytest.mark.parametrize(
+        ("root", "bucket"),
+        [("/work/xdit/", "xdit"), ("/work/XDiT/", "xdit"), ("/opt/SGLang/", "sglang"), ("/app/ATOM/", "atom")],
+    )
+    def test_directory_names_match_case_insensitively(self, root, bucket):
+        assert f"{bucket}=ok" in fp.summarise_framework_root_discovery(root)
+
+    def test_lowercase_xdit_checkout_reads_as_the_tree_it_resolves_to(self, tmp_path, monkeypatch):
+        """The resolver and the summary must agree on an env-named checkout whatever its case."""
+        checkout = tmp_path / "xdit"
+        checkout.mkdir()
+        monkeypatch.setenv("XDIT_REPO_PATH", str(checkout))
+
+        assert fp.resolve_framework_tree("xdit") == f"{checkout}/"
+        assert "xdit=ok" in fp.summarise_framework_root_discovery(fp.probe_framework_source_roots_for_env())
+
+    def test_installed_xfuser_package_counts_as_xdit(self):
+        """xDiT installs as ``xfuser``; the root resolve_framework_tree picks must read as found here too."""
+        out = fp.summarise_framework_root_discovery("/usr/local/lib/python3.12/dist-packages/xfuser/")
+        assert "xdit=ok" in out
+
+
+class TestDerivedFromTheRegistry:
+    """A framework that declares its package or checkout is discovered without another edit here."""
+
+    def test_every_declared_package_is_discovered(self):
+        declared = {spec.python_package for spec in fr.FRAMEWORKS.values() if spec.python_package}
+        assert declared - set(fp.FRAMEWORK_SOURCE_PACKAGES) == set()
+
+    def test_every_declared_checkout_is_a_default_root(self):
+        declared = {spec.source_root for spec in fr.FRAMEWORKS.values() if spec.source_root}
+        assert declared - set(fp._DEFAULT_SOURCE_ROOTS) == set()
+
 
 class TestAtomPathPresentInAllThreeLocations:
     """Pin atom-source-path entries across the three sister lists so a cleanup can't drop one."""
@@ -582,72 +597,26 @@ class TestAtomPathPresentInAllThreeLocations:
         assert any("/app/atom/atom" in r.lower() for r in fp._DEFAULT_SOURCE_ROOTS)
 
     def test_atom_present_in_reusable_source_roots(self):
-        from hyperloom.orchestrator.kernel import (
-            request_handlers as krh,
-        )
-
-        assert any("/app/atom/atom" in r.lower() for r in krh._reusable_source_roots())
+        assert any("/app/atom/atom" in r.lower() for r in fp.resolve_known_source_prefixes())
 
     def test_atom_present_in_tracelens_reusable_roots(self):
-        """The kernel-agent's tracelens_analysis ``_REUSABLE_SOURCE_ROOTS`` must track the orchestrator-side list."""
-        ka_path = (
-            Path(__file__).resolve().parents[4]
-            / "src"
-            / "hyperloom"
-            / "agents"
-            / "kernel"
-            / "tools"
-            / "tracelens_analysis.py"
-        )
-        if not ka_path.is_file():
-            pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
-        text = ka_path.read_text(encoding="utf-8")
+        """The kernel-agent's ``_REUSABLE_SOURCE_ROOTS`` must track the orchestrator-side list."""
+        from hyperloom.orchestrator.trace_analysis import _kernel_classification
+
+        text = Path(_kernel_classification.__file__).resolve().read_text(encoding="utf-8")
         assert "/app/atom/atom/" in text.lower(), (
-            "src/hyperloom/agents/kernel/tools/tracelens_analysis.py _REUSABLE_SOURCE_ROOTS "
+            "src/hyperloom/orchestrator/trace_analysis/_kernel_classification.py _REUSABLE_SOURCE_ROOTS "
             "is out of sync with src/hyperloom/orchestrator/kernel/"
             "request_handlers._REUSABLE_SOURCE_ROOTS (atom missing)"
         )
 
     def test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync(self):
         """The orchestrator gate and kernel-agent classifier derive reusable roots from the same source, so their atom subsets must match."""
-        ka_path = (
-            Path(__file__).resolve().parents[4]
-            / "src"
-            / "hyperloom"
-            / "agents"
-            / "kernel"
-            / "tools"
-            / "tracelens_analysis.py"
-        )
-        if not ka_path.is_file():
-            pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
-        from hyperloom.orchestrator.kernel import (
-            request_handlers as krh,
-        )
+        from hyperloom.orchestrator.trace_analysis import _kernel_classification as kernel_classification
 
-        orch_atom = frozenset(r.lower() for r in krh._reusable_source_roots() if "/atom/" in r.lower())
-        # Put the tools dir on sys.path: the sister tool imports sibling kernel-agent tools.
-        import importlib.util as _ilu
-        import sys as _sys
-
-        tools_dir = str(ka_path.parent)
-        added = tools_dir not in _sys.path
-        if added:
-            _sys.path.insert(0, tools_dir)
-        try:
-            spec = _ilu.spec_from_file_location(
-                "_tracelens_atom_sync_probe",
-                ka_path,
-            )
-            assert spec is not None and spec.loader is not None
-            mod = _ilu.module_from_spec(spec)
-            # Register before exec so self-referential dataclass annotations resolve.
-            _sys.modules[spec.name] = mod
-            spec.loader.exec_module(mod)
-            ka_atom = frozenset(r.lower() for r in mod._reusable_roots() if "/atom/" in r.lower())
-        finally:
-            if added and tools_dir in _sys.path:
-                _sys.path.remove(tools_dir)
+        orch_atom = frozenset(r.lower() for r in fp.resolve_known_source_prefixes() if "/atom/" in r.lower())
+        kernel_classification._framework_source_roots.cache_clear()
+        ka_atom = frozenset(r.lower() for r in kernel_classification._reusable_roots() if "/atom/" in r.lower())
         assert orch_atom, "orchestrator reusable roots carry no atom entry"
         assert ka_atom, "tracelens reusable roots carry no atom entry"
         assert orch_atom == ka_atom, f"atom subsets diverged — orch={sorted(orch_atom)!r} ka={sorted(ka_atom)!r}"
@@ -660,10 +629,8 @@ def test_prompt_renders_framework_source_roots(registry=None):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
-        framework="sglang",
-        max_minutes=60,
-        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
-        framework_source_roots=custom,
+        session=SessionContext(framework="sglang", max_minutes=60, framework_source_roots=custom),
+        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
     )
     assert "framework_source_roots:" in text
     assert "/custom/sglang/" in text
@@ -681,51 +648,12 @@ def test_probe_framework_source_roots_includes_defaults(tmp_path, monkeypatch):
     assert str(ws) in out or (str(ws) + "/") in out
 
 
-# apply_kernel_patch known-target roots
-_APPLY_TOOL_PATH = (
-    Path(__file__).resolve().parents[4] / "src" / "hyperloom" / "agents" / "kernel" / "tools" / "apply_kernel_patch.py"
-)
-
-
-@pytest.fixture(scope="module")
-def apply_tool() -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        "_apply_kernel_patch_roots_test",
-        _APPLY_TOOL_PATH,
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_known_target_roots_includes_dist_packages_vllm(
-    apply_tool,
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        fp, "_discover_installed_framework_roots", lambda: ("/usr/local/lib/python3.12/dist-packages/vllm/",)
-    )
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", raising=False)
-    apply_tool._CACHED_KNOWN_TARGET_ROOTS = None
-    roots = apply_tool.known_target_roots()
-    assert "/usr/local/lib/python3.12/dist-packages/vllm/" in roots
-
-
-def test_detect_strategy_accepts_dist_packages_vllm_py(
-    apply_tool,
-    monkeypatch,
-) -> None:
+# apply_kernel_patch strategy detection
+def test_detect_strategy_accepts_dist_packages_vllm_py() -> None:
     target = Path(
         "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/parameter.py",
     )
-    monkeypatch.setattr(
-        apply_tool,
-        "known_target_roots",
-        lambda: ("/usr/local/lib/python3.12/dist-packages/vllm/",),
-    )
-    strat = apply_tool._detect_strategy(target)
+    strat = patch_rebuild._detect_strategy(target)
     assert strat["compiled"] is False
 
 
@@ -740,33 +668,33 @@ _AITER_META_CU = Path("/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/k
 _AITER_META_CPP_ITFS_CU = Path("/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/cpp_itfs/mha_fwd.cu")
 
 
-def test_target_is_in_aiter_csrc_matches_aiter_meta(apply_tool) -> None:
+def test_target_is_in_aiter_csrc_matches_aiter_meta() -> None:
     # split-wheel layout must be recognised as an aiter csrc source
-    assert apply_tool._target_is_in_aiter_csrc(_AITER_META_CU) is True
+    assert patch_jit_cache._target_is_in_aiter_csrc(_AITER_META_CU) is True
     # classic layout still recognised
-    assert apply_tool._target_is_in_aiter_csrc(Path("/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu")) is True
+    assert patch_jit_cache._target_is_in_aiter_csrc(Path("/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu")) is True
     # unrelated source stays out
     assert (
-        apply_tool._target_is_in_aiter_csrc(
+        patch_jit_cache._target_is_in_aiter_csrc(
             Path("/usr/local/lib/python3.12/dist-packages/vllm/model_executor/parameter.py")
         )
         is False
     )
 
 
-def test_target_is_in_aiter_cpp_itfs_matches_aiter_meta(apply_tool) -> None:
-    assert apply_tool._target_is_in_aiter_cpp_itfs(_AITER_META_CPP_ITFS_CU) is True
+def test_target_is_in_aiter_cpp_itfs_matches_aiter_meta() -> None:
+    assert patch_jit_cache._target_is_in_aiter_cpp_itfs(_AITER_META_CPP_ITFS_CU) is True
     # a non-cpp_itfs aiter_meta source is csrc but NOT cpp_itfs
-    assert apply_tool._target_is_in_aiter_cpp_itfs(_AITER_META_CU) is False
+    assert patch_jit_cache._target_is_in_aiter_cpp_itfs(_AITER_META_CU) is False
 
 
-def test_invalidate_aiter_jit_build_runs_for_aiter_meta_target(apply_tool, tmp_path) -> None:
+def test_invalidate_aiter_jit_build_runs_for_aiter_meta_target(tmp_path) -> None:
     jit_build = tmp_path / "aiter" / "jit" / "build"
     jit_build.mkdir(parents=True)
     (jit_build / "module_aiter_core.so").write_bytes(b"stale")
     backup_dir = tmp_path / "backup"
 
-    res = apply_tool._invalidate_aiter_jit_build(
+    res = patch_jit_cache._invalidate_aiter_jit_build(
         _AITER_META_CU,
         backup_dir,
         jit_build_dir=jit_build,
@@ -779,7 +707,6 @@ def test_invalidate_aiter_jit_build_runs_for_aiter_meta_target(apply_tool, tmp_p
 
 
 def test_invalidate_aiter_jit_build_ignores_orphaned_prior_backup(
-    apply_tool,
     tmp_path,
 ) -> None:
     jit_build = tmp_path / "aiter" / "jit" / "build"
@@ -787,14 +714,14 @@ def test_invalidate_aiter_jit_build_ignores_orphaned_prior_backup(
     (jit_build / "first.so").write_bytes(b"first")
     backup_dir = tmp_path / "backup"
 
-    first = apply_tool._invalidate_aiter_jit_build(
+    first = patch_jit_cache._invalidate_aiter_jit_build(
         _AITER_META_CU,
         backup_dir,
         jit_build_dir=jit_build,
     )
     jit_build.mkdir(parents=True)
     (jit_build / "second.so").write_bytes(b"second")
-    second = apply_tool._invalidate_aiter_jit_build(
+    second = patch_jit_cache._invalidate_aiter_jit_build(
         _AITER_META_CU,
         backup_dir,
         jit_build_dir=jit_build,
@@ -805,6 +732,22 @@ def test_invalidate_aiter_jit_build_ignores_orphaned_prior_backup(
     assert first["backup_path"] != second["backup_path"]
     assert Path(first["backup_path"]).is_dir()
     assert Path(second["backup_path"]).is_dir()
+
+
+class TestPointSessionFrameworkRoot:
+    def test_every_resolver_names_the_pointed_root_over_a_prior_pin(self, monkeypatch, tmp_path):
+        prior = tmp_path / "image"
+        prior.mkdir()
+        checkout = tmp_path / "attempt-src"
+        checkout.mkdir()
+        monkeypatch.setenv("FRAMEWORK", "sglang")
+        monkeypatch.setenv("SGLANG_DIR", str(prior))
+        monkeypatch.setenv("SGLANG_REPO_PATH", "")
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
+
+        fp.point_session_framework_root(str(checkout), "sglang")
+        assert fp.resolve_session_framework_root() == f"{checkout}/"
+        assert fp.resolve_framework_tree("sglang") == f"{checkout}/"
 
 
 class TestResolveFrameworkTree:
@@ -823,56 +766,44 @@ class TestResolveFrameworkTree:
         assert fp.resolve_framework_tree("sglang") == f"{tree}/"
 
     def test_absent_env_falls_to_package_origin(self, monkeypatch, tmp_path):
-        pkg_parent = tmp_path / "site-packages"
-        (pkg_parent / "myfw").mkdir(parents=True)
+        pkg_dir = tmp_path / "site-packages" / "vllm"
+        pkg_dir.mkdir(parents=True)
+        for key in ("VLLM_REPO_PATH", "VLLM_DIR", "FRAMEWORK_REPO_PATH"):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: pkg_dir if name == "vllm" else None)
+        assert fp.resolve_framework_tree("vllm") == f"{pkg_dir}/"
+
+    def test_xdit_is_found_under_its_xfuser_package(self, monkeypatch, tmp_path):
+        """xDiT installs as ``xfuser``; there is no importable ``xdit`` package."""
+        pkg_dir = tmp_path / "xfuser"
+        pkg_dir.mkdir()
         monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: pkg_parent if name == "myfw" else None)
-        assert fp.resolve_framework_tree("myfw") == f"{pkg_parent}/"
+        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: pkg_dir if name == "xfuser" else None)
+        assert fp.resolve_framework_tree("xdit") == f"{pkg_dir}/"
 
-    def test_unknown_framework_resolves_to_nothing(self, monkeypatch):
-        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
-        assert fp.resolve_framework_tree("not-a-framework") == ""
-
-    def test_empty_name_resolves_to_nothing(self):
-        assert fp.resolve_framework_tree("") == ""
-
-    def test_a_framework_is_found_by_its_import_name(self, monkeypatch, tmp_path):
-        """xDiT ships as the ``xfuser`` package."""
-        xfuser = tmp_path / "xDiT" / "xfuser"
-        xfuser.mkdir(parents=True)
-        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
-        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: xfuser if name == "xfuser" else None)
-        assert fp.resolve_framework_tree("xdit") == f"{xfuser}/"
-
-    def test_a_default_root_matches_its_framework_case_insensitively(self, monkeypatch, tmp_path):
-        xdit = tmp_path / "app" / "xDiT"
-        xdit.mkdir(parents=True)
+    def test_xdit_default_checkout_is_named_after_its_repo(self, monkeypatch, tmp_path):
+        """The shipped default is ``/app/xDiT/``, the repo's directory name, not ``/xdit``."""
+        checkout = tmp_path / "xDiT"
+        checkout.mkdir()
         monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
         monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
-        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", (f"{xdit}/",))
-        assert fp.resolve_framework_tree("xdit") == f"{xdit}/"
+        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", (f"{checkout}/",))
+        assert fp.resolve_framework_tree("xdit") == f"{checkout}/"
 
+    def test_a_framework_without_a_tree_resolves_to_nothing(self, monkeypatch):
+        for key in ("CUSTOM_REPO_PATH", "CUSTOM_DIR", "FRAMEWORK_REPO_PATH"):
+            monkeypatch.delenv(key, raising=False)
+        assert fp.resolve_framework_tree("custom") == ""
 
-def _git_tracking(checkout: Path, *files: str) -> Path:
-    import subprocess
-
-    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
-    for rel in files:
-        target = checkout / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("x = 1\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(checkout), "add", "-A"], check=True)
-    subprocess.run(
-        ["git", "-C", str(checkout), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"],
-        check=True,
-    )
-    return checkout
+    @pytest.mark.parametrize("name", ["not-a-framework", ""])
+    def test_unregistered_name_is_rejected(self, name):
+        with pytest.raises(KeyError):
+            fp.resolve_framework_tree(name)
 
 
 class TestFrameworkApplyTree:
     def test_a_package_in_a_checkout_is_edited_at_the_checkout(self, tmp_path):
-        checkout = _git_tracking(tmp_path / "sglang", "python/sglang/__init__.py")
+        checkout = git_repo_tracking(tmp_path / "sglang", "python/sglang/__init__.py")
         tree = fp.framework_apply_tree(f"{checkout}/python/sglang/")
         assert tree == fp.FrameworkTree(tree=checkout / "python" / "sglang", root=checkout, checkout=True)
 
@@ -883,7 +814,7 @@ class TestFrameworkApplyTree:
         assert fp.framework_apply_tree(f"{package}/") == fp.FrameworkTree(tree=package, root=package, checkout=False)
 
     def test_an_untracked_package_under_some_repository_is_not_that_repository(self, tmp_path):
-        project = _git_tracking(tmp_path / "project", "README.md")
+        project = git_repo_tracking(tmp_path / "project", "README.md")
         package = project / ".venv" / "site-packages" / "vllm"
         package.mkdir(parents=True)
         (package / "__init__.py").write_text("", encoding="utf-8")
