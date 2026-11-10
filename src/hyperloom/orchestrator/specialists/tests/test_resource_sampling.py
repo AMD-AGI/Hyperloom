@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -283,3 +284,28 @@ def test_dir_usage_counts_what_was_read_of_a_directory_that_fails_and_goes_on_wi
     assert (
         dir_usage_bytes(root) == (2 + read_before_failing) * BLOCK
     )  # a.bin and sub, then what sub gave before failing
+
+
+def test_dir_usage_of_a_link_left_at_the_path_is_unknown_and_walks_nothing_it_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A specialist that writes its workspace can leave a link where its worktree was: the app's record of the
+    worktree's disk use must not walk the host directory it names."""
+    host = tmp_path / "host"
+    (host / "deep").mkdir(parents=True)
+    (host / "deep" / "big.bin").write_bytes(b"x" * 10000)
+    worktree = tmp_path / "ws" / "worktree"
+    worktree.parent.mkdir()
+    worktree.symlink_to(host, target_is_directory=True)
+    (tmp_path / "ws" / "file").write_bytes(b"x")
+    scanned: list[str] = []
+    scandir = os.scandir
+
+    def recording(path: Any) -> Any:
+        scanned.append(os.fspath(path))
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", recording)
+
+    assert dir_usage_bytes(worktree) is None and dir_usage_bytes(tmp_path / "ws" / "file") is None
+    assert scanned == []

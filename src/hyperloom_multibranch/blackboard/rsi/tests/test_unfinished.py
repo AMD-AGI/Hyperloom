@@ -41,8 +41,8 @@ DROPPED = intent("s3", "i1", "scheduler", "chunked prefill 8k", IntentLayer.CONF
 
 async def _leftovers(root: Path, clock: FakeClock) -> LocalBlackboard:
     """The scripted session, then ``s3`` from the integration head: a commit whose merge was not stackable, one on it
-    not merge-tested yet, a near miss, a near miss tried again on ``s4``, a near miss ``s1`` claims, a blocked gain
-    waiting for its diagnosis, and an explore withdrawn by the stop of ``s3``."""
+    not merge-tested yet, an explore that kept accuracy and fell just short of its bar, three blocked gains waiting for
+    their diagnosis, one tried again on ``s4`` and one ``s1`` claims, and an explore withdrawn by the stop of ``s3``."""
 
     observer = await scripted_session(root, clock)
     w = Writers(root, clock)
@@ -63,13 +63,13 @@ async def _leftovers(root: Path, clock: FakeClock) -> LocalBlackboard:
     await integrator.write_judgement("m2", unstacked, Conclusion.NOT_STACKABLE)
     await w.measure("s3", "u2", intent("s3", "c3", "sampler", "fused min-p"), delta("--min-p fused"))
     await gate.write_judgement("u2", judgement(2.0, ("u2",), recorded={METRIC: 1090.0}), Conclusion.COMMITTED, "c4")
-    for request_id, of in (("n1", NEAR), ("n2", RETRIED), ("n3", CLAIMED)):
-        await w.measure("s3", request_id, of, delta(f"--{request_id}"))
-        flat = judgement(0.8, (request_id,), verdict=Verdict.FLAT)
-        await gate.write_judgement(request_id, flat, Conclusion.RECORDED_ONLY)
-    await w.measure("s3", "d1", BLOCKED, delta("--fp8-gemm"))
-    blocked = judgement(2.0, ("d1",), verdict=Verdict.BLOCKED)
-    await gate.write_judgement("d1", blocked, Conclusion.DIAGNOSIS_PENDING)
+    await w.measure("s3", "n1", NEAR, delta("--n1"))
+    short = judgement(0.8, ("n1",), verdict=Verdict.FLAT)
+    await gate.write_judgement("n1", short, Conclusion.RECORDED_ONLY)
+    for request_id, of, change in (("d1", BLOCKED, "--fp8-gemm"), ("d2", RETRIED, "--d2"), ("d3", CLAIMED, "--d3")):
+        await w.measure("s3", request_id, of, delta(change))
+        blocked = judgement(2.0, (request_id,), verdict=Verdict.BLOCKED)
+        await gate.write_judgement(request_id, blocked, Conclusion.DIAGNOSIS_PENDING)
     dropped = delta("--chunked-prefill-size 8192")
     claim = await w.as_role(Role.SPECIALIST_RUNTIME, "s3").acquire(DROPPED, dropped.fingerprint(), ttl_seconds=TTL)
     await toolbox.write_request(request("x1", DROPPED, dropped))
@@ -77,9 +77,9 @@ async def _leftovers(root: Path, clock: FakeClock) -> LocalBlackboard:
     await toolbox.write_withdrawal(Withdrawal("x1", "branch stopped"))
     await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "s3", reason="no progress"))
     await scheduler.release_branch("s3")
-    await w.measure("s4", "n2b", intent("s4", "c0", "norm", "fused rms norm"), delta("--n2b"))
+    await w.measure("s4", "d2b", intent("s4", "c0", "norm", "fused rms norm"), delta("--d2b"))
     await w.as_role(Role.SPECIALIST_RUNTIME, "s1").acquire(
-        intent("s1", "c1", "allreduce", "custom allreduce"), delta("--n3").fingerprint(), ttl_seconds=TTL
+        intent("s1", "c1", "allreduce", "custom allreduce"), delta("--d3").fingerprint(), ttl_seconds=TTL
     )
     return observer
 
@@ -93,50 +93,35 @@ async def test_the_brief_lists_what_the_session_left_unfinished_in_order_and_dro
 
     assert [(item.request_id, item.reason) for item in brief.unfinished] == [
         ("u1", UnfinishedReason.NOT_STACKABLE),
-        ("n1", UnfinishedReason.NEAR_BAR),
         ("d1", UnfinishedReason.REPAIR_UNFINISHED),
         ("x1", UnfinishedReason.WITHDRAWN),
     ]
-    landed, near, _, withdrawn = brief.unfinished
+    landed, _, withdrawn = brief.unfinished
     assert (landed.branch, landed.measured_on, landed.gain_pct) == ("s3", "i1", 3.0)
     assert landed.detail == "merge on i1 -0.50%, bar 1.00%; commit c3"
-    assert (near.target, near.mechanism, near.gain_pct, near.detail) == ("attention", "fused rope", 0.8, "bar 1.00%")
     assert (withdrawn.gain_pct, withdrawn.detail) == (None, "branch stopped")
     assert withdrawn.change == "add args --chunked-prefill-size 8192"
     assert len(brief.unfinished) <= MAX_UNFINISHED
 
 
-async def test_a_near_miss_gained_more_than_half_its_bar_so_a_lower_bar_does_not_offer_noise(tmp_path: Path) -> None:
-    root, clock = tmp_path / "blackboard", FakeClock()
-    observer = await _leftovers(root, clock)
-    w = Writers(root, clock)
-    for request_id, target, gain in (("q1", "moe", 0.4), ("q2", "gdn", 0.2)):
-        await w.measure("s4", request_id, intent("s4", "c0", target, f"fused {target}"), delta(f"--{request_id}"))
-        short = judgement(gain, (request_id,), verdict=Verdict.FLAT, threshold_pct=0.6)
-        await w.as_role(Role.GATE).write_judgement(request_id, short, Conclusion.RECORDED_ONLY)
-
-    brief = await observer.startup_brief("i1")
-
-    near = [(item.request_id, item.detail) for item in brief.unfinished if item.reason is UnfinishedReason.NEAR_BAR]
-    assert near == [("n1", "bar 1.00%"), ("q1", "bar 0.60%")]
-
-
-@pytest.mark.parametrize(
-    ("accuracy", "leads"), [(AccuracyVerdict.NOT_MEASURED, ["q1", "n1"]), (AccuracyVerdict.FAILED, ["n1"])]
-)
-async def test_a_near_miss_whose_eval_did_not_run_is_a_lead_and_one_whose_eval_failed_is_not(
-    tmp_path: Path, accuracy: AccuracyVerdict, leads: list[str]
+@pytest.mark.parametrize("accuracy", [AccuracyVerdict.PASSED, AccuracyVerdict.NOT_MEASURED])
+async def test_a_result_just_short_of_its_bar_is_no_lead_whether_or_not_its_eval_ran(
+    tmp_path: Path, accuracy: AccuracyVerdict
 ) -> None:
     root, clock = tmp_path / "blackboard", FakeClock()
     observer = await _leftovers(root, clock)
     w = Writers(root, clock)
     await w.measure("s4", "q1", intent("s4", "c0", "moe", "fused moe"), delta("--q1"))
-    short = replace(judgement(0.8, ("q1",), verdict=Verdict.FLAT), accuracy=accuracy)
+    short = replace(judgement(0.95, ("q1",), verdict=Verdict.FLAT), accuracy=accuracy)
     await w.as_role(Role.GATE).write_judgement("q1", short, Conclusion.RECORDED_ONLY)
 
     brief = await observer.startup_brief("i1")
 
-    assert [item.request_id for item in brief.unfinished if item.reason is UnfinishedReason.NEAR_BAR] == leads
+    assert [(item.request_id, item.reason) for item in brief.unfinished] == [
+        ("u1", UnfinishedReason.NOT_STACKABLE),
+        ("d1", UnfinishedReason.REPAIR_UNFINISHED),
+        ("x1", UnfinishedReason.WITHDRAWN),
+    ]
 
 
 async def test_a_lead_another_branch_replayed_drops_out_and_a_withdrawn_replay_of_a_measured_change_is_none(
@@ -149,7 +134,9 @@ async def test_a_lead_another_branch_replayed_drops_out_and_a_withdrawn_replay_o
     await w.as_role(Role.SCHEDULER).record_lineage(
         LineageEvent(LineageKind.OPEN, "s5", from_commit="c4", reason="refill")
     )
-    await w.measure("s5", "p1", intent("s5", "c4", "rope", "replay n1 on my head"), delta("--n1"))
+    await w.measure(
+        "s5", "p1", intent("s5", "c4", "scheduler", "replay x1 on my head"), delta("--chunked-prefill-size 8192")
+    )
     replaying = intent("s5", "c4", "gemm", "replay d1 on my head")
     claim = await w.as_role(Role.SPECIALIST_RUNTIME, "s5").acquire(
         replaying, delta("--fp8-gemm").fingerprint(), ttl_seconds=TTL
@@ -167,7 +154,7 @@ async def test_a_lead_another_branch_replayed_drops_out_and_a_withdrawn_replay_o
 
     brief = await observer.startup_brief("i1")
 
-    assert [item.request_id for item in brief.unfinished] == ["u1", "d1", "x1"]
+    assert [item.request_id for item in brief.unfinished] == ["u1", "d1"]
 
 
 async def test_a_lead_replayed_with_a_change_made_for_another_head_drops_out(tmp_path: Path) -> None:
@@ -181,7 +168,7 @@ async def test_a_lead_replayed_with_a_change_made_for_another_head_drops_out(tmp
 
     brief = await observer.startup_brief("i1")
 
-    assert [item.request_id for item in brief.unfinished] == ["n1", "d1", "x1"]
+    assert [item.request_id for item in brief.unfinished] == ["d1", "x1"]
 
 
 async def test_a_lead_whose_replay_was_released_untested_drops_out_for_that_head_but_not_one_its_stop_released(
@@ -195,7 +182,7 @@ async def test_a_lead_whose_replay_was_released_untested_drops_out_for_that_head
         await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="c4", reason="refill"))
     refusing = w.as_role(Role.SPECIALIST_RUNTIME, "s5")
     claim = await refusing.acquire(
-        intent("s5", "c4", REPLAY_TARGET, "n1"), delta("--n1").fingerprint(), ttl_seconds=TTL
+        intent("s5", "c4", REPLAY_TARGET, "x1"), delta("--chunked-prefill-size 8192").fingerprint(), ttl_seconds=TTL
     )
     await refusing.release(claim.key)
     await w.as_role(Role.SPECIALIST_RUNTIME, "s6").acquire(
@@ -206,8 +193,8 @@ async def test_a_lead_whose_replay_was_released_untested_drops_out_for_that_head
 
     on_c4, on_i1 = await observer.startup_brief("c4"), await observer.startup_brief("i1")
 
-    assert [item.request_id for item in on_c4.unfinished] == ["u1", "d1", "x1"]
-    assert [item.request_id for item in on_i1.unfinished] == ["u1", "n1", "d1", "x1"]
+    assert [item.request_id for item in on_c4.unfinished] == ["u1", "d1"]
+    assert [item.request_id for item in on_i1.unfinished] == ["u1", "d1", "x1"]
 
 
 @dataclass(frozen=True)
@@ -228,21 +215,21 @@ async def test_a_lead_blackboard_replay_refused_on_a_head_leaves_the_briefs_from
     tmp_path: Path,
 ) -> None:
     observer = await _leftovers(tmp_path / "blackboard", FakeClock())
-    has_it = Recipe("sha256:" + "a" * 64, LaunchConfig("--n1"))
+    has_it = Recipe("sha256:" + "a" * 64, LaunchConfig("--fp8-gemm"))
     briefs = SessionBriefs(observer, repo=_Heads({"s5": "c3"}, {"c3": has_it}))
 
-    with pytest.raises(ValueError, match="your head c3 already has the change n1 tested"):
-        await briefs.for_branch("s5").peer_replay("n1")
+    with pytest.raises(ValueError, match="your head c3 already has the change d1 tested"):
+        await briefs.for_branch("s5").peer_replay("d1")
 
     offered = {
         commit: [item.request_id for item in (await briefs.for_branch("s6").startup_brief(commit)).unfinished]
         for commit in ("c3", "c4", "i1", "c1")
     }
     assert offered == {
-        "c3": ["u1", "d1", "x1"],
-        "c4": ["u1", "d1", "x1"],
-        "i1": ["u1", "n1", "d1", "x1"],
-        "c1": ["u1", "n1", "d1", "x1"],
+        "c3": ["u1", "x1"],
+        "c4": ["u1", "x1"],
+        "i1": ["u1", "d1", "x1"],
+        "c1": ["u1", "d1", "x1"],
     }
 
 
@@ -266,7 +253,7 @@ async def test_the_rendered_brief_names_each_lead_and_how_to_finish_it(tmp_path:
         "- u1 on s3, i1 +3.00%: committed, merge not stackable (merge on i1 -0.50%, bar 1.00%; commit c3); "
         "sampler / fused top-k (add args --sampler fused)"
     )
-    assert lines[start + 4] == (
+    assert lines[start + 3] == (
         "- x1 on s3, i1: withdrawn before its result (branch stopped); scheduler / chunked prefill 8k "
         "(add args --chunked-prefill-size 8192)"
     )

@@ -75,6 +75,20 @@ async def test_an_unsuccessful_verdict_keeps_its_result(tmp_path: Path) -> None:
     assert sink.pointers[0].summary == "failed: no trace"
 
 
+async def test_a_jobs_result_is_read_from_the_runner_once_it_ended(tmp_path: Path) -> None:
+    tool = ScriptedTool(output=ToolOutput(result={"error_class": "no_trace"}, summary="no trace", ok=False))
+    tool.block = asyncio.Event()
+    runner = jobs(tmp_path, tool, RecordingSink())
+    job_id = runner.submit(request())
+    await tool.started.wait()
+    assert runner.result(job_id) == {}
+    tool.block.set()
+    assert await runner.wait(job_id) is JobStatus.FAILED
+    assert runner.result(job_id) == {"error_class": "no_trace"}
+    with pytest.raises(LookupError):
+        runner.result("no-such-job")
+
+
 async def test_cancelling_a_running_job_still_tells_the_branch(tmp_path: Path) -> None:
     sink, tool = RecordingSink(), ScriptedTool()
     tool.block = asyncio.Event()

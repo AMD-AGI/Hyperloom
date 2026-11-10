@@ -32,6 +32,8 @@ P50_BELOW_THRESHOLD = "p50_gain_below_threshold"
 # answer is the client's quality call, recorded for the specialist and never a refusal.
 _EXTRA_FAILED_REQUESTS = "extra_failed_requests"
 _GUARDS = (("p90_regressed", GRADED_INTVTY), ("output_regressed", GRADED_OUTPUT))
+#: The refusals that say only that the candidate is slower than its parent: the P50 bar and the two speed guards.
+SPEED_GATES = frozenset({P50_BELOW_THRESHOLD, *(name for name, _ in _GUARDS)})
 _RECORDED_AXES = (
     GRADED_INTVTY_P50,
     GRADED_INTVTY,
@@ -148,4 +150,4 @@ def confirm(first: Judgement, retest: Mapping[str, float], parent: Mapping[str, 
     )
 
 
-__all__ = ["P50_BELOW_THRESHOLD", "compare", "confirm"]
+__all__ = ["P50_BELOW_THRESHOLD", "SPEED_GATES", "compare", "confirm"]

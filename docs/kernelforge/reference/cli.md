@@ -271,6 +271,7 @@ without reaching an agent, so the selection can be checked before anything is sp
 | `--model <name>` | provider default | Agent model. An explicit value wins; otherwise `$CODEX_MODEL` / `$CLAUDE_MODEL` / `$DSH_MODEL`, then the registered provider default. |
 | `--max-turns <n>` | `100` | Max authoring turns. |
 | `--max-recipes <n>` | `0` | Cap how many ranked recipes to try. `0` means uncapped, so every discovered recipe is considered; Hyperloom passes the count its fusion lane budget pays for. |
+| `--deadline-unix <t>` | `0` | Absolute time the run must finish by. Recipes run one after another, so each recipe's forge-loop is handed its own `--deadline-unix`: an even share of the time left, less a closing reserve for the export and manifest. `0` leaves each loop its default budget; Hyperloom passes the end of its fusion lane budget. |
 | `--gpu <id>` | `0` | HIP device id for authoring and A/B. |
 | `--gpu-target <arch>` | auto-detect | Canonical GPU arch the author writes for, e.g. `gfx950`; detected via `rocminfo` when omitted. |
 

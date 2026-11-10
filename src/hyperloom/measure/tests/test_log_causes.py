@@ -250,6 +250,26 @@ def test_a_hip_runtime_error_with_only_the_token_quotes_the_line_that_names_it()
     assert reason == "hip_runtime_error: Search for `hipErrorLaunchFailure' in https://docs.nvidia.com/cuda/"
 
 
+HSA_QUEUE_ABORT_LINE = (
+    ":0:rocdevice.cpp            :3020: 2245381405 us:  Callback: Queue 0x7f2b44400000 aborting with error : "
+    "HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. "
+    "code: 0x29"
+)
+HSA_QUEUE_ABORT_LOG = (
+    "[2000-01-01 00:00:00 TP0] Decode batch. #running-req: 64, #token: 70000, token usage: 0.21\n"
+    + HSA_QUEUE_ABORT_LINE
+    + "\nAborted (core dumped)\n"
+)
+
+
+def test_an_hsa_queue_abort_is_the_candidates_gpu_fault_that_quotes_the_abort_not_a_missing_kernel() -> None:
+    assert _classify("stderr of the launcher", HSA_QUEUE_ABORT_LOG) == (
+        FailureClass.CANDIDATE,
+        "hip_runtime_error: " + HSA_QUEUE_ABORT_LINE,
+    )
+    assert log_causes.missing_hip_kernel(HSA_QUEUE_ABORT_LOG) is None
+
+
 def test_an_absent_symbol_is_a_missing_kernel_that_names_the_symbol() -> None:
     assert _classify(UNDEFINED_SYMBOL_LOG) == (
         FailureClass.CANDIDATE,

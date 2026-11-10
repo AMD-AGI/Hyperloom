@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common.outside_facts import ENV_CONC
+from hyperloom.common.outside_facts import AIPERF_EXPORT_DIR, ENV_CONC
 
 MLPERF_CLIENT_SCRIPT = "mlperf_agentic_client.sh"
 AGENTX_CLIENT_SCRIPTS = frozenset({MLPERF_CLIENT_SCRIPT})
@@ -27,6 +27,10 @@ AGENTX_CLIENT_SCRIPTS = frozenset({MLPERF_CLIENT_SCRIPT})
 # Both client scripts write the pid of the server they boot here, under their RESULT_DIR. The server is setsid'd and
 # re-parented away from the client, so reaping the round's process tree never reaches it.
 AGENTX_SERVER_PIDFILE = "agentx_server.pid"
+
+# Where the AgentX client leaves aiperf's artifacts, relative to the round's directory; a round may nest its benchmark
+# one level down.
+AIPERF_ARTIFACT_DIRS = (AIPERF_EXPORT_DIR, f"*/{AIPERF_EXPORT_DIR}")
 
 BACKEND_ENV = "HYPERLOOM_AGENTIC_BACKEND"
 
@@ -154,7 +158,7 @@ def agentx_concurrency(env: Mapping[str, str] | None = None) -> int:
     without one carries no workload this layer can size a cap from.
     """
     runtime = os.environ if env is None else env
-    raw = str(runtime.get("CONC") or "").strip()
+    raw = str(runtime.get(ENV_CONC) or "").strip()
     return int(raw) if raw.isdigit() and int(raw) > 0 else 0
 
 
@@ -176,3 +180,16 @@ def canonical_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> flo
         return 0.0
     warmup = agentx_warmup_requests(conc) * CANON_SECONDS_PER_WARMUP_REQUEST
     return AGENTX_BOOT_ALLOWANCE_SEC + warmup + CANON_PROFILING_WINDOW_SEC + CANON_FINALISATION_SEC
+
+
+def find_aiperf_artifact(workspace: Path | str, name: str) -> Path | None:
+    """The aiperf artifact ``name`` of the round in ``workspace``, under one of :data:`AIPERF_ARTIFACT_DIRS`."""
+    try:
+        root = Path(workspace)
+        for directory in AIPERF_ARTIFACT_DIRS:
+            for candidate in sorted(root.glob(f"{directory}/{name}")):
+                if candidate.is_file():
+                    return candidate
+    except OSError:
+        return None
+    return None

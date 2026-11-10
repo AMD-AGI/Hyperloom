@@ -5,6 +5,7 @@
 
 from kernelforge.workflows.gemm_tune.evidence import (
     MOE_SHAPE_FIELDS,
+    moe_ck_missed_keys,
     moe_dispatch_keys,
     moe_tuple,
     moe_untuned_csv_text,
@@ -24,6 +25,7 @@ __all__ = [
     "RoutingEvidence",
     "RoutingTarget",
     "analyze_model",
+    "moe_ck_missed_keys",
     "moe_dispatch_keys",
     "moe_tuple",
     "moe_untuned_csv_text",

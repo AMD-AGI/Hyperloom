@@ -30,8 +30,8 @@ These are set in the app container's environment.
 
 | Variable | Required | What it points at |
 | --- | --- | --- |
-| `USER_DATA_PATH` | yes | Absolute, writable directory. Session directories are created below `<model basename>/` here; put it on persistent storage so a restarted run finds its session again. |
-| `HYPERLOOM_RUNNER_CACHE` | yes, for the hosted multi-branch entry | Absolute, writable directory on shared storage that the measurement sandboxes also mount. The hosted multi-branch entry builds the runner cache entry of the commit it runs here (`<cache>/<commit>/`) before the first test. This is the path *on the app host*; the sandboxes may mount the same storage elsewhere (see the template's `HYPERLOOM_RUNNER_CACHE` below). |
+| `USER_DATA_PATH` | yes | Absolute, writable directory. Session directories are created below `<model basename>/` here; put it on persistent storage so a restarted run finds its session again. When the legs of a run may be different host accounts of one group, make it, and the `HYPERLOOM_STATE_DIR` the host gives the run, a directory of that group with the setgid bit (`chmod 2775`): what a leg makes below them then takes the group, and the next leg's account can write there; the entry warns, naming each, when one is not setgid, and refuses one this account cannot write. Below a directory that other accounts can write (that group's, `/tmp`), what a leg writes there never goes through a link, since any account of the group could have put one there: give these two paths, and everything below them, without links in such a directory. |
+| `HYPERLOOM_RUNNER_CACHE` | yes, for the hosted multi-branch entry | Absolute, writable directory on shared storage that the measurement sandboxes also mount. The hosted multi-branch entry builds the runner cache entry of the commit it runs here (`<cache>/<commit>/`) before the first test. When the legs of a run may be different host accounts of one group, make it a directory of that group with the setgid bit (`chmod 2775`): every builder then takes the `.<commit>.flock` lock (mode `0664`). An entry is built in a new temporary directory of the builder's own (`$TMPDIR`, which needs room for one entry and its build environment), never in this directory, and copied in writable by its builder alone; a `.<commit>.tmp-*` directory that a builder killed while copying leaves is removed only by a later builder of the same account, and others build beside it. This is the path *on the app host*; the sandboxes may mount the same storage elsewhere (see the template's `HYPERLOOM_RUNNER_CACHE` below). |
 | `HYPERLOOM_RUNNER_WHEEL_TARGET` | yes, for the hosted multi-branch entry | The measurement image's interpreter and platform, for example `cp310-manylinux_2_28_x86_64`, or `cp314-manylinux_2_28_x86_64` for the Python 3.14 `rocm/vllm` images. The hosted multi-branch entry reads it and builds the runner cache's wheels for it, not for the app container, from the lock of that Python: `requirements/runner-cp314.lock` for `cp314`, `requirements/runner.lock` for the others. An entry holds the wheels of one Python, so deployments whose images run different Pythons need different `HYPERLOOM_RUNNER_CACHE` directories; a sandbox whose interpreter is not the entry's fails its start with `runner_start_failed`. A build by hand passes the tag as `--wheel-target` (see the example at the end). |
 | `HYPERLOOM_SOURCE_REPO` | yes | Where the run's Hyperloom source is fetched from: `OWNER/NAME` on GitHub, any git URL, or a local path (for example a mirror on shared storage when the app host has no GitHub egress). |
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
@@ -58,6 +58,17 @@ template's values to the paths inside the sandbox.
 
 The sandbox serves the model at the path the campaign spec names, so the template must mount the model storage at
 that same path.
+
+### Keeping a sandbox for the next test
+
+On a cluster that queues sandboxes, a measurement sandbox that ends gives its node back to the queue, and the next
+test's sandbox asks again behind every other job of its priority. By default the session therefore keeps a finished
+test's sandbox until the next test's sandbox runs (make-before-break), for at most 1800 s. The grant charges the kept
+sandbox like any other, so the session runs one test fewer at once to leave it room, and it does so only where the grant
+fits at least three tests at the session's TP; a grant that fits one or two, such as 3 sandboxes and 2 GPUs, keeps no
+sandbox and runs every test it fits. A dev sandbox a branch is promised takes the kept sandbox's room first. Set
+`multibranch.make_before_break: false` in the campaign spec (`--no-make-before-break` on `run --measurement hosted`) to
+run every test the grant fits and close each sandbox when its test ends.
 
 ### Starting the runner from the cache
 

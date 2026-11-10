@@ -126,7 +126,10 @@ metadata at boot. There is no separate live `classify` action.
 
 ENABLEMENT is entered when a baseline fails and enablement is admitted
 (`--enablement` is not `off` and the run is not multi-node). It is skipped
-entirely on runs where the baseline boots on the first attempt.
+entirely on runs where the baseline boots on the first attempt. A baseline the
+harness refused to launch because the host lacked the idle GPUs it needs never
+enters it: no server started, so the run stops on the first refusal with
+`stop_reason='host_gpus_unavailable'`.
 
 Admission is controlled by `--enablement {off,launch,eval,all}`,
 defaulting to `all`. `launch` admits the boot-failure lane, `eval` the
@@ -680,8 +683,9 @@ a resumed run.
 
 Every Orchestration turn is stateless: the Coordinator composes one
 unconditional full state projection (mission, `SharedState`, gaps,
-warm-start, scores, and the inbox events since the last turn), so the
-turn never depends on what an earlier turn happened to remember.
+warm-start, scores, the tasks in flight with each explore round's grid,
+and the inbox events since the last turn), so the turn never depends on
+what an earlier turn happened to remember.
 
 - **Cycle directive**: While SWEEP is open and another macro-cycle is
   still feasible, the Coordinator appends one handoff request to an ordinary
@@ -691,7 +695,7 @@ turn never depends on what an earlier turn happened to remember.
   entered; a turn that produced nothing usable leaves the directive empty.
 - **Context tools**: A read-only MCP surface lets the agent pull what the
   projection leaves out — finished outcomes (`get_recent_outcomes`),
-  in-flight work (`get_running_tasks`), failure packets (`get_failure` /
+  a mid-turn re-read of in-flight work (`get_running_tasks`), failure packets (`get_failure` /
   `get_variant_failures`), reference docs (`read_reference`), the raw
   `analysis.md` (`show_analysis_md`), denial history (`why_denied`) — plus
   Transports without MCP tools get the projection only.

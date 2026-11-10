@@ -459,8 +459,9 @@ def _kernel_agent_ctx() -> Any:
 
 @pytest.mark.asyncio
 async def test_kernel_agent_reprofiles_on_change(coord: Coordinator, monkeypatch):
-    """The kernel_agent task (no-GEMM path) reprofiles under its own lease when projected tput (120) diverges from the last measured trace (100), anchoring on the new snapshot."""
+    """The kernel_agent task (no-GEMM path) reprofiles under its own lease when projected tput (120) moved off the last trace's anchor (100), anchoring on the new snapshot."""
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.shared_state.last_roofline_tput = 100.0
     coord.sub = _StubSub(coord.shared_state, landed_tput=120.0)
     monkeypatch.setattr(coord.phase_kernel, "geak_enabled", lambda: False)
     monkeypatch.setattr(coord.phase_kernel, "_gemm_tuning_required_before_kernel_opt", lambda: False)
@@ -668,11 +669,29 @@ def test_serving_config_changes_still_force_a_reprofile(coord: Coordinator, labe
 
 @pytest.mark.asyncio
 async def test_kernel_entry_reprofile_skips_when_unchanged(coord: Coordinator):
-    """Projected tput matching the last measured trace (cur == measured) skips the reprofile."""
+    """Projected tput matching the last trace's anchor (cur == anchor) skips the reprofile."""
     coord.shared_state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
+    coord.shared_state.last_roofline_tput = 100.0
     coord.sub = _StubSub(coord.shared_state)
-    coord.shared_state.cumulative_gain_validated = 0.0  # cur = 100 == measured
+    coord.shared_state.cumulative_gain_validated = 0.0  # cur = 100 == anchor
     coord.shared_state.last_profile_workload = coord.shared_state.current_profile_workload_context()
+
+    await coord.phase_kernel._maybe_reprofile_for_kernel()
+
+    assert coord.sub.tasks_run == []
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_does_not_reprofile_the_stack_its_cycle_just_profiled(coord: Coordinator):
+    """The projection is compared with the anchor the last roofline left, never with the snapshot's measured tok/s."""
+    state = coord.shared_state
+    state.baseline_tput = 310.62342
+    state.cumulative_gain_validated = 9.694526883651713
+    projected = coord.phase_kernel.current_tput_from_validated_gain()
+    state.roofline_snapshots = [{"achieved_tok_per_sec": 316.6582}]
+    state.last_roofline_tput = projected
+    state.last_profile_workload = state.current_profile_workload_context()
+    coord.sub = _StubSub(state)
 
     await coord.phase_kernel._maybe_reprofile_for_kernel()
 
@@ -998,3 +1017,48 @@ async def test_a_failed_baseline_arm_does_not_block_a_current_best_that_moved_of
     await _fail_prelude_roofline(coord, _PROFILED, _SPLIT_FAILED)
 
     assert await coord.phase_prelude.enqueue_internal_analysis_task(reason="cycle_start") is not None
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_initial_analysis_is_asked_for_again_until_its_keys_run_out(session_dir):
+    """An initial analysis cancelled from outside the run never ran, so PRELUDE waits on a fresh one, a bounded number of times."""
+    from datetime import datetime, timedelta, timezone
+
+    from hyperloom.orchestrator.phases import machine_state as ps
+    from hyperloom.orchestrator.state import task_registry
+    from hyperloom.orchestrator.state.task_registry import TaskSpec
+
+    from .conftest import make_mock_critic_coordinator
+
+    c = make_mock_critic_coordinator(session_dir)
+    state = c.shared_state
+    now = datetime.now(timezone.utc)
+    state.phase = ps.PHASE_PRELUDE
+    state.phase_started_unix = (now - timedelta(minutes=1)).timestamp()
+    state.start_ts = (now - timedelta(minutes=2)).isoformat()
+    state.max_minutes = 96 * 60
+    state.baseline_tput = 100.0
+    try:
+        kind = c.phase_prelude.internal_analysis_kind()
+        cancelled, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind=kind, params={}, idempotency_key="internal-analysis-prelude_initial")
+        )
+        requested = [cancelled.task_id]
+        while state.auto_roofline_pending_task_id or len(requested) == 1:
+            await c.tasks.transition(requested[-1], "cancelled")
+            state.auto_roofline_pending_task_id = requested[-1]
+            await c.phase_machine._release_holds_no_task_will_settle()
+            if not state.auto_roofline_pending_task_id:
+                break
+            assert state.auto_roofline_pending_task_id not in requested
+            assert (await c.tasks.get(state.auto_roofline_pending_task_id)).state == "queued"
+            assert ps.compute_next_phase(state) is None
+            requested.append(state.auto_roofline_pending_task_id)
+            assert len(requested) <= task_registry.RETRY_KEY_ATTEMPTS
+
+        assert len(requested) > 1, "the cancelled initial analysis was not asked for again"
+        assert len(requested) == task_registry.RETRY_KEY_ATTEMPTS
+        assert [t for t in await c.tasks.queued() if t.kind == kind] == []
+        assert ps.compute_next_phase(state) is not None
+    finally:
+        await c.stop()

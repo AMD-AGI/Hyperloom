@@ -107,7 +107,7 @@ def test_a_record_is_judged_once_the_gate_judged_a_test_it_measured(
 def test_the_local_blackboard_implements_every_interface_method() -> None:
     names = [name for name, member in inspect.getmembers(interfaces.Blackboard) if inspect.iscoroutinefunction(member)]
 
-    assert len(names) == 46
+    assert len(names) == 47
     assert all(getattr(LocalBlackboard, name) is not getattr(interfaces.Blackboard, name) for name in names)
 
 
@@ -204,6 +204,7 @@ async def test_each_lineage_event_has_one_writer(open_as: Open, role: Role, even
         LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", recipe_digest="sha256:c0"),
         LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", driver=BranchDriver.AUTONOMOUS),
         LineageEvent(LineageKind.STOP, "s1", driver=BranchDriver.AUTONOMOUS),
+        LineageEvent(LineageKind.STOP, "s1", focus="attention"),
         LineageEvent(LineageKind.PROBATION, "s1"),
         LineageEvent(LineageKind.STOP, "s1", tests=4),
         LineageEvent(LineageKind.PROBATION, INTEGRATION_BRANCH, tests=4),
@@ -231,6 +232,19 @@ async def test_a_branch_an_autonomous_agent_drives_is_known_from_its_open_even_w
         "b01": BranchDriver.SPECIALIST,
         "b02": BranchDriver.AUTONOMOUS,
     }
+
+
+async def test_a_branch_carries_the_focus_its_open_names_and_one_opened_without_reads_unfocused(
+    open_as: Open,
+) -> None:
+    scheduler = open_as(Role.SCHEDULER)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "b01", from_commit="c0", focus="attention"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "b02", from_commit="c0"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "b01", reason="gave up"))
+
+    focus = {node.branch: node.focus for node in (await open_as(Role.INTEGRATOR).lineage()).branches}
+    assert focus == {INTEGRATION_BRANCH: "", "b01": "attention", "b02": ""}
 
 
 async def test_a_running_branch_is_held_on_probation_once_a_stall(open_as: Open) -> None:

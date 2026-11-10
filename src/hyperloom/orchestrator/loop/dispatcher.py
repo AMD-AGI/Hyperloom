@@ -43,13 +43,9 @@ from ..policy.gate import (
 )
 from ..policy.projection import serving_tp_for_policy
 from ..policy.specialist_in_flight import specialist_in_flight_denial
-from ..bus.gpu_pool import (
-    GPU_LEASE_TTL_GRACE,
-)
-from ..bus.resource_lock import (
-    KNOWN_LANES,
-    _expand_lanes,
-)
+from ..bus.gpu_pool import GPU_LEASE_TTL_GRACE
+from ..bus.resource_lock import KNOWN_LANES, _expand_lanes
+from ._dead_holder import DeadHolderAccountingMixin
 from ._explore_grid import explore_grid_denial
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension
@@ -147,11 +143,13 @@ class _InflightAction(NamedTuple):
     scope: CancelScope
 
 
-class DispatcherCollaborator(CoordinatorCollaborator):
+class DispatcherCollaborator(DeadHolderAccountingMixin, CoordinatorCollaborator):
     """Handles specialist dispatch: budget gating, action routing, and task enqueue."""
 
-    def __init__(self, coordinator) -> None:
+    def __init__(self, coordinator, *, refresh_admission_freeze: Callable[[], Awaitable[None]] | None = None) -> None:
         super().__init__(coordinator)
+        # Re-derives :attr:`admission_frozen` once the pump has booked; unwired, the flag is left as set.
+        self._refresh_admission_freeze = refresh_admission_freeze
         # Task ids already charged a failure by the dead-holder reclaim path, so
         # a late normal result for the same task cannot double-count it.
         self._dead_holder_accounted: set[str] = set()
@@ -444,7 +442,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 )
         except (sqlite3.Error, ValueError):
             log.exception("dispatcher: dead-running task reclaim failed")
-        dead_tasks.extend(self._coord.reconciler.last_report.failed_tasks)
+        dead_tasks.extend(self._coord.reconciler.take_failed_tasks())
         if dead_tasks:
             try:
                 await self._account_dead_holder_failures(dead_tasks, reason="dead_holder_pump")
@@ -465,11 +463,14 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Dispatched tasks outlive the pump and queue their completion for a later
         one. The pump repeats while a pass books something, so lanes freed by
         completions already queued are refilled in the same call. New spawns stop
-        while the phase budget is spent or :attr:`admission_frozen` is set.
+        while the phase budget is spent or :attr:`admission_frozen` is set, which
+        is re-derived after a drain that booked so a hold that booking settled is not read stale.
         """
         await self._reclaim_stale_dispatch_state()
         while True:
             booked = await self._drain_completions()
+            if booked and self._refresh_admission_freeze is not None:
+                await self._refresh_admission_freeze()
             shutting_down = await self._cancel_inflight_that_outlived_the_session()
             if not shutting_down and not self.admission_frozen and not self.dispatch_paused_for_phase_budget():
                 await self._spawn_fitting_queued()
@@ -523,10 +524,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 continue
             base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
             child_key_prefix = f"{base_key}-reconcile"
-            if await self.tasks.exists_with_key_prefix(
-                task.kind,
-                child_key_prefix,
-                states=("succeeded", "queued", "running"),
+            if any(
+                child.state in ("succeeded", "queued", "running")
+                for child in await self.tasks.with_key_prefix(task.kind, child_key_prefix)
             ):
                 continue
             for attempt in range(1, 6):
@@ -1000,45 +1000,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             int(floor_ttl_sec or 0),
             math.ceil(max(0.0, stop_at.remaining()) * (1.0 + GPU_LEASE_TTL_GRACE)),
         )
-
-    async def _account_dead_holder_failures(
-        self,
-        task_ids: list[str],
-        *,
-        reason: str,
-    ) -> None:
-        """Charge a failure for each task reclaimed from a dead lease holder.
-
-        A holder killed from outside this process (its lease reaped by
-        ``reap_dead_holders``) never returns a result, so without this the
-        per-action streak counters never see the death and the streak-based
-        auto-terminate stays blind to the whole failure mode.
-
-        Args:
-            task_ids: Task ids just transitioned ``running -> failed`` by the
-                dead-holder reclaim.
-            reason: Reclaim reason label, echoed into the failure result.
-        """
-        for task_id in task_ids:
-            if task_id in self._dead_holder_accounted:
-                continue
-            self._dead_holder_accounted.add(task_id)
-            try:
-                task = await self.tasks.get(task_id)
-            except TaskNotFound:
-                continue
-            error = f"lease holder process died before reporting a result; task reclaimed by {reason}"
-            await self._coord.writeback.handle_unpromotable_result(
-                task,
-                {"status": "failed", "error_class": "dead_holder_reaped", "error": error},
-            )
-            if task.kind == "specialist" and not self.owes_result(task_id):
-                await self._record_specialist_settlement(task, SubAgentResult(task_id, "failed", {}, error=error))
-            log.warning(
-                "dispatcher: counted dead-holder death of task=%s kind=%s as an action failure",
-                task_id,
-                task.kind,
-            )
 
     async def reap_dispatched_task(self, task: Task, result: SubAgentResult) -> None:
         """Run completion bookkeeping for one finished dispatched task.

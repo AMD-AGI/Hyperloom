@@ -566,6 +566,44 @@ def test_csv_jit_kernel_rows_returns_each_pair_once_in_first_seen_order(tmp_path
     assert aj.csv_jit_kernel_rows(csv_path) == [("kernel_b", "ck"), ("kernel_a", "ck"), ("kernel_a", "cktile")]
 
 
+def test_csv_jit_kernel_rows_keeps_only_the_last_row_of_a_dispatch_key(tmp_path):
+    csv_path = tmp_path / "a8w8_tuned_gemm.csv"
+    csv_path.write_text(
+        "gfx,cu_num,M,N,K,q_dtype_w,kernelId,kernelName\n"
+        "gfx950,256,64,57344,8192,torch.int8,46,replaced_int8_kernel\n"
+        "gfx950,256,64,57344,8192,torch.float8_e4m3fn,17,winning_fp8_kernel\n"
+        "gfx950,256,128,57344,8192,torch.int8,46,other_shape_kernel\n",
+        encoding="utf-8",
+    )
+    assert aj.csv_jit_kernel_rows(csv_path, frozenset({("gfx950", 256)})) == [
+        ("winning_fp8_kernel", ""),
+        ("other_shape_kernel", ""),
+    ]
+
+
+def test_csv_jit_kernel_rows_does_not_let_another_libtype_replace_a_row(tmp_path):
+    csv_path = tmp_path / "a8w8_bpreshuffle_tuned_gemm.csv"
+    csv_path.write_text(
+        "gfx,cu_num,M,N,K,libtype,kernelName\ngfx950,256,64,512,7168,ck,ck_kernel\ngfx950,256,64,512,7168,cktile,tile_kernel\n",
+        encoding="utf-8",
+    )
+    assert aj.csv_jit_kernel_rows(csv_path) == [("ck_kernel", "ck"), ("tile_kernel", "cktile")]
+
+
+def test_serving_modules_cover_rows_when_a_replaced_row_is_missing_from_so(tmp_path):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    (jit_dir / "module_gemm_a8w8.so").write_bytes(b"padding a8w8_rowwise_winner padding")
+    csv_path = tmp_path / "a8w8_tuned_gemm.csv"
+    csv_path.write_text(
+        "gfx,cu_num,M,N,K,q_dtype_w,kernelName\n"
+        "gfx950,256,64,57344,8192,torch.int8,a8w8_rowwise_replaced\n"
+        "gfx950,256,64,57344,8192,torch.float8_e4m3fn,a8w8_rowwise_winner\n",
+        encoding="utf-8",
+    )
+    assert aj.serving_modules_cover_rows(jit_dir, ("module_gemm_a8w8",), aj.csv_jit_kernel_rows(csv_path))
+
+
 def test_serving_modules_cover_rows_when_names_are_in_so(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()

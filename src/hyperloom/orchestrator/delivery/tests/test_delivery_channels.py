@@ -18,6 +18,7 @@ from hyperloom.orchestrator.actions.executors._nogit_patch import (
 from hyperloom.orchestrator.delivery import file_digest, ledger
 from hyperloom.orchestrator.delivery.deliverable import declared_targets
 from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessDispatcher
+from hyperloom_common.git_safety import recorded_admin_dir
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -65,7 +66,9 @@ def test_an_uncommitted_worktree_edit_is_still_harvested(tmp_path: Path) -> None
     (worktree / "patches").mkdir()
     (worktree / "patches" / "copy_of_mod.py").write_text("base\n", encoding="utf-8")
 
-    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree, base=base)
+    diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(
+        worktree, admin=recorded_admin_dir(repo, worktree), base=base
+    )
     assert "pkg/mod.py" in diff
     assert "pkg/added.py" in diff
     assert "copy_of_mod.py" not in diff

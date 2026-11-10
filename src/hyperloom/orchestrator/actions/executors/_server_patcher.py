@@ -44,6 +44,11 @@ _VLLM_PROFILER_SENTINELS: tuple[str, ...] = (
 _VLLM_GRAPH_CAPTURE_MIN_VERSION: tuple[int, ...] = (0, 26)
 _VLLM_GRAPH_CAPTURE_SENTINEL: tuple[str, ...] = ("vllm", "profiler", "graph_capture.py")
 _VLLM_GRAPH_CAPTURE_MARKERS: tuple[str, ...] = ("graph_capture_profiler", "capture_traces")
+# From 0.32 the patch builds the capture profiler in ``wrapper.py``, so ``capture_traces`` is written there and
+# ``graph_capture.py`` keeps only the context manager.
+_VLLM_WRAPPER_MIN_VERSION: tuple[int, ...] = (0, 32)
+_VLLM_WRAPPER_SENTINEL: tuple[str, ...] = ("vllm", "profiler", "wrapper.py")
+_VLLM_WRAPPER_MARKERS: tuple[str, ...] = ("capture_traces",)
 
 # xDiT: SHA-based version gating.  ``pip show xfuser`` always reports
 # ``0.4.5`` regardless of the actual commit, so version detection reads
@@ -641,7 +646,13 @@ def _vllm_graph_capture_sentinel(version: str, install_root: Path) -> tuple[tupl
     vt = _version_tuple(version)
     if vt is None or vt < _VLLM_GRAPH_CAPTURE_MIN_VERSION:
         return ()
-    return ((install_root.joinpath(*_VLLM_GRAPH_CAPTURE_SENTINEL), _VLLM_GRAPH_CAPTURE_MARKERS),)
+    graph_capture = install_root.joinpath(*_VLLM_GRAPH_CAPTURE_SENTINEL)
+    if vt < _VLLM_WRAPPER_MIN_VERSION:
+        return ((graph_capture, _VLLM_GRAPH_CAPTURE_MARKERS),)
+    return (
+        (graph_capture, _VLLM_GRAPH_CAPTURE_MARKERS[:1]),
+        (install_root.joinpath(*_VLLM_WRAPPER_SENTINEL), _VLLM_WRAPPER_MARKERS),
+    )
 
 
 def _discover_vllm_install() -> tuple[str, Path] | None:

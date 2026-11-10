@@ -116,13 +116,18 @@ class MachinePhase(CoordinatorCollaborator):
             log.exception("Coordinator: save after phase init failed")
 
     def _reopen_a_session_that_was_left_closed(self) -> None:
-        """Put a session persisted in CLOSE back at the phase machine's entrance."""
+        """Put a session persisted in CLOSE back at the phase machine's entrance, as the next macro-cycle.
+
+        The closed cycle's records -- the Forge controller's terminal result above all -- describe a pass that has
+        ended; kept as the reopened pass's own, they would end its KERNEL on the first tick.
+        """
         state = self.shared_state
         log.info(
             "Coordinator: session resumed in CLOSE, a phase with no way out; "
             "reopening at PRELUDE so the new budget can be spent on the work "
             "the earlier leg stopped short of."
         )
+        self._open_next_macro_cycle(state.no_gain_cycle_streak, trigger="reopen")
         _phase_state.record_phase_transition(
             state,
             to_phase=_phase_state.PHASE_PRELUDE,
@@ -188,12 +193,25 @@ class MachinePhase(CoordinatorCollaborator):
         if not state.stop_reason:
             state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
 
+    async def _framework_round_fits(self) -> bool:
+        """Whether FRAMEWORK_AGENT has a round left: work queued or running, or an action its time gate still admits."""
+        if str(self.shared_state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return True
+        if await self.tasks.queued() or await self.tasks.running():
+            return True
+        dispatcher = self._coord.dispatcher
+        return any(
+            dispatcher.time_budget_denial_for_action(action) is None
+            for action in _phase_state.allowed_actions_for(_phase_state.PHASE_FRAMEWORK_AGENT)
+        )
+
     async def _next_phase(self, *, in_flight: _phase_state.WorkInFlight) -> tuple[str, str, dict[str, Any]] | None:
         """The transition the predicates ask for, held while the operator-defined specialist's work is pending."""
         state = self.shared_state
         next_phase = _phase_state.compute_next_phase(
             state,
             in_flight=in_flight,
+            framework_round_fits=await self._framework_round_fits(),
             flags=self.phase_flags(),
         )
         if next_phase is None or str(state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
@@ -202,6 +220,24 @@ class MachinePhase(CoordinatorCollaborator):
             return next_phase
         log.info("phase_machine: holding %s exit (reason=%s) for operator work", state.phase, next_phase[1])
         return None
+
+    def _transition_pending(self, next_phase: tuple[str, str, dict[str, Any]] | None) -> bool:
+        return next_phase is not None and next_phase[0] != (self.shared_state.phase or "").upper()
+
+    async def refresh_admission_freeze(self) -> None:
+        """Re-derive the freeze after reactors, releasing any hold they settled."""
+        state = self.shared_state
+        await self._release_holds_no_task_will_settle()
+        in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
+        in_prelude = str(state.phase or "").upper() == _phase_state.PHASE_PRELUDE
+        next_phase = await self._next_phase(
+            in_flight=_phase_state.WorkInFlight(
+                enablement=in_enablement and await self._coord.enablement_lane.enablement_in_flight(),
+                kernel=await self._coord.phase_kernel.agent_in_flight(),
+                prelude=in_prelude and await self._prelude_work_in_flight(),
+            ),
+        )
+        self._coord.dispatcher.admission_frozen = self._transition_pending(next_phase)
 
     def settle_escalate_hint(self, move: Transition) -> None:
         """Consume or discard the pending escalate hint, according to what drove this transition."""
@@ -241,13 +277,15 @@ class MachinePhase(CoordinatorCollaborator):
         ):
             state.no_gain_cycle_streak = int(move.evidence.get("no_gain_cycle_streak_effective", 0) or 0)
 
-    def _open_looped_back_cycle(self, move: Transition, prior_cycle: int) -> None:
-        """Open the macro-cycle a loopback transition has just entered."""
+    def _open_next_macro_cycle(self, no_gain_cycle_streak: int, *, trigger: str) -> None:
+        """Open the next macro-cycle and record the strategy it starts on."""
         state = self.shared_state
-        state.open_macro_cycle(no_gain_cycle_streak=int(move.evidence.get("no_gain_cycle_streak_effective") or 0))
+        prior_cycle = state.macro_cycle
+        state.open_macro_cycle(no_gain_cycle_streak=no_gain_cycle_streak)
         self._coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
         log.info(
-            "Coordinator: macro-cycle reloop %d -> %d (no_gain_streak=%d, gain_anchor=%.4f)",
+            "Coordinator: macro-cycle %s %d -> %d (no_gain_streak=%d, gain_anchor=%.4f)",
+            trigger,
             prior_cycle,
             state.macro_cycle,
             state.no_gain_cycle_streak,
@@ -307,7 +345,7 @@ class MachinePhase(CoordinatorCollaborator):
             evidence=move.evidence,
         )
         if is_loopback:
-            self._open_looped_back_cycle(move, prior_cycle)
+            self._open_next_macro_cycle(int(move.evidence.get("no_gain_cycle_streak_effective") or 0), trigger="reloop")
         # Mirror the phase boundary into the operator-facing lifecycle log using the ENTER status (a point-in-time
         # marker, not a START/END interval).
         _phase_state.record_lifecycle_event(
@@ -369,7 +407,7 @@ class MachinePhase(CoordinatorCollaborator):
         await self._coord.phase_internal.maybe_enqueue_trajectory_reviewer()
         dispatcher = self._coord.dispatcher
         # Admission stays frozen for as long as a transition is pending.
-        dispatcher.admission_frozen = next_phase is not None and next_phase[0] != (state.phase or "").upper()
+        dispatcher.admission_frozen = self._transition_pending(next_phase)
         if not dispatcher.admission_frozen:
             return
         target, reason, evidence = next_phase
@@ -405,11 +443,24 @@ class MachinePhase(CoordinatorCollaborator):
         the writeback that settles the phase's hold, so the hold would run to its allowance.
         """
         phase = str(self.shared_state.phase or "").upper()
+        if phase == _phase_state.PHASE_PRELUDE:
+            await self._ask_again_for_a_cancelled_initial_analysis()
         if phase in (_phase_state.PHASE_PRELUDE, _phase_state.PHASE_ENABLEMENT):
             # Both phases hold their exit for this marker.
             await self._coord.phase_kernel.release_finished_roofline_gate()
         # SWEEP waits for its conc_sweep's outcome; checked on a resumed process's first decision only.
         await self._coord.phase_sweep.resume_unsettled_sweep()
+
+    async def _ask_again_for_a_cancelled_initial_analysis(self) -> None:
+        """Request PRELUDE's initial analysis again when the task its hold names was cancelled before it analyzed."""
+        state = self.shared_state
+        prelude = self._coord.phase_prelude
+        named = (state.auto_roofline_pending_task_id or "").strip()
+        task = await self.tasks.find(named, kind=prelude.internal_analysis_kind()) if named else None
+        if task is None or task.state != "cancelled":
+            return
+        state.auto_roofline_pending_task_id = ""
+        await prelude.maybe_enqueue_prelude_initial_analysis_after_baseline()
 
     async def _drain_for_transition(self, *, prior: str, target: str, reason: str, evidence: Any) -> bool:
         """Clear the way to ``target`` and return whether the transition may commit on this tick.

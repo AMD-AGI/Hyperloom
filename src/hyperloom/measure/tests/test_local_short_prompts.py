@@ -20,7 +20,6 @@ import pytest
 from hyperloom.measure import local
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.phases import SHORT_PROMPTS
-from hyperloom.measure.ports import DEV_SANDBOX_PORTS
 from hyperloom.measure.socket import RoundPlan
 from hyperloom.measure.long_context.held import FLUSHED
 from hyperloom.measure.short_prompts.outputs import FAILED, OK, read_outputs
@@ -40,13 +39,11 @@ NOT_HELD = "the test's server was not held up for the check"
 class _Servers:
     """The servers rounds bring up, each a real HTTP server; ``started`` names the rounds that booted one.
 
-    ``port`` is the lifecycle's own pick (a free port by default). The backend may not keep it, as it does not keep one a
-    dev sandbox serves on, so a server listens where the round's ``server_lifecycle`` says, as a real one would."""
+    ``port`` is the lifecycle's own pick, a free port; a server listens where the round's ``server_lifecycle`` says, as a
+    real one would."""
 
-    def __init__(
-        self, monkeypatch, *, eligible: bool = True, framework: str = "sglang", port: int | None = None
-    ) -> None:
-        self.port = free_port() if port is None else port
+    def __init__(self, monkeypatch, *, eligible: bool = True, framework: str = "sglang") -> None:
+        self.port = free_port()
         self.live: FakeServer | None = None
         self.started: list[str] = []
         self.teardowns = 0
@@ -133,19 +130,6 @@ def test_a_planned_test_answers_on_its_own_server_after_its_measured_round_and_b
     assert (outcome.returncode, outcome.failure_class) == (0, None)
 
 
-def test_a_lifecycle_port_a_dev_sandbox_serves_on_is_replaced_and_the_check_asks_the_server_on_the_replacement(
-    monkeypatch, tmp_path, cache
-):
-    grid = _grid(monkeypatch, tmp_path, port=DEV_SANDBOX_PORTS.start)
-
-    outcome = _run(tmp_path, cache)
-
-    ports = [c["launch"].server_lifecycle["port"] for c in grid.calls]
-    assert len(ports) == 1 and not set(ports) & set(DEV_SANDBOX_PORTS), "the server is given a replacement"
-    assert [e.status for e in read_outputs(tmp_path / "out").processes] == [OK]
-    assert grid.servers.flushes == 1 and outcome.returncode == 0
-
-
 def test_the_check_is_apart_from_the_test_its_rounds_its_files_and_its_result_directory_are_the_tests_own(
     monkeypatch, tmp_path, cache
 ):
@@ -190,7 +174,7 @@ def test_a_test_whose_round_failed_runs_no_check(monkeypatch, tmp_path, cache):
     assert SHORT_PROMPTS not in [p.name for p in outcome.phases], "nor asked the prompts"
 
 
-def test_a_graded_test_answers_after_its_measured_round_on_the_server_its_warmup_booted(monkeypatch, tmp_path, cache):
+def test_a_graded_test_answers_after_its_evaluation_on_the_server_its_warmup_booted(monkeypatch, tmp_path, cache):
     grid = _grid(monkeypatch, tmp_path)
     point = _point(tmp_path, "acc", run_eval="true")
 
@@ -205,14 +189,11 @@ def test_a_graded_test_answers_after_its_measured_round_on_the_server_its_warmup
         )
     )
 
-    assert _names(grid) == ["warmup", "test"]
-    assert [c["launch"].server_lifecycle["cleanup"] for c in grid.calls] == [False, False]
-    assert (
-        grid.calls[1]["recipe"].base.extra_envs == {"RUN_EVAL": "false"}
-        and grid.calls[1]["launch"].server_already_ready is True
-    )
+    assert _names(grid) == ["warmup", "test", "eval"]
+    assert [c["launch"].server_lifecycle["cleanup"] for c in grid.calls] == [False, False, False]
+    assert [c["launch"].server_already_ready for c in grid.calls] == [False, True, True]
     assert grid.servers.started == ["warmup"] and [e.status for e in read_outputs(tmp_path / "out").processes] == [OK]
-    assert [r.phase for r in outcome.rounds] == ["warmup", "accuracy", "measure"]
+    assert [r.phase for r in outcome.rounds] == ["warmup", "measure", "accuracy"]
 
 
 def test_an_agentx_test_holds_its_server_for_the_check_and_reports_no_accuracy_round(monkeypatch, tmp_path, cache):
@@ -224,18 +205,17 @@ def test_an_agentx_test_holds_its_server_for_the_check_and_reports_no_accuracy_r
     )
 
     assert _names(grid) == ["warmup", "test"] and grid.calls[1]["launch"].server_already_ready is True
-    assert grid.calls[1]["recipe"].base.extra_envs is None, "an AgentX round carries nothing of an evaluation"
+    assert [c["recipe"].base.extra_envs for c in grid.calls] == [None, None], "an AgentX round carries no evaluation"
     assert [r.phase for r in outcome.rounds] == ["warmup", "measure"]
     assert [e.status for e in read_outputs(tmp_path / "out").processes] == [OK]
 
 
-def test_a_test_whose_evaluation_failed_runs_no_check_although_its_round_kept_its_status(monkeypatch, tmp_path, cache):
-    """A benchmark that served its whole protocol is ``succeeded`` when only its accuracy evaluation fails: the evaluation's
-    return code is what says the test failed, and a test that failed spends no time on the check."""
+def test_a_test_whose_evaluation_failed_runs_no_check(monkeypatch, tmp_path, cache):
+    """The evaluation's return code is what says the test failed, and a test that failed spends no time on the check."""
     grid = _grid(monkeypatch, tmp_path)
-    result = grid.result("test", returncode=0)
+    result = grid.result("eval", returncode=0)
     (Path(result.workspace) / "eval_returncode").write_text("3\n", encoding="utf-8")
-    grid.answers["test"] = result
+    grid.answers["eval"] = result
     call = _call(
         tmp_path,
         _point(tmp_path, "acc", run_eval="true"),
@@ -248,7 +228,7 @@ def test_a_test_whose_evaluation_failed_runs_no_check_although_its_round_kept_it
 
     outcome = LocalMeasurementBackend().run_test(call)
 
-    assert _names(grid) == ["test"], "no server of the check was started"
+    assert _names(grid) == ["test", "eval"], "no server of the check was started"
     assert outcome.returncode == 3 and SKIPPED in outcome.stderr
     assert not (tmp_path / "out" / SHORT_PROMPTS_DIR).exists()
 
@@ -297,6 +277,19 @@ def test_a_sweep_answers_on_its_arms_server_after_its_last_level(monkeypatch, tm
     assert grid.servers.started == ["c4"] and list(read_outputs(tmp_path / "out").completed) == [0]
 
 
+def test_a_graded_sweep_answers_on_its_arms_server_after_its_one_evaluation(monkeypatch, tmp_path, cache):
+    grid = _grid(monkeypatch, tmp_path)
+    points = (_point(tmp_path, "c4", conc=4, run_eval="true"), _point(tmp_path, "c2", conc=2, run_eval="true"))
+    call = _call(tmp_path, *points, prep="conc_sweep", accuracy=True, short_prompts=staged_plan(cache))
+
+    outcome = LocalMeasurementBackend().run_test(call)
+
+    assert _names(grid) == ["c4", "c4", "c2", "eval"]
+    assert [c["launch"].server_lifecycle["cleanup"] for c in grid.calls] == [False] * 4, "the check follows them all"
+    assert grid.servers.started == ["c4"] and list(read_outputs(tmp_path / "out").completed) == [0]
+    assert [(r.point, r.phase) for r in outcome.rounds] == [(0, "measure"), (1, "measure"), (0, "accuracy")]
+
+
 def test_a_call_naming_a_prompt_set_that_is_not_staged_is_refused_before_any_server_starts(
     monkeypatch, tmp_path, cache
 ):
@@ -327,10 +320,10 @@ def test_a_profile_or_repro_test_does_not_run_the_check(tmp_path, cache, kind):
         local._validate_checks(call)
 
 
-def test_a_call_with_no_plan_is_run_exactly_as_before(monkeypatch, tmp_path):
+def test_a_call_with_no_plan_reclaims_its_server_with_its_last_round(monkeypatch, tmp_path):
     grid = _grid(monkeypatch, tmp_path)
 
     LocalMeasurementBackend().run_test(_call(tmp_path))
 
-    assert _names(grid) == ["test"] and grid.calls[0]["launch"].server_lifecycle is None
+    assert _names(grid) == ["test"] and grid.calls[0]["launch"].server_lifecycle["cleanup"] is True
     assert not (tmp_path / "out" / SHORT_PROMPTS_DIR).exists()

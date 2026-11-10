@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -145,6 +146,23 @@ def test_the_curators_answer_is_read_from_its_json_object_though_prose_with_brac
     steps, refused = read_steps(answer + "\nThe others {merge, rewrite} can wait.", found)
 
     assert ([(step.action, step.lesson) for step in steps], refused) == ([(RETIRE, wrong)], [])
+
+
+def test_an_answer_the_curator_cannot_read_says_whether_it_was_empty_and_how_it_began(
+    pool: LessonPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    found = offer("sess-1", pool.lessons(), pool.standings())
+    prose = "No step is needed: every lesson offered is short, true and specific already. " * 3
+
+    with caplog.at_level(logging.WARNING):
+        empty = read_steps(" \n", found)
+        unread = read_steps(prose, found)
+
+    assert empty == ([], ["the answer is empty"])
+    assert unread[0] == [] and len(unread[1]) == 1
+    assert unread[1][0].startswith("the answer holds no JSON object with a list of actions: 'No step is needed:")
+    assert unread[1][0].endswith(f"({len(prose)} characters)")
+    assert prose.strip() in caplog.text
 
 
 async def test_the_curator_reads_and_writes_the_pool_off_the_event_loop(

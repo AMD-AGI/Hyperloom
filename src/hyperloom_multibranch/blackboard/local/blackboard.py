@@ -82,12 +82,14 @@ from hyperloom_multibranch.contracts.blackboard.records import (
     LlmUsage,
     LlmUsageRecord,
     ManifestFingerprint,
+    MapDirection,
     MergeAttempt,
     BlackboardSnapshot,
     OpShares,
     QuarantineEvent,
     RecordedValue,
     RegressionCase,
+    RetractionRef,
     SearchHit,
     SessionProfile,
     StartupBrief,
@@ -130,7 +132,7 @@ from hyperloom_multibranch.blackboard.local.segments import (
     make_writer_id,
     require_token,
 )
-from hyperloom_multibranch.blackboard.local.state import ClaimDecision, JudgementWrite, BlackboardState
+from hyperloom_multibranch.blackboard.local.state import AgentMapWrite, ClaimDecision, JudgementWrite, BlackboardState
 from hyperloom_multibranch.blackboard.local.unfinished import refused_replays, unfinished_leads
 
 SEGMENTS_DIR = "segments"
@@ -365,6 +367,8 @@ def _check_lineage(event: LineageEvent) -> None:
         raise ValueError("only the root event names its commit's recipe digest; judgements name the others'")
     if event.driver is not BranchDriver.SPECIALIST and event.kind is not LineageKind.OPEN:
         raise ValueError(f"only an open event names who drives its branch, not a {event.kind.value} event")
+    if event.focus and event.kind is not LineageKind.OPEN:
+        raise ValueError(f"only an open event names its branch's focus, not a {event.kind.value} event")
 
 
 def _new_lineage(state: BlackboardState, event: LineageEvent) -> bool:
@@ -651,6 +655,7 @@ class LocalBlackboard(
         conclusion: Conclusion,
         commit_id: str | None = None,
         recipe_digest: str | None = None,
+        retracts: RetractionRef | None = None,
     ) -> TestRecord:
         state = self._state()
         request = state.record(request_id).request
@@ -664,9 +669,11 @@ class LocalBlackboard(
             raise NotRecorded(f"the measurement of {request_id} failed; there is nothing to judge")
         if (conclusion in COMMITTING or conclusion is Conclusion.MERGED) != (commit_id is not None):
             raise ValueError(f"a {conclusion.value} judgement names a commit exactly when it makes one")
+        if retracts is not None and conclusion is not Conclusion.COMMITTED:
+            raise ValueError(f"only a committed retraction names what it retracts, not a {conclusion.value} judgement")
         _check_recipe_digest(state, commit_id, recipe_digest)
         summary = f"{conclusion.value}: {judgement.verdict.value} {judgement.gain_pct:+.2f}% on {request_id}"
-        write = JudgementWrite(request_id, judgement, conclusion, commit_id, recipe_digest)
+        write = JudgementWrite(request_id, judgement, conclusion, commit_id, recipe_digest, retracts)
         self._append(EntryKind.JUDGEMENT, write, branch=request.branch, parent=request.parent_commit, summary=summary)
         return self._state().record(request_id)
 
@@ -1033,6 +1040,16 @@ class LocalBlackboard(
 
     async def manifest_fingerprints(self) -> tuple[ManifestFingerprint, ...]:
         return tuple(self._state().fingerprints)
+
+    async def write_agent_map(self, directions: Sequence[MapDirection]) -> None:
+        self._require(Role.SCHEDULER)
+        written = AgentMapWrite(tuple(directions))
+        ids = [item.id for item in written.directions]
+        if "" in ids or len(set(ids)) < len(ids):
+            raise ValueError(f"each direction of Arbor's map has an id, and one no other direction has: {ids}")
+        opened = sum(1 for item in written.directions if item.open)
+        summary = f"Arbor's map: {len(ids)} directions, {opened} open"
+        self._append(EntryKind.AGENT_MAP, written, branch="", parent="", summary=summary)
 
     async def snapshot(self) -> BlackboardSnapshot:
         now = self._clock()

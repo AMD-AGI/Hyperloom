@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from hyperloom_common.coerce import to_str_list
 
+from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
 
@@ -21,6 +22,7 @@ __all__ = [
     "controls_of",
     "effective_fingerprint",
     "is_executable",
+    "keeps_effective_args",
     "normalize_proposal",
 ]
 
@@ -127,3 +129,17 @@ def content_fingerprint(proposal: Mapping[str, Any]) -> str:
     """Fingerprint the change a ``proposal_set`` entry or grid row asks for, independent of its name and stack."""
     fields = normalize_proposal(proposal)
     return effective_fingerprint(fields["extra_args"], fields["extra_envs"], controls=controls_of(fields))
+
+
+def keeps_effective_args(
+    benchmark: Mapping[str, Any], base_mode: str, variant_mode: str, remove_args: list[str], unset_envs: list[str]
+) -> bool:
+    """Whether a KEEP persists as a replace snapshot of the argv it launched.
+
+    Native KEEP edits remain relative to the verified recipe unless explicitly replaced.
+    """
+    return (
+        base_mode == "replace"
+        or variant_mode == "replace"
+        or (not is_magpie_agentx(benchmark) and bool(remove_args or unset_envs))
+    )

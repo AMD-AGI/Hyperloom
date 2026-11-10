@@ -132,7 +132,8 @@ class Farm:
     server inherits no meta directory of its own, the image's, which the server is told to read aiter's sources from.
 
     When the sheet patches aiter's ``csrc`` or ``hsa`` (``meta_patched``), ``aiter_meta`` is the farm's own copy of the
-    meta directory instead, and the server must read that one."""
+    meta directory instead, and the server must read that one. ``mirrored`` are the image's directories the farm mirrors
+    (each package's, and the meta directory's where the farm lays one): its untouched files are links into them."""
 
     site: Path
     packages: tuple[str, ...]
@@ -140,6 +141,7 @@ class Farm:
     aiter_meta: Path | None = None
     meta_patched: bool = False
     native: tuple[NativeModule, ...] = ()
+    mirrored: tuple[Path, ...] = ()
 
 
 def locate_package(import_name: str, python: str, cwd: Path) -> Path:
@@ -308,8 +310,10 @@ def build_farm(
     meta_root = next((root for root in roots if root.import_name == AITER_META_WHEEL_DIR), None)
     packages = [root for root in roots if root is not meta_root]
     native: list[NativeModule] = []
+    mirrored: list[Path] = []
     for root in packages:
         base = locate_package(root.import_name, python, farm_dir.parent)
+        mirrored.append(base)
         if isinstance(root, BuiltRoot):
             native += _build_runtime_root(root, base, site, read_blob)
         elif root.kind == _RUNTIME_KIND:
@@ -320,11 +324,14 @@ def build_farm(
     if meta_root is not None or any(root.import_name == AITER_PACKAGE for root in packages):
         aiter = locate_package(AITER_PACKAGE, python, farm_dir.parent)
         meta = _build_meta_root(meta_root, aiter, site, os.environ if inherited is None else inherited, read_blob)
+        if meta is not None:
+            mirrored.append(image_aiter_meta(aiter))
     rebuilt = tuple(_plain(root) for root in packages) + (() if meta_root is None else (_plain(meta_root),))
     if not rebuilt:
         return None
     names = tuple(root.import_name for root in packages)
-    return Farm(site, names, rebuilt, meta, meta_patched=meta_root is not None, native=tuple(native))
+    patched = meta_root is not None
+    return Farm(site, names, rebuilt, meta, patched, tuple(native), tuple(dict.fromkeys(mirrored)))
 
 
 def _build_runtime_root(

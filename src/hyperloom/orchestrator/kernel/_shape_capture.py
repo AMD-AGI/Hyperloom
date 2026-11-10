@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
+from hyperloom.common.ports import pick_server_port
 from hyperloom_common.env import env_bool
 from hyperloom.orchestrator.trace_analysis._capture_shapes import is_capture_fragment as _shared_is_capture_fragment
 
@@ -103,7 +104,7 @@ async def _capture_tunableop_recording(run: _ShapeCaptureRun, state: Any) -> Han
             "vLLM TunableOp shape capture requires an existing baseline_config_path",
             run.capture_dir,
         )
-    capture_port = _pick_shape_capture_port()
+    capture_port = pick_server_port()
     try:
         timeout_sec = int(os.environ.get("HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC") or _DEFAULT_CAPTURE_TIMEOUT_SEC)
     except (TypeError, ValueError):
@@ -413,19 +414,6 @@ def _vllm_dense_shape_capture_required(
     except (TypeError, ValueError):
         return False
     return hidden_size > 0 and intermediate_size > 0
-
-
-def _pick_shape_capture_port() -> int:
-    """Pick a free local port distinct from the production serving port."""
-    import socket
-
-    for _ in range(5):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = int(sock.getsockname()[1])
-        if port != 8888:
-            return port
-    return 18888
 
 
 def _is_tunableop_untuned_row(line: str) -> bool:

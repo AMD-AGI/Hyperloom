@@ -79,7 +79,7 @@ def test_a_challenger_session_plays_the_champion_from_its_first_breach_on_and_re
     started = {PLAYBOOK_KEY: LONGER.label, CHAMPION_KEY: H0.label}
     assert (play.stop_rule(), play.versions()) == (StopRule(stall_tests=8), started)
     assert "on trial in this session" in play.render()
-    assert not play.fall_back(()) and play.fall_back((breach, "stop of b2, held by a near-bar lead"))
+    assert not play.fall_back(()) and play.fall_back((breach, "stop of b2, held by a stranded lead"))
     assert not play.fall_back(("stop of b3, held by a stranded lead",))
     assert (play.playbook, play.stop_rule()) == (H0, StopRule())
     assert play.versions() == {**started, FALLBACK_KEY: breach}

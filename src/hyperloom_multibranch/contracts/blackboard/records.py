@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from hyperloom.contracts.recipe import KernelArtifact, RecipeDelta
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.repo import ResolvedPatch
+from hyperloom_multibranch.contracts.blackboard.exhausted import Exhausted
 from hyperloom_multibranch.contracts.blackboard.peers import (
     BranchLogEntry,
     Intent,
@@ -98,8 +99,23 @@ class Claim:
 
 
 @dataclass(frozen=True)
+class RetractionRef:
+    """What a landed retraction undoes: an autonomous agent's change of its ``iteration``, kept as its keep ``keep``,
+    which its finding ``finding`` found invalid, and the commit ``retracted_commit`` that change landed in."""
+
+    iteration: int
+    keep: int
+    finding: str
+    retracted_commit: str
+
+    def __str__(self) -> str:
+        return f"{self.retracted_commit}, the agent's iteration {self.iteration} (its keep {self.keep}), found invalid by {self.finding}"
+
+
+@dataclass(frozen=True)
 class TestRecord:
-    """Everything known about one test: request, result, judgement, conclusion and commit."""
+    """Everything known about one test: request, result, judgement, conclusion and commit; ``retracts``, what a
+    retraction the gate landed undoes, ``None`` for every other test."""
 
     __test__ = False
 
@@ -113,10 +129,18 @@ class TestRecord:
     judged_at: float | None = None
     withdrawn_at: float | None = None
     withdrawal_reason: str = ""
+    retracts: RetractionRef | None = None
 
     @property
     def request_id(self) -> str:
         return self.request.request_id
+
+    @property
+    def landed_retraction(self) -> bool:
+        """Whether the test is a retraction the gate landed: a commit that undoes a change its own agent found invalid,
+        slower by construction, so no reader may count it as a gain, a worked change or progress."""
+
+        return self.retracts is not None
 
     @property
     def in_flight(self) -> bool:
@@ -193,7 +217,8 @@ class LineageEvent:
     its recipe (``Recipe.digest()``); a judgement names the recipe digest of every other commit. The ``OPEN`` of a
     repair branch names in ``repairs`` the test whose blocked gain it was opened to repair. Only an ``OPEN`` names a
     ``driver`` other than the specialist: an autonomous branch's, written before its agent starts, so a branch whose
-    start fails is known for one too.
+    start fails is known for one too. Only an ``OPEN`` names the ``focus`` the scheduler briefed the branch on, empty
+    when it named none.
 
     ``REROOT`` moves a running branch's head from ``from_commit`` onto ``commit_id``, an integration commit; the
     branch's runtime records it for its own branch once it has moved the branch in the repository. From then on only a
@@ -216,6 +241,7 @@ class LineageEvent:
     repairs: str = ""
     driver: BranchDriver = BranchDriver.SPECIALIST
     tests: int = 0
+    focus: str = ""
 
 
 @dataclass(frozen=True)
@@ -560,7 +586,8 @@ class Probation:
 
 @dataclass(frozen=True)
 class BranchNode:
-    """A branch of the tree; ``probations`` are the stalls it was held through, in the order they began."""
+    """A branch of the tree; ``probations`` are the stalls it was held through, in the order they began, and
+    ``focus`` the one its ``OPEN`` names."""
 
     branch: str
     origin: LineageKind
@@ -573,6 +600,7 @@ class BranchNode:
     repairs: str = ""
     driver: BranchDriver = BranchDriver.SPECIALIST
     probations: tuple[Probation, ...] = ()
+    focus: str = ""
 
 
 @dataclass(frozen=True)
@@ -600,6 +628,22 @@ class LineageView:
             pending.extend([*node.merged_from, node.parent_commit])
         return tuple(seen)
 
+    def built_on(self, commit_id: str) -> frozenset[str]:
+        """``commit_id`` and every commit built on it, through children and the merges that brought it in."""
+
+        children: dict[str, list[str]] = {}
+        for node in self.commits:
+            for source in (node.parent_commit, *node.merged_from):
+                children.setdefault(source, []).append(node.commit_id)
+        found: set[str] = set()
+        pending = [commit_id]
+        while pending:
+            current = pending.pop()
+            if current not in found:
+                found.add(current)
+                pending.extend(children.get(current, ()))
+        return frozenset(found)
+
 
 @dataclass(frozen=True)
 class MergeState:
@@ -618,10 +662,11 @@ class MergeState:
 @dataclass(frozen=True)
 class CommittedCommit:
     """A specialist commit as the integrator sees it; ``gain_pct`` is its own gain over its parent commit,
-    ``merge_attempts`` how many merge attempts it took part in, and ``first_failed_at`` when the first of them that
-    failed was recorded, ``None`` while none failed. A merge fails when it is skipped on a conflict, is not stackable,
-    or its merge test is one the candidate failed, which the integrator leaves pending; a measurement that failed, or a
-    round that superseded it, is retried on the next head and is no failure."""
+    ``merge_attempts`` how many merge attempts it took part in, ``not_stackable`` how many of them were not stackable,
+    and ``first_failed_at`` when the first of them that failed was recorded, ``None`` while none failed. A merge fails
+    when it is skipped on a conflict, is not stackable, or its merge test is one the candidate failed, which the
+    integrator leaves pending; a measurement that failed, or a round that superseded it, is retried on the next head
+    and is no failure."""
 
     commit_id: str
     branch: str
@@ -633,6 +678,7 @@ class CommittedCommit:
     merged_into: str | None = None
     last_merge: MergeState | None = None
     merge_attempts: int = 0
+    not_stackable: int = 0
     first_failed_at: float | None = None
 
 
@@ -725,6 +771,51 @@ class UnfinishedLead:
 
 
 @dataclass(frozen=True)
+class FocusBranch:
+    """A stopped branch the scheduler opened on the same focus as the brief's, as the brief recalls it.
+
+    ``tests`` counts its tests not withdrawn, ``gains_pct`` the gain of each commit it made, ``exhausted`` its latest
+    exhausted record, and ``under_start`` whether the brief's start commit builds on its head.
+    """
+
+    branch: str
+    start_commit: str
+    head_commit: str
+    tests: int
+    gains_pct: tuple[float, ...]
+    stop_reason: str
+    exhausted: Exhausted | None = None
+    under_start: bool = False
+
+
+#: Arbor's status of a direction of its map still to work; any other status sets the direction aside, with its ``why``.
+MAP_OPEN = "open"
+
+
+@dataclass(frozen=True)
+class MapDirection:
+    """A direction of Arbor's map: its map ``id`` (``m-...``), ``title``, Arbor ``status`` and the ``why`` of it.
+
+    ``holder`` is the Arbor branch the share the direction is in was dealt to, empty for one in no share; the branch
+    holds an open direction while it runs. ``ops`` are the profile ops the direction acts on when the map names them
+    exactly; without them, its id, title and why name its ops.
+    """
+
+    id: str
+    title: str
+    status: str
+    why: str = ""
+    holder: str = ""
+    ops: tuple[str, ...] = ()
+
+    @property
+    def open(self) -> bool:
+        """Still to work; the map set aside a direction of any other status."""
+
+        return self.status == MAP_OPEN
+
+
+@dataclass(frozen=True)
 class StartupBrief:
     """What a fill specialist reads at start; ``leads`` and ``lessons`` come from cross-session recall.
 
@@ -733,7 +824,10 @@ class StartupBrief:
     on any branch. ``focus`` is the bottleneck the scheduler opened the branch on, empty when it named none.
     ``settings_menu`` is the settings this session has not tried and ``code_menu`` the source and kernel changes, each
     ranked for the branch, a line each, the ops it acts on and its family's note indented under it; none for a branch
-    of the menu's control.
+    of the menu's control. ``focus_history`` are the stopped branches opened on the same focus op, newest first.
+    ``agent_map`` is what the branch is shown of Arbor's map, in the map's order: the directions that name its focus
+    op, those a running Arbor branch holds, each with its holder in ``map_holders``, and those the map set aside; none
+    in a session without a map.
     """
 
     start_commit: str
@@ -745,6 +839,9 @@ class StartupBrief:
     focus: str = ""
     settings_menu: tuple[str, ...] = ()
     code_menu: tuple[str, ...] = ()
+    focus_history: tuple[FocusBranch, ...] = ()
+    agent_map: tuple[MapDirection, ...] = ()
+    map_holders: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -836,7 +933,8 @@ class BlackboardSnapshot:
     """Everything the blackboard held at ``taken_at``, read at once: what the RSI, the dashboard and the exports use.
     ``resolved_patches`` are the model-written patches of every merge recorded, in the order the merges were.
     ``op_shares`` holds, by commit, the op shares :meth:`RecordSearch.op_shares` gives it: a commit no tool profiled
-    has those of the last profiled commit of the same recipe."""
+    has those of the last profiled commit of the same recipe. ``agent_map`` holds the directions of Arbor's map the
+    scheduler wrote last, in the map's order; none in a session without a map."""
 
     taken_at: float
     profile: SessionProfile | None
@@ -857,6 +955,7 @@ class BlackboardSnapshot:
     resolved_patches: tuple[ResolvedPatch, ...] = ()
     agent_manifests: Mapping[str, AgentManifestRecord] = field(default_factory=dict)
     card_holds: tuple[CardHold, ...] = ()
+    agent_map: tuple[MapDirection, ...] = ()
 
     @property
     def baseline(self) -> BaselineRecord | None:
@@ -907,11 +1006,32 @@ class BlackboardSnapshot:
         made = next((record for record in self.records if record.commit_id == commit_id), None)
         return made.judgement.recorded_value if made is not None and made.judgement is not None else {}
 
+    def map_holders(self) -> dict[str, str]:
+        """The Arbor branch that holds each open direction of ``agent_map``, by the direction's id: its ``holder``
+        while the lineage shows that branch running. Once the branch stops, the direction is held by none."""
+
+        running = {node.branch for node in self.lineage.branches if node.stopped_at is None}
+        return {item.id: item.holder for item in self.agent_map if item.open and item.holder in running}
+
+    def unretracted(self) -> dict[str, tuple[TestRecord, ...]]:
+        """The commits that hold a change a landed retraction undoes and not the retraction, each with those
+        retractions: the commits built on their ``retracted_commit`` and not on their own commit, whose values count a
+        change its agent found invalid."""
+
+        held: dict[str, list[TestRecord]] = {}
+        for record in self.records:
+            if record.retracts is not None:
+                undone = self.lineage.built_on(record.retracts.retracted_commit)
+                for commit_id in undone - self.lineage.built_on(record.commit_id or ""):
+                    held.setdefault(commit_id, []).append(record)
+        return {node.commit_id: tuple(held[node.commit_id]) for node in self.lineage.commits if node.commit_id in held}
+
 
 __all__ = [
     "CLAIM_TOKEN_LENGTH",
     "ENVIRONMENT_FIELDS",
     "LESSON_ID",
+    "MAP_OPEN",
     "MAX_OP_SHARES",
     "SHORT_COMMIT",
     "AgentManifestRecord",
@@ -927,6 +1047,7 @@ __all__ = [
     "CommittedCommit",
     "DedupAnswer",
     "EnvironmentChange",
+    "FocusBranch",
     "FrontierScore",
     "InboxItem",
     "InboxPage",
@@ -940,6 +1061,7 @@ __all__ = [
     "priced_usd",
     "LlmUsageRecord",
     "ManifestFingerprint",
+    "MapDirection",
     "MergeAttempt",
     "MergeState",
     "BlackboardSnapshot",
@@ -950,6 +1072,7 @@ __all__ = [
     "QuarantineEvent",
     "RecordedValue",
     "RegressionCase",
+    "RetractionRef",
     "SearchHit",
     "SessionProfile",
     "REPLAY_TARGET",

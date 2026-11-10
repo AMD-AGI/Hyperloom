@@ -149,6 +149,9 @@ class ExperimentRepo(Protocol):
 
     async def read_recipe(self, commit: str) -> Recipe: ...
 
+    async def root(self) -> str:
+        """The root commit: the baseline ``init_root`` wrote, which every commit of the repository descends from."""
+
     async def create_branch(self, branch: str, at_commit: str) -> None: ...
 
     async def head(self, branch: str) -> str: ...

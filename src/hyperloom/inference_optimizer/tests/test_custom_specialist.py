@@ -809,6 +809,10 @@ async def test_framework_holds_a_leverage_exit_for_queued_custom_work_but_not_a_
     await coord.phase_machine.advance_phase_if_needed()
 
     assert (state.phase, [t.params.get("domain", t.kind) for t in await coord.tasks.queued()]) == expected
+    if hint:
+        coord.dispatcher.admission_frozen = True
+        await coord.phase_machine.refresh_admission_freeze()
+        assert not coord.dispatcher.admission_frozen
 
 
 # HYPERLOOM_CUSTOM_SPECIALIST_ONLY

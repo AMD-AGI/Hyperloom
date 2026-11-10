@@ -429,52 +429,57 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return "\n".join([header] + rendered)
 
     def _context_running_tasks_reader(self) -> str:
-        """Project in-flight tasks and their held resources from three reads, not one snapshot."""
-        tasks = self.tasks.running_context_sync()
-        backlog = "\n".join(line for line in (self._queued_backlog_line(), self._queued_specialists_line()) if line)
-        if not tasks:
-            return "\n".join(line for line in ("(no tasks in flight)", backlog) if line)
+        """Project in-flight work: every running task, every queued explore round, then the queued backlog.
 
+        Built from three reads, not one snapshot. A queued round is listed with its grid because the grid, not a
+        count, is what a new round has to differ from.
+        """
+        tasks = [
+            *self.tasks.running_context_sync(),
+            *(t for t in self.tasks.queued_context_sync() if t.kind == _EXPLORE),
+        ]
+        backlog = [line for line in (self._queued_backlog_line(), self._queued_specialists_line()) if line]
         lanes_by_task = self.locks.lanes_by_task_sync()
         gpus_by_task = gpus_by_task_sync(self.db)
         now_unix = time.time()
-        lines = ["=== Tasks in flight ==="]
-        for task in tasks:
-            lanes, expires_at = lanes_by_task.get(task.task_id, ([], ""))
-            gpus = gpus_by_task.get(task.task_id, [])
-            params = task.params or {}
-            started = to_unix(task.updated_at, 0.0)
-            running_sec = max(0.0, now_unix - started) if started > 0 else 0.0
-            parts = [
-                f"  - task_id={task.task_id}",
-                f"kind={task.kind!r}",
-                f"running_sec={int(running_sec)}",
-            ]
-            domain = str(params.get("domain") or "")
-            gap = str(params.get("gap_canonical_id") or "")
-            if domain:
-                parts.append(f"domain={domain!r}")
-            if gap:
-                parts.append(f"gap={gap!r}")
-            parts.append(f"idempotency_key={task.idempotency_key!r}")
-            if task.lease_ttl_sec:
-                parts.append(f"lease_ttl_sec={task.lease_ttl_sec}")
-            if expires_at:
-                exp_unix = to_unix(expires_at, 0.0)
-                if exp_unix > 0:
-                    parts.append(f"lease_expires_in_sec={int(exp_unix - now_unix)}")
-            if lanes:
-                parts.append(f"lanes={sorted(lanes)}")
-            if gpus:
-                parts.append(f"gpu_ids={sorted(gpus)}")
-            hb_age = self._task_heartbeat_age_sec(task, now_unix=now_unix)
-            if hb_age is not None:
-                parts.append(f"heartbeat_age_sec={int(hb_age)}")
-            parts.extend(_explore_round_parts(task, now_unix=now_unix))
-            lines.append(" ".join(parts))
-        if backlog:
-            lines.append(backlog)
-        return "\n".join(lines)
+        lines = [self._in_flight_line(task, lanes_by_task, gpus_by_task, now_unix) for task in tasks]
+        return "\n".join(["=== Tasks in flight ===", *(lines or ["(no tasks in flight)"]), *backlog])
+
+    def _in_flight_line(
+        self, task: Task, lanes_by_task: dict[str, Any], gpus_by_task: dict[str, Any], now_unix: float
+    ) -> str:
+        """One task: how long it has been in its state, what it works on, and the lanes, GPUs and lease it holds."""
+        lanes, expires_at = lanes_by_task.get(task.task_id, ([], ""))
+        gpus = gpus_by_task.get(task.task_id, [])
+        params = task.params or {}
+        since = to_unix(task.updated_at, 0.0)
+        parts = [
+            f"  - task_id={task.task_id}",
+            f"kind={task.kind!r}",
+            f"{task.state}_sec={int(max(0.0, now_unix - since)) if since > 0 else 0}",
+        ]
+        domain = str(params.get("domain") or "")
+        gap = str(params.get("gap_canonical_id") or "")
+        if domain:
+            parts.append(f"domain={domain!r}")
+        if gap:
+            parts.append(f"gap={gap!r}")
+        parts.append(f"idempotency_key={task.idempotency_key!r}")
+        if task.lease_ttl_sec:
+            parts.append(f"lease_ttl_sec={task.lease_ttl_sec}")
+        if expires_at:
+            exp_unix = to_unix(expires_at, 0.0)
+            if exp_unix > 0:
+                parts.append(f"lease_expires_in_sec={int(exp_unix - now_unix)}")
+        if lanes:
+            parts.append(f"lanes={sorted(lanes)}")
+        if gpus:
+            parts.append(f"gpu_ids={sorted(gpus)}")
+        hb_age = self._task_heartbeat_age_sec(task, now_unix=now_unix)
+        if hb_age is not None:
+            parts.append(f"heartbeat_age_sec={int(hb_age)}")
+        parts.extend(_explore_round_parts(task, now_unix=now_unix))
+        return " ".join(parts)
 
     def _queued_backlog_line(self) -> str:
         """Benchmark-lane backlog: queued integrate_patch / explore tasks in dispatch order, and untested proposals."""
@@ -587,13 +592,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return _advisory_sections(self, _ADVISORY_BLOCKS)
 
     async def _orchestration_turn_sections(self) -> list[str]:
-        """The denial summary, proposal queue and plateau pair: only the orchestration agent reads them, and each
-        moves with the session, so they are rendered per tick.
+        """The work in flight, denial summary, proposal queue and plateau pair: only the orchestration agent reads
+        them, and each moves with the session, so they are rendered per tick.
         """
         from ..predictor.prompt import queue_block
         from ..predictor.rows import PROVENANCE
 
-        sections: list[str] = []
+        sections: list[str] = [self._context_running_tasks_reader()]
         denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
         if denial_summary:
             sections.append(denial_summary)

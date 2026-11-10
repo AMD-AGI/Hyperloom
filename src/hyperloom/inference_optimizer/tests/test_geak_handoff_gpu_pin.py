@@ -104,8 +104,8 @@ def test_pin_prefers_rocr_over_hip_and_cuda() -> None:
     assert out["ids"] == [4, 5]
 
 
-def test_pin_prefers_process_env_over_recipe() -> None:
-    """The process mask is the one the GEAK child actually inherits."""
+def test_pin_prefers_process_env_over_a_recipe_mask_outside_it() -> None:
+    """A recipe mask outside the process mask cannot be where the run is; the GEAK child inherits the process's."""
     out = resolve_gpu_pin(
         recipe_envs={"TP": 1, "ROCR_VISIBLE_DEVICES": "6"},
         environ={"ROCR_VISIBLE_DEVICES": "3"},
@@ -572,3 +572,12 @@ def test_a_yaml_sequence_element_is_stripped_before_it_reaches_value() -> None:
     """``[' 4', 5]`` must not produce ``" 4,5"`` — ROCm's parser rejects the token."""
     pin = resolve_gpu_pin(recipe_envs={"TP": 2, "ROCR_VISIBLE_DEVICES": [" 4", 5]}, environ={})
     assert pin["value"] == "4,5"
+
+
+def test_pin_prefers_the_recipes_own_mask_inside_the_process_mask() -> None:
+    """The materializer launches a point on its own mask inside the session's, so that is the pin."""
+    out = resolve_gpu_pin(
+        recipe_envs={"TP": 1, "ROCR_VISIBLE_DEVICES": "7"},
+        environ={"ROCR_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7"},
+    )
+    assert (out["value"], out["count"], out["source"]) == ("7", 1, "baseline_recipe")

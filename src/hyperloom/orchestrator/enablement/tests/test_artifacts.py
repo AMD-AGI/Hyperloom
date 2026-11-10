@@ -298,7 +298,7 @@ def _collected_and_vetted_round(tmp_path, target, before, after):
         )
     )
     patch = Path(_patch(worktree, "patches/manual.patch", diff))
-    collected, _roots = SpecialistSubprocessDispatcher._collect_patches(worktree, workspace, worktree)
+    collected, _roots = SpecialistSubprocessDispatcher._collect_patches(worktree, workspace, worktree, pinned=None)
     assert collected == [str(patch)]
     kept, dropped, _grounding, _spans_roots = vet_patches(collected, base_checkout=worktree)
     payload = {"patches_written": kept, "setup_commands": ["pip install local-runtime==1.0"]}

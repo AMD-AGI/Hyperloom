@@ -298,7 +298,7 @@ class ClaudeBackend:
     """Production Claude backend. Implements :class:`Backend`."""
 
     model: str | None = None
-    max_turns_default: int = 12
+    max_turns_default: int = 32
     # Role's allowed intent set for the emit_intent tool and the output-format suffix. None = all IntentType values.
     allowed_intents: frozenset[IntentType] | None = None
     # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN streamed SDK messages before the turn is

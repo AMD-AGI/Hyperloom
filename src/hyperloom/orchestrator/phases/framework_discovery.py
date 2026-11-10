@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging as _logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,8 +14,10 @@ from hyperloom_common.coerce import first_str, first_text, to_float, to_list, to
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args, merge_server_args
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
+from ..actions.executors import content_fingerprint, controls_of, normalize_proposal
 from ..specialists.profile import is_authoring_specialist
 from ..state.task_registry import TaskSpec
+from ..state.task_states import TERMINAL_STATES
 from .framework_records import (
     _framework_config_levers_from_done,
     _patches_on_disk,
@@ -32,6 +35,20 @@ log = _logging.getLogger(__name__)
 DISCOVER_FAILURE_RETRY_LIMIT: int = 3
 
 
+def _config_lever_deliverable(config_levers: Mapping[str, Any]) -> dict[str, Any]:
+    """The integrate deliverable a config-lever round is reviewed with."""
+    deliverable: dict[str, Any] = {
+        "extra_server_args": config_levers.get("extra_server_args", ""),
+        "extra_envs": dict(config_levers.get("extra_envs", {})),
+        "framework_agent_authoring": True,
+    }
+    if config_levers:
+        # The round is named after the proposal whose lever it benches, not the deliverable's first proposal.
+        deliverable["patch_name"] = config_levers["name"]
+        deliverable.update(controls_of(normalize_proposal(config_levers)))
+    return deliverable
+
+
 def _specialist_resolve_bases(session_dir: Any, sid: str) -> list[Path]:
     """The specialist's worktree and run dir, which its ``patches_written`` paths are resolved against."""
     from hyperloom.inference_optimizer.session.session_paths import runs_dir as _runs_dir
@@ -46,22 +63,17 @@ def _specialist_resolve_bases(session_dir: Any, sid: str) -> list[Path]:
 class _CandidateDiscoveryMixin:
     """Dispatches and harvests candidate-discovery rounds and routes specialist deliverables to Critic review."""
 
-    async def _candidate_discovery_inflight(self) -> bool:
-        """True while a discovery round this phase dispatched, the kind ``_ingest_candidate_discovery`` harvests, is queued or running."""
-        return any(
-            t.kind == "specialist" and bool((t.params or {}).get("candidate_discovery"))
-            for t in (*await self.tasks.queued(), *await self.tasks.running())
-        )
-
     async def _maybe_enqueue_candidate_discovery(self, *, reason: str) -> bool:
-        """Dispatch the candidate-discovery specialist when the pool is empty."""
+        """Dispatch the next candidate-discovery round when the pool is empty; True while a round is queued or running."""
         state = self.shared_state
         limit = int(DISCOVER_FAILURE_RETRY_LIMIT)
         empties = int(state.framework_agent_empty_discoveries or 0)
         failures = int(state.framework_agent_discover_failures or 0)
         if empties >= limit or failures >= limit or int(state.research_lane_capacity or 0) <= 0:
             return False
-        if await self._candidate_discovery_inflight():
+        key_prefix = f"candidate-discovery:{reason}{self._coord.dispatcher.cycle_idem_suffix()}:r"
+        rounds = await self.tasks.with_key_prefix("specialist", key_prefix)
+        if any(t.state not in TERMINAL_STATES for t in rounds):
             return True
         gap, keywords = self._compose_framework_local_explore_gap()
         framework = str(state.framework or "").strip().lower()
@@ -86,9 +98,9 @@ class _CandidateDiscoveryMixin:
             TaskSpec(
                 kind="specialist",
                 params=params,
-                # The round count is part of the key: the registry returns the row a key already names, so a fixed key
-                # would re-fetch the finished first attempt and neither streak could advance.
-                idempotency_key=f"candidate-discovery:{reason}{self._coord.dispatcher.cycle_idem_suffix()}:r{empties + failures}",
+                # The registry hands back the row a key already names, so the next round is numbered past every round
+                # it holds.
+                idempotency_key=f"{key_prefix}{len(rounds)}",
                 requires_lanes=lanes,
                 lease_ttl_sec=ttl,
                 dispatch_class="coordinator",
@@ -106,7 +118,7 @@ class _CandidateDiscoveryMixin:
                 reason=reason,
                 parallelism=len(lanes or ()),
             )
-        log.info("FRAMEWORK: dispatched candidate discovery (reason=%s)", reason)
+            log.info("FRAMEWORK: dispatched candidate discovery round %d (reason=%s)", len(rounds), reason)
         return True
 
     def _ingest_candidate_discovery(
@@ -340,7 +352,7 @@ class _CandidateDiscoveryMixin:
             return
         if config_levers and self._config_lever_known_bad(config_levers):
             return
-        # Empty, or the str args and dict envs _config_lever_from_proposal builds.
+        # Empty, or the str args and dict envs config_lever_from_proposal builds.
         extra_server_args = config_levers.get("extra_server_args", "")
         extra_envs = dict(config_levers.get("extra_envs", {}))
         candidate_id = str(spec_params.get("framework_agent_candidate_id") or "")
@@ -348,7 +360,7 @@ class _CandidateDiscoveryMixin:
             sid,
             spec_params,
             done_payload,
-            {"extra_server_args": extra_server_args, "extra_envs": extra_envs, "framework_agent_authoring": True},
+            _config_lever_deliverable(config_levers),
             observation={
                 "kind": "framework_config_autosubmitted_for_review",
                 "candidate_id": candidate_id,
@@ -370,15 +382,11 @@ class _CandidateDiscoveryMixin:
         Different upstream PRs often reduce to the same server args / envs, so
         the ledger is keyed by content fingerprint rather than by PR.
         """
-        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
-
         try:
             from hyperloom.agents.framework.kb import read_pr_ledger
 
-            fingerprint = canonical_fingerprint(
-                config_levers.get("extra_server_args"),
-                config_levers.get("extra_envs"),
-            )
+            # The integrate record hashes the deliverable this lever is reviewed with.
+            fingerprint = content_fingerprint(_config_lever_deliverable(config_levers))
             for rec in read_pr_ledger():
                 if str(rec.get("applicability") or "") != fingerprint:
                     continue

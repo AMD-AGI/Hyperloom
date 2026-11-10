@@ -1244,7 +1244,9 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
     coordinator.shared_state.benchmark_mode = mode
     phase = coordinator.phase_kernel
     monkeypatch.setattr(phase, "_kernel_rewrite_controller_timeouts", lambda: (60, 90))
-    monkeypatch.setattr(controller_submit, "run_controller_subprocess", lambda **kwargs: {"patch_count": 1})
+    monkeypatch.setattr(
+        controller_submit, "run_controller_subprocess", lambda **kwargs: {"status": "completed", "patch_count": 1}
+    )
     monkeypatch.setattr(controller_submit, "record_controller_llm_usage", lambda **kwargs: None)
     callbacks = []
 
@@ -1258,6 +1260,53 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
     assert len(callbacks) == 1
     assert callbacks[0].__func__ is WritebackCollaborator.record_integrate_keep
     assert callbacks[0].__self__.shared_state is coordinator.shared_state
+
+
+@pytest.mark.asyncio
+async def test_a_controller_the_orchestrator_cancelled_is_not_this_cycles_result(tmp_path, monkeypatch):
+    """A stop mid-Controller leaves the cycle unsettled, so the resumed entry runs a fresh Controller."""
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE
+    from hyperloom.orchestrator.kernel import controller_submit
+    from hyperloom.orchestrator.phases.controller_settlement import kernel_controller_settled
+
+    repo, base = _repo(tmp_path)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coordinator = _coordinator(session_dir, repo)
+    coordinator.shared_state.kernel_optimizer = "forge"
+    phase = coordinator.phase_kernel
+    output = tmp_path / "cycle"
+    _publish(
+        ControllerLayout(output).patches_root,
+        repo,
+        base,
+        kernel_name="published",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+    monkeypatch.setattr(phase, "_kernel_rewrite_controller_timeouts", lambda: (60, 90))
+    monkeypatch.setattr(
+        controller_submit,
+        "run_with_session_kill",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, ORCHESTRATOR_CANCELLED_RETURNCODE, "", ""),
+    )
+    monkeypatch.setattr(controller_submit, "record_controller_llm_usage", lambda **kwargs: None)
+    integrated: list[dict] = []
+
+    async def _integrate(**kwargs):
+        integrated.append(kwargs)
+        return integration.ControllerIntegrationSummary("completed", (), 0, 0, 0, "")
+
+    monkeypatch.setattr(integration, "integrate_controller_patches", _integrate)
+    await phase._run_kernel_rewrite_controller(tmp_path / "handoff", output, {})
+
+    read = controller_submit.read_controller_result(
+        output_dir=output, returncode=ORCHESTRATOR_CANCELLED_RETURNCODE, timed_out=False
+    )
+    assert (read["status"], read["patch_count"]) == ("cancelled", 1)
+    assert integrated == []
+    assert coordinator.shared_state.kernel_rewrite_controller_result == {}
+    assert kernel_controller_settled(coordinator.shared_state) is False
 
 
 @pytest.mark.asyncio

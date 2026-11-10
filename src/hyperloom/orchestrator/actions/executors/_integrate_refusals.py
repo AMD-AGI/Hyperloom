@@ -14,6 +14,7 @@ from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_OUTPUT,
+    VERDICT_KEEP,
     constraint_veto_reason,
     holds_within_band,
     incomparability_reason,
@@ -228,11 +229,12 @@ def _gate_failure_reasons(
     reasons: list[str] = []
     if not graded.comparable:
         reasons.append(f"performance comparison unavailable: {graded.degrade_reason}")
-    elif graded.graded_on_intvty and delta_pct is None:
-        reasons.append(
-            graded.veto_reason
-            or f"interactivity p50 {graded.reference:.1f}->{graded.candidate:.1f} did not clear the interactivity KEEP gate"
-        )
+    elif graded.graded_on_intvty:
+        if graded.verdict != VERDICT_KEEP:
+            reasons.append(
+                graded.veto_reason
+                or f"interactivity p50 {graded.reference:.1f}->{graded.candidate:.1f} did not clear the interactivity KEEP gate"
+            )
     elif delta_pct is None:
         reasons.append("no measurable throughput")
     elif delta_pct < keep_threshold_pct:

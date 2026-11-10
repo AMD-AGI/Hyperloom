@@ -54,7 +54,7 @@ def failures_at(snapshot: BlackboardSnapshot, head: str) -> tuple[FailedTest, ..
     redeemed = {
         (record.request.parent_commit, record.request.intent_fingerprint)
         for record in snapshot.records
-        if record.conclusion in _REDEEMING
+        if record.conclusion in _REDEEMING and not record.landed_retraction
     }
     failed = []
     for record in snapshot.records:

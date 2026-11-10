@@ -36,6 +36,7 @@ class TestFlyDSLClassification(unittest.TestCase):
             delete=False,
             encoding="utf-8",
         )
+        self.addCleanup(os.unlink, tmp.name)
         tmp.write(body)
         tmp.flush()
         tmp.close()
@@ -121,6 +122,7 @@ class TestFlyDSLClassification(unittest.TestCase):
             delete=False,
             encoding="utf-8",
         )
+        self.addCleanup(os.unlink, tmp.name)
         tmp.write("// flydsl mention in a HIP comment\n")
         tmp.flush()
         tmp.close()
@@ -274,6 +276,7 @@ class TestFlyDSLKernelParams(unittest.TestCase):
             delete=False,
             encoding="utf-8",
         )
+        self.addCleanup(os.unlink, tmp.name)
         tmp.write(body)
         tmp.flush()
         tmp.close()

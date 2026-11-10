@@ -9,18 +9,22 @@ import json
 import os
 from dataclasses import dataclass, field
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from hyperloom.common.owner_scope import process_started_at, same_environment
+from hyperloom.common.session_files import pins_hold_credentials
+from hyperloom_common.shared_storage import open_shared_append, ownership
 from hyperloom_common.timeutil import now_iso
 
 from . import lock as session_lock
 from . import session_paths
 from .coordinator_db import OlderCoordinatorDB, refuse_older_schema
-from .paths import db_path_for
+from .optimization_journal import journal_path
+from .paths import ENV_LEDGER_DIR, SESSION_FILES, db_path_for, ledger_mark_path, private_db_exists, shared_db_path_for
 
 
 class ResumeBlocked(RuntimeError):
@@ -197,12 +201,84 @@ def foreign_owner_scopes(session_dir: Path, owner_scope: str) -> list[str]:
         return []
 
 
+def _require_readable(session_dir: Path) -> None:
+    """Refuse, naming the file, a session file this account cannot read.
+
+    ``state.json`` and ``manifest.json`` are owner-only while the operator's ``--extra-env`` or ``--server-args`` hold a
+    credential, and the optimization journal while a recorded decision does: another account of the group is refused
+    here, not handed it. The database is read too, since a session an earlier release made keeps it owner-only. A journal
+    that cannot be read is never replaced by a fresh one (that would lose its history).
+    """
+    for path in (*(session_dir / name for name in SESSION_FILES), journal_path(session_dir), db_path_for(session_dir)):
+        try:
+            with path.open("rb"):
+                pass
+        except FileNotFoundError:
+            continue  # said by the checks that need the file
+        except PermissionError as exc:
+            raise ResumeBlocked(
+                f"cannot read {path}{ownership(path)}. A session that holds a credential keeps its state, manifest "
+                "and optimization journal where only the account that made it can read them, and a session an earlier "
+                "release made keeps its database so: resume it as that account, or start a new session."
+            ) from exc
+
+
+def _session_has_run(state: Mapping[str, Any]) -> bool:
+    """Whether the session did anything in an earlier leg: a tick counted, an integrate window left open, or a stack."""
+    return bool(int(state.get("tick") or 0) or state.get("pending_integrate") or state.get("optimization_stack"))
+
+
+def require_own_ledger(session_dir: Path, state: Mapping[str, Any]) -> None:
+    """Refuse the resume of a credential session that has run before when there is no coordinator database for this
+    account to inspect: not its own ledger (it is below the container's ``TMPDIR`` unless ``HYPERLOOM_LEDGER_DIR`` keeps
+    it, so a new container has none, and another account's is its own). The earlier legs' leases and tasks cannot be
+    read, so work they left running (Ray workers, servers on other nodes) would go unseen, which the guard exists to
+    prevent.
+
+    A session is a credential session when the pins hold a credential now, or an earlier leg held one and ran on a ledger
+    outside the session directory (it left :func:`~.paths.ledger_mark_path`). A database in the session directory stands in
+    for the ledger only for a session no such leg ran: its earlier legs ran without a credential, and that database is
+    theirs; where an earlier leg did, the database in the session directory is stale (or was put there), and its leases are
+    not those of the legs that matter.
+
+    ``state`` is a mapping with the fields of ``state.json`` (the pins, ``tick``, ``pending_integrate``,
+    ``optimization_stack``).
+
+    Raises:
+        ResumeBlocked: Naming ``HYPERLOOM_LEDGER_DIR``.
+    """
+    moved = ledger_mark_path(session_dir).is_file()
+    if not (pins_hold_credentials(state) or moved) or not _session_has_run(state):
+        return
+    if private_db_exists(session_dir) or (not moved and shared_db_path_for(session_dir).exists()):
+        return
+    raise ResumeBlocked(
+        "this session holds a credential and has run before, and this account has no coordinator database for it "
+        "(its database is in the TMPDIR of the container, or the account, that ran it): the leases and tasks of the "
+        "earlier legs cannot be inspected, so work they left running would go unseen. "
+        f"Set {ENV_LEDGER_DIR} to a persistent private directory of this account's that holds that database, or "
+        "give up resuming and start a new session."
+    )
+
+
+def recorded_state(session_dir: Path) -> Mapping[str, Any]:
+    """The fields of ``state.json`` as recorded; empty when there is none (``_require_readable`` has said so when it
+    exists and cannot be read)."""
+    try:
+        recorded = json.loads((session_dir / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return recorded if isinstance(recorded, dict) else {}
+
+
 def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
     """Reject unobservable residual work without migrating or repairing the DB.
 
     Observable local owners are left to the coordinator's existing reaper. An
     empty ledger does not prove a recorded running or cancelled execution exited.
     """
+    _require_readable(session_dir)
+    require_own_ledger(session_dir, recorded_state(session_dir))
     path = db_path_for(session_dir)
     try:
         if not path.exists():
@@ -620,7 +696,7 @@ def confirm_scope_gone(session_dir: Path, *, owner_scope: str, reason: str, curr
         "released_gpu_leases": result["released_gpu_leases"],
     }
     try:
-        with session_paths.pod_history_path(session_dir).open("a", encoding="utf-8") as fh:
+        with os.fdopen(open_shared_append(session_paths.pod_history_path(session_dir)), "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, sort_keys=True) + "\n")
     except OSError:
         result["ledger_recorded"] = False

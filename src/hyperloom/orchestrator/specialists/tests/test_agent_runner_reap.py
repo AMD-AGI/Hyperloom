@@ -23,6 +23,8 @@ from hyperloom.common.proctree import REAP_MARK_ENV, proc_identity, running
 from hyperloom.orchestrator.specialists import agent_runner
 from hyperloom.orchestrator.specialists.agent_runner import Liveness
 from hyperloom.orchestrator.specialists import subprocess_ as ss
+from hyperloom.orchestrator.specialists import launch_env
+from hyperloom.common.agent_isolation import AccountIsolation
 from hyperloom.orchestrator.specialists.tests._agent_fixtures import make_runner, make_spec, wait_finished
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="procfs and sessions are POSIX-only")
@@ -143,9 +145,9 @@ async def test_a_demoted_cli_is_swept_as_its_account(
     tmp_path: Path, started: _Started, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The app's uid cannot read a demoted child's environment, so the mark is looked for as the account."""
-    monkeypatch.setattr(agent_runner, "_launch_user", _SameUid)
-    monkeypatch.setattr(agent_runner, "prepare_demote", lambda *args: {})
-    monkeypatch.setattr(ss, "marked_pids", lambda key, value: [])
+    monkeypatch.setattr(agent_runner, "_launch_isolation", lambda: AccountIsolation(_SameUid()))
+    monkeypatch.setattr(launch_env, "_demote", lambda *args: {})
+    monkeypatch.setattr(launch_env, "marked_pids", lambda key, value: [])
     ws = tmp_path / "w"
     runner = make_runner(tmp_path / "session")
     handle = await runner.launch(make_spec(ws, code=_cli(ws, "detached"), mcp=False))

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from hyperloom_common.io import WriteOptions, atomic_write_json
+from hyperloom_common.shared_storage import make_shared_dirs, open_shared
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom_common.timeutil import now_iso
 
@@ -35,6 +36,9 @@ HISTORY_DIRNAME: str = "history"
 LOCK_FILENAME: str = ".lock"
 HISTORY_VERSION_PREFIX: str = "v"
 HISTORY_VERSION_SUFFIX: str = ".json"
+
+#: Every account of the group upserts into the workspace's recipe KB in turn.
+_KB_WRITE = WriteOptions(make_parents=True, fsync=True, shared=True)
 
 
 # List-valued knowledge fields whose pre/post-write sizes ``put_recipe`` reports back, so an audit consumer can derive
@@ -131,8 +135,8 @@ class _CidLock:
         self._mutex = _cid_mutex(self.path)
         self._mutex.acquire()
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            make_shared_dirs(self.path.parent)
+            self._fd = open_shared(self.path, os.O_RDWR)
             fcntl.flock(self._fd, fcntl.LOCK_EX)
         except BaseException:
             if self._fd is not None:
@@ -297,7 +301,7 @@ class LocalRecipeStore:
             "replaced_by": dict(replaced_by or {}),
             "snapshot": snapshot,
         }
-        atomic_write_json(archive_path, archive_payload, options=WriteOptions(make_parents=True, fsync=True))
+        atomic_write_json(archive_path, archive_payload, options=_KB_WRITE)
 
     # put_recipe
     def put_recipe(self, upsert: RecipeUpsert) -> dict[str, Any]:
@@ -305,7 +309,7 @@ class LocalRecipeStore:
         if not upsert.canonical_id:
             raise ValueError("put_recipe requires a non-empty canonical_id")
         recipe_dir = self._recipe_dir(upsert.canonical_id)
-        recipe_dir.mkdir(parents=True, exist_ok=True)
+        make_shared_dirs(recipe_dir)
         lock = _CidLock(self._lock_path(upsert.canonical_id))
         with lock:
             now = now_iso(timespec="microseconds")
@@ -328,9 +332,7 @@ class LocalRecipeStore:
 
             recipe = Recipe.from_dict(payload_dict)
             written = recipe.to_dict()
-            atomic_write_json(
-                self._live_path(upsert.canonical_id), written, options=WriteOptions(make_parents=True, fsync=True)
-            )
+            atomic_write_json(self._live_path(upsert.canonical_id), written, options=_KB_WRITE)
             counts = _collection_counts(written)
 
         return {

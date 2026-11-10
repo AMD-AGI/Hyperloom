@@ -16,6 +16,7 @@ import re
 from typing import Any
 
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 FAILURE_STAGE_WARMUP: str = "warmup"
 FAILURE_STAGE_DECISION: str = "decision"
@@ -48,6 +49,7 @@ MAGPIE_NONZERO_INVALID_MEASUREMENT: str = "magpie_nonzero_invalid_measurement"
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]")
 _CANDIDATE_ERROR_CLASSES = frozenset(
     {
+        ARGV_INVALID,
         "capability_unsupported",
         "invalid_argument",
         "unsupported_config",
@@ -76,7 +78,13 @@ _ENVIRONMENT_EVIDENCE_RE = re.compile(
     r"|card\s+(?:is\s+)?(?:not\s+)?(?:clean|idle)"
     r"|(?:gpu|device)\s+(?:is\s+)?busy"
     r"|address\s+already\s+in\s+use"
+    r"|port\s+\d+\s+is\s+unavailable"
     r"|temporary\s+failure\s+in\s+name\s+resolution",
+    re.IGNORECASE,
+)
+# A server or its actor that died before serving: Magpie's health-wait errors and the serving lease's actor death.
+_SERVER_DEATH_EVIDENCE_RE = re.compile(
+    r"exited\s+(?:before\s+becoming\s+healthy|during\s+its\s+health\s+check)|ray_actor_error",
     re.IGNORECASE,
 )
 _CANDIDATE_EVIDENCE_RE = re.compile(
@@ -175,9 +183,19 @@ def classify_failure_attribution(
         return FAILURE_ATTRIBUTION_ENVIRONMENT
     if kind in _CANDIDATE_ERROR_CLASSES or _CANDIDATE_EVIDENCE_RE.search(evidence):
         return FAILURE_ATTRIBUTION_CANDIDATE
-    if kind in _HARNESS_ERROR_CLASSES:
+    if kind in _HARNESS_ERROR_CLASSES and not _server_died(evidence):
         return FAILURE_ATTRIBUTION_HARNESS
     return FAILURE_ATTRIBUTION_UNKNOWN
+
+
+def _server_died(evidence: str) -> bool:
+    """Whether ``evidence`` shows the server process died, which no harness class explains."""
+    lowered = evidence.lower()
+    return bool(
+        _SERVER_DEATH_EVIDENCE_RE.search(evidence)
+        or any(marker in lowered for marker in WORKER_DEATH_MARKERS)
+        or _SIGNAL_EXIT_RE.search(lowered)
+    )
 
 
 def classify_root_cause_type(error_class: str, error_text: str) -> str:

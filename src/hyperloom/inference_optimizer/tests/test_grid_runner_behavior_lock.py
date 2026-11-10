@@ -20,6 +20,7 @@ import pytest
 import yaml
 
 from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 from hyperloom.orchestrator.actions.executors import (
@@ -109,6 +110,19 @@ def _invalid_rc0_workspace(slot: Path) -> Path:
     ws.mkdir(parents=True, exist_ok=True)
     (ws / "benchmark_report.json").write_text('{"success": false, "framework": "sglang"}')
     return ws
+
+
+_SGLANG_REFUSAL = (
+    "sglang serve: error: ambiguous option: --cuda-graph-bs could match --cuda-graph-bs-decode, --cuda-graph-bs-prefill"
+)
+_MAGPIE_BANNER = "Magpie.modes.benchmark.benchmarker - INFO - Using user-specified script: benchmarks/srt_agentic.sh"
+
+
+def _refused_argv_round(cmd, *a, **k):
+    """A round whose server exited at argument parsing, the way SGLang refuses a flag it renamed."""
+    ws = _invalid_rc0_workspace(Path(cmd[cmd.index("--output-dir") + 1]))
+    (ws / "server.log").write_text(f"usage: sglang serve [-h] [--model-path MODEL_PATH]\n{_SGLANG_REFUSAL}\n")
+    return subprocess.CompletedProcess(cmd, 1, "", _MAGPIE_BANNER)
 
 
 # Variant-boundary progress matrix
@@ -341,6 +355,18 @@ class TestKeepGoingAsymmetry:
         assert results[0].error_class == "magpie_nonzero_invalid_measurement"
         assert results[0].returncode == 1
 
+    def test_a_round_the_server_refused_at_argument_parsing_is_a_refused_argv(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        results = self._run(_refused_argv_round, base, tmp_path / "out")
+
+        assert (results[0].error_class, results[0].error) == (ARGV_INVALID, _SGLANG_REFUSAL)
+        marker = json.loads(next((tmp_path / "out").glob("variant_*/abort_reason.json")).read_text(encoding="utf-8"))
+        assert (marker["error_class"], marker["error"]) == (ARGV_INVALID, _SGLANG_REFUSAL)
+
     def test_rc_nonzero_blank_pipe_uses_report_errors(self, tmp_path, monkeypatch):
         """Last-resort: empty pipe and no log files, diagnostic only in report.errors."""
         monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
@@ -475,7 +501,7 @@ class TestAutoWarmupTeardown:
         # Pin the free-port picker so the teardown-port assertion is deterministic (baseline uses a per-session free
         # port).
         monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors._server_lifecycle._pick_free_port",
+            "hyperloom.orchestrator.actions.executors._server_lifecycle.pick_server_port",
             lambda: 8888,
         )
         base = tmp_path / "base.yaml"
@@ -533,6 +559,15 @@ class TestAutoWarmupTeardown:
         assert len(teardown_calls) == 1
         assert teardown_calls[0]["framework"] == "sglang"
         assert "run_grid_warmup_round_failed" in results[0].nonfatal_warnings
+
+    def test_a_warmup_the_server_refused_at_argument_parsing_is_a_refused_argv(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        results, _ = self._run_capture_teardown(_refused_argv_round, base, tmp_path / "out")
+
+        assert (results[0].error_class, results[0].error) == (ARGV_INVALID, _SGLANG_REFUSAL)
 
     def test_warmup_setup_failure_fails_the_variant_instead_of_measuring_it_cold(self, tmp_path, monkeypatch):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")

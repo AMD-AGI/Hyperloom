@@ -25,6 +25,14 @@ REPO_ROOT="${REPO_ROOT:-$(cd "${_script_dir}/../../../.." && pwd)}"
 
 ENV_TEMPLATE="${REPO_ROOT}/.env.template"
 DOTENV="${REPO_ROOT}/.env"
+# shellcheck source=runtime_env.sh
+. "${_script_dir}/runtime_env.sh"
+# Set in main, before .env is first read or written: why another account can write .env
+# (runtime_env_dotenv_not_private), why it keeps no credentials (that, or the marker install_kernel_tools.sh
+# write_env_file leaves), and the kernel-agent env file that keeps them instead.
+DOTENV_NOT_PRIVATE=""
+DOTENV_CREDENTIALS_ELSEWHERE=""
+KERNEL_AGENT_ENV_FILE=""
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
@@ -55,9 +63,9 @@ SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # below 2.11 and so cannot resolve against a ROCm 10 stack at all; 0.5.19 moved
 # that dependency into runtime_common unpinned, which leaves the installer's
 # ROCm torch constraint as the version pip solves for.
-# vLLM installs 0.29.0+rocm723 from the wheels.vllm.ai pip index. The rocm723
-# variant puts the vLLM ROCm layer at 7.2.3; the docker route instead uses the
-# ROCm 10.0 rocm/vllm image, so the two paths no longer share a patch level. AITER_REF
+# vLLM installs 0.33.0+rocm72 from the wheels.vllm.ai pip index. The rocm72
+# variant puts the vLLM ROCm layer at 7.2; the docker route instead uses the
+# ROCm 10.0 vllm/vllm-openai-rocm image, so the two paths no longer share a ROCm level. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
 SGLANG_REF="${SGLANG_REF:-297e54fd105e974cdf401e5b4d20253a22c16f90}"
@@ -72,12 +80,12 @@ SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-}"
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
-VLLM_VERSION="${VLLM_VERSION:-0.29.0}"
-VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
+VLLM_VERSION="${VLLM_VERSION:-0.33.0}"
+VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm72}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
 VLLM_INSTALL_METHOD="${VLLM_INSTALL_METHOD:-auto}"
 VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
-VLLM_SOURCE_REF="${VLLM_SOURCE_REF:-98dff2a81d747d1dba01a47f939f48c3526d4206}"
+VLLM_SOURCE_REF="${VLLM_SOURCE_REF:-4ba787ec9959e566d3b587a796dff07673324da5}"
 # The source checkout is a depth-1 fetch of a commit SHA and carries no tags, so
 # setuptools_scm would otherwise stamp the build 0.1.dev1 instead of the release.
 VLLM_PRETEND_VERSION="${VLLM_PRETEND_VERSION:-${VLLM_VERSION}}"
@@ -197,7 +205,7 @@ die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
 IMAGE_HINT="Provision the ROCm framework base first (SGLang: lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x|mi35x-*; \
 vLLM bare-metal: Ubuntu 24.04+ host with ROCm torch, or use docker mode with \
-rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0), then re-run."
+vllm/vllm-openai-rocm:v0.33.0-rocm100), then re-run."
 
 is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
 
@@ -1133,10 +1141,10 @@ assert_vllm_glibc_compatible() {
   vllm_version_requires_glibc_239 || return 0
   local glibc="${1:-$(host_glibc_version)}"
   if [ -z "$glibc" ]; then
-    die "cannot detect host glibc; vLLM ${VLLM_VERSION} requires glibc >= 2.39. Use docker mode or set VLLM_VERSION=0.27.1 on older hosts."
+    die "cannot detect host glibc; vLLM ${VLLM_VERSION} requires glibc >= 2.39. Use docker mode or set VLLM_VERSION=0.27.1 and VLLM_ROCM_VARIANT=rocm723 on older hosts."
   fi
   if ! _version_ge "$glibc" "2.39"; then
-    die "vLLM ${VLLM_VERSION} requires glibc >= 2.39 (host has ${glibc}). Use docker mode or set VLLM_VERSION=0.27.1 before running setup."
+    die "vLLM ${VLLM_VERSION} requires glibc >= 2.39 (host has ${glibc}). Use docker mode or set VLLM_VERSION=0.27.1 and VLLM_ROCM_VARIANT=rocm723 before running setup."
   fi
 }
 
@@ -1620,7 +1628,7 @@ download_rocm_profiler_hotfix_libs() {
     warn "failed to download ${ROCM_PROFILER_HOTFIX_ASSET} from ${url}"
     return 1
   fi
-  if ! tar -xzf "$archive" -C "$tmp_dir"; then
+  if ! tar --no-same-owner -xzf "$archive" -C "$tmp_dir"; then
     rm -rf "$tmp_dir"
     warn "failed to extract ${ROCM_PROFILER_HOTFIX_ASSET}"
     return 1
@@ -2291,18 +2299,45 @@ restore_persisted_framework_env() {
 }
 
 read_dotenv_var() {
-  local name="$1"
+  local name="$1" value
   [ -f "$DOTENV" ] || return 0
+  # A .env that keeps no credentials lends none, and one another account can write lends only what install.sh's
+  # loader takes from it (runtime_env_dotenv_lent): that account would otherwise choose the gateway this account's
+  # key goes to, the interpreter it runs or the repository and index it installs from.
+  if [ -n "${DOTENV_CREDENTIALS_ELSEWHERE:-}" ] &&
+     [[ " $RUNTIME_ENV_DOTENV_CREDENTIAL_KEYS $RUNTIME_ENV_DOTENV_RETIRED_CREDENTIAL_KEYS " == *" $name "* ]]; then
+    return 0
+  fi
   # `|| true` keeps a no-match grep from tripping pipefail/set -e when this is
   # used inside a ${VAR:-$(read_dotenv_var ...)} default expansion.
-  { grep -E "^[[:space:]]*(export[[:space:]]+)?${name}=" "$DOTENV" 2>/dev/null || true; } | tail -n 1 \
-    | sed -E "s/^[[:space:]]*(export[[:space:]]+)?${name}=//; s/^[\"']//; s/[\"']$//"
+  value="$({ grep -E "^[[:space:]]*(export[[:space:]]+)?${name}=" "$DOTENV" 2>/dev/null || true; } | tail -n 1 \
+    | sed -E "s/^[[:space:]]*(export[[:space:]]+)?${name}=//; s/^[\"']//; s/[\"']$//")"
+  if [ -n "${DOTENV_NOT_PRIVATE:-}" ] && [ -n "$value" ] && ! runtime_env_dotenv_lent "$name" "$value"; then
+    return 0
+  fi
+  [ -z "$value" ] || printf '%s\n' "$value"
+}
+
+# Before each write of a .env another account can write (DOTENV_NOT_PRIVATE): remove what it would not lend
+# (runtime_env_keep_lent_dotenv_lines), so the write, which leaves a file of this account's that a later reader may
+# find private, never keeps a line another account planted, nor one it appends before the write: the file it leaves
+# is 0600.
+keep_lent_dotenv_lines() {
+  [ -n "${DOTENV_NOT_PRIVATE:-}" ] || return 0
+  runtime_env_keep_lent_dotenv_lines "$DOTENV" ||
+    die "${DOTENV}, which another account can write (${DOTENV_NOT_PRIVATE}), could not be rid of what it does not lend; remove those lines by hand"
 }
 
 # Upsert KEY=VALUE into .env, matching an optional leading-whitespace / export
 # prefix so a pre-existing line is replaced (never duplicated). Pure-bash.
 upsert_dotenv_var() {
   local key="$1" value="$2" tmp found=0 line stripped
+  # A .env another account can write lends only what runtime_env_dotenv_lent allows, so nothing else is written there.
+  if [ -n "${DOTENV_NOT_PRIVATE:-}" ] && ! runtime_env_dotenv_lent "$key" "$value"; then
+    warn "${key} is not written to ${DOTENV}, which another account can write (${DOTENV_NOT_PRIVATE}); export it in the shell that runs hyperloom"
+    return 0
+  fi
+  keep_lent_dotenv_lines
   tmp="$(mktemp)"
   if [ -f "$DOTENV" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
@@ -2321,6 +2356,8 @@ upsert_dotenv_var() {
 
 remove_dotenv_var() {
   local key="$1" tmp line stripped
+  [ -f "$DOTENV" ] || return 0
+  keep_lent_dotenv_lines
   [ -f "$DOTENV" ] || return 0
   tmp="$(mktemp)"
   while IFS= read -r line || [ -n "$line" ]; do
@@ -2426,6 +2463,16 @@ resolve_credentials() {
       log "created ${DOTENV} from .env.template"
     else
       warn "no .env and no .env.template at ${ENV_TEMPLATE}; expecting LLM credentials from shell env"
+    fi
+  fi
+
+  # A .env that keeps no credentials: they come from the shell or this container's kernel-agent env file, as
+  # install.sh's preflight_load_dotenv takes them.
+  if [ -n "${DOTENV_CREDENTIALS_ELSEWHERE:-}" ] && [ -n "${KERNEL_AGENT_ENV_FILE:-}" ]; then
+    if ! runtime_env_load_kernel_agent_credentials "$KERNEL_AGENT_ENV_FILE"; then
+      warn "credentials not taken from ${KERNEL_AGENT_ENV_FILE}; export them in this shell"
+    elif [ "$RUNTIME_ENV_CREDENTIALS_LOADED" -gt 0 ]; then
+      log "loaded ${RUNTIME_ENV_CREDENTIALS_LOADED} missing credential(s) from ${KERNEL_AGENT_ENV_FILE} (env wins): ${DOTENV} keeps none, as ${DOTENV_CREDENTIALS_ELSEWHERE}"
     fi
   fi
 
@@ -2562,7 +2609,10 @@ resolve_credentials() {
   [ -n "$anthropic_url" ] && export ANTHROPIC_BASE_URL="$anthropic_url"
 
   # Persist resolved values to .env (skip on check-only / dry-run).
-  if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+  if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && [ -n "${DOTENV_CREDENTIALS_ELSEWHERE:-}" ]; then
+    persist_credentials_elsewhere "${anthropic_key:-$anthropic_token}" "$anthropic_url" "$oauth_token" \
+      "$DUAL_PROTOCOL_GATEWAY" "$has_openai_side"
+  elif [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     local persist_anthropic_key="${anthropic_key:-$anthropic_token}"
     if [ -n "$persist_anthropic_key" ]; then
       upsert_dotenv_var ANTHROPIC_API_KEY "$persist_anthropic_key"
@@ -2606,6 +2656,31 @@ resolve_credentials() {
     remove_dotenv_var SAFE_API_KEY
     log "credentials written to ${DOTENV}"
   fi
+}
+
+# resolve_credentials' write for a checkout whose .env keeps no credentials (DOTENV_CREDENTIALS_ELSEWHERE), as
+# install_kernel_tools.sh write_env_file keeps them: the Anthropic key ($1), URL ($2) and subscription token ($3) go to
+# this container's kernel-agent env file alone, those an earlier install or the operator left in .env (with their
+# retired spellings) are removed, and .env says where they are (HYPERLOOM_DOTENV_CREDENTIALS). The OpenAI key, which
+# the kernel-agent env file does not carry, is not written anywhere: the shell keeps it. $4 and $5 are
+# DUAL_PROTOCOL_GATEWAY and has_openai_side.
+persist_credentials_elsewhere() {
+  [ -n "$KERNEL_AGENT_ENV_FILE" ] || die "no kernel-agent env file to keep the credentials in; set USER_DATA_PATH"
+  keep_lent_dotenv_lines
+  runtime_env_remove_dotenv_credentials "$DOTENV" ||
+    die "the credentials in ${DOTENV} could not be removed, and it keeps none (${DOTENV_CREDENTIALS_ELSEWHERE}); remove them by hand"
+  runtime_env_write_kernel_agent_credentials "$KERNEL_AGENT_ENV_FILE" "ANTHROPIC_API_KEY=$1" "ANTHROPIC_BASE_URL=$2" \
+    "CLAUDE_CODE_OAUTH_TOKEN=$3" || die "the credentials could not be written to ${KERNEL_AGENT_ENV_FILE}"
+  upsert_dotenv_var HYPERLOOM_DOTENV_CREDENTIALS kernel-agent-env
+  if [ "$4" -eq 1 ] || [ "$5" -eq 1 ]; then
+    [ -n "${OPENAI_BASE_URL:-}" ] && upsert_dotenv_var OPENAI_BASE_URL "$OPENAI_BASE_URL"
+    [ -n "${CLAUDE_MODEL:-}" ] && upsert_dotenv_var CLAUDE_MODEL "$CLAUDE_MODEL"
+    [ -n "${CODEX_MODEL:-}" ] && upsert_dotenv_var CODEX_MODEL "$CODEX_MODEL"
+    [ -z "${OPENAI_API_KEY:-}" ] ||
+      warn "OPENAI_API_KEY is not written to ${DOTENV}, which keeps no credentials; keep it exported in the shell that runs hyperloom"
+  fi
+  remove_dotenv_var LLM_GATEWAY_KEY
+  log "credentials kept out of ${DOTENV}, which keeps none (${DOTENV_CREDENTIALS_ELSEWHERE}): they are in ${KERNEL_AGENT_ENV_FILE} alone"
 }
 
 # vLLM gates every aiter kernel behind VLLM_ROCM_USE_AITER and defaults it off,
@@ -2711,6 +2786,13 @@ EOF
 }
 
 main() {
+  # Asked before any write below, which replaces .env with a file of this account's.
+  DOTENV_NOT_PRIVATE="$(runtime_env_dotenv_not_private "$DOTENV")"
+  if [ -n "$DOTENV_NOT_PRIVATE" ]; then
+    DOTENV_CREDENTIALS_ELSEWHERE="another account can write it (${DOTENV_NOT_PRIVATE})"
+  elif [ "${HYPERLOOM_DOTENV_CREDENTIALS:-$(read_dotenv_var HYPERLOOM_DOTENV_CREDENTIALS)}" = kernel-agent-env ]; then
+    DOTENV_CREDENTIALS_ELSEWHERE="it carries HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env"
+  fi
   restore_persisted_framework_env
   case "$FRAMEWORK_ENV" in
     shared|isolated) ;;
@@ -2747,6 +2829,11 @@ _default_workspace_root() {
     USER_DATA_PATH="$user_data"
   fi
   export USER_DATA_PATH
+  if [ -n "$DOTENV_CREDENTIALS_ELSEWHERE" ]; then
+    # The file install.sh writes for this workspace (runtime_env_derive_runtime_paths), derived in a subshell so
+    # nothing else here changes.
+    KERNEL_AGENT_ENV_FILE="$(runtime_env_derive_runtime_paths && printf '%s' "$KERNEL_AGENT_ENV")"
+  fi
   # Preserve explicit choices with env > .env precedence; leave an omitted backend
   # empty so the CLI can apply its framework-specific default at launch.
   export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-$(read_dotenv_var KERNEL_OPT_BACKEND_ORDER)}"

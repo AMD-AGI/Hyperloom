@@ -7,19 +7,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from typing import Any
 
 import yaml
 
+from hyperloom.common.agentx_workload import find_aiperf_artifact
 from hyperloom.common.launch_log_evidence import (
     engine_adjusted_settings_from_log,
     observed_server_config_from_log,
     observed_server_identity_from_log,
     operand_digest,
 )
+
+#: Where InferenceX's ``install_agentic_deps`` (``benchmarks/benchmark_lib.sh``) builds the round's aiperf,
+#: relative to the round's workspace: Magpie points ``AIPERF_RUNTIME_DIR`` at ``<workspace>/.agentx-runtime``.
+_ROUND_AIPERF = Path(".agentx-runtime", "venv", "bin", "aiperf")
 
 
 def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
@@ -76,6 +84,24 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def server_launch_environment(launch: Mapping[str, Any]) -> tuple[dict[str, str], set[str]]:
+    """The environment a Magpie-verified server launch ran with, and the names its launch cleared.
+
+    ``runtime_environment`` is the server process's own environment, which carries what the launcher injects (an
+    InferenceX recipe's simulated acceptance, say); ``effective_env`` is what the recipe set over it, where ``None``
+    records a name it cleared.
+    """
+    env = {str(name): str(value) for name, value in (launch.get("runtime_environment") or {}).items()}
+    cleared: set[str] = set()
+    for name, value in (launch.get("effective_env") or {}).items():
+        if value is None:
+            env.pop(str(name), None)
+            cleared.add(str(name))
+        else:
+            env[str(name)] = str(value)
+    return env, cleared
+
+
 def native_launch_evidence(
     measurement: dict[str, Any], config_path: Path, *, actual_server_log: str | None = None
 ) -> dict[str, Any]:
@@ -121,6 +147,31 @@ def native_launch_evidence(
     }
 
 
+_SHAPE_PERCENTILES = ("avg", "p50", "p75", "p90", "p99")
+# Magpie's AgentX report carries no sequence lengths; the aiperf summary it leaves in the round's workspace does.
+_AIPERF_SUMMARY = "profile_export_aiperf.json"
+
+
+def measured_corpus_shape(workspace: Path | None) -> dict[str, Any]:
+    """The ISL/OSL percentiles the round replayed, from aiperf's export; ``{}`` when it does not carry both."""
+    path = None if workspace is None else find_aiperf_artifact(workspace, _AIPERF_SUMMARY)
+    if path is None:
+        return {}
+    try:
+        export = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(export, dict):
+        return {}
+    shape: dict[str, Any] = {}
+    for key, name in (("isl", "input_sequence_length"), ("osl", "output_sequence_length")):
+        metric = export.get(name)
+        if not isinstance(metric, dict):
+            return {}
+        shape[key] = {p: int(metric[p]) for p in _SHAPE_PERCENTILES if isinstance(metric.get(p), (int, float))}
+    return {**shape, "source": "measured"} if all(shape.values()) else {}
+
+
 def read_agentx_report(workspace: Path) -> dict[str, Any] | None:
     """Read the latest public AgentX report for the shared correctness gate."""
     paths = list(workspace.rglob("benchmark_report.json"))
@@ -135,3 +186,47 @@ def read_agentx_report(workspace: Path) -> dict[str, Any] | None:
         return None
     measured = agentx_measurement(report)
     return measured if measured["valid_measurement"] else {}
+
+
+@dataclass(frozen=True)
+class ReplayedTrace:
+    """The corpus a valid AgentX round replayed and the mean request it served."""
+
+    corpus: str
+    entries: int
+    requests: int
+    mean_isl: int
+    mean_osl: int
+
+
+def replayed_trace(workspace: Path) -> ReplayedTrace | None:
+    """The trace the latest valid AgentX round under ``workspace`` replayed, or ``None`` without one.
+
+    The report publishes token rates over the measured window rather than token counts, so each
+    mean is its rate times the window over the successful requests.
+    """
+    measured = read_agentx_report(workspace)
+    if not measured:
+        return None
+    dataset = measured["agentx_metrics"].get("dataset") or {}
+    requests, window = measured["completed_requests"], measured["duration_seconds"]
+    rates = (measured["input_throughput"], measured["output_throughput"])
+    if not (dataset.get("loader") and dataset.get("num_dataset_entries") and requests and window and all(rates)):
+        return None
+    return ReplayedTrace(
+        corpus=str(dataset["loader"]),
+        entries=int(dataset["num_dataset_entries"]),
+        requests=int(requests),
+        mean_isl=round(rates[0] * window / requests),
+        mean_osl=round(rates[1] * window / requests),
+    )
+
+
+def round_replay_client(workspace: Path) -> Path | None:
+    """The aiperf the AgentX round in ``workspace`` replayed with, or ``None`` when it cannot run here.
+
+    Its venv links an interpreter the round installed outside the workspace, so the client runs only
+    in a container where a Magpie round has run.
+    """
+    client = workspace / _ROUND_AIPERF
+    return client if os.access(client, os.X_OK) and client.with_name("python").is_file() else None

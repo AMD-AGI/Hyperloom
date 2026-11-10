@@ -434,7 +434,6 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
     monkeypatch.setattr(cli, "_preflight", Mock(return_value={}))
     monkeypatch.setattr(cli, "_resolve_models_for_run", Mock())
     monkeypatch.setattr(cli, "_preflight_agentx_backend", Mock())
-    monkeypatch.setattr(cli, "_apply_agentx_budget_profile", Mock())
     monkeypatch.setattr(resource_lock, "local_owner_scope", lambda: "local")
     lock = Mock()
     monkeypatch.setattr(cli, "_acquire_session_lock_or_exit", Mock(return_value=lock))

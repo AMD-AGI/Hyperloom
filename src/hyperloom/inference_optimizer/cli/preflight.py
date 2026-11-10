@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -15,7 +16,7 @@ import socket
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
@@ -432,8 +433,9 @@ _LM_EVAL_PINNED_SPECS = (
 _LM_EVAL_FROZEN_DEPS = ("torch", "pandas", "numpy", "triton")
 
 
-def _frozen_constraints(python_exe: str) -> list[str]:
-    """Pin the packages this install must not move, as ``pip -c`` arguments."""
+@contextlib.contextmanager
+def _frozen_constraints(python_exe: str) -> Iterator[list[str]]:
+    """Pin the packages this install must not move, as ``pip -c`` arguments; the constraints file is removed on exit."""
     pins: list[str] = []
     for name in _LM_EVAL_FROZEN_DEPS:
         probe = subprocess.run(
@@ -447,28 +449,33 @@ def _frozen_constraints(python_exe: str) -> list[str]:
             pins.append(f"{name}=={version}")
     if not pins:
         print("Preflight: WARNING — could not read installed versions; lm_eval install is unconstrained")
-        return []
+        yield []
+        return
     # The name deliberately carries no package name: this path is spliced into a pip command line that callers assert
     # does not mention a package spec.
     handle, path = tempfile.mkstemp(prefix="hyperloom_pip_constraints_", suffix=".txt")
-    with os.fdopen(handle, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(pins) + "\n")
-    print(f"Preflight: constraining the lm_eval install to {' '.join(pins)}")
-    return ["-c", path]
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(pins) + "\n")
+        print(f"Preflight: constraining the lm_eval install to {' '.join(pins)}")
+        yield ["-c", path]
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
 
 
 def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
     """Install the pinned ``lm_eval[api]``, falling back to the source archive."""
-    constraints = _frozen_constraints(python_exe)
-    for i, (source, spec) in enumerate(_LM_EVAL_PINNED_SPECS):
-        is_last = i == len(_LM_EVAL_PINNED_SPECS) - 1
-        proc = subprocess.run(
-            [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *constraints, *pip_extra, spec],
-            check=is_last,
-        )
-        if proc.returncode == 0:
-            return
-        print(f"Preflight: WARNING — pinned lm_eval via {source} failed; falling back")
+    with _frozen_constraints(python_exe) as constraints:
+        for i, (source, spec) in enumerate(_LM_EVAL_PINNED_SPECS):
+            is_last = i == len(_LM_EVAL_PINNED_SPECS) - 1
+            proc = subprocess.run(
+                [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *constraints, *pip_extra, spec],
+                check=is_last,
+            )
+            if proc.returncode == 0:
+                return
+            print(f"Preflight: WARNING — pinned lm_eval via {source} failed; falling back")
 
 
 def _resumed_session_state(args: argparse.Namespace) -> dict[str, Any] | None:
@@ -627,20 +634,11 @@ def _install_missing_lm_eval_deps(python_exe: str, pip_extra: list[str], missing
     """Install the ``lm_eval[api]`` dependencies an image that ships ``lm_eval`` lacks."""
     targets = missing
     print(f"Preflight: installing {' '.join(targets)} (accuracy gate; missing: {' '.join(missing)}) ...")
-    subprocess.run(
-        [
-            python_exe,
-            "-m",
-            "pip",
-            "install",
-            "--quiet",
-            "--no-cache-dir",
-            *_frozen_constraints(python_exe),
-            *pip_extra,
-            *targets,
-        ],
-        check=True,
-    )
+    with _frozen_constraints(python_exe) as constraints:
+        subprocess.run(
+            [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *constraints, *pip_extra, *targets],
+            check=True,
+        )
     print(f"Preflight: {' '.join(targets)} installed OK")
     return {
         "status": "applied",
@@ -808,7 +806,6 @@ def _check_tracelens_cli() -> dict[str, Any]:
             "target": "TraceLens",
             "message": None,
         }
-    session_dir = str(_workspace_root_resolve())
     print(
         f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
         f"/opt/venv/bin/TraceLens_* console_scripts are installed by "
@@ -817,8 +814,7 @@ def _check_tracelens_cli() -> dict[str, Any]:
         f"before every launch (carve-out applies only to --resume-from in "
         f"the same shell that earlier ran install.sh). Re-run:\n"
         f"  bash $REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh\n"
-        f"  . {session_dir}/runtime/kernel-agent.env.sh\n"
-        f"then retry `python -m hyperloom optimize`. Refusing to start.",
+        f"then retry `python -m hyperloom optimize` in the same container. Refusing to start.",
         file=sys.stderr,
     )
     raise SystemExit(2)
