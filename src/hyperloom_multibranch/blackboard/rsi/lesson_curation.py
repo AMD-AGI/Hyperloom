@@ -58,6 +58,8 @@ NO_LESSONS = "no lesson to curate"
 MERGE, REWRITE, RETIRE = "merge", "rewrite", "retire"
 _MERGED, _REWRITTEN, _RETIRED, _REFUSED = "merged", "rewritten", "retired", "refused"
 _ACTION, _LESSON, _CONTENT, _WHY = "action", "lesson", "content", "why"
+#: Of an answer the curator cannot read, the report quotes this much and the scheduler log keeps this much.
+_QUOTED_CHARS, _LOGGED_CHARS = 120, 4000
 
 CURATION_SYSTEM_PROMPT = f"""You curate the lesson pool of a multi-branch LLM inference optimization system: what the
 specialists of past sessions learnt, which the specialists of later sessions are shown before they decide. Keep the
@@ -211,9 +213,13 @@ def _step(item: object) -> CurationStep | None:
 def read_steps(answer: str, found: _Offer) -> tuple[list[CurationStep], list[str]]:
     """The steps of ``answer`` the curator may take, :data:`MAX_STEPS` at most, and why it refused the others."""
 
+    if not answer.strip():
+        return [], ["the answer is empty"]
     raw = _steps(answer)
     if raw is None:
-        return [], ["the answer holds no JSON object with a list of actions"]
+        log.warning("CLOSE's curator answered with no JSON object with a list of actions: %s", answer[:_LOGGED_CHARS])
+        quoted = _text(answer)[:_QUOTED_CHARS]
+        return [], [f"the answer holds no JSON object with a list of actions: {quoted!r} ({len(answer)} characters)"]
     taken: list[CurationStep] = []
     refused: list[str] = []
     for item in raw:

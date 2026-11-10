@@ -405,6 +405,21 @@ class SilentModel(ScriptedCompletion):
 
 
 @dataclass
+class SlowModel(ScriptedCompletion):
+    """A judge model that answers ``seconds`` of virtual time after it is asked; ``asked`` holds when each call
+    started. A test double, not a placeholder."""
+
+    clock: VirtualClock = field(default_factory=lambda: VirtualClock(START))
+    seconds: float = 0.0
+    asked: list[float] = field(default_factory=list)
+
+    async def __call__(self, system: str, user: str) -> CompletionReply:
+        self.asked.append(self.clock.now())
+        await self.clock.sleep(self.seconds)
+        return await super().__call__(system, user)
+
+
+@dataclass
 class Stage:
     """One session on the specialist runtime: ``scripts`` and ``steps`` are what each branch's specialist does,
     ``explored`` what its tests and retests measure and ``measured`` what every other test does, the runtime refuses
@@ -1299,6 +1314,23 @@ async def test_a_judge_that_never_answers_gives_up_at_the_explore_deadline_and_o
     assert [row["reason"] for row in decisions if row["kind"] == "judge_failed"] == [
         "no answer by the EXPLORE deadline"
     ]
+
+
+async def test_no_judge_round_starts_when_too_little_of_explore_is_left_to_start_a_branch(tmp_path: Path) -> None:
+    interval = 500.0
+    stage = _stage(tmp_path)
+    stage.settings = replace(SETTINGS, judge_interval_seconds=interval)
+    stage.judge = SlowModel([OPENING, STEER], clock=stage.time, seconds=100.0)
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    [explore] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "explore"]
+    explore_end = float(str(explore["detail"]["explore_end"]))
+    steered = stage.judge.asked[1:]
+    assert steered and all(explore_end - at >= branches.SPECIALIST_START_SECONDS for at in steered)
+    assert explore_end - branches.SPECIALIST_START_SECONDS < steered[-1] + interval < explore_end
+    assert [row for row in _decisions(stage) if row["kind"] == "judge_failed"] == []
 
 
 def _decisions(stage: Stage) -> list[dict[str, object]]:
@@ -3001,9 +3033,9 @@ async def test_a_toolbox_without_cards_for_a_test_ends_explore_as_a_failed_sessi
 
 
 class AnalysingToolbox(LeasingToolbox):
-    """The recording toolbox with an analysis route whose TraceLens job of PRELUDE's root profile ends at once and
-    every later one never does, noting every test taken back; a double for a backend that profiles, not a
-    placeholder."""
+    """The recording toolbox with an analysis route whose TraceLens job of PRELUDE's root profile ends at once, with
+    no shares and no error class, and every later one never does, noting every test taken back; a double for a
+    backend that profiles, not a placeholder."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -3018,6 +3050,9 @@ class AnalysingToolbox(LeasingToolbox):
 
     def tool_status(self, job_id: str) -> JobStatus:
         return JobStatus.SUCCEEDED if job_id == "tracelens-1" else JobStatus.RUNNING
+
+    def tool_result(self, job_id: str) -> Mapping[str, Any]:
+        return {}
 
     async def cancel(self, request_id: str) -> CancelOutcome:
         self.taken_back.append(request_id)

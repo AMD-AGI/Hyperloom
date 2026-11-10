@@ -139,6 +139,7 @@ def _view(
     queued: dict[str, tuple[QueuedIntent, ...]] | None = None,
     building: dict[str, tuple[BuildStatus, ...]] | None = None,
     roofline_ceiling: dict[str, float] | None = None,
+    focus: dict[str, str] | None = None,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -182,6 +183,7 @@ def _view(
         specialists=specialists or {},
         held=held or {},
         queued=queued or {},
+        focus=focus or {},
         building=building or {},
     )
 
@@ -234,6 +236,17 @@ def test_the_prompt_shows_the_open_areas_and_the_playbook_before_the_reply_forma
     assert prompt.index("Scheduling playbook h0:") < prompt.index("Reply with")
     assert "Scheduling playbook" not in bare and "Open areas" not in bare
     assert (system_prompt(played), system_prompt(_view())) == (PLAYBOOK_JUDGE_PROMPT, JUDGE_SYSTEM_PROMPT)
+
+
+def test_the_prompt_shows_arbor_s_map_after_the_open_areas_only_when_the_session_has_one() -> None:
+    areas = "Open areas for a new branch, from the profile of c1:\n- gemm_a8w8 (gemm): 10.0% of GPU time"
+    held = "Arbor's map: the directions ...\n- m-gemm (held by b02): Dense GEMMs"
+    prompt = render_prompt(replace(_view(), open_areas=areas, agent_map=held, playbook=H0.render()))
+
+    assert (
+        prompt.index(areas) < prompt.index(held) < prompt.index("Scheduling playbook h0:") < prompt.index("Reply with")
+    )
+    assert "Arbor's map" not in render_prompt(replace(_view(), open_areas=areas))
 
 
 def test_a_playbook_session_s_prompt_makes_its_stall_evidence_the_one_stop_rule_for_a_stall() -> None:
@@ -314,7 +327,7 @@ def test_a_branch_row_shows_what_is_known_of_its_specialist_and_a_gave_up_one_is
     assert (rows["b02"]["specialist"]["lost"], rows["b02"]["specialist"]["judge_failed"]) == (6, True)
     assert "specialist" not in rows[INTEGRATION_BRANCH] and "specialist" not in rows["b03"]
     prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
-    for field in ("crashes", "lost", "gave_up", "unready", "judge_failed"):
+    for field in ("crashes", "lost", "gave_up", "exhausted", "unready", "judge_failed"):
         assert f"({field})" in prompt
     assert "The scheduler stops a gave-up branch itself" in prompt
     assert "A branch whose judging failed makes no more progress" in prompt
@@ -333,6 +346,31 @@ def test_the_prompt_says_a_free_slot_may_be_opened_without_a_stop() -> None:
 
     assert "free_branch_slots counts the branches you may open at this call having stopped nothing" in prose
     assert "Leaving a free slot unopened needs a reason; opening into it does not." in prose
+
+
+def test_a_playbook_session_s_prompt_leaves_a_free_slot_free_while_no_open_area_is_left() -> None:
+    prose = " ".join(PLAYBOOK_JUDGE_PROMPT.split())
+
+    assert "needs a reason; opening into it does not" not in prose
+    assert "When the open areas list no op, leave a free slot free" in prose
+    assert "the scheduler then opens only the branches you name a focus for" in prose
+    assert "only for an angle its history has not tried" in prose
+    assert "briefed on the open areas' ops in turn" in prose
+    assert "so refill the free slots" not in prose
+
+
+def test_every_specialist_row_shows_its_focus_a_stopped_one_included() -> None:
+    focused = (
+        _entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION),
+        _entry("b01"),
+        _entry("b03", stopped=True, origin=BranchOrigin.REFILL),
+    )
+
+    rows = {row["branch"]: row for row in _state(_view(roster=focused, focus={"b03": "act_mul"}))["branches"]}
+
+    assert (rows["b03"]["focus"], rows["b03"]["stopped"]) == ("act_mul", "judge: flat")
+    assert rows["b01"]["focus"] == "" and "focus" not in rows[INTEGRATION_BRANCH]
+    assert "a stopped branch keeps it" in " ".join(PLAYBOOK_JUDGE_PROMPT.split())
 
 
 def test_a_branch_whose_specialist_is_not_known_shows_none() -> None:

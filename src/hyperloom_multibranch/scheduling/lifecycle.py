@@ -64,12 +64,14 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
 )
 from hyperloom_multibranch.blackboard.rsi.session import FRONTIER_LOG, archived_history
 from hyperloom_multibranch.rulegate.critic import FixReviewer
+from hyperloom_multibranch.scheduling.agent_map import SharedMap
 from hyperloom_multibranch.scheduling.agent_plans import (
     AGENT_SOURCES_UNREAD,
     DOSSIER_ENDED,
     DOSSIER_SKIPPED,
     DOSSIER_STARTED,
     GENERATED_FOR,
+    GENERATED_MAP,
     MADE_BY_PASS,
     MADE_BY_SHARES,
     MAP_KEPT,
@@ -92,7 +94,7 @@ from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, St
 from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
 from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
-from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchResolver, MergeRecords
+from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION, PLAYBOOK_JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.layout import SessionLayout
@@ -385,7 +387,8 @@ class Session:
             services.resolver_model,
         )
         records = MergeRecords(merger, DecisionLog(self._layout.merges, self._clock))
-        return Integrator(records, repo, checks, resolver, self._clock)
+        integrator = BundlingIntegrator if self._settings.workload.bundles_merges else Integrator
+        return integrator(records, repo, checks, resolver, self._clock)
 
     def _open_llm_roles(self, services: SessionServices) -> None:
         """The judge, and the playbook author and the curator CLOSE asks, each recording its spend on the blackboard."""
@@ -605,7 +608,9 @@ class Session:
             if settings.agent_directions and settings.review_gate and await self._arbors():
                 dossier = Path(settings.agent_dossier) if settings.agent_dossier else None
                 await self._review(Path(settings.agent_directions), dossier, MADE_BY_USER)
-            return AgentBranches(settings.agents, await agent_plans(settings.agents, settings.agent_directions, work))
+            plans = await agent_plans(settings.agents, settings.agent_directions, work)
+            await self._hand_map(settings.agent_directions, plans)
+            return AgentBranches(settings.agents, plans)
         arbors = await self._arbors()
         if not arbors or (len(arbors) < GENERATED_FOR and not settings.review_gate):
             return AgentBranches(settings.agents, await agent_plans(settings.agents, "", work))
@@ -668,12 +673,22 @@ class Session:
         work = self._layout.agent_plans
         given = () if shares is None else (shares.shares, shares.source)
         plans = await agent_plans(map_for, map_file, work, *given)
+        await self._hand_map(map_file, plans)
         answers = []
         for agent, plan in zip(map_for, plans):
             admission = await self._desk.admit_share(ShareRequest(branch, start_commit, agent, plan))
             answers.append(f"{admission.branch or admission.reason} ({admission.status.value})")
         split = "split" if any(plans) else "not split, each Arbor maps its own"
         return f"{len(map_for)} share branches asked, the map {split}: {', '.join(answers)}"
+
+    async def _hand_map(self, map_file: str, plans: tuple[str, ...]) -> None:
+        """Keep the map ``plans`` were split from on the blackboard (:mod:`agent_map`), for the open areas, the briefs,
+        the menu and the judge to read: ``map_file``, or the one generated from the root's shares when it is ``""``;
+        none when nothing was split."""
+
+        if any(plans):
+            given = Path(map_file) if map_file else self._layout.agent_plans / GENERATED_MAP
+            await self._branches.record_map(SharedMap.read(given, plans))
 
     async def _too_late(self, branch: str, map_for: tuple[str, ...], step: str) -> str:
         """Why the shares of ``map_for`` do not open when each would now run less than ``--agent-share-minutes``

@@ -5,10 +5,11 @@
 blackboard in step.
 
 Opening a branch records its ``OPEN`` lineage, cuts it in the experiment repository at its start commit, starts its
-specialist there and gives it its K; the session's briefs keep the focus a branch the scheduler opens in a batch was
-opened with. A user branch opens the same way where EXPLORE starts, on the direction the user wrote for it, which its
-started decision records. A repair the fork desk admitted is opened the same way at the commit its blocked
-candidate was measured against, however far the branch that asked for it has committed past that commit meanwhile:
+specialist there and gives it its K; a branch the scheduler opens in a batch is briefed on its focus as the judge wrote
+it, and its ``OPEN`` names the profile op that focus names. A user branch opens the same way where EXPLORE starts, on
+the direction the user wrote for it, which its started decision records. A repair the fork desk admitted is opened
+the same way at the commit its blocked candidate was measured against, however far the branch that asked for it has
+committed past that commit meanwhile:
 the repair lands on its own branch, and the integrator carries a commit's own change onto the integration head. A
 fork is cut by the rule gate at that same commit, which lands the fix on it first and records its
 ``SPLIT`` lineage, so it gets no ``OPEN``: it is opened at its head once the gate has landed it, and a fork the gate
@@ -62,6 +63,7 @@ from hyperloom_multibranch.scheduling.roster import (
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
+    from hyperloom_multibranch.scheduling.agent_map import SharedMap
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 logger = logging.getLogger(__name__)
@@ -92,6 +94,18 @@ class BatchStart:
 
 
 @dataclass(frozen=True)
+class BranchFocus:
+    """A branch's focus: the ``text`` it is briefed on and its started decision logs, and the profile ``op`` that text
+    names, which its ``OPEN`` records; ``op`` is ``text`` when it names no profiled op."""
+
+    text: str
+    op: str
+
+
+UNFOCUSED = BranchFocus("", "")
+
+
+@dataclass(frozen=True)
 class Launch:
     """What a branch's specialist starts on: the repair the branch was opened for, the focus the session's briefs keep
     for it unless ``None``, the direction the user wrote for a user branch, and the agent the user named for an agent's
@@ -99,7 +113,7 @@ class Launch:
     mapping branch, which maps the directions those Arbor agents split (:attr:`BranchTask.map_for`)."""
 
     repair: RepairRequest | None = None
-    focus: str | None = None
+    focus: BranchFocus | None = None
     direction: str = ""
     agent: str = ""
     plan: str = ""
@@ -130,16 +144,24 @@ class BranchControl:
         self._reserved = context.reserved
         self._specialists: set[str] = set()
         self._deadlines: dict[str, float] = {}
+        self._map: SharedMap | None = None
+
+    async def record_map(self, shared: SharedMap) -> None:
+        """Keep ``shared`` on the blackboard as the session's map, whose shares the agent branches open on; each share
+        names its directions' holder once a branch opens on it."""
+
+        self._map = shared
+        await self._blackboard.write_agent_map(shared.directions)
 
     async def integration_head(self) -> str:
         return await self._repo.head(INTEGRATION_BRANCH)
 
     async def open_branches(
-        self, count: int, k: int, start: BatchStart, focus: tuple[str, ...] = ()
+        self, count: int, k: int, start: BatchStart, focus: tuple[BranchFocus, ...] = ()
     ) -> tuple[BranchEntry, ...]:
         """Open up to ``count`` specialist branches at K ``k`` as ``start`` says, record ``OPEN``, start them; the
         branches opened before the roster first refuses one. The n-th branch is briefed on ``focus[n]``, on none past
-        its end or where it is ``""``.
+        its end or where its text is ``""``.
 
         Forks and repairs are admitted while a branch starts, so the roster is asked again before each branch, right
         before its branch id is issued: a refused branch takes no id."""
@@ -149,7 +171,7 @@ class BranchControl:
             entry = self._issue(start, k)
             if entry is None:
                 break
-            aim = focus[index] if index < len(focus) else ""
+            aim = focus[index] if index < len(focus) else UNFOCUSED
             opened.append(await self._open(entry, start.start_commit, start.deadline, Launch(focus=aim)))
         return tuple(opened)
 
@@ -160,7 +182,7 @@ class BranchControl:
         :meth:`open_branches` opens a batch, unfocused at K :data:`STARTED_K`; the roster entries issued before the
         roster first refuses one, a branch whose specialist did not start among them, already stopped."""
 
-        launches = tuple(Launch(focus="", direction=direction) for direction in directions)
+        launches = tuple(Launch(focus=UNFOCUSED, direction=direction) for direction in directions)
         return await self._open_named(BranchOrigin.USER, launches, start_commit, deadline)
 
     async def open_agent_branches(
@@ -171,7 +193,7 @@ class BranchControl:
         gives each agent, in order, its share of the session's directions (``""``, or none given, for no share)."""
 
         shares = plans + ("",) * (len(agents) - len(plans))
-        launches = tuple(Launch(focus="", agent=agent, plan=plan) for agent, plan in zip(agents, shares))
+        launches = tuple(Launch(focus=UNFOCUSED, agent=agent, plan=plan) for agent, plan in zip(agents, shares))
         return await self._open_named(BranchOrigin.AGENT, launches, start_commit, deadline)
 
     async def open_map_branch(
@@ -181,7 +203,7 @@ class BranchControl:
         ``map_for`` split, with the first one's dossier pass; each share then opens as a branch the fork desk admits, into
         the slots the mapping branch holds for them meanwhile."""
 
-        launch = Launch(focus="", agent=map_for[0], map_for=map_for)
+        launch = Launch(focus=UNFOCUSED, agent=map_for[0], map_for=map_for)
         opened = await self._open_named(BranchOrigin.AGENT, (launch,), start_commit, deadline)
         for entry in opened:
             if entry.stop is None:
@@ -250,7 +272,7 @@ class BranchControl:
             return entry
         detail: dict[str, object] = {"start_commit": start_commit, "k": entry.k, "from_branch": entry.from_branch}
         if launch.focus is not None:
-            detail["focus"] = launch.focus
+            detail["focus"] = launch.focus.text
         if launch.direction:
             detail["direction"] = launch.direction
         if launch.map_for:
@@ -391,11 +413,14 @@ class BranchControl:
         return frozenset({*state.pending_build_by_branch, *state.queued_by_branch, *state.running_by_branch})
 
     async def _launch(self, entry: BranchEntry, start_commit: str, deadline: float, launch: Launch) -> None:
-        """Start the specialist unbriefed, as the runtime briefs each launch itself; a ``launch.focus`` is the one the
-        session's briefs keep for the branch."""
+        """Start the specialist unbriefed, as the runtime briefs each launch itself; the text of a ``launch.focus`` is
+        the one the session's briefs keep for the branch, and its op the one its ``OPEN`` names."""
 
         if launch.focus is not None:
-            self._briefs.for_branch(entry.branch, launch.focus)
+            self._briefs.for_branch(entry.branch, launch.focus.text)
+        if launch.plan and self._map is not None and launch.plan in self._map.shares.values():
+            self._map = self._map.dealt(launch.plan, entry.branch)
+            await self._blackboard.write_agent_map(self._map.directions)
         if entry.origin.cut_by_scheduler:
             reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
             repairs = launch.repair.judgement.request_ids[0] if launch.repair is not None else ""
@@ -406,6 +431,7 @@ class BranchControl:
                 reason=reason,
                 repairs=repairs,
                 driver=entry.origin.driver,
+                focus=launch.focus.op if launch.focus is not None else "",
             )
             await self._blackboard.record_lineage(opened)
             await self._repo.create_branch(entry.branch, start_commit)
@@ -417,6 +443,7 @@ class BranchControl:
             direction=launch.direction,
             agent=launch.agent,
             deadline=deadline,
+            focus=launch.focus.text if launch.focus is not None else "",
             plan=launch.plan,
             map_for=launch.map_for,
         )
@@ -444,6 +471,8 @@ __all__ = [
     "REPAIR_TIME_LIMIT_REASON",
     "SPECIALIST_CALL_SECONDS",
     "SPECIALIST_START_SECONDS",
+    "UNFOCUSED",
     "BatchStart",
     "BranchControl",
+    "BranchFocus",
 ]

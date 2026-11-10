@@ -113,6 +113,7 @@ class _Job:
     workdir: Path
     status: JobStatus = JobStatus.RUNNING
     pointer: ToolResultPointer | None = None
+    result: Mapping[str, Any] = field(default_factory=dict)
     #: The branches the result goes to, in the order they asked, those whose push the sink accepted, and those whose push
     #: is under way (a join or a redelivery meanwhile does not push to them again).
     recipients: list[str] = field(default_factory=list)
@@ -256,6 +257,11 @@ class ToolJobs:
     def status(self, job_id: str) -> JobStatus:
         return self._job(job_id).status
 
+    def result(self, job_id: str) -> Mapping[str, Any]:
+        """The tool's own result of the job; empty while it runs, when the tool raised, or for a job a restarted runner
+        adopted from the shared record."""
+        return self._job(job_id).result
+
     def cancel(self, job_id: str) -> bool:
         """Ask the job to stop; False when it already ended. The branch still gets a pointer, saying cancelled."""
         job = self._job(job_id)
@@ -316,6 +322,7 @@ class ToolJobs:
             output, error = await self._execute(job)
         job.workdir.mkdir(parents=True, exist_ok=True)
         summary = self._settle(job, output, error)
+        job.result = dict(output.result) if output is not None else {}
         record = {
             "job_id": job.job_id,
             "tool": job.request.tool,
