@@ -91,8 +91,8 @@ You may open branches at any call. opening is true only for the call that sizes 
 commit EXPLORE started on — the root commit, or the Recipe KB champion PRELUDE replayed onto it — at least one branch
 unless user branches opened already (an agent's branch does not count). A branch opened at a later call starts from the
 integration head, briefed on its focus: the op it should speed up. Name the focus of each, or leave it out and the
-branch is briefed on the largest op of the integration head's latest profile, or on none when that head was never
-profiled. The opening batch is given no focus. free_branch_slots counts the branches you may open at this call having
+branch is briefed on the largest ops of the integration head's latest profile in turn, the largest first, wrapping when
+more branches open than it has ops, or on none when that head was never profiled. The opening batch is given no focus. free_branch_slots counts the branches you may open at this call having
 stopped nothing; a stop frees one more for the same answer, and branches beyond the slots left are not opened. Leaving a
 free slot unopened needs a reason; opening into it does not. pending lists the forks and repairs the rule gate asked for
 that wait for a slot, oldest first, with how long each has waited: a slot your stops free goes to them first and only
@@ -122,7 +122,7 @@ stays stranded the integration branch, and every branch you open from it, goes o
 before stopping such a branch, whose head holds the gain the integration head lacks.
 bottleneck_moved: the profile of the integration head taken after it moved found its largest op changed, or that op's
 share fell by more than {MB_BOTTLENECK_SHIFT_PP} percentage points: branches still speeding up the previous largest op
-have less to gain, and a branch you open now is briefed on the new largest op unless you name its focus.
+have less to gain, and a branch you open now without a focus is briefed from the new profile as above.
 The integration branch's profile_running is true while that profile runs: its PROFILE test holds one of the
 integration branch's K slots, so merge tests wait for it while that K is 1; size the integration branch's K with it.
 environment_changed: the toolbox quarantined a measurement node after an infrastructure failure (gpu_ids is empty for
