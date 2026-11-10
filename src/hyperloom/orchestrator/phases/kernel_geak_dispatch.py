@@ -49,6 +49,7 @@ from .kernel_gemm_tuning import _first_text
 log = logging.getLogger(__name__)
 
 _GEAK_RUNNER_MODULE = "hyperloom.orchestrator.kernel.geak_runner"
+_TIMED_OUT = "timeout"
 
 # How long the GEAK handoff waits for the servers it stopped to release their VRAM.
 _GEAK_GPU_FREE_WAIT_SEC: float = 120.0
@@ -750,6 +751,43 @@ class _GeakDispatchMixin:
             handoff=handoff,
         )
 
+    def _outer_timeout_record(
+        self, flushed: dict[str, Any], *, runner_timeout: int, kill_timeout: int
+    ) -> dict[str, Any]:
+        """What an outer-deadline kill leaves in the session.
+
+        A ``result.json`` GEAK managed to flush keeps its own status, phase, validation status, and accepted
+        kernels. No file means Hyperloom killed the run before GEAK classified it.
+        """
+        if not flushed:
+            return {
+                "status": _TIMED_OUT,
+                "error_class": "external_timeout",
+                "phase_reached": "unknown",
+                "error": (
+                    f"GEAK e2e killed after {kill_timeout}s (budget-capped) "
+                    "before it wrote result.json; closing window preserved"
+                ),
+                "runner_timeout_s": runner_timeout,
+                "kill_timeout_s": kill_timeout,
+            }
+        error = str(flushed.get("error") or "").strip()
+        record: dict[str, Any] = {
+            "status": flushed.get("status") or _TIMED_OUT,
+            "error_class": flushed.get("error_class") or flushed.get("status") or _TIMED_OUT,
+            "error": error
+            or f"GEAK e2e killed after {kill_timeout}s (budget-capped); retained the result GEAK flushed",
+            "runner_timeout_s": runner_timeout,
+            "kill_timeout_s": kill_timeout,
+        }
+        for key in ("phase_reached", "validation_status", "accepted_kernels", "stages_reached"):
+            if key in flushed:
+                record[key] = flushed[key]
+        phase = record.get("phase_reached")
+        if phase and "stages_reached" not in record:
+            record["stages_reached"] = [phase]
+        return record
+
     def _refuse_geak_without_replay_client(self, handoff: dict[str, Any]) -> bool:
         """Skip a GEAK run that would replay AgentX traces with no aiperf that can run in this container.
 
@@ -858,15 +896,23 @@ class _GeakDispatchMixin:
             # the phase as a timeout.
             facts = _facts()
             flushed = read_json(self._geak_result_path(), {}, require_dict=True)
-            if flushed.get("status") == "ok" and not (agentx and self._geak_settled_replay(flushed, agentx=agentx)):
+            settled = bool(flushed) and agentx and self._geak_settled_replay(flushed, agentx=agentx)
+            if flushed.get("status") == "ok" and not settled:
                 log.info(
                     "GEAK flushed an OK result.json under SIGTERM grace; promoting the recovered win despite the cap."
                 )
                 return GeakRunnerOutcome(flushed, facts, "sigterm_flushed_result_json")
+            if not settled:
+                self._finish_geak_skip(
+                    self._outer_timeout_record(flushed, runner_timeout=runner_timeout, kill_timeout=kill_timeout),
+                    handoff=handoff,
+                    facts=facts,
+                )
+                return GeakRunnerOutcome()
             self._finish_geak_skip(
                 {
                     "status": "error",
-                    "error_class": "timeout",
+                    "error_class": _TIMED_OUT,
                     "error": f"GEAK e2e killed after {kill_timeout}s (budget-capped); closing window preserved",
                     "runner_timeout_s": runner_timeout,
                     "kill_timeout_s": kill_timeout,
