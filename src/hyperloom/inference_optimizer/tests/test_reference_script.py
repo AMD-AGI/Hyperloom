@@ -119,11 +119,27 @@ def test_render_redacts_secret_shaped_envs():
     """The script is archived and uploaded, so credentials are named but not written."""
     text = render_reference_script(
         framework="sglang",
-        launch=LaunchSettings(server_args="", envs={"HF_TOKEN": "hf_realsecret", "VLLM_ROCM_USE_AITER": "1"}),
+        launch=LaunchSettings(
+            server_args="",
+            envs={
+                "HF_TOKEN": "hf_realsecret",
+                "AWS_SECRET_ACCESS_KEY": "aws_realsecret",
+                "VLLM_ROCM_USE_AITER": "1",
+                "SGLANG_SIMULATE_ACC_TOKEN_MODE": "1",
+            },
+        ),
     )
-    assert "hf_realsecret" not in text
+    assert "hf_realsecret" not in text and "aws_realsecret" not in text
     assert "# export HF_TOKEN=<redacted; supply manually>" in text
+    assert "# export AWS_SECRET_ACCESS_KEY=<redacted; supply manually>" in text
     assert "export VLLM_ROCM_USE_AITER=1" in text
+    assert "export SGLANG_SIMULATE_ACC_TOKEN_MODE=1" in text.splitlines()
+
+
+def test_launch_controls_may_unset_a_token_named_knob():
+    controls = {"unset_envs": ["SGLANG_SIMULATE_ACC_TOKEN_MODE"]}
+    text = render_reference_script(framework="sglang", launch=LaunchSettings(server_args="--tp 8", **controls))
+    assert "unset SGLANG_SIMULATE_ACC_TOKEN_MODE" in text.splitlines()
 
 
 def test_render_no_model_no_export():
