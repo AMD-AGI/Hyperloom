@@ -12,6 +12,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -60,6 +61,7 @@ from inference_suite.load.scriptable import scriptable_base
 from inference_suite.parser_check import FlagRefusal, RefusedFlag
 from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
 from inference_suite.recipe.image_version import NO_RECIPE_IMAGE, recipe_image_facts
+from inference_suite.runtime import gpus as runtime_gpus
 from inference_suite.runtime import server as runtime_server
 from inference_suite.runtime import watch
 from inference_suite.runtime.phases import Phase
@@ -634,6 +636,22 @@ def test_a_round_whose_gpus_another_process_holds_is_refused_before_its_server_s
     assert report.run_status is RunStatus.FAILED and report.failed_step is FailedStep.GPUS_UNAVAILABLE
     assert report.failure_detail == "GPU 3: held by pid 4242 (python3)"
     assert result.layout.launch.exists() and not result.layout.server_log.exists() and not rig.calls.exists()
+
+
+def test_a_round_whose_amd_smi_fails_silently_records_the_refusal(rig, monkeypatch):
+    bin_dir = rig.tmp / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "amd-smi").write_text("#!/bin/sh\nexit 1\n")
+    (bin_dir / "amd-smi").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setattr(runtime_server, "await_free_gpus", runtime_gpus.await_free_gpus)
+
+    report = run.run_round(rig.config("r1")).report
+
+    assert report.run_status is RunStatus.FAILED and report.failed_step is FailedStep.GPUS_UNAVAILABLE
+    assert report.failure_detail is not None and report.failure_detail.endswith(
+        "amd-smi list --json exited 1 and printed nothing"
+    )
 
 
 def test_the_refusal_says_whether_the_host_holds_a_redacted_value(rig, monkeypatch):
