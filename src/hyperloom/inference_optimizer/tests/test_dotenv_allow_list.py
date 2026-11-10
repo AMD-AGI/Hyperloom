@@ -132,7 +132,7 @@ def _candidates() -> list[str]:
         *_FETCH_AND_ENDPOINT_VALUES,
         "NODE_EXTRA_CA_CERTS",
         "PROMPT_COMMAND",
-        "MAGPIE_PYTHON",
+        "VLLM_PYTHON",
         "TRACELENS_INTERNAL_ROOT",
         "TL_EXTENSION",
         "HYPERLOOM",
@@ -393,7 +393,7 @@ def test_a_private_dotenv_is_read_as_before(tmp_path):
     checkout.mkdir(mode=0o755)
     kept = {
         "PYTHONPATH": "/opt/own/site",
-        "MAGPIE_PYTHON": "/opt/own/bin/python",
+        "VLLM_PYTHON": "/opt/own/bin/python",
         "TRACELENS_INTERNAL_ROOT": "/opt/own/tl",
         "HTTPS_PROXY": "http://own-proxy.invalid:3128",
         "VIRTUAL_ENV": "/opt/own/venv",
