@@ -65,18 +65,44 @@ def test_a_roofline_that_cannot_fit_the_session_is_skipped_up_front():
     assert [(s["status"], s["detail"].split()[0]) for s in steps] == [("skipped", "insufficient_session_time")]
 
 
-def test_a_roofline_that_fits_runs_under_the_derived_timeout(monkeypatch):
-    phase, steps, _ = _phase(roofline_runtime_sec=1432.0, remaining_sec=7200.0)
-    granted: list[float] = []
+@pytest.fixture
+def granted(monkeypatch):
+    """The timeouts CLOSE handed to ``asyncio.wait_for``."""
+    seen: list[float] = []
     real_wait_for = asyncio.wait_for
 
     async def _wait_for(awaitable, timeout):
-        granted.append(timeout)
+        seen.append(timeout)
         return await real_wait_for(awaitable, timeout)
 
     monkeypatch.setattr(close_phase.asyncio, "wait_for", _wait_for)
+    return seen
+
+
+def test_a_roofline_that_fits_runs_under_the_derived_timeout(granted):
+    phase, steps, _ = _phase(roofline_runtime_sec=1432.0, remaining_sec=7200.0)
 
     asyncio.run(phase._maybe_run_close_post_opt_roofline())
 
     assert granted == [pytest.approx(1790.0)]
     assert steps[-1]["status"] == "done"
+
+
+@pytest.mark.parametrize(("measured", "remaining"), [(200.0, 450.0), (0.0, 450.0)])
+def test_a_roofline_the_session_can_fit_runs_with_less_than_the_floor_left(granted, measured, remaining):
+    """The floor bounds the wait; only the measured time, with headroom, bounds what must fit."""
+    phase, steps, _ = _phase(roofline_runtime_sec=measured, remaining_sec=remaining)
+
+    asyncio.run(phase._maybe_run_close_post_opt_roofline())
+
+    assert granted == [pytest.approx(remaining, abs=5.0)]
+    assert steps[-1]["status"] == "done"
+
+
+def test_a_spent_session_skips_the_roofline_even_when_none_was_measured(granted):
+    phase, steps, _ = _phase(roofline_runtime_sec=0.0, remaining_sec=0.0)
+
+    asyncio.run(phase._maybe_run_close_post_opt_roofline())
+
+    assert granted == []
+    assert [(s["status"], s["detail"].split()[0]) for s in steps] == [("skipped", "insufficient_session_time")]

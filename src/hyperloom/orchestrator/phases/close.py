@@ -115,13 +115,17 @@ class ClosePhase(CoordinatorCollaborator):
         return False
 
     async def _post_opt_roofline_timeout_sec(self, step: str) -> float | None:
-        """The slowest roofline this session ran, with headroom; ``None``, recorded as skipped, when it cannot fit."""
-        slowest_sec = float(self.shared_state.roofline_runtime_sec or 0.0)
-        timeout_sec = max(self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC, slowest_sec * self._POST_OPT_ROOFLINE_HEADROOM)
+        """How long to wait: the floor or the slowest roofline run, with headroom, capped by the time left.
+
+        ``None``, recorded as skipped, when the time left cannot fit the slowest roofline this session ran."""
+        needed_sec = float(self.shared_state.roofline_runtime_sec or 0.0) * self._POST_OPT_ROOFLINE_HEADROOM
         deadline = self.shared_state.session_deadline()
-        if deadline is None or deadline.remaining() >= timeout_sec:
-            return timeout_sec
-        detail = f"insufficient_session_time remaining={max(0.0, deadline.remaining()):.0f}s needed={timeout_sec:.0f}s"
+        if deadline is None:
+            return max(self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC, needed_sec)
+        remaining_sec = deadline.remaining()
+        if remaining_sec > 0.0 and remaining_sec >= needed_sec:
+            return min(max(self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC, needed_sec), remaining_sec)
+        detail = f"insufficient_session_time remaining={max(0.0, remaining_sec):.0f}s needed={needed_sec:.0f}s"
         await self._record_close_step(step, status="skipped", detail=detail)
         return None
 
