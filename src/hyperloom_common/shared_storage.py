@@ -409,6 +409,30 @@ def create_shared_file(path: Path) -> None:
     write_shared_bytes(path, b"")
 
 
+def open_shared(path: Path, access: int, mode: int = SHARED_FILE_MODE) -> int:
+    """Open ``path`` for ``access`` (``os.O_RDWR``, ``os.O_WRONLY | os.O_APPEND``) and return the descriptor, creating it
+    when it is not there: with ``mode`` below shared storage (:func:`parent_is_shared`), else as the umask leaves it
+    (a narrower ``mode`` is kept as asked, shared or not).
+
+    It is reached through its parent as :func:`open_directory` reaches it, and never through a link. A file that exists
+    is opened as it is, never truncated, chmodded or replaced by rename: a lock or a log that another process holds open
+    would be left on an unlinked inode. Another account's ``0600`` file therefore raises ``PermissionError``.
+    """
+    with shared_parent(path) as (directory, name, widen):
+        try:
+            descriptor = os.open(
+                name, access | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, _OWNER_ONLY, dir_fd=directory
+            )  # the umask never decides it: fchmod below
+        except FileExistsError:
+            return os.open(name, access | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+        try:
+            os.fchmod(descriptor, _final_mode(mode, widen))
+        except BaseException:
+            os.close(descriptor)
+            raise
+    return descriptor
+
+
 @dataclass(frozen=True)
 class Flush:
     """What :func:`write_shared_bytes` flushes to disk: the new ``file`` before the rename, its ``directory`` after."""
@@ -710,6 +734,7 @@ __all__ = [
     "directory_is_shared",
     "make_shared_dirs",
     "open_directory",
+    "open_shared",
     "open_shared_append",
     "open_shared_existing",
     "read_directory",
