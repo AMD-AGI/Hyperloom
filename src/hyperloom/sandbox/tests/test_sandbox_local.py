@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import proctree
+from hyperloom_common import proctree
 from hyperloom.sandbox import local_sandbox, reaper
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
 from hyperloom.sandbox.gpu_pool import GpuPool

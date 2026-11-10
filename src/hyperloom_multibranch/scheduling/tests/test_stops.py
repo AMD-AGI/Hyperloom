@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.proctree import descendants, running
+from hyperloom_common.proctree import descendants, running
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
