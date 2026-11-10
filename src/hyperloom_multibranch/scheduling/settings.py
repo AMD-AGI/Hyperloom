@@ -72,7 +72,7 @@ class Workload:
     """The fixed workload, spelled as the single-lineage command line spells it, and the kernel optimizer its recipes
     are scoped to. ``inferencex`` is the request shape of an InferenceX workload and ``None`` for an AgentX trace
     replay, whose shape the trace fixes; ``conc`` is the primary operating point of either. ``ep`` is the
-    expert-parallel size an AgentX workload is served at; an InferenceX one is served at :data:`DEFAULT_EP`.
+    expert-parallel size either is served at.
     ``agentx_duration_sec`` is an AgentX workload's trace window, ``None`` for the measuring harness's default.
     ``agentx_objective`` is the axis an AgentX workload is graded on; an InferenceX one is graded on output throughput.
 

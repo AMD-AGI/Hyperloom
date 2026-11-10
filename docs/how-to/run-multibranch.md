@@ -64,9 +64,10 @@ agent CLI the specialists run must be installed. `--measurement hosted` also nee
 
 `hyperloom-multibranch run --help` has the full text of each option.
 
-- **Workload:** `--model`, `--framework`, `--gpu-type`, `--workload` (`inferencex` or `agentx`), `--tp`, `--conc`,
-  `--precision`; `--isl`/`--osl` for `inferencex` only, `--ep`, `--agentx-duration-sec` (the trace window each
-  test replays, the harness's default when not given) and `--agentx-objective` for `agentx` only; `--kernel-optimizer`;
+- **Workload:** `--model`, `--framework`, `--gpu-type`, `--workload` (`inferencex` or `agentx`), `--tp`, `--ep`
+  (expert-parallel size, default 1), `--conc`, `--precision`; `--isl`/`--osl` for `inferencex` only,
+  `--agentx-duration-sec` (the trace window each test replays, the harness's default when not given) and
+  `--agentx-objective` for `agentx` only; `--kernel-optimizer`;
   `--inferencex-commit SHA` to resolve the session's base launch from InferenceX at that commit instead of `main`
   (see [Base launch](../reference/inference-suite.md#base-launch)).
 - **AgentX objective:** `--agentx-objective p50_interactivity|total_token_throughput` (default

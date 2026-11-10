@@ -63,6 +63,7 @@ from inference_suite.recipe.image_version import NO_RECIPE_IMAGE, recipe_image_f
 from inference_suite.runtime import server as runtime_server
 from inference_suite.runtime import watch
 from inference_suite.runtime.phases import Phase
+from inference_suite.runtime.watch import Stop
 from inference_suite.staging import AGENTX_PYTHON, GSM8K_TASK, StagingReport
 from inference_suite.tests.test_base_launch_contract import _base
 from inference_suite.tests.test_config_contract import _AGENTX, _MLPERF, _SHA, _config, _eval
@@ -270,7 +271,11 @@ class _Rig:
         self.staging = StagingReport(_SHA, dict(PINNED_TOOLS), ())
         monkeypatch.setattr(run.staging, "verify", lambda *_args: self.staging)
         self.busy_gpus: str | None = None
-        monkeypatch.setattr(runtime_server, "unavailable_gpus", lambda gpus: self.busy_gpus)
+        monkeypatch.setattr(
+            runtime_server,
+            "await_free_gpus",
+            lambda gpus, gate: None if self.busy_gpus is None else Stop(FailedStep.GPUS_UNAVAILABLE, self.busy_gpus),
+        )
 
     def _probe(self, python, framework, env, *, cwd):
         assert env["HF_TOKEN"] == _SECRET

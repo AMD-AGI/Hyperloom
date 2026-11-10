@@ -126,7 +126,7 @@ def gave_up_reason(status: SpecialistStatus) -> str:
 
 @dataclass(frozen=True)
 class ExploreWindow:
-    """The commit every gain is measured against, the commit the first branches start from, the clock times EXPLORE and the budget end at, the session's whole budget, the GPU seconds the session's tests and
+    """The commit every gain is measured against, the commit the first branches start from, the clock times EXPLORE and the budget end at, the GPU seconds the session's tests and
     leases may use before EXPLORE ends and the dollars the session's recorded LLM calls may cost (``math.inf`` for no
     limit, for either), the directions the user wrote, one user branch each, the agents the user named, one agent branch each, and in the same
     order each agent's share of the session's directions (:func:`~.agent_plans.agent_plans`; ``""`` for none), and
@@ -140,7 +140,6 @@ class ExploreWindow:
     start_commit: str
     explore_end: float
     session_deadline: float
-    budget_seconds: float
     explore_gpu_seconds: float
     max_llm_usd: float
     user_directions: tuple[str, ...]

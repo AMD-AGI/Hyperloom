@@ -198,14 +198,17 @@ def test_the_runs_source_is_cloned_into_the_session_once_and_a_restart_finds_it(
 
 
 def test_a_commit_the_source_lacks_fails_the_run_and_leaves_no_clone(tmp_path: Path) -> None:
-    origin = tmp_path / "origin"
+    # A directory of the test's own: the autouse fixtures of this directory make theirs in tmp_path.
+    root = tmp_path / "clones"
+    root.mkdir()
+    origin = root / "origin"
     _origin(origin)
-    destination = tmp_path / "MB-runner-source"
+    destination = root / "MB-runner-source"
 
     with pytest.raises(CacheBuildError, match="f" * 40):
         runner_source(destination, str(origin), "f" * 40)
 
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["origin"], "no clone and no staging left"
+    assert sorted(path.name for path in root.iterdir()) == ["origin"], "no clone and no staging left"
 
 
 def test_the_clone_is_made_where_no_other_account_can_plant_a_config_and_is_left_readable_not_writable(
