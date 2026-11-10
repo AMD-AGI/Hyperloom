@@ -9,14 +9,14 @@ import hashlib
 import json
 import logging as _logging
 import sqlite3
-import subprocess
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from . import machine_state as _phase_state
-from .kernel_round_budget import controller_round_stop, measurement_round_sec
+from .kernel_round_budget import measurement_round_sec
+from .kernel_controller_integration import _ControllerIntegrationMixin
 from hyperloom_common.coerce import first_str, to_int
 from hyperloom_common.env import env_bool, env_float
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_NO_PROMOTE
@@ -88,7 +88,9 @@ class KernelExitFacts:
     agent_in_flight: bool
 
 
-class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, CoordinatorCollaborator):
+class KernelPhase(
+    _GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, _ControllerIntegrationMixin, CoordinatorCollaborator
+):
     """KERNEL_AGENT phase handler: drives kernel-level optimization tasks."""
 
     # Relative-change floor for the Forge kernel-entry reprofile: effectively "any change", absorbing float noise.
@@ -195,6 +197,21 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         identity = self.shared_state.profile_workload_identity
         return identity(recorded) != identity(self.shared_state.profile_workload_context())
 
+    def last_trace_profiles_the_live_stack(self) -> bool:
+        """Whether the latest trace was taken on the validated stack, config and workload being served now.
+
+        Compares the projection with the anchor the watermark keeps in it, never with a snapshot's measured tok/s:
+        under AgentX the validated gain is the latency objective's, and the two never meet.
+        """
+        before = self.shared_state.last_roofline_tput
+        cur = self.current_tput_from_validated_gain()
+        return (
+            before > 0
+            and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL
+            and not self._profile_config_changed(self._current_profile_config_signature())
+            and not self._profile_workload_changed()
+        )
+
     def _reprofile_idempotency_reason(self, profile_signature: Any, target_tput: float) -> str:
         identity = json.dumps(
             {
@@ -226,8 +243,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         return landed
 
     async def _maybe_reprofile_for_kernel(self) -> None:
-        """Reprofile inline when projected tput moved off the last trace's anchor, so the phase targets the live bottleneck."""
-        before = self.shared_state.last_roofline_tput
+        """Reprofile inline when the validated stack moved since the last trace, so the phase targets the live bottleneck."""
         cur = self.current_tput_from_validated_gain()
         profile_signature = self._current_profile_config_signature()
         config_changed = self._profile_config_changed(profile_signature)
@@ -242,13 +258,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         if cur <= 0:
             _note_reprofile(KernelReprofile(ran=False, skipped_reason="no_projected_tput"))
             return
-        # With a measured trace, reprofile only on a material gain or a change in what is being measured.
-        if (
-            before > 0
-            and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL
-            and not config_changed
-            and not workload_changed
-        ):
+        if self.last_trace_profiles_the_live_stack():
             _note_reprofile(KernelReprofile(ran=False, skipped_reason="within_tolerance"))
             return
         trigger = "config_changed" if config_changed else ("workload_changed" if workload_changed else "gain")
@@ -699,8 +709,14 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         phase_remaining = _phase_state.phase_budget_remaining_seconds(self.shared_state)
         if phase_remaining is not None:
             candidates.append(max(0.0, float(phase_remaining)))
-        # The phase still measures the Controller's patches E2E after the Controller exits.
-        hard_timeout = int(min(candidates) - measurement_round_sec(self.shared_state)) if candidates else 90 * 60
+        from ..kernel.subthreshold_bundle import bundle_due
+
+        # The phase still measures the Controller's patches E2E after the Controller exits, and the sub-threshold
+        # bundle once more when this cycle already holds one.
+        rounds = 2 if bundle_due(self.shared_state) else 1
+        hard_timeout = (
+            int(min(candidates) - rounds * measurement_round_sec(self.shared_state)) if candidates else 90 * 60
+        )
         return max(0, hard_timeout - 30), max(0, hard_timeout)
 
     def reject_geak_promotion(
@@ -765,22 +781,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         # they left is part of what the server is now running. Committing it is
         # what lets a campaign name its own baseline -- the diff's starting
         # point, and the state a borrowed repository is handed back at.
-        baselines: dict[str, object] = {}
-        try:
-            from ..kernel.campaign_baseline import seal_campaign_baseline
-
-            baselines = seal_campaign_baseline(
-                self.shared_state,
-                session_id=str(self.shared_state.session_id or self.session_dir.name),
-                macro_cycle=int(self.shared_state.macro_cycle or 0),
-            )
-            if baselines:
-                log.info(
-                    "KERNEL entry: sealed campaign baselines %s",
-                    {repo: baseline.commit for repo, baseline in baselines.items()},
-                )
-        except (OSError, ValueError, subprocess.SubprocessError):
-            log.exception("KERNEL entry: sealing the campaign baseline failed")
+        baselines = self._seal_campaign_baselines()
         from ..kernel.forge_handoff import write_forge_handoff
 
         env_spec = self._coord.writeback.build_env_spec()
@@ -789,9 +790,11 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             env_spec=env_spec,
             handoff_dir=handoff_dir,
             baselines=baselines,
+            session_dir=self.session_dir,
         )
         log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
         await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
+        await self._validate_subthreshold_bundle()
 
     async def _controller_attempt_result(self, handoff_dir: Path, output_dir: Path) -> dict[str, Any]:
         from ..kernel.controller_submit import run_controller_subprocess
@@ -828,53 +831,6 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         # ``state.json`` itself and must not be able to report a budget other than the one it was given.
         return {**attempt, **result, **{key: attempt[key] for key in _CONTROLLER_ATTEMPT_FACTS}}
 
-    async def _integrate_controller_output(self, result: dict[str, Any], output_dir: Path) -> None:
-        if int(result.get("patch_count") or 0) <= 0:
-            result["integration"] = {
-                "status": "not_run",
-                "reason": "Controller published no patches",
-                "kept_count": 0,
-                "reverted_count": 0,
-                "skipped_count": 0,
-            }
-            return
-        from ..kernel.controller_patch_integration import KeepSession, integrate_controller_patches
-
-        try:
-            integration = await integrate_controller_patches(
-                patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
-                session=KeepSession(
-                    session_dir=self.session_dir,
-                    shared_state=self.shared_state,
-                    record_keep=self._coord.writeback.record_integrate_keep,
-                ),
-                admit_round=lambda rounds_run: controller_round_stop(self.shared_state, rounds_run),
-            )
-            result["integration"] = integration.to_dict()
-        except Exception as error:  # isolation boundary: the Controller patch integration step, recorded as failed
-            log.exception("KERNEL entry: Controller patch integration failed")
-            result["integration"] = {"status": "failed", "reason": str(error), "kept_count": 0}
-
-    def _file_controller_integration_failure(self, result: dict[str, Any]) -> None:
-        integration = result["integration"]
-        skipped = [
-            str(row.get("reason") or "")
-            for row in integration.get("results") or []
-            if isinstance(row, dict) and str(row.get("status") or "").startswith("skipped")
-        ]
-        status = str(integration.get("status") or "")
-        if status not in {"failed", "no_patch_admitted"} and not skipped:
-            return
-        cycle = int(self.shared_state.macro_cycle or 0)
-        self.shared_state.record_action_failure(
-            action="kernel_rewrite_controller",
-            task_id=str(result.get("run_id") or f"forge-cycle-{cycle}"),
-            result={
-                "error_class": status or "patches_skipped",
-                "error": "; ".join(x for x in ([str(integration.get("reason") or "")] + skipped) if x)[:800],
-            },
-        )
-
     async def _run_kernel_rewrite_controller(
         self, handoff_dir: Path, output_dir: Path, baselines: dict[str, object]
     ) -> None:
@@ -898,7 +854,9 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
                 result["reclaimed_repositories"] = reclaimed
         except ValueError:
             log.exception("KERNEL entry: reclaiming the campaign repositories failed")
-        if result["status"] == "cancelled":  # unsettled: the resumed entry runs a fresh Controller
+        if result["status"] == "cancelled":
+            # Unsettled: the resumed entry runs a fresh Controller.
+            log.warning("KERNEL entry: Controller attempt %s was cancelled; leaving it to the resume", output_dir.name)
             return
         await self._integrate_controller_output(result, output_dir)
         self._record_kernel_rewrite_controller_timeline(result)
