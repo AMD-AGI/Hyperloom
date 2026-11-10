@@ -3137,10 +3137,8 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monkeypatch) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
-    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-same"))
+    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-same", {"runs": 1}))
     recorded: list = []
 
     async def _rec(source, intent, denied, action_name=None):
@@ -3148,7 +3146,7 @@ async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monk
 
     monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
     # Same key while the first task is still queued (non-terminal) -> denied.
-    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-same"))
+    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-same", {"runs": 2}))
     assert [d.rule for d in recorded] == ["duplicate_idempotency_key_running"]
 
 
