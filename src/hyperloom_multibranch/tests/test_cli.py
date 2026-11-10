@@ -924,10 +924,20 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
         runs.append(persisted.settings)
         return 0
 
+    def resume(persisted: PersistedRun, peer_factory: PeerFactory, services: object, deadline: float) -> int:
+        runs.append(persisted.settings)
+        RESUMED_TO.append(deadline)
+        return 0
+
+    RESUMED_TO.clear()
     monkeypatch.setattr(cli, "run_session", run_session)
     monkeypatch.setattr(cli, "final_only", final_only)
-    monkeypatch.setattr(cli, "resume", final_only)
+    monkeypatch.setattr(cli, "resume", resume)
     return runs
+
+
+#: The deadline of each resume :func:`agent_cli` noted.
+RESUMED_TO: list[float] = []
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -1381,7 +1391,7 @@ def test_a_final_only_holds_the_session_against_a_second_one_and_releases_it(
     async def while_it_runs(run: PersistedRun, peer_factory: object, services: object, leg: object) -> int:
         assert layout.final_only_lock.read_text(encoding="utf-8") == f"{os.getpid()}\n"
         assert cli.final_only(run, peer_factory, services) == cli.EXIT_USAGE
-        assert cli.resume(run, peer_factory, services) == cli.EXIT_USAGE
+        assert cli.resume(run, peer_factory, services, 3600.0) == cli.EXIT_USAGE
         return 0
 
     monkeypatch.setattr(cli, "_run_leg", while_it_runs)
@@ -1511,10 +1521,13 @@ def test_a_resume_continues_the_session_on_the_settings_its_manifest_holds(
     layout = _ended_before_final(tmp_path / "MB-20260101T000000Z-0123abcd")
     _killed(layout, ANOTHER_POD)
 
+    before = time.time()
     assert cli.main(["run", "--resume", str(layout.root), "-v"]) == 0
 
     assert agent_cli == [_settings()]
     assert not any(workspace.iterdir())
+    [deadline] = RESUMED_TO
+    assert 3600.0 + before <= deadline <= 3600.0 + time.time(), "the first deadline, moved by the time it was down"
 
 
 #: A grant of four GPUs that has a day left.

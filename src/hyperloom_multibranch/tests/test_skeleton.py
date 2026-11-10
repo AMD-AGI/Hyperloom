@@ -150,10 +150,10 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     SessionServices,
     persisted_run,
     prelude_landed,
-    resumable_run,
 )
 from hyperloom_multibranch.scheduling.local_peers import workload_rule
 from hyperloom_multibranch.scheduling.manifest import read_manifest
+from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, resumable_run
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.prelude import roofline_ceiling
@@ -609,12 +609,15 @@ class Stage:
         with self._polls_on_virtual_time():
             return await self._session().finish(ended)
 
-    async def resume(self, ended: SessionStopReason) -> SessionOutcome:
-        """EXPLORE, FINAL and CLOSE over the session directory this stage was built on, as ``run --resume`` runs them."""
+    async def resume(self, ended: SessionStopReason, deadline: float | None = None) -> SessionOutcome:
+        """EXPLORE, FINAL and CLOSE over the session directory this stage was built on up to ``deadline``, as a resume
+        runs them; by default up to the deadline ``run --resume`` gives, moved by the time the session was down."""
 
+        if deadline is None:
+            deadline = deadline_after_downtime(self.layout, self.time.now())
         with self._polls_on_virtual_time() as patch:
             patch.setattr(lifecycle, "run_image_check", self.image_check)
-            return await self._session().resume(ended)
+            return await self._session().resume(ended, deadline)
 
     @contextlib.contextmanager
     def _polls_on_virtual_time(self) -> Iterator[pytest.MonkeyPatch]:
@@ -664,13 +667,13 @@ def _recovery(stage: Stage, settings: RunSettings) -> Stage:
 DOWNTIME_SECONDS = 1800.0
 
 
-def _resumed(stage: Stage, settings: RunSettings) -> Stage:
-    """A second stage over the directory ``stage`` left, as ``run --resume`` builds one :data:`DOWNTIME_SECONDS` after
-    the last decision that session recorded: the same directory and the settings its manifest holds, every peer
-    fresh, no specialist script and a judge that never answers."""
+def _resumed(stage: Stage, settings: RunSettings, downtime: float = DOWNTIME_SECONDS) -> Stage:
+    """A second stage over the directory ``stage`` left, as a resume builds one ``downtime`` seconds after the last
+    decision that session recorded: the same directory and the settings its manifest holds, every peer fresh, no
+    specialist script and a judge that never answers."""
 
     stopped_at = float(read_jsonl(stage.layout.decisions)[-1]["at"])
-    time = VirtualClock(stopped_at + DOWNTIME_SECONDS)
+    time = VirtualClock(stopped_at + downtime)
     return Stage(stage.layout, time, HeldRegistry(stage.layout.pids, time), ScriptedCompletion(), [], settings=settings)
 
 
@@ -2099,6 +2102,24 @@ async def test_a_resume_after_a_stop_signal_continues_explore_on_new_branches_an
 
     with pytest.raises(ValueError, match="already chose"):
         await asyncio.to_thread(resumable_run, stage.layout.root)
+
+
+async def test_a_resume_up_to_the_first_starts_deadline_gives_no_downtime_back(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    stage.steps = _signalling(stage)
+    await stage.run()
+    manifest = read_manifest(stage.layout.manifest)
+
+    persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
+    resumed = _resumed(stage, persisted.settings, downtime=60.0)
+    outcome = await resumed.resume(persisted.ended, manifest.deadline)
+
+    assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED and outcome.final is not None
+    [phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "resume"]
+    assert phase["detail"] == {"ended": "signal", "downtime_seconds": 60.0, "deadline": manifest.deadline}
+    assert read_manifest(stage.layout.manifest) == manifest
+    [explore] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "explore"][1:]
+    assert explore["detail"]["explore_end"] <= manifest.deadline
 
 
 async def test_a_second_resume_after_a_stopped_resume_archives_nothing_again_either(
