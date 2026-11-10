@@ -12,6 +12,11 @@ toolbox started now in the same directory would measure on, and raises :class:`B
 reason when anything differs or the record cannot say (a session from before the record, or one whose record lacks a
 field). It reads only: it takes no lock and writes nothing.
 
+A hosted session's tests run in the grant's sandboxes, not on the node of the application that submits them, and a
+restart of a hosted run reschedules that application onto another node, often as another account of the run's group.
+:func:`check_hosted_baseline_reusable` is the guard of that restart: it compares everything but the node
+(:data:`HOSTED_COMPARED`), with the card count of the runner template the session's tests run on in place of a pool.
+
 :func:`infra_ended_keeps` reads the toolbox's submit log for the keeps whose test the infrastructure ended before
 anything was measured, so the resume can submit them again; it reads only as well.
 """
@@ -68,6 +73,9 @@ class MeasurementEnvironment:
 
 #: The fields a record must carry, in the order a refusal names them.
 RECORDED_FIELDS = tuple(field.name for field in dataclasses.fields(MeasurementEnvironment))
+#: The fields a hosted restart compares: all but ``node``, the application's, which a reschedule changes by design and
+#: which measures nothing there (the tests run in the grant's sandboxes).
+HOSTED_COMPARED = tuple(name for name in RECORDED_FIELDS if name != "node")
 
 
 @dataclass(frozen=True)
@@ -124,9 +132,35 @@ def check_baseline_reusable(toolbox_dir: Path, cards: Sequence[int]) -> None:
             now on any of them.
     """
 
-    recorded = _recorded(toolbox_dir)
-    now = _environment_now(toolbox_dir, len(cards))
-    for name in RECORDED_FIELDS:
+    from hyperloom.sandbox.node import node_name
+
+    _compare(_recorded(toolbox_dir), _environment_now(toolbox_dir, node_name(), len(cards)), RECORDED_FIELDS)
+
+
+def check_hosted_baseline_reusable(toolbox_dir: Path, cards: int) -> None:
+    """Refuse the resume of a hosted session whose baseline was measured on something else than what its tests would be
+    measured on now; the guard of a hosted restart, which may run on another node and as another account of the run's
+    group.
+
+    ``toolbox_dir`` is the session's ``SessionLayout.toolbox``, ``cards`` the card count of the runner template the
+    resumed session's tests run on (its TP). The record is compared with this build, the current ``MEASUREMENT_EPOCH``,
+    the image this process names, ``cards`` and the frozen base launch, as :func:`check_baseline_reusable` does, and
+    never with the node (:data:`HOSTED_COMPARED`). Reads only; takes no lock and writes nothing. Blocks.
+
+    Raises:
+        BaselineNotReusable: With a one-line reason: the record is missing or unreadable, lacks a field, differs from
+            now on any compared field, or a file the comparison reads is refused to this account.
+    """
+
+    try:
+        now = _environment_now(toolbox_dir, "", cards)
+    except OSError as exc:
+        raise BaselineNotReusable(f"the session's frozen base launch cannot be read: {exc}") from exc
+    _compare(_recorded(toolbox_dir), now, HOSTED_COMPARED)
+
+
+def _compare(recorded: Mapping[str, object], now: MeasurementEnvironment, fields: Sequence[str]) -> None:
+    for name in fields:
         was, is_now = recorded[name], getattr(now, name)
         if name == "build":
             was, is_now = _build_text(was), _build_text(dataclasses.asdict(is_now))
@@ -223,12 +257,12 @@ def _recorded(toolbox_dir: Path) -> Mapping[str, object]:
     return document
 
 
-def _environment_now(toolbox_dir: Path, cards: int) -> MeasurementEnvironment:
-    """What a toolbox started now in ``toolbox_dir`` would measure on; refuses when part of it cannot be named."""
+def _environment_now(toolbox_dir: Path, node: str, cards: int) -> MeasurementEnvironment:
+    """What a toolbox started now in ``toolbox_dir`` on ``node`` would measure on; refuses when part of it cannot be
+    named."""
 
     from hyperloom.measure.pins import ImagePinError, active_image
     from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch
-    from hyperloom.sandbox.node import node_name
     from inference_suite.contracts import BaseLaunchError
 
     try:
@@ -236,7 +270,7 @@ def _environment_now(toolbox_dir: Path, cards: int) -> MeasurementEnvironment:
     except ImagePinError as exc:
         raise BaselineNotReusable(f"the image this run measures in cannot be named: {exc}") from exc
     try:
-        return MeasuredOn(toolbox_dir, node_name(), image, cards).environment()
+        return MeasuredOn(toolbox_dir, node, image, cards).environment()
     except (BaseLaunchMismatch, BaseLaunchError) as exc:
         raise BaselineNotReusable(f"the session's frozen base launch cannot be read: {exc}") from exc
 
@@ -264,11 +298,13 @@ def _build_text(build: object) -> str:
 
 __all__ = [
     "BASELINE_ENVIRONMENT_FILE",
+    "HOSTED_COMPARED",
     "RECORDED_FIELDS",
     "BaselineNotReusable",
     "KeepRef",
     "MeasuredOn",
     "MeasurementEnvironment",
     "check_baseline_reusable",
+    "check_hosted_baseline_reusable",
     "infra_ended_keeps",
 ]

@@ -16,6 +16,7 @@ import this package) can pass them as keyword arguments.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -29,9 +30,10 @@ from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
-from hyperloom.measure.sandboxes import DEFAULT_MAX_PARALLEL_TESTS, MEASUREMENT_ROLE
+from hyperloom.measure.sandboxes import DEFAULT_MAX_PARALLEL_TESTS, MEASUREMENT_ROLE, RUN_ID_KEY
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy
-from hyperloom.sandbox.socket import Role, SandboxProvider
+from hyperloom.sandbox.node import node_name
+from hyperloom.sandbox.socket import Role, SandboxError, SandboxProvider
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
@@ -55,6 +57,7 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
     with_short_prompts,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.resume_guard import MeasuredOn
 from hyperloom_multibranch.toolbox.native_builds import native_builds, with_native_plan
 from hyperloom_multibranch.toolbox.long_context import environment_long_context
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, environment_short_prompts
@@ -85,6 +88,8 @@ _COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _MANIFEST_DIGEST = re.compile(r"[0-9a-f]{64}")
 _GRANT_KEYS = ("max_sandboxes", "max_gpus", "gpu_hours", "max_runtime_sec")
 _REQUIRED_TEXT = ("run_id", "api_url", "sandbox_url", "measurement_key")
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -240,12 +245,17 @@ class HostedOptions:
 class HostedToolbox(LeasedToolbox):
     """A :class:`RealToolbox` that also owns its hosted backend and sandbox provider; ``close`` releases them.
 
-    ``leases`` is ``None`` when the session has no grant limits or no ``dev`` key.
+    ``leases`` is ``None`` when the session has no grant limits or no ``dev`` key. ``run_id`` is the run's id, which every
+    sandbox of the run carries whichever process, container or account of the run created it.
     """
 
     backend: HostedMeasurementBackend
     provider: SandboxProvider
     leases: HostedBranchLeases | None
+    run_id: str
+    #: The ``measurement`` sandboxes of the run that were running when :meth:`start` began, so an earlier process's:
+    #: ended by the first :meth:`withdraw_all`.
+    _earlier: tuple[str, ...] = ()
 
     async def lease_branch_sandbox(
         self,
@@ -278,12 +288,43 @@ class HostedToolbox(LeasedToolbox):
         return await asyncio.to_thread(self.backend.live_output, request_id)
 
     async def start(self) -> None:
-        """End the lease sandboxes an earlier process of this run left behind, then start as :class:`LeasedToolbox`
-        does, which closes their records ``toolbox_lost``."""
+        """End the lease sandboxes an earlier process of this run left behind, note the ``measurement`` sandboxes it
+        left, then start as :class:`LeasedToolbox` does, which closes the leases' records ``toolbox_lost`` and recovers
+        the earlier process's unfinished tests."""
 
         if self.leases is not None:
             await asyncio.to_thread(self.leases.end_leftovers)
+        self._earlier = await asyncio.to_thread(self._running_measurements)
         await super().start()
+
+    async def withdraw_all(self, reason: str = "session stopped") -> tuple[str, ...]:
+        """Withdraw every test as :class:`RealToolbox` does, then, the first time, end the ``measurement`` sandboxes an
+        earlier process of the run left running (noted by :meth:`start`).
+
+        A recovered test ends its sandbox only once its attempt re-attached to it, and a test withdrawn before that, or
+        still queued behind the grant's slots, never does; nor does a sandbox the service made for a create that process
+        did not live to journal. A later leg of the run, in another container and maybe as another account, takes the
+        session over by withdrawing what it recovered: without this those sandboxes would measure on for nobody,
+        holding the grant's slots and cards until their own timeout. Every test they ran is withdrawn by now."""
+
+        withdrawn = await super().withdraw_all(reason)
+        earlier, self._earlier = self._earlier, ()
+        if earlier:
+            await asyncio.to_thread(self._end_measurements, earlier)
+        return withdrawn
+
+    def _running_measurements(self) -> tuple[str, ...]:
+        try:
+            found = self.provider.find({RUN_ID_KEY: self.run_id}, role=MEASUREMENT_ROLE)
+        except SandboxError:
+            log.exception("the measurement sandboxes an earlier process of the run left could not be listed")
+            return ()
+        return tuple(info.sandbox_id for info in found)
+
+    def _end_measurements(self, sandbox_ids: Sequence[str]) -> None:
+        for sandbox_id in sandbox_ids:
+            self.backend.pool.discard(sandbox_id)  # one already gone is fine, one unreachable is logged
+        log.info("ended %d measurement sandbox(es) an earlier process of the run left", len(sandbox_ids))
 
     async def close(self) -> None:
         """End the tests' bookkeeping, then the lease sandboxes and the measurement sandboxes of this run."""
@@ -505,6 +546,9 @@ def build_hosted_toolbox(
         ),
     )
     toolbox.backend, toolbox.provider, toolbox.trace_root, toolbox.blobs = backend, provider, directory, spec.blobs
+    toolbox.run_id = inputs.run_id
+    # The runner template's cards, not the app's node: a restart reschedules the app, and its tests run in the grant.
+    toolbox.measured_on = MeasuredOn(directory, node_name(), spec.image_digest, inputs.tp)
     if leases is not None:
         toolbox.attach_leases(leases)
     return toolbox

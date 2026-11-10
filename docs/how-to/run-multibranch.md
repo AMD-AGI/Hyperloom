@@ -116,8 +116,13 @@ the profile and the root commit are the ones the first PRELUDE recorded.
   `run --resume`. Its budget counts from the original start, for `--max-hours` as for `--max-gpu-hours`: the deadline
   stays the one the first start set and the `resume` phase records it with the downtime. Such a resume is refused when
   the session recorded no baseline, was to stop once its map was made, already spent the GPU hours EXPLORE has under
-  `--max-gpu-hours`, or is past that deadline; the restart then
-  finishes it with `final-only`.
+  `--max-gpu-hours`, or is past that deadline; the restart then finishes it with `final-only`. It is refused too,
+  with one warning naming the field, when the baseline was measured on another build, `MEASUREMENT_EPOCH`, image,
+  base launch or runner template card count than the restart would measure on, as recorded in
+  `MB-toolbox/baseline-environment.json` when the first baseline test was accepted. The application's node and account
+  are not compared: a reschedule changes them by design, and the tests run in the grant. The restart ends the
+  measurement sandboxes the earlier start left running in the grant before it measures anything. A hosted session
+  measured on its container's cards is finished, not resumed.
 - **Knowledge steps:** a CLOSE of a session whose search tree the RSI archive already holds runs none of the knowledge
   steps: no RSI archive, playbook proposal or lesson curation. Each is reported `skipped` with the reason
   `an earlier CLOSE of this session archived its search tree`. This holds for every later CLOSE of that session, a

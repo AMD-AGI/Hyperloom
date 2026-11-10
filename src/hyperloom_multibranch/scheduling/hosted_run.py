@@ -51,6 +51,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from collections.abc import Callable, Mapping
@@ -68,7 +69,7 @@ from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR
-from hyperloom_multibranch.scheduling.launch_isolation import launch_isolation
+from hyperloom_multibranch.scheduling.launch_isolation import HOSTED, launch_isolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run, persisted_session, prelude_landed
 from hyperloom_multibranch.scheduling.manifest import read_manifest
@@ -77,6 +78,7 @@ from hyperloom_multibranch.scheduling.resumption import ResumeRefused, require_r
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
+from hyperloom_multibranch.toolbox.resume_guard import BaselineNotReusable, check_hosted_baseline_reusable
 
 # hyperloom/hosted/entry.py EXIT_FILE and SESSION_FILE
 EXIT_FILE = "exit.json"
@@ -483,6 +485,32 @@ def hosted_resume_deadline(persisted: PersistedRun, now: float) -> float:
     return deadline
 
 
+def hosted_restart_leg(
+    persisted: PersistedRun, finish: Callable[..., int], resume: Callable[..., int]
+) -> Callable[..., int]:
+    """What a restart of the run runs over ``persisted``, the ``finish`` of :func:`earlier_session`: ``resume``
+    (``cli.resume``) with ``deadline`` bound to :func:`hosted_resume_deadline`'s, so its budget counts from the run's
+    first start, when the session was measured in the grant's sandboxes and its baseline still measures what a test
+    measured now would (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same
+    build, ``MEASUREMENT_EPOCH``, image, base launch and runner template cards; not the node or the account, which a
+    reschedule changes by design); else ``finish`` (``cli.final_only``), and one warning names why. Writes nothing.
+    Blocks."""
+
+    root = persisted.layout.root
+    isolation = read_manifest(persisted.layout.manifest).agent_isolation
+    if isolation is None or isolation.tests != HOSTED:
+        log.warning("hosted run: finishing %s, whose tests did not run in the grant's sandboxes", root)
+        return finish
+    try:
+        check_hosted_baseline_reusable(persisted.layout.toolbox, persisted.settings.workload.tp)
+        deadline = hosted_resume_deadline(persisted, time.time())
+    except (BaselineNotReusable, ResumeRefused) as exc:
+        log.warning("hosted run: finishing %s instead of resuming it: %s", root, exc)
+        return finish
+    log.info("hosted run: resuming %s up to the deadline its first start set", root)
+    return partial(resume, deadline=deadline)
+
+
 #: What reading back an earlier session fails with when this account cannot read what it left: a file an earlier leg of
 #: another account of the group made owner-only, or one that is not the text it wrote.
 CANNOT_READ_SESSION = (PermissionError, UnicodeDecodeError, json.JSONDecodeError)
@@ -555,6 +583,7 @@ __all__ = [
     "earlier_session",
     "grant_deadline",
     "grant_tests_that_fit",
+    "hosted_restart_leg",
     "hosted_resume_deadline",
     "hosted_storage",
     "layer_bwrap",
