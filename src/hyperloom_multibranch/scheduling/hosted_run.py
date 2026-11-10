@@ -7,11 +7,13 @@ The campaign spec maps onto the options of ``run`` (:func:`run_argv`), so a host
 of :class:`~hyperloom_multibranch.scheduling.settings.RunSettings` a command-line session is. Besides the common part
 the legacy entry validated, a multi-branch session needs ``multibranch.workload`` (``--workload``),
 ``workload.conc`` and ``workload.precision``; ``multibranch.inferencex_commit`` is ``--inferencex-commit``,
-``multibranch.max_branches`` ``--max-branches``,
+``multibranch.reference_script`` ``--reference-script``, ``multibranch.max_branches`` ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``placement.measurement`` is ``--measurement``, and ``placement.max_parallel_tests`` is
 ``--max-parallel-tests``, at most what runs at once where the session measures. The fields ``run`` has no option for --
-``objective``, ``launch``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read.
+``objective``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read. A spec that
+sets ``launch.server_args`` or ``launch.extra_env`` is refused rather than run without them: a multi-branch session's
+base launch, its flags and its environment, is the shell script ``multibranch.reference_script`` names.
 
 With ``placement.measurement`` ``hosted`` (the default), every test, PRELUDE's included, runs in a measurement sandbox
 of the grant, so the application's container needs no card: ``hosted-cpu`` serves as ``hosted-gpu`` does. Dev
@@ -141,10 +143,12 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
     tests at once; every value is written ``--option=value`` so that one starting with ``-`` is no option.
 
     Raises:
-        HostedRefused: When the spec lacks what a multi-branch session needs, naming each missing field.
+        HostedRefused: When the spec lacks what a multi-branch session needs, naming each missing field, or sets a
+            field the session would not read.
     """
 
     section = _multibranch_section(spec.multibranch)
+    _refuse_launch_fields(spec)
     values: dict[str, Any] = {
         "model": spec.model_path,
         "framework": spec.framework_name,
@@ -163,6 +167,7 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "osl": spec.osl,
         "ep": spec.ep,
         "inferencex-commit": _inferencex_commit(section.get("inferencex_commit")),
+        "reference-script": _reference_script(section.get("reference_script")),
         "max-hours": max_hours,
         "max-gpu-hours": spec.max_gpu_hours,
         "max-llm-usd": spec.max_llm_usd,
@@ -179,6 +184,26 @@ def _inferencex_commit(commit: object) -> str | None:
     if commit is not None and not isinstance(commit, str):
         raise HostedRefused("multibranch.inferencex_commit must be a string")
     return commit
+
+
+def _reference_script(path: object) -> str | None:
+    if path is not None and (not isinstance(path, str) or not path.strip()):
+        raise HostedRefused("multibranch.reference_script must be the path of a launch script")
+    return path
+
+
+def _refuse_launch_fields(spec: CampaignSpec) -> None:
+    given = [
+        field
+        for field, value in (("launch.server_args", spec.server_args), ("launch.extra_env", spec.extra_env))
+        if value is not None
+    ]
+    if given:
+        raise HostedRefused(
+            f"a multibranch run does not read {' or '.join(given)}: give the base launch as"
+            " multibranch.reference_script, a shell launch script whose 'export NAME=value' lines set its environment"
+            " and whose server command carries its flags"
+        )
 
 
 def _agent_sources(sources: object) -> list[str]:
@@ -458,6 +483,51 @@ def hosted_resume_deadline(persisted: PersistedRun, now: float) -> float:
     return deadline
 
 
+#: What reading back an earlier session fails with when this account cannot read what it left: a file an earlier leg of
+#: another account of the group made owner-only, or one that is not the text it wrote.
+CANNOT_READ_SESSION = (PermissionError, UnicodeDecodeError, json.JSONDecodeError)
+
+
+def close_before_starting_again(close: Callable[[], int], left: PersistedRun) -> int | None:
+    """Close ``left``, which ended before PRELUDE recorded its baseline, with ``close`` (which ends the sandboxes of the
+    tests it left) before the run starts the spec's session again: the exit code the run ends with when a stop during
+    the close ended it, else ``None``. A close that cannot read ``left`` (:data:`CANNOT_READ_SESSION`, and for a file
+    the OS refuses, one inside ``left``'s directory) leaves it as it is, one warning names the file and why, and
+    ``None`` says the run goes on with a new session in a directory of its own, as that session measured nothing a
+    restart carries on from. A file outside that directory the OS refuses is not the earlier session's to skip: it
+    raises, and ends the run as before."""
+
+    root = left.layout.root
+    log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", root)
+    try:
+        closed = close()
+    except CANNOT_READ_SESSION as exc:
+        if not _names_a_file_of(root, exc):
+            raise
+        log.warning("cannot read %s to close it, so it is left as it is and a new session starts: %s", root, _why(exc))
+        return None
+    return None if reported_stop_reason(root) == left.ended.value else closed
+
+
+def _names_a_file_of(root: Path, exc: BaseException) -> bool:
+    """Whether ``exc`` is about what the session in ``root`` left: a refused file inside ``root``, or text that is not
+    what was written (which names no file)."""
+
+    if not isinstance(exc, OSError):
+        return True
+    return exc.filename is not None and Path(os.path.abspath(os.fsdecode(exc.filename))).is_relative_to(
+        os.path.abspath(root)
+    )
+
+
+def _why(exc: BaseException) -> str:
+    """The file an error names, with its owner and mode, and the reason; else the error."""
+
+    if isinstance(exc, OSError) and exc.filename:
+        return f"{exc.filename}{ownership(Path(exc.filename))}: {exc.strerror}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 def reported_stop_reason(root: Path) -> str | None:
     """The stop reason the CLOSE of the session in ``root`` reported, ``None`` when it wrote no report."""
 
@@ -469,6 +539,7 @@ def reported_stop_reason(root: Path) -> str | None:
 
 
 __all__ = [
+    "CANNOT_READ_SESSION",
     "EXIT_FILE",
     "GRANT_MARGIN_SECONDS",
     "HOST_LAYER_ENV",
@@ -480,6 +551,7 @@ __all__ = [
     "HostedRefused",
     "arm_grant_stop",
     "campaign_spec",
+    "close_before_starting_again",
     "earlier_session",
     "grant_deadline",
     "grant_tests_that_fit",

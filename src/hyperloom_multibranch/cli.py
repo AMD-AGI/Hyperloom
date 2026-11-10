@@ -149,6 +149,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     HostedExit,
     arm_grant_stop,
     campaign_spec,
+    close_before_starting_again,
     earlier_session,
     grant_deadline,
     grant_tests_that_fit,
@@ -1091,13 +1092,12 @@ def _hosted_start(host: HostInfo) -> HostedStart:
 
 
 def _start_again(left: PersistedRun, settings: RunSettings, ready: ReadySession, state_dir: Path) -> int:
-    """Close ``left``, which ended before its baseline was recorded, with :func:`final_only`, which ends the sandboxes
-    of the tests it left, then start the spec's session on ``settings`` unless a stop during the close ended the run."""
+    """Close ``left``, which ended before its baseline was recorded, with :func:`final_only`, or leave it when it cannot
+    be read (:func:`close_before_starting_again`); then start the spec's session unless a stop during it ended the run."""
 
-    log.warning("%s ended before PRELUDE recorded its baseline: closing it, then starting again", left.layout.root)
-    closed = final_only(left, ready.peer_factory, ready.services)
-    if reported_stop_reason(left.layout.root) != left.ended.value:
-        return closed
+    ended = close_before_starting_again(partial(final_only, left, ready.peer_factory, ready.services), left)
+    if ended is not None:
+        return ended
     return run_session(settings, ready.peer_factory, ready.services, partial(_record_root, state_dir))
 
 
