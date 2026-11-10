@@ -35,7 +35,7 @@ from hyperloom.sandbox.socket import Role, SandboxProvider
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
-from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
+from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, INFRA_BACKOFF_SECONDS
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
 from hyperloom_multibranch.toolbox.hosted_leases import (
     DevSession,
@@ -196,7 +196,9 @@ class HostedOptions:
     ``policy`` is the quota and priority policy; its ``global_concurrency`` is lowered to what the grant runs at once
     when higher. ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted.
     ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the infrastructure retries per test before it
-    ends as ``measurement_failed`` and ``poll_interval_sec`` how often the backend polls a runner sandbox for its result.
+    ends as ``measurement_failed``, ``infra_backoff_seconds`` the wait before each
+    one after a failure that is not the node's (:class:`~.attempts.InfraBackoff`) and ``poll_interval_sec`` how often
+    the backend polls a runner sandbox for its result.
     ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None`` is the hosted set, TraceLens: it reads the
     traces a profile test lands below ``session_dir``. ``kernel_tune`` leases a card of a local pool and the roofline
     profiles on host cards, and the hosted toolbox has neither. ``retry`` is how the service client repeats a control-plane
@@ -225,6 +227,7 @@ class HostedOptions:
     archive: ResultArchive | None = None
     timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC
     max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
+    infra_backoff_seconds: tuple[float, ...] = INFRA_BACKOFF_SECONDS
     poll_interval_sec: float = 5.0
     tools: Sequence[AsyncTool] | None = None
     retry: RetryPolicy = RetryPolicy()
@@ -491,7 +494,9 @@ def build_hosted_toolbox(
         acceptance,
         tools=session_tools(options.tools if options.tools is not None else (tracelens_tool(),), blackboard, directory),
         tuning=ToolboxTuning(
-            policy=capped_policy(options.policy, parallel), max_infra_retries=options.max_infra_retries
+            policy=capped_policy(options.policy, parallel),
+            max_infra_retries=options.max_infra_retries,
+            infra_backoff_seconds=options.infra_backoff_seconds,
         ),
     )
     toolbox.backend, toolbox.provider, toolbox.trace_root, toolbox.blobs = backend, provider, directory, spec.blobs

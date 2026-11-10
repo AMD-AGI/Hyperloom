@@ -171,6 +171,8 @@ BASIC_NAMES = frozenset(
 BASIC_PREFIXES = ("LC_",)
 #: The variable naming the app's state directory, which no bind of a sandbox may show.
 STATE_DIR_ENV = "HYPERLOOM_STATE_DIR"
+#: The registry that adopted each launcher still uncollected, told when it is collected (:func:`_collected`).
+_adopted: dict[subprocess.Popen[bytes], Processes] = {}
 GUARDED_NOTE = (
     "the image's installed frameworks are not mounted read-only on this host: what a command, or a process it left "
     "running, writes into them is restored within seconds, and recorded with the command"
@@ -501,13 +503,13 @@ class LocalProcess:
         while anything it started runs."""
 
         if self._code is not None or self.status is None:
-            return self._code if self._code is not None else self.popen.poll()
+            return self._code if self._code is not None else _collected(self.popen)
         try:
             self._code = self.status.wait_exit(self.popen, 0)
         except TimeoutError:
             return None
         self.status = None
-        return self._code if self._code is not None else self.popen.poll()
+        return self._code if self._code is not None else _collected(self.popen)
 
     def retire(self) -> None:
         """Collect the launcher of a command that ended and left nothing running, ending it first when it has not
@@ -523,9 +525,10 @@ class LocalProcess:
             return
         for pid in launchers:
             _kill(pid)
-        if self.popen.poll() is None:
+        if _collected(self.popen) is None:
             self.popen.send_signal(signal.SIGKILL)
             self.popen.wait()
+            _collected(self.popen)
 
     def ended(self) -> bool:
         """Whether the command and every process it started ended, its launcher retired then."""
@@ -533,7 +536,7 @@ class LocalProcess:
         if self.returncode is None:
             return False
         self.retire()
-        return self.popen.poll() is not None
+        return _collected(self.popen) is not None
 
     async def output(self) -> str:
         return await asyncio.to_thread(read_tail, self.log)
@@ -731,7 +734,7 @@ class LocalAgentSandbox:
 
         if guarded.guard is None:
             return
-        if process.popen.poll() is None:
+        if _collected(process.popen) is None:
             self._follow(process, guarded)
         else:
             guarded.ended()
@@ -786,6 +789,7 @@ class LocalAgentSandbox:
         if self.processes is not None:
             try:
                 self.processes.adopt(popen.pid, branch=self.branch, argv=argv)
+                _adopted[popen] = self.processes
             except ValueError:
                 logger.warning("`%s` of %s ended before the process registry took it over", command, self.branch)
         return LocalProcess(
@@ -1035,7 +1039,17 @@ def _kill(pid: int) -> None:
 def _reap(root: str) -> None:
     """Collect the launchers of the sandbox at ``root`` that ended, which would otherwise linger as zombies."""
 
-    _launched[root] = [popen for popen in _launched.get(root, []) if popen.poll() is None]
+    _launched[root] = [popen for popen in _launched.get(root, []) if _collected(popen) is None]
+
+
+def _collected(popen: subprocess.Popen[bytes]) -> int | None:
+    """The launcher's exit code once it is collected, ``None`` while it runs. The registry that adopted it forgets
+    its record then, so a kill of its branch never signals a later group that reused its id."""
+
+    code = popen.poll()
+    if code is not None and (processes := _adopted.pop(popen, None)) is not None:
+        processes.forget(popen.pid)
+    return code
 
 
 def _restarted(ended: tuple[int, Path]) -> str:

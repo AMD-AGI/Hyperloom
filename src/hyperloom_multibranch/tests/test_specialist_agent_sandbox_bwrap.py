@@ -368,19 +368,20 @@ async def test_a_confined_command_reaches_its_trees_and_frameworks_and_nothing_o
         path.write_text(text)
     monkeypatch.setenv("HOME", str(app_home))
     monkeypatch.setenv("HYPERLOOM_STATE_DIR", str(state))
-    sandbox = _sandbox(area, probe, HF_HOME=str(hf), HYPERLOOM_TEST_APP_VALUE=SECRET, GH_TOKEN=SECRET)
+    first = _sandbox(area, probe, HF_HOME=str(hf), HYPERLOOM_TEST_APP_VALUE=SECRET, GH_TOKEN=SECRET)
     worktree, agent = area / "worktree", area / "agent"
     (worktree / "source.py").write_text("source")
     (worktree / "3rdparty").symlink_to(base / "third-party")
     sandbox = LocalAgentSandbox(
-        cards=sandbox.cards,
+        cards=first.cards,
         python_path=(),
-        root=sandbox.root,
-        base_env=sandbox.base_env,
-        isolation=sandbox.isolation,
-        paths=SandboxPaths(sandbox.paths.writable, (worktree, base / "third-party"), sandbox.paths.home),
-        forwarded=sandbox.forwarded,
+        root=first.root,
+        base_env=first.base_env,
+        isolation=first.isolation,
+        paths=SandboxPaths(first.paths.writable, (worktree, base / "third-party"), first.paths.home),
+        forwarded=first.forwarded,
     )
+    await first.stop()  # a confined sandbox makes its private /tmp as it is made; its stop deletes it
     home = agent / "sandbox" / "home"
     args = {
         "reads": {

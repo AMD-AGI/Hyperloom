@@ -122,6 +122,13 @@ class ProcessRegistry:
             raise ValueError(f"process {pid} of {branch} does not lead its own process group")
         return self._register(pid, branch, argv)
 
+    def forget(self, pid: int) -> None:
+        """Drop the record of ``pid``, which the peer that started it collected, once nothing of its group runs, so a
+        later group reusing the id is never mistaken for it; a group a member of which still runs stays registered
+        for the kills. Blocks on ``/proc``."""
+
+        self._registered = [r for r in self._registered if r.pid != pid or _live_roots(r)]
+
     def record_scheduler(self) -> None:
         """Record this process in ``MB-pids.jsonl``, so the file says whether the session still runs even before it
         was handed a process.

@@ -14,10 +14,12 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common import confinement
-from hyperloom.measure.tests.gpu_free_host import USES_REAL_GPUS_FLAG, machine_without_readable_gpus  # noqa: F401
+from hyperloom.measure.tests.gpu_free_host import (  # noqa: F401  (autouse fixtures)
+    USES_REAL_GPUS_FLAG,
+    idle_card_list,
+    machine_without_readable_gpus,
+)
 from hyperloom.measure.tests.hosted_fixtures import freeze_session_base, staged_tool_cache
-from hyperloom.sandbox import card_occupancy
-from hyperloom.sandbox.tests.kernel_tree import KernelTree
 from hyperloom_multibranch.toolbox.local_hosted import JIT_STORE_ENV
 
 
@@ -46,12 +48,3 @@ def own_private_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     """The app's private paths of each test's own: a native build service registers its key and trust file there, and
     the next test's sandboxes must not mask them."""
     monkeypatch.setattr(confinement, "PRIVATE_PATHS", confinement.PrivatePaths())
-
-
-@pytest.fixture(autouse=True)
-def idle_card_list(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    if getattr(request.module, USES_REAL_GPUS_FLAG, False):
-        return
-    tree = KernelTree(tmp_path / "idle-machine")
-    monkeypatch.setattr(card_occupancy, "KFD_PATH", tree.kfd)
-    monkeypatch.setattr(card_occupancy, "PROC_PATH", tree.procfs)
