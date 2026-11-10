@@ -127,6 +127,21 @@ def test_history_scope_covers_the_path_its_failures_and_every_attempt_from_the_s
     assert tree.history_scope("2" * 40) == frozenset({1, 2, 3})
 
 
+def test_an_interrupted_round_keeps_the_node_a_slot_already_admitted():
+    tree = _grown_tree()
+    deepen = Slot(1, SlotType.DEEPEN, "2" * 40, "continue", direction="d001")
+    branch = Slot(2, SlotType.BRANCH, tree.root.commit, "open a route")
+    tree.open_round(Round(iteration=3, slots=(deepen, branch)))
+    tree.add_node(_node("4" * 40, "2" * 40, "d001", iteration=3, samples=(1.3, 1.3, 1.3)))
+
+    tree.close_interrupted_round("the session ended")
+
+    assert tree.round is None
+    kept, lost = tree.attempts
+    assert (kept.slot, kept.outcome, kept.node, kept.score) == (1, AttemptOutcome.NODE, "4" * 40, pytest.approx(1.3))
+    assert (lost.slot, lost.outcome, lost.node, lost.detail) == (2, AttemptOutcome.ERROR, "", "the session ended")
+
+
 def test_a_prefix_resolves_only_when_it_names_one_node():
     tree = _grown_tree()
 

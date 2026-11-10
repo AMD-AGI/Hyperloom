@@ -33,12 +33,11 @@ from kernelforge.workflows.forge_loop.roles.slot_selector import SelectorAnswer
 from kernelforge.workflows.forge_loop.tree.admission import SlotOutcome, TreeAdmissionMixin, measured_correct
 from kernelforge.workflows.forge_loop.tree.facts import FactSources, RoundOutlook, render_facts
 from kernelforge.workflows.forge_loop.tree.model import (
-    Attempt,
-    AttemptOutcome,
     NodeSource,
     Round,
     SearchTree,
     TreeNode,
+    lost_attempt,
 )
 from kernelforge.workflows.forge_loop.tree.planning import RoundPlans, TreePlanningMixin
 from kernelforge.workflows.forge_loop.tree.refs import node_holding_tree, pin_node, reconcile_node_refs
@@ -114,8 +113,7 @@ class TreeSearchLoop(TreePlanningMixin, TreeAdmissionMixin, IterationLoop):
         if repair.lost:
             raise ValueError(f"search tree nodes whose commits no longer exist: {', '.join(repair.lost)}")
         if tree.round is not None:
-            reason = "the session ended before this round finished"
-            tree.close_round([_lost_attempt(tree.round.iteration, slot, reason) for slot in tree.round.slots])
+            tree.close_interrupted_round("the session ended before this round finished")
         head = self._rev_parse("HEAD")
         if head != tree.published_head:
             # The campaign branch moved past what the tree recorded: a publication finished and the tree was not saved.
@@ -239,10 +237,10 @@ class TreeSearchLoop(TreePlanningMixin, TreeAdmissionMixin, IterationLoop):
         attempts = [outcome.attempt for outcome in outcomes]
         measured = {attempt.slot for attempt in attempts}
         for item in plans.unplanned:
-            attempts.append(_lost_attempt(tree.round.iteration, item.slot, item.reason))
+            attempts.append(lost_attempt(tree.round.iteration, item.slot, item.reason))
         for plan in plans.plans:
             if plan.slot.index not in measured:
-                attempts.append(_lost_attempt(tree.round.iteration, plan.slot, reason or "the slot was not measured"))
+                attempts.append(lost_attempt(tree.round.iteration, plan.slot, reason or "the slot was not measured"))
         tree.close_round(sorted(attempts, key=lambda item: item.slot))
         self._tree_store.save(tree)
 
@@ -287,22 +285,6 @@ class TreeSearchLoop(TreePlanningMixin, TreeAdmissionMixin, IterationLoop):
             self._tree.publish(node.commit, head=self.run_state.best.commit_hash)
             self._tree_store.save(self._tree)
             print(f"  [tree] published node {node.commit[:12]} as the new best")
-
-
-def _lost_attempt(iteration: int, slot, reason: str) -> Attempt:
-    return Attempt(
-        iteration=iteration,
-        slot=slot.index,
-        slot_type=slot.slot_type,
-        start=slot.start,
-        direction=slot.direction,
-        outcome=AttemptOutcome.ERROR,
-        score=None,
-        node="",
-        archive_path="",
-        reason=slot.reason,
-        detail=reason,
-    )
 
 
 def _round_summary(outcomes: list[SlotOutcome]) -> str:

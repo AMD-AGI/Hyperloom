@@ -18,12 +18,14 @@ from kernelforge.workflows.forge_loop.tree.model import (
     AttemptOutcome,
     DirectionProposal,
     NodeSource,
+    Round,
     SearchTree,
     Slot,
     SlotType,
     TreeNode,
 )
 from kernelforge.workflows.forge_loop.tree.planning import SlotPlan
+from kernelforge.workflows.forge_loop.tree.store import SearchTreeStore
 from kernelforge.workflows.forge_loop.tree.worktrees import StartWorktrees
 
 # The published best wins the small case; every challenger here wins the large one.
@@ -73,6 +75,7 @@ class _Host(TreeAdmissionMixin):
         self._start_worktrees = StartWorktrees(repo)
         self.measured: list[str] = []
         self._experiments = ExperimentsLayout(repo.parent / "experiments")
+        self._tree_store = SearchTreeStore(repo.parent / "search_tree.json")
         self._lane_rejection = lambda _diff: ""
 
     async def _measure_at(self, iteration: int, plan: str, worktree: Path) -> IterationResult:
@@ -135,6 +138,21 @@ def test_a_route_that_left_before_the_published_best_is_stacked_and_records_its_
     assert host.measured == [_source({"A": 2, "B": 1, "C": 3})]
     assert node.parent == ids.published and node.source is NodeSource.COMPOSE
     assert node.provenance == (ids.sibling,)
+
+
+def test_an_admitted_node_is_saved_before_its_round_closes(tmp_path):
+    repo, tree, ids = _lineage(tmp_path)
+    candidate = _commit(repo, ids.published, {"A": 2, "B": 1, "C": 4})
+    slot = Slot(1, SlotType.DEEPEN, ids.published, "continue the route", direction="d001")
+    tree.open_round(Round(iteration=2, slots=(slot,)))
+    host = _Host(repo)
+    diff = _git(repo, "diff", ids.published, candidate) + "\n"
+
+    outcome = asyncio.run(host._measure_slot(tree, 2, SlotPlan(slot, "plan", ""), LaneResult("1", "plan", diff)))
+
+    saved = host._tree_store.load()
+    assert saved.round is not None and saved.round.iteration == 2
+    assert saved.node(outcome.node.commit) is not None
 
 
 def test_a_lane_that_reproduces_an_existing_node_adds_nothing(tmp_path):

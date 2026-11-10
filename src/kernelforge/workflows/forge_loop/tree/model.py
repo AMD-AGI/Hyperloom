@@ -312,6 +312,16 @@ class SearchTree:
         self.attempts.extend(attempts)
         self.round = None
 
+    def close_interrupted_round(self, reason: str) -> None:
+        """Close the round a session left open: a slot whose node was admitted keeps it, every other slot is lost."""
+        if self.round is None:
+            raise ValueError("no round is open")
+        iteration = self.round.iteration
+        admitted = {item.slot: item for item in self.nodes if item.iteration == iteration and item.slot}
+        self.close_round(
+            [_interrupted_attempt(iteration, slot, admitted.get(slot.index), reason) for slot in self.round.slots]
+        )
+
 
 @dataclass(frozen=True)
 class DirectionProposal:
@@ -327,6 +337,30 @@ def _rank(node: TreeNode) -> tuple[float, int]:
     return (node.score, -node.iteration)
 
 
+def lost_attempt(iteration: int, slot: Slot, reason: str) -> Attempt:
+    """The attempt of a slot that came to nothing measured, and why."""
+    return Attempt(
+        iteration=iteration,
+        slot=slot.index,
+        slot_type=slot.slot_type,
+        start=slot.start,
+        direction=slot.direction,
+        outcome=AttemptOutcome.ERROR,
+        score=None,
+        node="",
+        archive_path="",
+        reason=slot.reason,
+        detail=reason,
+    )
+
+
+def _interrupted_attempt(iteration: int, slot: Slot, node: TreeNode | None, reason: str) -> Attempt:
+    lost = lost_attempt(iteration, slot, reason)
+    if node is None:
+        return lost
+    return replace(lost, outcome=AttemptOutcome.NODE, score=node.score, node=node.commit, detail="")
+
+
 __all__ = [
     "Attempt",
     "AttemptOutcome",
@@ -340,4 +374,5 @@ __all__ = [
     "SlotStatus",
     "SlotType",
     "TreeNode",
+    "lost_attempt",
 ]
