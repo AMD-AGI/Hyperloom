@@ -45,6 +45,7 @@ from ._spec_decode_pin import (
     SPECULATIVE_DECODING_PINNED,
     SpeculativeDecodingPinnedError,
     refuse_unpinned_speculative_change,
+    speculative_pin_reason,
 )
 from ._patch_laying import PatchedServer, is_patched_copy
 from ._profile_setup import SGLANG_PATCH_SERVER_FLAG
@@ -100,6 +101,7 @@ __all__ = [
     "run_grid_warmup_enabled",
     "run_with_session_kill",
     "session_breakdown_executor",
+    "speculative_pin_reason",
     "strip_visible_devices_from_config",
     "teardown_lifecycle_server",
 ]

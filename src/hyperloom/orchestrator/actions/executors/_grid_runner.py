@@ -84,8 +84,10 @@ from ._workload_envs import BenchmarkTarget, LaunchLayer
 
 from ._grid_base import (
     GridVariant,
+    RoundError,
     VariantResult,
     apply_variant_env,
+    argv_refusal,
     importable_overlay_dir,
     pin_xdit_tool_path,
     runnable_moe_backend_args,
@@ -637,13 +639,6 @@ class _RoundProcess(NamedTuple):
     stderr: str
 
 
-class _RoundError(NamedTuple):
-    """Why a grid round measured nothing, and under which class it is recorded."""
-
-    summary: str
-    error_class: str
-
-
 def _invalid_measurement_error(
     proc: _RoundProcess,
     *,
@@ -651,17 +646,17 @@ def _invalid_measurement_error(
     death_excerpt: str,
     workspace: Any,
     slot: Any,
-) -> _RoundError:
+) -> RoundError:
     if proc.returncode != 0:
         error = death_excerpt or redact_secret_values((proc.stderr or proc.stdout)[-2000:])
         if not error.strip():
             error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
         if not error.strip():
             error = redact_secret_values(_report_errors_summary(report))
-        return _RoundError(error, "magpie_nonzero_invalid_measurement")
+        return RoundError(error, "magpie_nonzero_invalid_measurement")
     if not report:
-        return _RoundError(death_excerpt or "benchmark_report missing", "benchmark_report_missing")
-    return _RoundError(
+        return RoundError(death_excerpt or "benchmark_report missing", "benchmark_report_missing")
+    return RoundError(
         death_excerpt or "benchmark_report missing valid throughput/completed requests",
         "benchmark_report_invalid_metric",
     )
@@ -1157,21 +1152,23 @@ async def _warmup_throughput(
     _teardown_variant_server(at.path, rounds.lifecycle)
     warmup_server_log = warmup_slot / "server.log"
     report_path = workspace / "benchmark_report.json"
-    warmup_error = (
+    found = argv_refusal(_measurement_server_log_path(warmup_server_log, workspace)) or RoundError(
         server_log_death_excerpt(str(warmup_server_log))
         or redact_secret_values((pass_.proc.stderr or pass_.proc.stdout)[-2000:])
         if returncode != 0
-        else "warmup benchmark_report missing valid throughput/completed requests"
+        else "warmup benchmark_report missing valid throughput/completed requests",
+        "warmup_round_failed",
     )
     log.warning(
-        "grid_runner: variant %s aborted: warmup_round_failed (rc=%s): %s",
+        "grid_runner: variant %s aborted: %s (rc=%s): %s",
         _variant_tag(run, at),
+        found.error_class,
         returncode,
-        warmup_error[:200],
+        found.summary[:200],
     )
     _abort_variant(
         at,
-        _VariantFailure("warmup_round_failed", warmup_error),
+        _VariantFailure(found.error_class, found.summary),
         workspace=str(workspace) if run_ws is not None else None,
         report_path=str(report_path) if report_path.exists() else None,
         raw_result_path=measurement.get("raw_result_path"),
@@ -1395,12 +1392,12 @@ def _abort_without_workspace(
     preflight_abort = returncode == AGENTX_PREFLIGHT_RETURNCODE
     server_log = at.path / "server.log"
     if preflight_abort:
-        found = _RoundError(
+        found = RoundError(
             redact_secret_values((proc.stderr or "").strip()[-2000:]) or "AgentX preflight aborted the round",
             AGENTX_PREFLIGHT_ERROR_CLASS,
         )
     else:
-        found = _RoundError(
+        found = RoundError(
             server_log_death_excerpt(str(server_log))
             or (
                 redact_secret_values((proc.stderr or proc.stdout)[-2000:])
@@ -1451,7 +1448,7 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
     workspace = outcome.measured.workspace
     report_path = workspace / "benchmark_report.json"
     server_log = at.path / "server.log"
-    found = _invalid_measurement_error(
+    found = argv_refusal(_measurement_server_log_path(server_log, workspace)) or _invalid_measurement_error(
         outcome.measured.round.proc,
         report=outcome.report,
         death_excerpt=server_log_death_excerpt(str(server_log)),

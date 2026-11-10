@@ -508,7 +508,12 @@ excludes dotenv-provided `PYTHON`, `VIRTUAL_ENV`, and
 `INFERENCE_OPTIMIZER_FORCE_PYTHON`; explicit shell selections remain intact.
 A readonly `USER_DATA_PATH` is not reassigned; reconcile a conflict with the
 setup-selected workspace root before continuing. CLI preflight loads generated
-`kernel-agent.env.sh` in-process, not through shell `source`.
+`kernel-agent.env.sh` in-process, not through shell `source`. On a checkout
+another account can write (a group- or other-writable checkout or `.env`, one of
+another account's, or a link, as a bind-mounted shared source dir is), `install.sh`
+keeps the Anthropic-side credentials out of `.env` and in that container-local
+file alone, and `install.sh` and preflight read them from there: export them in
+the shell that runs `install.sh` in each new container.
 
 
 ### Step 1 — Install (one-time per pod / venv rebuild)
@@ -1237,7 +1242,7 @@ python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hour
 GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
-Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`,
+Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`, `r9600d`,
 `radeon8060s`. **`mi308x` and
 `mi325x` map to `runner_type=mi300x`** with a warning, since the GPUs share the
 same runner family and Magpie has not shipped `sglang_mi308x.sh` /
@@ -1246,8 +1251,9 @@ need a true MI308X/MI325X-specific script, uncomment the `benchmark_script:`
 template in the relevant YAML and point it at your script under
 `InferenceX/benchmarks/...`.
 
-`r9700` (Radeon AI PRO R9700, gfx1201) maps to `runner_type=gfx12`, Magpie's
-`vllm_gfx12.sh`, and runs with `--framework vllm` only: pass
+`r9700` (Radeon AI PRO R9700, gfx1201) and `r9600d` (Radeon AI PRO R9600D, gfx1201)
+map to `runner_type=gfx12`, Magpie's
+`vllm_gfx12.sh`, and run with `--framework vllm` only: pass
 `--framework vllm`, since another framework (including the default) exits
 with code 2 at launch.
 
