@@ -10,7 +10,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -135,3 +135,32 @@ def test_capture_refuses_missing_dump_and_restores_environment(tmp_path, monkeyp
         exporter("first")
     assert "FLYDSL_DUMP_DIR" not in os.environ
     assert not (tmp_path / "kernel.s").exists()
+
+
+def test_rebuild_compiles_outside_the_shared_frontend_cache(tmp_path, monkeypatch, frontend):
+    # FlyDSL >= 0.3.4.1 drops source IR from its disk cache, so a rebuild served by the
+    # cache the source baseline populated cannot be fingerprinted.
+    shared = tmp_path / "shared-cache"
+    monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", str(shared))
+    exporter = capture.FlyDSLAssembly(str(tmp_path / "kernel.py"), "kernel.s", "gfx950", export=True)
+    exporter("specialization-1")
+    caches = []
+
+    def compile_kernel(identity):
+        cache = os.environ["FLYDSL_RUNTIME_CACHE_DIR"]
+        caches.append(cache)
+        return None if cache == str(shared) else identity
+
+    monkeypatch.setattr(frontend, "compile", compile_kernel)
+    monkeypatch.setattr(capture, "with_assembly", lambda compiled, path, **kwargs: "assembly-variant")
+    loader = capture.FlyDSLAssembly(str(tmp_path / "kernel.py"), "kernel.s", "gfx950")
+    assert loader("specialization-1") == "assembly-variant"
+    assert caches[0] != str(shared)
+    assert not Path(caches[0]).exists()
+    assert os.environ["FLYDSL_RUNTIME_CACHE_DIR"] == str(shared)
+
+
+def test_fingerprint_without_source_ir_is_explicit():
+    cached = SimpleNamespace(_keepalive=SimpleNamespace(source_ir=None))
+    with pytest.raises(AssemblyError, match="source IR"):
+        capture._fingerprint(cached)

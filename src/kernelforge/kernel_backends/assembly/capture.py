@@ -18,12 +18,7 @@ from kernelforge.kernel_backends.assembly.flydsl import with_assembly
 
 
 @contextmanager
-def _capture_environment(directory: Path):
-    values = {
-        "FLYDSL_DUMP_IR": "1",
-        "FLYDSL_DUMP_DIR": str(directory / "dump"),
-        "FLYDSL_RUNTIME_CACHE_DIR": str(directory / "cache"),
-    }
+def _flydsl_environment(values: dict[str, str]):
     previous = {key: os.environ.get(key) for key in values}
     try:
         os.environ.update(values)
@@ -34,6 +29,16 @@ def _capture_environment(directory: Path):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def _capture_environment(directory: Path):
+    return _flydsl_environment(
+        {
+            "FLYDSL_DUMP_IR": "1",
+            "FLYDSL_DUMP_DIR": str(directory / "dump"),
+            "FLYDSL_RUNTIME_CACHE_DIR": str(directory / "cache"),
+        }
+    )
 
 
 _FLYDSL_ASSEMBLY = "kernelforge.kernel_backends.assembly.capture import FlyDSLAssembly"
@@ -109,11 +114,17 @@ def bind_compile(source: str, assembly: str, target: str, *, export: bool) -> st
 
 
 def _fingerprint(compiled) -> str:
+    source_ir = compiled._keepalive.source_ir
+    if source_ir is None:
+        raise AssemblyError(
+            "FlyDSL returned a compiled artifact without its source IR (FlyDSL >= 0.3.4.1 does not keep it "
+            "in the disk cache); the specialization must be compiled fresh to be fingerprinted"
+        )
     from flydsl._mlir import ir
     from flydsl.compiler.jit_function import _create_mlir_context
 
     with _create_mlir_context(), ir.Location.unknown():
-        module = ir.Module.parse(compiled._keepalive.source_ir)
+        module = ir.Module.parse(source_ir)
         normalized = module.operation.get_asm(enable_debug_info=False)
     return hashlib.sha256(normalized.encode()).hexdigest()
 
@@ -165,7 +176,11 @@ class FlyDSLAssembly:
                 )
                 return compiled
 
-        compiled = flyc.compile(*args, **kwargs)
+        # A cache hit carries no source IR on FlyDSL >= 0.3.4.1, and the source baseline has
+        # already cached this specialization, so compile it fresh in a private cache.
+        with tempfile.TemporaryDirectory(prefix="forge-flydsl-build-") as scratch:
+            with _flydsl_environment({"FLYDSL_RUNTIME_CACHE_DIR": scratch}):
+                compiled = flyc.compile(*args, **kwargs)
         self._check(_fingerprint(compiled))
         return with_assembly(
             compiled,
