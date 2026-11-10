@@ -58,10 +58,14 @@ def _local_temp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Non
 class _Processes:
     def __init__(self) -> None:
         self.adopted: list[tuple[int, str, tuple[str, ...]]] = []
+        self.forgotten: list[int] = []
 
     def adopt(self, pid: int, *, branch: str, argv: Sequence[str]) -> object:
         self.adopted.append((pid, branch, tuple(argv)))
         return None
+
+    def forget(self, pid: int) -> None:
+        self.forgotten.append(pid)
 
 
 def _sandbox(tmp_path: Path, processes: _Processes | None = None, branch: str = "") -> LocalAgentSandbox:
@@ -324,6 +328,21 @@ def test_a_pattern_is_required(tmp_path: Path, tool: str) -> None:
 class _Late(_Processes):
     def adopt(self, pid: int, *, branch: str, argv: Sequence[str]) -> object:
         raise ValueError(f"{pid} ended")
+
+
+async def test_the_registry_forgets_a_launcher_that_ended_by_itself_once_a_stop_collects_it(tmp_path: Path) -> None:
+    processes = _Processes()
+    sandbox = _sandbox(tmp_path, processes, "b07")
+    process = await sandbox.start("true", tmp_path, {})
+    launcher = process.popen.pid
+
+    await _until(lambda: not _alive(launcher))
+    assert processes.forgotten == []
+    await sandbox.stop()
+
+    assert processes.forgotten == [launcher]
+    await sandbox.stop()
+    assert processes.forgotten == [launcher]
 
 
 async def test_a_command_that_ends_before_the_registry_takes_it_still_runs(tmp_path: Path) -> None:
