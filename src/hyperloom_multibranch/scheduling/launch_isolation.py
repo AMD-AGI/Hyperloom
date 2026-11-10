@@ -12,7 +12,8 @@ from a chooser that path does not call:
 - an agent or dev sandbox on this host (:class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox`)
   runs its commands as the app's own account and asks no chooser, so it runs unconfined (:data:`SANDBOX_UNCONFINED`);
 - a test measured on this host's cards runs in a sandbox the local toolbox's provider makes, which names no account
-  for it (:class:`~hyperloom.sandbox.local.ProcessUsers`), so it runs unconfined (:data:`TESTS_UNCONFINED`).
+  for it and is given no runner plan (:class:`~hyperloom.sandbox.local.ProcessUsers`), so it runs unconfined
+  (:data:`TESTS_UNCONFINED`).
 
 A session measured in a grant's sandboxes runs its agent and dev sandboxes and its tests there (:data:`HOSTED`), not on
 this host.
@@ -44,7 +45,7 @@ HOSTED = "hosted"
 #: Why an agent or dev sandbox on this host is not isolated.
 SANDBOX_UNCONFINED = "an agent or dev sandbox on this host runs its commands as the app's own account, unconfined"
 #: Why a test on this host's cards is not isolated.
-TESTS_UNCONFINED = "a test on this host runs as the app's own account, unconfined: its provider names no account for it"
+TESTS_UNCONFINED = "a test on this host runs as the app's own account, unconfined: its provider is given no runner plan"
 
 
 @dataclass(frozen=True)
@@ -118,7 +119,7 @@ def _local_sandbox_isolation() -> tuple[str, tuple[str, ...]]:
 
 def _local_test_isolation() -> tuple[str, tuple[str, ...]]:
     """How a test on this host's cards is launched, and why it is not isolated: unconfined, as the local toolbox's
-    provider names no account for its test sandboxes, in a hosted run too."""
+    provider confines no test sandbox without a runner plan, in a hosted run too."""
 
     return NONE, (TESTS_UNCONFINED,)
 
