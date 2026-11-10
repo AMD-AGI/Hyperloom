@@ -40,10 +40,12 @@ from dataclasses import dataclass, field, replace
 from typing import NamedTuple, Protocol
 
 from hyperloom.measure.failures import (
+    CAPACITY_UNAVAILABLE,
     HF_CACHE_PERMISSION,
     FOREIGN_PROCESS_ON_CARD,
     HUB_RATE_LIMITED,
     JIT_BUILD_TIMEOUT,
+    RUNNER_START_TIMEOUT,
     SANDBOX_ACQUIRE_TIMEOUT,
     TEST_TIMEOUT_REASON,
 )
@@ -106,12 +108,6 @@ NODE_BLAMELESS_INFRA_REASONS: frozenset[str] = frozenset(
 )
 #: Infrastructure failures whose node is not reported.
 _UNREPORTED_INFRA_REASONS = ONCE_RETRIED_INFRA_REASONS | NODE_BLAMELESS_INFRA_REASONS
-#: The hosted backend's ``error_class`` when no sandbox started within the runner's start timeout
-#: (``hyperloom.measure.hosted``): the platform short of sandboxes, or on a local host every card held by a process
-#: outside the toolbox.
-RUNNER_START_TIMEOUT = "runner_start_timeout"
-#: The platform's ``error_class`` when it had no room for the sandbox (``hyperloom.measure.failures.INFRA_ERROR_CLASSES``).
-CAPACITY_UNAVAILABLE = "capacity_unavailable"
 #: Infrastructure failures a retry waits out first (:class:`InfraBackoff`): the ones that are not the node's. Cards a
 #: process outside the test held (:data:`FOREIGN_PROCESS_ON_CARD`) or a platform with no sandbox to give
 #: (:data:`RUNNER_START_TIMEOUT`, :data:`CAPACITY_UNAVAILABLE`) may be free a minute later, and a failure never held
