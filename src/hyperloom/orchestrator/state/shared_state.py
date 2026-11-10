@@ -608,6 +608,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin, _RooflineState
     # candidate-free authoring specialist that authors a throughput patch from the live source + profile evidence
     # instead of skipping the phase.
     framework_local_explore_enabled: bool = True
+    # --no-source-changes: integrate_patch keeps only server arguments and environment variables. Fixed for the
+    # session once set; a resume can turn it on, never off.
+    no_source_changes: bool = False
     # Maps an authoring specialist task_id -> originating FRAMEWORK candidate id (PR URL), so the authored-outcome
     # bridge can key the progress row on the PR-URL that ``_select_next_framework_agent_candidate`` checks.
     framework_agent_specialist_candidate_map: dict[str, str] = field(

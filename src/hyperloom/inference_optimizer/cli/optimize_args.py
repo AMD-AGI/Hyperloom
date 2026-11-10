@@ -433,6 +433,18 @@ def add_framework_agent_arguments(opt: argparse.ArgumentParser) -> None:
         "DISCOVER_FAILURE_RETRY_LIMIT (3) empty/failed discoveries. Requires "
         "the authoring track (has no effect under diff-only mode).",
     )
+    opt.add_argument(
+        "--no-source-changes",
+        dest="no_source_changes",
+        action="store_true",
+        default=False,
+        help="Keep no source, file or runtime change from the framework phase, "
+        "specialists, upstream PRs or enablement: a round that carries a patch, "
+        "a tuned artifact, a rewrite switch, an install or another runtime is "
+        "skipped, and only server arguments and environment variables are kept. "
+        "The kernel phase and the PRELUDE warm replay have their own switches "
+        "(--no-kernel, --no-warm-replay). Default: source changes are kept.",
+    )
 
 
 def add_critic_arguments(opt: argparse.ArgumentParser) -> None:
